@@ -116,6 +116,21 @@ func (r *MembershipSQLiteRepository) GetCurrentByMember(tx sharedDomain.Transact
 	return membershipFromRow(&row), nil
 }
 
+func (r *MembershipSQLiteRepository) GetReplacedBy(tx sharedDomain.Transaction, replacementID uuid.UUID) (*membershipDomain.Membership, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	var row sqliteMembershipRow
+	err := stx.Get(context.Background(), &row,
+		`SELECT * FROM memberships WHERE replaced_by = ? AND deleted_at IS NULL`,
+		replacementID.String())
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return membershipFromRow(&row), nil
+}
+
 // ---------------------------------------------------------------------------
 // MembershipAdjustmentRepository
 // ---------------------------------------------------------------------------

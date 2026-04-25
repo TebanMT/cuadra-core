@@ -66,17 +66,81 @@ func (s *MemberService) RenewMembershipForPayment(ctx context.Context, tx shared
 	}
 	newID := uuid.New()
 	next := current.Renew(newID, mt, in.PaymentDate, now)
-	current.MarkReplaced(newID, now)
+	// Three-step dance to satisfy *both* constraints simultaneously:
+	//   * uq_memberships_member_active forbids two `active` rows per member
+	//     (so we can't INSERT new before vacating `current`).
+	//   * memberships.replaced_by FK forbids pointing at a non-existent row
+	//     (so we can't UPDATE `current.replaced_by = newID` before INSERT).
+	// 1) Flip current to `replaced` without setting replaced_by → frees the
+	//    partial unique index.
+	// 2) INSERT new row → FK satisfied because predecessor exists.
+	// 3) UPDATE current.replaced_by = newID → FK target now exists.
+	current.Status = membershipDomain.StatusReplaced
+	current.Version++
+	current.UpdatedAt = now
 	if _, err := s.Memberships.Update(tx, current); err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}
 	if _, err := s.Memberships.Create(tx, next); err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}
+	current.ReplacedBy = &newID
+	current.Version++
+	current.UpdatedAt = now
+	if _, err := s.Memberships.Update(tx, current); err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
 	return &RenewMembershipForPaymentOutput{
 		OldMembership: current,
 		NewMembership: next,
 		NextType:      mt,
+	}, nil
+}
+
+// RevertMembershipFromPaymentInput is the cross-BC input from billing/UC-022.
+// Caller passes the member whose latest renewal must be undone. The members
+// BC cancels the active Membership and re-activates the one it replaced (the
+// previous expiry is preserved on the predecessor row, so no re-computation
+// is needed).
+type RevertMembershipFromPaymentInput struct {
+	MemberID uuid.UUID
+}
+
+type RevertMembershipFromPaymentOutput struct {
+	CancelledMembership *membershipDomain.Membership
+	RestoredMembership  *membershipDomain.Membership
+}
+
+// RevertMembershipFromPayment is invoked by billing/UC-022 when the operator
+// requested `revert_membership=true` on a refund. We undo the most recent
+// renewal: cancel the current active membership, set its predecessor (the
+// `replaced` row pointing at it) back to `active`. Returns business errors
+// when there is no active membership or no predecessor to restore.
+func (s *MemberService) RevertMembershipFromPayment(ctx context.Context, tx sharedDomain.Transaction, in RevertMembershipFromPaymentInput, now time.Time) (*RevertMembershipFromPaymentOutput, error) {
+	current, err := s.Memberships.GetCurrentByMember(tx, in.MemberID)
+	if err != nil {
+		return nil, err
+	}
+	predecessor, err := s.Memberships.GetReplacedBy(tx, current.ID)
+	if err != nil {
+		return nil, err
+	}
+	current.Cancel(now)
+	if _, err := s.Memberships.Update(tx, current); err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
+	if predecessor != nil {
+		predecessor.Status = membershipDomain.StatusActive
+		predecessor.ReplacedBy = nil
+		predecessor.Version++
+		predecessor.UpdatedAt = now
+		if _, err := s.Memberships.Update(tx, predecessor); err != nil {
+			return nil, sharedDomain.NewUnexpectedError(err)
+		}
+	}
+	return &RevertMembershipFromPaymentOutput{
+		CancelledMembership: current,
+		RestoredMembership:  predecessor,
 	}, nil
 }
 

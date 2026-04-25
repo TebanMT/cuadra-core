@@ -22,6 +22,11 @@ import (
 	memRepoLite "github.com/cuadra/cuadra-core/src/modules/members/infraestructure/db/repositories"
 	memCtrl "github.com/cuadra/cuadra-core/src/modules/members/interfaces/controllers"
 
+	billingApp "github.com/cuadra/cuadra-core/src/modules/billing/app"
+	folioSvc "github.com/cuadra/cuadra-core/src/modules/billing/domain/folio"
+	billingRepoLite "github.com/cuadra/cuadra-core/src/modules/billing/infraestructure/db/repositories"
+	billingCtrl "github.com/cuadra/cuadra-core/src/modules/billing/interfaces/controllers"
+
 	usersApp "github.com/cuadra/cuadra-core/src/modules/users/app"
 	usersRepoLite "github.com/cuadra/cuadra-core/src/modules/users/infraestructure/db/repositories"
 	usersCtrl "github.com/cuadra/cuadra-core/src/modules/users/interfaces/controllers"
@@ -60,6 +65,7 @@ func main() {
 	memberRepo := memRepoLite.NewMemberSQLiteRepository()
 	membershipRepo := memRepoLite.NewMembershipSQLiteRepository()
 	adjustmentRepo := memRepoLite.NewMembershipAdjustmentSQLiteRepository()
+	paymentRepo := billingRepoLite.NewPaymentSQLiteRepository()
 
 	// ── Shared services ────────────────────────────────────────────────────
 	tokens := auth.NewJWTService(envOrDefault("JWT_SECRET", "sidecar-dev-secret-do-not-use-in-prod"))
@@ -97,6 +103,16 @@ func main() {
 	toggleMember := memApp.NewToggleMemberStatus(memberRepo, uow, recorder)
 	lockExpiry := memApp.NewLockMembershipExpiry(membershipRepo, adjustmentRepo, uow, recorder)
 	assignPin := memApp.NewAssignPin(memberRepo, uow, recorder)
+	memberSvc := memApp.NewMemberService(memberRepo, membershipRepo, mtRepo)
+
+	// ── Billing (Sesión 3) ────────────────────────────────────────────────
+	folios := folioSvc.NewGenerator(paymentRepo)
+	registerPayment := billingApp.NewRegisterMembershipPayment(paymentRepo, folios, memberSvc, memberRepo, uow, recorder, billingApp.NoopPublisher{})
+	settlePayment := billingApp.NewSettlePendingBalance(paymentRepo, folios, uow, recorder)
+	receiptPayment := billingApp.NewGenerateReceipt(paymentRepo, gymRepo, memberRepo, uow)
+	sendReceipt := billingApp.NewSendReceipt(paymentRepo, uow)
+	listMemberPayments := billingApp.NewListMemberPayments(paymentRepo, memberRepo, uow)
+	refundPayment := billingApp.NewRefundPayment(paymentRepo, folios, memberSvc, uow, recorder)
 
 	authCtrl := usersCtrl.NewAuthController(usersCtrl.AuthController{
 		Signup:           signup,
@@ -116,6 +132,7 @@ func main() {
 	})
 	mtCtrl := memCtrl.NewMembershipTypeController(createMT, updateMT, deactivateMT, listMT, tokens)
 	memberCtrl := memCtrl.NewMemberController(createMember, updateMember, listMembers, memberDetail, toggleMember, lockExpiry, assignPin, tokens)
+	paymentCtrl := billingCtrl.NewPaymentController(registerPayment, settlePayment, receiptPayment, sendReceipt, listMemberPayments, refundPayment, tokens)
 
 	if os.Getenv("ENVIRONMENT") == "production" {
 		gin.SetMode(gin.ReleaseMode)
@@ -128,6 +145,7 @@ func main() {
 	authCtrl.RegisterRoutes(r)
 	mtCtrl.RegisterRoutes(r)
 	memberCtrl.RegisterRoutes(r)
+	paymentCtrl.RegisterRoutes(r)
 
 	port := envOrDefault("SIDECAR_PORT", "9090")
 	// ADR-003 §2.2: print the port to stdout so Tauri can capture it.

@@ -20,6 +20,11 @@ import (
 	memRepoPg "github.com/cuadra/cuadra-core/src/modules/members/infraestructure/db/repositories"
 	memCtrl "github.com/cuadra/cuadra-core/src/modules/members/interfaces/controllers"
 
+	billingApp "github.com/cuadra/cuadra-core/src/modules/billing/app"
+	folioSvc "github.com/cuadra/cuadra-core/src/modules/billing/domain/folio"
+	billingRepoPg "github.com/cuadra/cuadra-core/src/modules/billing/infraestructure/db/repositories"
+	billingCtrl "github.com/cuadra/cuadra-core/src/modules/billing/interfaces/controllers"
+
 	usersApp "github.com/cuadra/cuadra-core/src/modules/users/app"
 	usersRepoPg "github.com/cuadra/cuadra-core/src/modules/users/infraestructure/db/repositories"
 	usersCtrl "github.com/cuadra/cuadra-core/src/modules/users/interfaces/controllers"
@@ -54,6 +59,7 @@ func main() {
 	memberRepo := memRepoPg.NewMemberPostgresRepository()
 	membershipRepo := memRepoPg.NewMembershipPostgresRepository()
 	adjustmentRepo := memRepoPg.NewMembershipAdjustmentPostgresRepository()
+	paymentRepo := billingRepoPg.NewPaymentPostgresRepository()
 
 	// ── Shared services ────────────────────────────────────────────────────
 	tokens := auth.NewJWTService(mustEnv("JWT_SECRET"))
@@ -89,6 +95,16 @@ func main() {
 	toggleMember := memApp.NewToggleMemberStatus(memberRepo, uow, recorder)
 	lockExpiry := memApp.NewLockMembershipExpiry(membershipRepo, adjustmentRepo, uow, recorder)
 	assignPin := memApp.NewAssignPin(memberRepo, uow, recorder)
+	memberSvc := memApp.NewMemberService(memberRepo, membershipRepo, mtRepo)
+
+	// ── Billing (Sesión 3) ────────────────────────────────────────────────
+	folios := folioSvc.NewGenerator(paymentRepo)
+	registerPayment := billingApp.NewRegisterMembershipPayment(paymentRepo, folios, memberSvc, memberRepo, uow, recorder, billingApp.NoopPublisher{})
+	settlePayment := billingApp.NewSettlePendingBalance(paymentRepo, folios, uow, recorder)
+	receiptPayment := billingApp.NewGenerateReceipt(paymentRepo, gymRepo, memberRepo, uow)
+	sendReceipt := billingApp.NewSendReceipt(paymentRepo, uow)
+	listMemberPayments := billingApp.NewListMemberPayments(paymentRepo, memberRepo, uow)
+	refundPayment := billingApp.NewRefundPayment(paymentRepo, folios, memberSvc, uow, recorder)
 
 	// ── Controllers ────────────────────────────────────────────────────────
 	authCtrl := usersCtrl.NewAuthController(usersCtrl.AuthController{
@@ -111,6 +127,7 @@ func main() {
 	})
 	mtCtrl := memCtrl.NewMembershipTypeController(createMT, updateMT, deactivateMT, listMT, tokens)
 	memberCtrl := memCtrl.NewMemberController(createMember, updateMember, listMembers, memberDetail, toggleMember, lockExpiry, assignPin, tokens)
+	paymentCtrl := billingCtrl.NewPaymentController(registerPayment, settlePayment, receiptPayment, sendReceipt, listMemberPayments, refundPayment, tokens)
 
 	// ── Gin router ────────────────────────────────────────────────────────
 	if os.Getenv("ENVIRONMENT") == "production" {
@@ -123,6 +140,7 @@ func main() {
 	authCtrl.RegisterRoutes(r)
 	mtCtrl.RegisterRoutes(r)
 	memberCtrl.RegisterRoutes(r)
+	paymentCtrl.RegisterRoutes(r)
 
 	port := envOrDefault("PORT", "8080")
 	log.Printf("cuadra-server starting on :%s", port)

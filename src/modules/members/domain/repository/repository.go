@@ -72,6 +72,11 @@ type MembershipRepository interface {
 	Update(tx sharedDomain.Transaction, m *membershipDomain.Membership) (*membershipDomain.Membership, error)
 	GetByID(tx sharedDomain.Transaction, id uuid.UUID) (*membershipDomain.Membership, error)
 	GetCurrentByMember(tx sharedDomain.Transaction, memberID uuid.UUID) (*membershipDomain.Membership, error)
+	// GetReplacedBy returns the Membership row whose ReplacedBy points at the
+	// given id (i.e. the predecessor of the current row). Returns (nil, nil)
+	// when there is no predecessor — first-ever membership for the member.
+	// Used by UC-022 to restore the prior membership on refund.
+	GetReplacedBy(tx sharedDomain.Transaction, replacementID uuid.UUID) (*membershipDomain.Membership, error)
 }
 
 // MembershipAdjustmentRepository — append-only history (UC-017).

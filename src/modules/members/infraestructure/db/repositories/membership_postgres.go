@@ -66,6 +66,19 @@ func (r *MembershipPostgresRepository) GetCurrentByMember(tx sharedDomain.Transa
 	return membershipFromModel(&row), nil
 }
 
+func (r *MembershipPostgresRepository) GetReplacedBy(tx sharedDomain.Transaction, replacementID uuid.UUID) (*membershipDomain.Membership, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	var row models.MembershipModel
+	err := gormTx.Where("replaced_by = ? AND deleted_at IS NULL", replacementID).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return membershipFromModel(&row), nil
+}
+
 // ---------------------------------------------------------------------------
 // MembershipAdjustmentRepository
 // ---------------------------------------------------------------------------
