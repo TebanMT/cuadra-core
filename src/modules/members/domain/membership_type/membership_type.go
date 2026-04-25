@@ -1,5 +1,6 @@
-// Package membership_type holds the MembershipType aggregate. Sesión 1
-// implements just enough for UC-001 step 3 — full CRUD lives in Sesión 2.
+// Package membership_type holds the MembershipType aggregate (UC-011).
+// Cambios de precio/duración NO son retroactivos: las membresías activas
+// conservan su snapshot — ver DA-11.1 + ADR-002 §3.6.
 package membership_type
 
 import (
@@ -40,15 +41,68 @@ type MembershipType struct {
 // freq is either "monthly", "annual", or empty when there's no fee.
 func New(id, gymID uuid.UUID, name string, price float64, durationDays int,
 	enrollmentFee, maintenanceFee float64, freq string, now time.Time) (*MembershipType, error) {
+	mt := &MembershipType{
+		ID:        id,
+		GymID:     gymID,
+		Version:   1,
+		Active:    true,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := mt.applyFields(name, price, durationDays, enrollmentFee, maintenanceFee, freq); err != nil {
+		return nil, err
+	}
+	return mt, nil
+}
+
+// Update mutates the MembershipType in-place. Per DA-11.1 the caller is NOT
+// required to update existing memberships — those keep their snapshot. Only
+// future renewals see the new values.
+func (mt *MembershipType) Update(name string, price float64, durationDays int,
+	enrollmentFee, maintenanceFee float64, freq string, now time.Time) error {
+	if err := mt.applyFields(name, price, durationDays, enrollmentFee, maintenanceFee, freq); err != nil {
+		return err
+	}
+	mt.Version++
+	mt.UpdatedAt = now
+	return nil
+}
+
+// Deactivate is the soft-delete path (DA-11.2). active=false; DeletedAt stays
+// nil because legacy payments still need to reference the row.
+func (mt *MembershipType) Deactivate(now time.Time) {
+	if !mt.Active {
+		return
+	}
+	mt.Active = false
+	mt.Version++
+	mt.UpdatedAt = now
+}
+
+// Reactivate is symmetric. Used when an owner toggles the plan back on.
+func (mt *MembershipType) Reactivate(now time.Time) {
+	if mt.Active {
+		return
+	}
+	mt.Active = true
+	mt.Version++
+	mt.UpdatedAt = now
+}
+
+func (mt *MembershipType) applyFields(name string, price float64, durationDays int,
+	enrollmentFee, maintenanceFee float64, freq string) error {
 	name = strings.TrimSpace(name)
-	if name == "" || len(name) > 100 {
-		return nil, memErrors.ErrInvalidMembershipTypeName
+	if len(name) < 3 || len(name) > 100 {
+		return memErrors.ErrInvalidMembershipTypeName
 	}
 	if price <= 0 {
-		return nil, memErrors.ErrInvalidPrice
+		return memErrors.ErrInvalidPrice
 	}
 	if durationDays < 1 {
-		return nil, memErrors.ErrInvalidDuration
+		return memErrors.ErrInvalidDuration
+	}
+	if enrollmentFee < 0 || maintenanceFee < 0 {
+		return memErrors.ErrInvalidPrice
 	}
 	var freqPtr *string
 	switch {
@@ -58,20 +112,61 @@ func New(id, gymID uuid.UUID, name string, price float64, durationDays int,
 		f := freq
 		freqPtr = &f
 	default:
-		return nil, memErrors.ErrInvalidMaintenanceFreq
+		return memErrors.ErrInvalidMaintenanceFreq
 	}
-	return &MembershipType{
-		ID:                   id,
-		GymID:                gymID,
-		Version:              1,
-		Name:                 name,
-		Price:                price,
-		DurationDays:         durationDays,
-		EnrollmentFee:        enrollmentFee,
-		MaintenanceFee:       maintenanceFee,
-		MaintenanceFrequency: freqPtr,
-		Active:               true,
-		CreatedAt:            now,
-		UpdatedAt:            now,
-	}, nil
+	mt.Name = name
+	mt.Price = price
+	mt.DurationDays = durationDays
+	mt.EnrollmentFee = enrollmentFee
+	mt.MaintenanceFee = maintenanceFee
+	mt.MaintenanceFrequency = freqPtr
+	return nil
+}
+
+// Validator is the chain interface for create-time validation.
+type Validator interface {
+	Validate(mt *MembershipType) error
+}
+
+type nameValidator struct{ Next Validator }
+
+func (v *nameValidator) Validate(mt *MembershipType) error {
+	if len(strings.TrimSpace(mt.Name)) < 3 || len(mt.Name) > 100 {
+		return memErrors.ErrInvalidMembershipTypeName
+	}
+	if v.Next != nil {
+		return v.Next.Validate(mt)
+	}
+	return nil
+}
+
+type priceValidator struct{ Next Validator }
+
+func (v *priceValidator) Validate(mt *MembershipType) error {
+	if mt.Price <= 0 {
+		return memErrors.ErrInvalidPrice
+	}
+	if mt.EnrollmentFee < 0 || mt.MaintenanceFee < 0 {
+		return memErrors.ErrInvalidPrice
+	}
+	if v.Next != nil {
+		return v.Next.Validate(mt)
+	}
+	return nil
+}
+
+type durationValidator struct{ Next Validator }
+
+func (v *durationValidator) Validate(mt *MembershipType) error {
+	if mt.DurationDays < 1 {
+		return memErrors.ErrInvalidDuration
+	}
+	if v.Next != nil {
+		return v.Next.Validate(mt)
+	}
+	return nil
+}
+
+func BuildValidatorChain() Validator {
+	return &nameValidator{Next: &priceValidator{Next: &durationValidator{}}}
 }

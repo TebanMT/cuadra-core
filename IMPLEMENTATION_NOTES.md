@@ -139,3 +139,132 @@ cuadra-core/
 ## Próxima sesión sugerida
 
 Sesión 2 (UC-011..UC-017, members): Member + Membership + MembershipType (CRUD completo). Las tablas ya existen; falta domain + app + repos + handlers. El patrón de Sesión 1 (UoW.Command, audit, sync queue write-through) se replica directo.
+
+---
+
+# cuadra-core — Notas de Implementación, Sesión 2 (Members)
+
+Fecha: 2026-04-25
+
+## Qué se implementó
+
+**Sesión 2 (UC-011 a UC-017 + UC-032 partial) end-to-end:**
+
+| UC | Endpoint | Use case |
+|---|---|---|
+| UC-011 (1) | `POST /api/v1/membership-types` | `members/app.CreateMembershipType` |
+| UC-011 (2) | `PATCH /api/v1/membership-types/:id` | `members/app.UpdateMembershipType` |
+| UC-011 (3) | `DELETE /api/v1/membership-types/:id` (soft) | `members/app.DeactivateMembershipType` |
+| UC-011 (4) | `GET /api/v1/membership-types?include_inactive=true` | `members/app.ListMembershipTypes` |
+| UC-012 | `POST /api/v1/members` | `members/app.CreateMember` |
+| UC-013 | `PATCH /api/v1/members/:id` | `members/app.UpdateMember` |
+| UC-014 | `GET /api/v1/members?q&status&plan_id&sort&page&page_size` | `members/app.ListMembers` |
+| UC-015 | `GET /api/v1/members/:id` | `members/app.GetMemberDetail` |
+| UC-016 | `PATCH /api/v1/members/:id/status` | `members/app.ToggleMemberStatus` |
+| UC-017 | `POST /api/v1/memberships/:id/lock-expiry` | `members/app.LockMembershipExpiry` |
+| UC-032 (partial) | `POST /api/v1/members/:id/pin` | `members/app.AssignPin` |
+
+**Domain layer (`src/modules/members/domain/`):**
+- `member/Member` aggregate con `NewMember`, `ApplyProfileUpdate`, `ChangeStatus`,
+  `MarkEnrollmentPaid`, `UpdateLastMaintenance`, `SetPin`, `RegisterContactAttempt`,
+  validators (chain) + helpers (`ValidatePhone`, `ValidateEmail`, `ValidatePin`,
+  `ValidateStartDate`).
+- `membership/Membership` aggregate con `New`, `Renew` (regla UC-018: acumula
+  vs reinicia), `MarkReplaced`, `Cancel`, `AdjustExpiry`, `SetExpiry`, `IsActive`,
+  `DaysUntilExpiry`. Snapshot fields (`TypeNameSnapshot`, `PriceSnapshot`,
+  `DurationDaysSnapshot`) son inmutables — DA-11.1.
+- `membership/MembershipAdjustment` entidad histórica con validación de razón ≥5.
+- `membership_type/MembershipType` extendido con `Update`, `Deactivate`,
+  `Reactivate` y validator chain.
+- `access/AccessStatusEvaluator` — domain service puro, retorna
+  `allowed_active | allowed_expiring_soon | denied_expired | denied_inactive | denied_no_membership`.
+  Threshold "expiring_soon" = 7 días. **Consumido por checkins en Sesión 5**.
+- `errors/` — sentinels nuevos para member/membership/adjustment/PIN.
+- `repository/` — interfaces para los 4 aggregates + read model
+  `MemberWithMembership` + `ListQuery` con filtros/sort/pagination.
+
+**Cross-BC services (`members/app/services.go`):**
+- `MemberService.RenewMembershipForPayment` — implementa la mitad de UC-018 que
+  vive en `members`. Marca la membresía actual como `replaced`, crea una nueva
+  con snapshot del MembershipType (posiblemente diferente) y devuelve ambas.
+  **Listo para que billing en Sesión 3 lo invoque dentro de su UoW.Command**.
+- `MemberService.GetAccessStatus` — delegación al evaluator. Consumido por
+  checkins en Sesión 5.
+
+**Infrastructure layer (`src/modules/members/infraestructure/`):**
+- Modelos GORM (`member_model.go`, `membership_model.go`,
+  `membership_type_model.go`) — sin tags en domain, solo aquí.
+- Repos Postgres+GORM (`*_postgres.go`, `//go:build server`):
+  `MemberPostgresRepository`, `MembershipPostgresRepository`,
+  `MembershipAdjustmentPostgresRepository`, `MembershipTypePostgresRepository`.
+- Repos SQLite+sqlx (`*_sqlite.go`, `//go:build sidecar`) con paridad —
+  conversión cents/dates en el mapper (ADR-002 §4) + sync_queue write-through.
+- `NextFolio` — Postgres usa `SELECT ... FOR UPDATE` (clause.Locking); SQLite
+  confía en su tx serializada.
+- `PinHashCollidesInGym` — itera bcrypt hashes del gym y corre `Verify` por PIN.
+  O(N_pins) por intento; aceptable para gyms <10k members. Si alguna vez deja
+  de serlo, migrar a HMAC peppered hash.
+
+**Interfaces layer (`src/modules/members/interfaces/controllers/`):**
+- `MembershipTypeController` — UC-011.
+- `MemberController` — UC-012..UC-017 + UC-032 partial.
+- Mismo patrón: parsear → use case → mapear response. Errors mapeados con
+  `utils.DomainErrorToHttpCode`. Auth middleware en todas.
+- UC-017 (lock-expiry) detrás de `RequireOwner()` — DA-17.1.
+
+**DI:** Sólo se *agregaron* repos/use cases/controllers en `cmd/server/main.go`
+y `cmd/sidecar/main.go`. Sin refactorizar Sesión 1.
+
+**Tests:**
+- Unit (`domain/`): 4 archivos
+  (`member_test.go`, `membership_test.go`, `access/evaluator_test.go`,
+  `membership_type_test.go` heredado).
+  - `Renew()` cubre las dos ramas de UC-018 (acumula vs reinicia).
+  - `AccessStatusEvaluator` cubre los 5 estados + threshold ±1.
+  - Validators cubren happy path + errores específicos.
+- Integration (`app/members_integration_test.go`, build `sidecar`, SQLite real):
+  cubre UC-011..UC-017 + AssignPin. Atomicidad de UC-017 verificada
+  explícitamente — un reason inválido NO debe mover `expiry_date`.
+
+## Decisiones tomadas (cuando había ambigüedad)
+
+1. **PIN hash collision detection**: bcrypt salts impiden lookup directo;
+   iteramos hashes del gym y `Verify` por intento. Aceptable para volúmenes
+   esperados (≤1k miembros con PIN por gym).
+2. **Folio format**: `MEM-NNNNNN` (6 dígitos zero-padded por gym). Suficiente
+   para 10⁶ socios; los gyms reales no llegan a 10⁴.
+3. **List status filter**: derivado al vuelo en SQL (DA-14.2). El cálculo
+   `julianday(expiry_date) - julianday(today)` en SQLite es exacto en horas
+   de UTC; en Postgres usamos `expiry_date - today`.
+4. **`enrollment_paid` y `last_maintenance_paid`** se mantienen en `members`
+   como cache (ADR-002 §3.5). Se actualizarán desde billing/UC-018 vía
+   `Member.MarkEnrollmentPaid` / `Member.UpdateLastMaintenance`.
+5. **No emisión real de eventos `MemberCreatedWithInitialPayment`**: en
+   Sesión 2 todavía no existe `billing`. La señal viaja como `PendingFirstPayment`
+   en el Output del use case + en la respuesta HTTP. Cuando billing aterrice
+   (Sesión 3), `CreateMember` puede invocar `billing.RegisterPayment` directamente
+   dentro del mismo `UoW.Command`. Marcado como `TODO(billing — Sesión 3)`.
+6. **`UpdateMembershipType` no muta memberships activas**: DA-11.1. El snapshot
+   en `memberships` es la fuente de verdad para esa membresía vigente. El
+   próximo `Renew()` ya verá los nuevos valores del MembershipType.
+7. **PIN auto-generation**: 4 dígitos random rechazando weak PINs (0000, 1234,
+   secuencias 1111-9999). 50 intentos máx antes de devolver `errPinExhausted`.
+8. **`UC-014` ordenación de "expiry"**: Postgres usa `NULLS LAST`; SQLite los
+   pone donde le toca según orden. Aceptable: socios sin membresía activa son
+   raros y la UI ya los muestra al final por `status` filter.
+
+## TODO pendientes nuevos
+
+| Marcador | Lugar | Resumen |
+|---|---|---|
+| `TODO(billing — Sesión 3)` | `members/app/create_member.go` | Si `ChargeFirstPayment=true`, invocar `billing.RegisterPayment` dentro del mismo `UoW.Command`. La firma del cross-BC service `RenewMembershipForPayment` ya está lista. |
+| Diferido | UC-018 completo | Vive en billing. Esta sesión deja `RenewMembershipForPayment` ready. |
+
+## Comandos
+
+```bash
+# Smoke verificado en sidecar (`bin/cuadra-sidecar`):
+SIDECAR_DB_PATH=/tmp/cuadra.db bin/cuadra-sidecar &
+curl -s http://127.0.0.1:9090/health
+# Signup → token → POST /api/v1/membership-types → POST /api/v1/members → ...
+```

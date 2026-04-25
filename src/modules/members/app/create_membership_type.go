@@ -1,5 +1,13 @@
-// Package app — members use cases. Sesión 1 implements only
-// CreateMembershipType (UC-001 step 3 dependency). Full CRUD lands in Sesión 2.
+// Package app implements the use cases of the `members` BC.
+//
+// UC-011 — MembershipType CRUD
+// UC-012 — Crear socio
+// UC-013 — Editar socio
+// UC-014 — Listar / buscar / filtrar socios
+// UC-015 — Ver detalle de socio
+// UC-016 — Cambiar estado activo / inactivo
+// UC-017 — Bloquear / ajustar vencimiento manual
+// UC-032 — Asignar PIN al socio (operación, el flujo de check-in vive en checkins)
 package app
 
 import (
@@ -15,6 +23,10 @@ import (
 	"github.com/cuadra/cuadra-core/src/shared/audit"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 )
+
+// ---------------------------------------------------------------------------
+// CreateMembershipType — UC-011
+// ---------------------------------------------------------------------------
 
 type CreateMembershipTypeInput struct {
 	GymID                uuid.UUID
@@ -65,10 +77,13 @@ func (uc *CreateMembershipType) Execute(ctx context.Context, in CreateMembership
 			EntityID:    created.ID,
 			Action:      audit.ActionCreate,
 			ActorUserID: &in.ActorUserID,
-			Changes:     map[string]any{"name": created.Name, "price": created.Price, "duration_days": created.DurationDays},
-			IPAddress:   audit.IPFromContext(ctx),
-			UserAgent:   audit.UAFromContext(ctx),
-			At:          now,
+			Changes: map[string]any{
+				"name": created.Name, "price": created.Price, "duration_days": created.DurationDays,
+				"enrollment_fee": created.EnrollmentFee, "maintenance_fee": created.MaintenanceFee,
+			},
+			IPAddress: audit.IPFromContext(ctx),
+			UserAgent: audit.UAFromContext(ctx),
+			At:        now,
 		})
 		out = created
 		return nil

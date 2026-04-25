@@ -57,6 +57,9 @@ func main() {
 	otpRepo := gymRepoLite.NewTransferOTPSQLiteRepository()
 	userRepo := usersRepoLite.NewUserSQLiteRepository()
 	mtRepo := memRepoLite.NewMembershipTypeSQLiteRepository()
+	memberRepo := memRepoLite.NewMemberSQLiteRepository()
+	membershipRepo := memRepoLite.NewMembershipSQLiteRepository()
+	adjustmentRepo := memRepoLite.NewMembershipAdjustmentSQLiteRepository()
 
 	// ── Shared services ────────────────────────────────────────────────────
 	tokens := auth.NewJWTService(envOrDefault("JWT_SECRET", "sidecar-dev-secret-do-not-use-in-prod"))
@@ -84,6 +87,16 @@ func main() {
 	requestTransfer := usersApp.NewRequestTransferOwnership(userRepo, otpRepo, uow, recorder, emailSender)
 	confirmTransfer := usersApp.NewConfirmTransferOwnership(userRepo, otpRepo, transferRepo, nil, uow, recorder, emailSender)
 	createMT := memApp.NewCreateMembershipType(mtRepo, uow, recorder)
+	updateMT := memApp.NewUpdateMembershipType(mtRepo, uow, recorder)
+	deactivateMT := memApp.NewDeactivateMembershipType(mtRepo, uow, recorder)
+	listMT := memApp.NewListMembershipTypes(mtRepo, uow)
+	createMember := memApp.NewCreateMember(memberRepo, membershipRepo, mtRepo, uow, recorder)
+	updateMember := memApp.NewUpdateMember(memberRepo, uow, recorder)
+	listMembers := memApp.NewListMembers(memberRepo, uow)
+	memberDetail := memApp.NewGetMemberDetail(memberRepo, uow)
+	toggleMember := memApp.NewToggleMemberStatus(memberRepo, uow, recorder)
+	lockExpiry := memApp.NewLockMembershipExpiry(membershipRepo, adjustmentRepo, uow, recorder)
+	assignPin := memApp.NewAssignPin(memberRepo, uow, recorder)
 
 	authCtrl := usersCtrl.NewAuthController(usersCtrl.AuthController{
 		Signup:           signup,
@@ -101,7 +114,8 @@ func main() {
 		ConfirmTransfer:  confirmTransfer,
 		Tokens:           tokens,
 	})
-	mtCtrl := memCtrl.NewMembershipTypeController(createMT, tokens)
+	mtCtrl := memCtrl.NewMembershipTypeController(createMT, updateMT, deactivateMT, listMT, tokens)
+	memberCtrl := memCtrl.NewMemberController(createMember, updateMember, listMembers, memberDetail, toggleMember, lockExpiry, assignPin, tokens)
 
 	if os.Getenv("ENVIRONMENT") == "production" {
 		gin.SetMode(gin.ReleaseMode)
@@ -113,6 +127,7 @@ func main() {
 	})
 	authCtrl.RegisterRoutes(r)
 	mtCtrl.RegisterRoutes(r)
+	memberCtrl.RegisterRoutes(r)
 
 	port := envOrDefault("SIDECAR_PORT", "9090")
 	// ADR-003 §2.2: print the port to stdout so Tauri can capture it.

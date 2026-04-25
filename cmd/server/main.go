@@ -51,6 +51,9 @@ func main() {
 	resetRepo := usersRepoPg.NewPasswordResetPostgresRepository()
 	blRepo := usersRepoPg.NewRefreshTokenBlacklistPostgresRepository()
 	mtRepo := memRepoPg.NewMembershipTypePostgresRepository()
+	memberRepo := memRepoPg.NewMemberPostgresRepository()
+	membershipRepo := memRepoPg.NewMembershipPostgresRepository()
+	adjustmentRepo := memRepoPg.NewMembershipAdjustmentPostgresRepository()
 
 	// ── Shared services ────────────────────────────────────────────────────
 	tokens := auth.NewJWTService(mustEnv("JWT_SECRET"))
@@ -76,6 +79,16 @@ func main() {
 	requestTransfer := usersApp.NewRequestTransferOwnership(userRepo, otpRepo, uow, recorder, emailSender)
 	confirmTransfer := usersApp.NewConfirmTransferOwnership(userRepo, otpRepo, transferRepo, blRepo, uow, recorder, emailSender)
 	createMT := memApp.NewCreateMembershipType(mtRepo, uow, recorder)
+	updateMT := memApp.NewUpdateMembershipType(mtRepo, uow, recorder)
+	deactivateMT := memApp.NewDeactivateMembershipType(mtRepo, uow, recorder)
+	listMT := memApp.NewListMembershipTypes(mtRepo, uow)
+	createMember := memApp.NewCreateMember(memberRepo, membershipRepo, mtRepo, uow, recorder)
+	updateMember := memApp.NewUpdateMember(memberRepo, uow, recorder)
+	listMembers := memApp.NewListMembers(memberRepo, uow)
+	memberDetail := memApp.NewGetMemberDetail(memberRepo, uow)
+	toggleMember := memApp.NewToggleMemberStatus(memberRepo, uow, recorder)
+	lockExpiry := memApp.NewLockMembershipExpiry(membershipRepo, adjustmentRepo, uow, recorder)
+	assignPin := memApp.NewAssignPin(memberRepo, uow, recorder)
 
 	// ── Controllers ────────────────────────────────────────────────────────
 	authCtrl := usersCtrl.NewAuthController(usersCtrl.AuthController{
@@ -96,7 +109,8 @@ func main() {
 		ConfirmTransfer:  confirmTransfer,
 		Tokens:           tokens,
 	})
-	mtCtrl := memCtrl.NewMembershipTypeController(createMT, tokens)
+	mtCtrl := memCtrl.NewMembershipTypeController(createMT, updateMT, deactivateMT, listMT, tokens)
+	memberCtrl := memCtrl.NewMemberController(createMember, updateMember, listMembers, memberDetail, toggleMember, lockExpiry, assignPin, tokens)
 
 	// ── Gin router ────────────────────────────────────────────────────────
 	if os.Getenv("ENVIRONMENT") == "production" {
@@ -108,6 +122,7 @@ func main() {
 	})
 	authCtrl.RegisterRoutes(r)
 	mtCtrl.RegisterRoutes(r)
+	memberCtrl.RegisterRoutes(r)
 
 	port := envOrDefault("PORT", "8080")
 	log.Printf("cuadra-server starting on :%s", port)

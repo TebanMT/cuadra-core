@@ -1,8 +1,12 @@
 // Package domain — bounded context `members`.
 //
-// Sesión 2 implementation. Skeleton-only in Sesión 1: subdirectories
-// reserved for Member, Membership, MembershipType aggregates per
-// CUADRA-USE-CASES.md UC-011..UC-017.
+// Aggregates:
+//   - Member          (member/) — UC-012..UC-017, UC-032, UC-035
+//   - Membership      (membership/) — UC-018 renewal logic, UC-017 adjustments
+//   - MembershipType  (membership_type/) — UC-011
 //
-// TODO(humano): implementar UC-011 a UC-017.
+// Domain services:
+//   - access.AccessStatusEvaluator — consumed by checkins BC (Sesión 5)
+//
+// All persistence is fronted by the interfaces in repository/.
 package domain
