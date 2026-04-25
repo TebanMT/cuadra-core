@@ -1,0 +1,13 @@
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  cmd = "go build -tags server -o tmp/cuadra-server ./cmd/server"
+  bin = "tmp/cuadra-server"
+  delay = 800
+  exclude_dir = ["tmp", "bin", "dist", "db_migrations"]
+  include_ext = ["go"]
+  kill_delay = "0s"
+
+[log]
+  time = false

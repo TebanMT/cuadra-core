@@ -1,0 +1,12 @@
+tmp/
+.env
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+bin/
+dist/
+node_modules/
+.DS_Store
+coverage.out
+*.test
