@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
+	caDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/contact_attempt"
 	fpDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/fingerprint"
 	memberDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/member"
 	membershipDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/membership"
@@ -99,6 +100,16 @@ type PinCandidate struct {
 // from MemberRepository. Both Postgres and SQLite member repos implement it.
 type MemberPinCandidateLister interface {
 	ListPinCandidates(tx sharedDomain.Transaction, gymID uuid.UUID) ([]PinCandidate, error)
+}
+
+// ContactAttemptRepository — UC-035 append-only history of "le hablé".
+type ContactAttemptRepository interface {
+	Create(tx sharedDomain.Transaction, a *caDomain.ContactAttempt) (*caDomain.ContactAttempt, error)
+	// LastByMember returns the most recent attempt for `memberID`, or
+	// (nil, nil) when none. Reports use this to filter "vencidos sin
+	// contactar en últimos 7 días".
+	LastByMember(tx sharedDomain.Transaction, memberID uuid.UUID) (*caDomain.ContactAttempt, error)
+	ListByMember(tx sharedDomain.Transaction, memberID uuid.UUID, limit int) ([]*caDomain.ContactAttempt, error)
 }
 
 // FingerprintRepository — UC-028 + the read paths checkins/Sesión 5 needs.

@@ -1,4 +1,4 @@
-.PHONY: help tidy build build-server build-sidecar run-server run-sidecar test test-unit test-integration vet fmt fmt-check docker-up docker-down migrate-postgres migrate-sqlite migrate-reset-postgres clean
+.PHONY: help tidy build build-server build-sidecar run-server run-sidecar test test-unit test-integration vet fmt fmt-check docker-up docker-down migrate-postgres migrate-sqlite migrate-reset-postgres seed clean
 
 # --- Defaults ---
 DB_URL ?= postgresql://cuadra:cuadra_dev@localhost:5432/cuadra?sslmode=disable
@@ -85,6 +85,11 @@ migrate-sqlite:
 
 migrate-reset-postgres:
 	psql "$(DB_URL)" -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
+
+# `make seed` — populate a clean Postgres with one demo gym + members in
+# every dashboard category. Reuses the existing migrations runner.
+seed:
+	DATABASE_URL="$(DB_URL)" go run -tags server ./cmd/seed
 
 clean:
 	rm -rf tmp bin

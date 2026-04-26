@@ -45,4 +45,9 @@ var (
 	// PIN
 	ErrInvalidPin      = errors.New("el PIN debe ser de 4 dígitos")
 	ErrPinAlreadyTaken = errors.New("ese PIN ya está en uso por otro socio del gimnasio")
+
+	// Contact attempt (UC-035)
+	ErrInvalidContactChannel     = errors.New("canal de contacto inválido (whatsapp/phone/in_person/other)")
+	ErrInvalidContactNoteTooLong = errors.New("la nota de contacto es demasiado larga")
+	ErrMemberAlreadyLost         = errors.New("este socio ya está marcado como perdido")
 )
