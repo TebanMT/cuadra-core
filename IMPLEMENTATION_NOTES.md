@@ -436,3 +436,115 @@ Sesión 6 (UC-033..UC-036, dashboard read models + reports cross-context):
 queries que usan `application/reports/` para retención, ingresos,
 asistencia. Esta sesión expone `checkins.ListByMember` ya — reports
 podrá agregarlo por gym/rango sin tocar el BC.
+
+---
+
+# cuadra-core — Notas de Implementación, Sesión 8 (Sync protocol)
+
+Fecha: 2026-04-25
+
+## Qué se implementó
+
+**Sesión 8 (UC-042 a UC-045) end-to-end:**
+
+| UC | Endpoint | Componente |
+|---|---|---|
+| UC-042 | `POST /api/v1/sync/push` (cloud) + Agent loop (sidecar) | `shared/sync.Handler` + `Agent` |
+| UC-042 | `GET /api/v1/sync/pull?since=…&limit=…` (cloud) | `shared/sync.Handler.Pull` |
+| UC-043 | `GET /api/v1/sync/full?cursor=…&limit=…` (cloud) | `shared/sync.Handler.FullSync` |
+| UC-044 | `GET /api/v1/sync/status` (sidecar local) | `shared/sync.StatusController` |
+| UC-044 | `POST /api/v1/sync/trigger` (sidecar local, manual nudge) | `StatusController.Trigger` |
+| UC-044 | `POST /api/v1/sync/auth` (sidecar, JWT relay desde frontend) | `StatusController.SetAuth` |
+| UC-045 | LWW silencioso + `conflict_log` (cloud) + `conflict_log_local` (sidecar) | `PostgresStore.UpsertOne`, `recordLocalConflict` |
+| ADR §5 | `GET /_internal/metrics` (Prometheus text) | `shared/sync.Metrics` |
+
+**Plumbing nuevo:**
+
+- `shared/sync/types.go` — wire types (`PushRequest/Response`, `PullChange`, `StatusResponse`, etc.).
+  Sin build tags — los comparten cloud y sidecar.
+- `shared/sync/tables.go` — registry de las 18 entidades sync'd con sus columnas, en orden topológico (gyms → users → membership_types → … → audit_log). Usado por SQLite apply (sidecar) y full-sync (server).
+- `shared/sync/server_store.go` (`//go:build server`) — `Store` interface, `PostgresStore` (UPSERTs en `sync_entities` con `SELECT FOR UPDATE`), cursor opaco resumible, `extractUpdatedAt` (acepta epoch ms o ISO).
+- `shared/sync/server_handler.go` — handler Gin, valida `gym_id` payload vs JWT, `schema_version` (responde 426 si excede), procesa cada item en su propia transacción serializable.
+- `shared/sync/server_metrics.go` — Prometheus text format hand-rolled (sin dep nueva), counters + histogram con buckets sub-100ms..10s.
+- `shared/sync/agent.go` (`//go:build sidecar`) — goroutine con `Run(ctx)`, ticker 30s + canal de `TriggerNow`, `Push`/`Pull`/`FullSync`, backoff exponencial 1s..5min (ADR §3.3).
+- `shared/sync/agent_apply.go` — `ApplyPullChange`: UPSERT genérico desde el JSON snapshot a la tabla local, con LWW por `version`, `WHERE excluded.version > <table>.version`. Decoder base64 para BLOBs (`template_encrypted`, `whatsapp_business_token_enc`), coerciones JSON→SQLite (`bool→0/1`, JSONB→TEXT, números enteros).
+- `shared/sync/agent_state.go` — wrappers para `sync_state` (client_id, last_pulled_at, last_synced_at, full_sync_cursor, retry_count, next_retry_at).
+- `shared/sync/agent_status.go` — `StatusController` que mapea `AgentSnapshot` a los 5 estados de UC-044 (`online | offline_short | offline_medium | offline_long | offline_critical | initial_syncing`).
+
+**Migraciones:**
+
+- `db_migrations/postgres/003_sync_entities.sql` — tabla canónica donde aterrizan los snapshots pusheados desde sidecars. PK `(gym_id, entity_type, entity_id)`, índice `(gym_id, server_updated_at)`. Cloud-only.
+- `db_migrations/sqlite/003_sync_local.sql` — `conflict_log_local` (mirror del cloud para soporte/debug; ADR-001 §3.7).
+
+**Atomicidad sync_queue + mutación verificada (ADR §3.10):**
+
+`shared/sync/agent_test.go::TestAtomicidad_SyncQueueAndMutationCommitTogether` y `TestAtomicidad_BothSidesCommit` — fuerzan rollback dentro del `UoW.Command` y verifican que ni members ni sync_queue persistieron. La rama positiva confirma que ambas filas commitean juntas. La existing infra de Sesión 1 (`UoW.Command + SqlxTransaction.EnqueueSync`) ya lo garantizaba; el test es la verificación viva.
+
+**Coalescing en sync_queue (ADR §3.2):**
+
+`SqliteQueue.Enqueue` ya hacía `UPDATE … WHERE entity_id=? AND synced_at IS NULL` antes de `INSERT`. Test `TestSyncQueueCoalescing` confirma que 5 mutaciones consecutivas a la misma entidad colapsan a 1 sola fila pendiente, con `client_version` del último.
+
+## Tests
+
+- **Unit** (no build tag): registry sanity (`tables_test.go`).
+- **Server** (`-tags server`): cursor round-trip, `extractUpdatedAt`, push (accept/idempotent/conflict_server_wins/conflict_client_wins/rejected_unauthorized/schema 426), pull, full-sync paginación, `/_internal/metrics`. Mock `Store` + mock `ConflictLogger` evitan necesitar Postgres.
+- **Sidecar** (`-tags sidecar`): agent end-to-end contra `httptest`, atomicidad (forced rollback), coalescing, `buildStatusResponse` thresholds (UC-044), `backoff` sequence.
+- **Chaos** (`-tags "sidecar chaos"`, **excluido de CI por convención**): sleep 200ms ante cada request. Verificado localmente.
+
+```bash
+make test                                   # server + sidecar
+go test -tags "sidecar chaos" ./src/shared/sync/  # chaos opcional
+```
+
+## Decisiones de diseño (cuando había ambigüedad)
+
+1. **`sync_entities` como tabla canónica cloud, NO populación directa de tablas de dominio en cloud-side desde sync.** El push del sidecar aterriza en `sync_entities` (JSONB blob). Las tablas de dominio cloud (members, payments, …) se populan por handlers cloud-side directos (signup, login, …). Pros: protocolo genérico, cero impedance mismatch entre Postgres y SQLite tipos. Cons: el dashboard cloud (Sesión 6) lee de tablas de dominio — la data pusheada por el sidecar todavía no se ve ahí. Bridging (proyección cloud-side de `sync_entities` → tablas de dominio) es un follow-up.
+2. **Wire format = SQLite shape**: timestamps en epoch ms (no ISO), BLOBs base64, JSONB embebido como object/array. Mantiene compat con los `enqueue*` ya escritos en cada BC sin tocar 18 funciones.
+3. **JWT relay vía `POST /sync/auth`** (no compartir el JWT secret cloud↔sidecar). El frontend desktop envía el token al sidecar después de UC-002 login. Limpio y desacoplado.
+4. **Per-item transacción serializable** (no batch transaction): un item malo no rolea el batch. ADR §3.3 ambiguo, opto por el camino seguro.
+5. **`ConflictLogger` como interface** (no struct concreto): desacopla del Postgres real para que los unit tests del handler corran sin DB.
+6. **`Bootstrap` público en Agent**: tests precargan `sync_state` y luego llaman `Bootstrap` para que el agent re-lea estado. En producción `Run` lo invoca al startup.
+7. **Métricas Prom hand-rolled** (sin `prometheus/client_golang`): set chico y estable, principio "boring", swap si crece.
+
+## TODO pendientes
+
+| Marcador | Lugar | Resumen |
+|---|---|---|
+| Diferido | `sync_entities` → tablas de dominio (proyección cloud-side) | Para que el dashboard cloud (Sesión 6) vea data pusheada por el sidecar. ETA: tras Sesión 8 está mergeada y el equipo decida si se trata server-side worker o trigger Postgres. |
+| Diferido | Snapshots completos en `enqueue*` por BC | Las funciones `enqueueMember`, etc., emiten payloads parciales. ApplyPullChange merge-friendly hoy, pero un snapshot full es más correcto. Tickets per-BC. |
+| Diferido | Auto-update de migraciones sidecar (ADR-005) | Cuando llegue `migration version mismatch`, sidecar caer en read-only. Hoy `Pull` con `426` lo deja en backoff infinito — UC-044 mostrará `offline_critical`. Aceptable hasta ADR-005. |
+| Diferido | `sync_queue_depth` gauge real | El campo existe en `Metrics` pero el server no escribe (no tiene visibilidad del sidecar). Idea: cliente lo manda en cada push como header `X-Sync-Queue-Depth`. |
+| `TODO(humano)` | Chaos suite ampliada (clock skew, packet loss) | Sólo latency está implementada. ADR-001 §6.3 sugiere también drop, clock skew. Implementar gradualmente; CI-skip por defecto. |
+
+## Comandos
+
+```bash
+# Build (ambos binarios)
+make build
+
+# Run cloud server (con sync handlers)
+DATABASE_URL=... make run-server   # serves /api/v1/sync/{push,pull,full} + /_internal/metrics
+
+# Run sidecar con sync agent
+CUADRA_CLOUD_URL=https://cloud.cuadra.app SYNC_INTERVAL_S=30 make run-sidecar
+
+# El frontend desktop, post-login (UC-002), envía el token:
+curl -X POST http://127.0.0.1:9090/api/v1/sync/auth \
+  -H "Content-Type: application/json" \
+  -d '{"token":"<access_jwt_del_login>"}'
+
+# Indicador para el frontend (UC-044):
+curl http://127.0.0.1:9090/api/v1/sync/status
+# {"state":"online","last_synced_at":"…","queue_pending_count":0,…}
+
+# Métricas Prom para scraping
+curl http://localhost:8080/_internal/metrics
+```
+
+## Próxima sesión sugerida
+
+Cierre / hardening:
+- Bridging `sync_entities` → tablas de dominio cloud (para que dashboard vea sidecar pushes).
+- Backfill snapshots completos en cada BC enqueue (~18 funciones, tedioso pero mecánico).
+- E2E real cliente↔servidor sobre Postgres (hoy hay mock Store + httptest; falta corrida con `make migrate-postgres` en CI).
+- ADR-005 (auto-update) — habilita que `426` actualice el sidecar en lugar de quedar en `offline_critical` indefinido.

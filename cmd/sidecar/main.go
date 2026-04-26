@@ -3,12 +3,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -53,7 +55,7 @@ import (
 	bcrypto "github.com/cuadra/cuadra-core/src/shared/biometric/crypto"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 	"github.com/cuadra/cuadra-core/src/shared/email"
-	"github.com/cuadra/cuadra-core/src/shared/sync"
+	syncShared "github.com/cuadra/cuadra-core/src/shared/sync"
 )
 
 func main() {
@@ -70,7 +72,7 @@ func main() {
 		log.Fatalf("apply sqlite migrations: %v", err)
 	}
 
-	queue := sync.NewSqliteQueue()
+	queue := syncShared.NewSqliteQueue()
 	uow := sharedDomain.NewSQLiteUnitOfWork(db, queue)
 
 	// ── Repositories ───────────────────────────────────────────────────────
@@ -228,6 +230,29 @@ func main() {
 	checkinCtrl.RegisterRoutes(r)
 	kioskCtrl.RegisterRoutes(r)
 	notificationsCtrl.RegisterRoutes(r)
+
+	// ── Sync agent (Sesión 8 / ADR-001) ──────────────────────────────────
+	// The agent is started after routes are registered so /sync/status sees
+	// the live snapshot. The desktop frontend hands the cloud JWT to the
+	// agent via POST /api/v1/sync/auth after a successful login, so we
+	// don't need to share JWT secrets across the cloud↔sidecar boundary.
+	cloudURL := os.Getenv("CUADRA_CLOUD_URL")
+	syncInterval := time.Duration(envInt("SYNC_INTERVAL_S", 30)) * time.Second
+	agent := syncShared.NewAgent(syncShared.AgentConfig{
+		BaseURL:  cloudURL,
+		Interval: syncInterval,
+		Logger:   log.New(os.Stderr, "[sync] ", log.LstdFlags),
+	}, db, uow)
+	syncStatusCtrl := syncShared.NewStatusController(agent)
+	syncStatusCtrl.RegisterRoutes(r)
+
+	syncCtx, cancelSync := context.WithCancel(context.Background())
+	defer cancelSync()
+	if cloudURL != "" {
+		go agent.Run(syncCtx)
+	} else {
+		log.Printf("[sync] CUADRA_CLOUD_URL empty — agent dormant; /sync/status will report initial state only")
+	}
 
 	port := envOrDefault("SIDECAR_PORT", "9090")
 	// ADR-003 §2.2: print the port to stdout so Tauri can capture it.

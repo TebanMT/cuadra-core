@@ -55,6 +55,7 @@ import (
 	bcrypto "github.com/cuadra/cuadra-core/src/shared/biometric/crypto"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 	"github.com/cuadra/cuadra-core/src/shared/email"
+	syncShared "github.com/cuadra/cuadra-core/src/shared/sync"
 )
 
 func main() {
@@ -238,6 +239,15 @@ func main() {
 	reportsController.RegisterRoutes(r)
 	notificationsCtrl.RegisterRoutes(r)
 	notiWebhookCtrl.RegisterRoutes(r)
+
+	// Sync protocol (Sesión 8 / ADR-001) — push/pull/full + Prometheus
+	// metrics at /_internal/metrics. The handler depends only on the UoW
+	// already wired above; Store and ConflictLogger are stateless.
+	syncMetrics := syncShared.NewMetrics()
+	syncStore := syncShared.NewPostgresStore()
+	syncConflicts := syncShared.NewConflictLogger()
+	syncHandler := syncShared.NewHandler(uow, syncStore, syncConflicts, tokens, syncMetrics)
+	syncHandler.RegisterRoutes(r)
 
 	// Background workers (Sesión 7 §dispatcher + scheduler).
 	bgCtx, cancelBg := context.WithCancel(context.Background())
