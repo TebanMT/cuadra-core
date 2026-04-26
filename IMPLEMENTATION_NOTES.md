@@ -268,3 +268,171 @@ SIDECAR_DB_PATH=/tmp/cuadra.db bin/cuadra-sidecar &
 curl -s http://127.0.0.1:9090/health
 # Signup → token → POST /api/v1/membership-types → POST /api/v1/members → ...
 ```
+
+---
+
+# cuadra-core — Notas de Implementación, Sesión 5 (Checkins + Biometric)
+
+Fecha: 2026-04-25
+
+## Qué se implementó
+
+**Sesión 5 (UC-028 a UC-032 + DA-29.2) end-to-end:**
+
+| UC | Endpoint | Use case |
+|---|---|---|
+| UC-028 | `POST /api/v1/members/:id/fingerprint` | `members/app.RegisterFingerprint` |
+| UC-029 | `POST /api/v1/checkins/fingerprint` (sidecar-only) | `checkins/app.CheckinByFingerprint` |
+| UC-029 (auto-detect) | `GET  /api/v1/biometric/status` | `KioskController.handleStatus` |
+| UC-030 | `POST /api/v1/checkins/manual` | `checkins/app.CheckinManual` |
+| UC-031 | `POST /api/v1/kiosk/start`, `POST /api/v1/kiosk/stop`, `GET /api/v1/kiosk/events` (long-poll) | `checkins/app.KioskLoop` + `KioskBroadcaster` |
+| UC-032 | `POST /api/v1/checkins/pin` | `checkins/app.CheckinByPin` |
+| DA-29.2 | `POST /api/v1/checkins/override` | `checkins/app.OverrideCheckin` |
+
+**`shared/biometric/` expandido:**
+- `Reader` interface re-escrita conforme a ADR-004 §3.3:
+  `Info()`, `OnConnect/OnDisconnect`, `Capture`, `Enroll(samples)`,
+  `Identify(input, []EncryptedTemplate, threshold)`, `Available`.
+- Tipos value: `CaptureResult{Bytes, Format, QualityScore}`, `EncryptedTemplate{MemberID, Bytes, Format}`, `MatchResult{MemberID, Score}`, `ReaderInfo{DeviceID, Vendor, Model, Connected}`.
+- Mock (`mock.go`, `!sidecar || bio_mock`) ahora usa el `GMKProvider` para descifrar y compara plaintext byte-a-byte (test-friendly determinismo).
+- Stub real DP (`digitalpersona.go`, `sidecar && bio_dp`) — header con declaraciones CGO comentadas + métodos vacíos. TODO ADR-004 Phase 1.
+- Disabled stub (`digitalpersona_disabled.go`, `sidecar && !bio_dp`) — exporta `NewDigitalPersonaReader` para builds sidecar dev (kiosko opera en PIN/manual hasta que el SDK aterrice).
+
+**`shared/biometric/crypto/`:**
+- AES-256-GCM con formato `[version=0x01][nonce 12B][ciphertext+tag]` (ADR-006 §2.1).
+- `EncryptTemplate` / `DecryptTemplate` + `Zero` defensivo para plaintexts.
+- `GMKProvider` interface + `InMemoryGMKProvider` (mock determinístico para tests, fallback dev en cloud + sidecar). El backend real OS-keychain (Tauri command) está marcado como TODO Sesión 8.
+- Tests: round-trip, tamper detection (ErrDecryptionFailed), wrong key, version unsupported, blob too short, nonce uniqueness, GMK provider lifecycle.
+
+**`members` BC adiciones:**
+- `domain/fingerprint/MemberFingerprint` aggregate (UC-028) — guarda **solo** bytes ya cifrados; el dominio no maneja plaintext nunca. Validators: identifiers no-Nil, blob no-empty, quality ≥ `QualityScoreFloor` (60). `SoftDelete` bumpea version.
+- `domain/fingerprint/errors.go` — sentinels: `ErrEmptyTemplate`, `ErrFingerprintAlreadySet`, `ErrConsentRequired`, etc.
+- `domain/repository/repository.go` — `FingerprintRepository` (Create/Update/GetByMember/ListByGym) + `MemberPinCandidateLister` interface (capability opcional para UC-032 sin engordar `MemberRepository`).
+- `infraestructure/db/models/member_fingerprint_model.go` (Postgres GORM) + `db/repositories/fingerprint_postgres.go` (mapper bidireccional).
+- `infraestructure/db/repositories/fingerprint_sqlite.go` (sqlx) — payload sync queue codifica `template_encrypted` como base64 (la columna del queue es TEXT).
+- `app/register_fingerprint.go` (UC-028) — encripta fuera del UoW.Command, valida consentimiento, rechaza duplicados (DA-28.2), audita con tamaño-de-blob (jamás bytes).
+- `MemberService.WithFingerprints(repo)` + `LoadFingerprintsForGym(ctx, tx, in)` — seam cross-BC para que checkins lea las huellas.
+- `MemberRepository.ListPinCandidates` (Postgres + SQLite) — devuelve `[]PinCandidate{MemberID, PinHash}` para que checkins pueda hacer la iteración bcrypt sin conocer el repo concreto.
+
+**`checkins` BC (nuevo):**
+- `domain/checkin/Checkin` aggregate con cuatro factories — `NewFingerprintCheckin`, `NewPinCheckin`, `NewManualCheckin`, `NewOverrideCheckin`. Mapea `access.AccessStatus` → `chk_checkins_result` enum.
+- `domain/errors/errors.go` — sentinels para UC-029/030/032/DA-29.2.
+- `domain/repository/CheckinRepository` — `Create`, `GetByID`, `ListByMember(memberID, since, limit)`.
+- `infraestructure/db/models/checkin_model.go` + `repositories/checkin_postgres.go` y `checkin_sqlite.go` (paridad cents/dates, sync_queue write-through).
+- `app/services.go` — helper compartido `recordCheckin()` que evalúa AccessStatus + persiste + audita. Los UCs (manual / pin / fingerprint) lo consumen.
+- `app/checkin_manual.go` (UC-030).
+- `app/checkin_by_pin.go` (UC-032) + `PinAttemptLimiter` in-memory (5 intentos/60s ⇒ cooldown 60s, por gym, reset al éxito).
+- `app/checkin_by_fingerprint.go` (UC-029, **build tag `sidecar`**) — fase 1: Query tx para cargar candidates; fase 2: `Reader.Identify` (sin tx); fase 3: Command tx para insertar checkin.
+- `app/override_checkin.go` (DA-29.2) — inserta una segunda fila con `result=allowed_override`, conserva el método original, no muta el row negado anterior.
+- `app/kiosk_events.go` — `KioskBroadcaster` (subscribe/publish, drop-on-full) + tipos `KioskEvent`/`KioskEventType`. Sin build tag — accesible al cloud para tests.
+- `app/checkin_kiosk_loop.go` (**build tag `sidecar`**, UC-031) — goroutine que loopea `Reader.Capture`, dispara fingerprint check-in async, registra callbacks `OnConnect/OnDisconnect`, publica eventos. `Start` idempotente, `Stop` seguro multi-call.
+- `interfaces/controllers/checkin_controller.go` — manual/pin/override (cloud + sidecar).
+- `interfaces/controllers/kiosk_controller.go` (**build tag `sidecar`**) — fingerprint, biometric status, kiosk start/stop, kiosk events long-poll (timeout 25s).
+- `members/interfaces/controllers/fingerprint_controller.go` — `POST /api/v1/members/:id/fingerprint`. Carga útil base64 (la captura del SDK).
+
+**DI:**
+- `cmd/server/main.go`: añadidos `fingerprintRepo`, `checkinRepo`, `gmkProvider` (in-memory), `registerFingerprint`, los tres UCs de checkin (manual/pin/override) y los controllers (`fingerprintCtrl`, `checkinCtrl`).
+- `cmd/sidecar/main.go`: lo anterior + `bioReader := biometric.NewDigitalPersonaReader()` (variant según build tag), `checkinFingerprint`, `kioskEvents`, `kioskLoop` (con `uuid.Nil` provisional — TODO Sesión 6: bind GymID al login), `kioskCtrl`.
+
+**Tests (todos verdes en sus respectivos build tags):**
+- Unit:
+  - `shared/biometric/crypto/crypto_test.go` — round-trip + tamper + wrong key + version + blob length + nonce uniqueness + GMK provider lifecycle.
+  - `members/domain/fingerprint/fingerprint_test.go` — happy path, validators, soft-delete versioning.
+  - `checkins/domain/checkin/checkin_test.go` — todos los factories + mapeo enum + override valida razón ≥5 + `IsAllowed`.
+- Integration (`checkins/app/checkins_integration_test.go`, build `sidecar bio_mock`, SQLite real + MockReader):
+  - `TestUC028AndUC029_FingerprintEnrollmentAndCheckin` — registra huella, prueba que UC-029 identifica al socio correcto y persiste el checkin con `result=allowed_active`.
+  - `TestUC029_NoMatch_ReturnsBusinessError` — captura distinta a la registrada → ErrNoFingerprintMatch.
+  - `TestUC030_ManualCheckin_Allowed` — UC-030 con operador, valida que `operator_id` se persiste.
+  - `TestUC032_PIN_MatchesAndRejects` — assign PIN → wrong PIN falla → right PIN éxito → 5 wrong intentos → lockout.
+  - `TestDA29_2_OverrideAfterDenied` — socio inactive → manual checkin returns denied_inactive → override agrega segunda fila con `manual_override=true`. Ambas filas siguen presentes.
+  - `TestKioskLoop_BroadcastsHotplugEvents` — start emite `kiosk_started`, simulación disconnect/connect emite los eventos correspondientes vía broadcaster.
+
+## Build tag matrix
+
+```
+go build                                    → cloud (server tag implícito por main.go)
+go build -tags=server                       → cloud explícito
+go build -tags=sidecar                      → sidecar dev (DigitalPersona disabled stub)
+go build -tags="sidecar bio_mock"           → sidecar tests (mock reader)
+go build -tags="sidecar bio_dp"             → sidecar producción (DP SDK stub — TODO real link)
+
+go test ./...                               → unit tests + crypto
+go test -tags=sidecar ./...                 → + sqlite integration tests
+go test -tags="sidecar bio_mock" ./...      → + UC-029 e2e con mock reader
+```
+
+## Decisiones tomadas (cuando había ambigüedad)
+
+1. **`MemberPinCandidateLister` como capability opcional** en lugar de
+   ampliar `MemberRepository` con un nuevo método obligatorio. Tipo
+   `PinCandidate` definido en `members/domain/repository/` para que
+   tanto los repos infra como el use case de checkins lo importen sin
+   crear un ciclo infra→app.
+2. **Encriptación FUERA del UoW.Command en RegisterFingerprint.**
+   Failures de crypto (GMK no encontrada, IV exhausted) no deben
+   rollback otras escrituras. Sólo entramos en transacción cuando ya
+   tenemos el blob listo.
+3. **El cloud server expone también las rutas de checkins manual/pin/override**
+   aunque la operación en kiosko vive en el sidecar. El dashboard puede
+   necesitar registrar checkins manualmente (revisión, corrección post-hoc)
+   y los tests cloud se benefician. Fingerprint + kiosk endpoints sí son
+   sidecar-only (`build sidecar`).
+4. **`KioskBroadcaster` sin build tag** (ver `app/kiosk_events.go`)
+   permite que controllers cloud serialicen eventos para dashboards
+   futuros sin arrastrar el SDK biometrico.
+5. **`KioskLoop` arranca con `uuid.Nil` GymID** — el sidecar es
+   single-tenant per process, pero el login todavía no le pasa el
+   `gym_id` al loop. Marcado como TODO Sesión 6.
+6. **Mock match = byte-equality plaintext** (`MockReader.Identify`).
+   El reader descifra los blobs con el GMK provider configurado y
+   compara byte a byte. Esto valida la cadena completa (GMK → encrypt →
+   sync → decrypt → match) sin simular un matcher fuzzy del SDK.
+7. **`PinAttemptLimiter` in-memory** (no persistido). Reinicio del
+   sidecar resetea el contador — aceptable porque el espacio es 10⁴
+   y cada intento requiere acceso físico al kiosko.
+8. **`gmk_keys` cloud aún no se persiste.** Sesión 1 dejó la tabla;
+   Sesión 5 usa el `InMemoryGMKProvider` con seed determinístico para
+   tests. La generación al signup + delivery al login + cache local
+   queda como TODO Sesión 8 (cuando aterricen sync agent + Tauri command
+   para keychain).
+9. **No se modifican migrations.** Las tablas `member_fingerprints` y
+   `checkins` ya las creó Sesión 1 (ADR-002 §3.8 + §3.12).
+
+## TODOs nuevos
+
+| Marcador | Lugar | Resumen |
+|---|---|---|
+| `TODO(humano)` | `shared/biometric/digitalpersona.go` | Linkear el SDK real DigitalPersona U.are.U 4500 (descomentar `cgo CFLAGS/LDFLAGS`, llamar `dpfpdd_capture`, `dpfpdd_create_ftrs`, `dpfpdd_identify`). Bloqueado en hardware en mano. |
+| Sesión 6 | `cmd/sidecar/main.go` | El `KioskLoop` arranca con `uuid.Nil` — bind real `gym_id` después del login. |
+| Sesión 8 | `cmd/sidecar/main.go` | Reemplazar `InMemoryGMKProvider` por OS-keychain provider (Tauri command `cuadra.gmk.<gym_id>`). Generación cloud, delivery al login, cache local. |
+| Sesión 8 | `members/app/register_fingerprint.go` | Cuando el provider real exista, agregar fallback ARCO (member request to delete). El soft-delete está en el aggregate (`SoftDelete`) — sólo falta el use case + endpoint DELETE. |
+| Sesión 9+ | `gyms.kiosk_settings` | Threshold de match (DA-29.4) actualmente hardcoded a 0.7 en `FingerprintMatchThresholdDefault`. Cuando aterrice settings UI, leer de la columna JSON. |
+
+## Comandos de smoke
+
+```bash
+# Crypto round-trip
+go test ./src/shared/biometric/crypto/...
+
+# Checkin domain
+go test ./src/modules/checkins/domain/...
+
+# UC-028..UC-032 e2e con SQLite + MockReader
+go test -tags="sidecar bio_mock" ./src/modules/checkins/...
+
+# Build sidecar production-ish
+go build -tags="sidecar bio_dp" -o bin/cuadra-sidecar ./cmd/sidecar
+
+# Sidecar dev: arranca y verifica /biometric/status
+SIDECAR_DB_PATH=/tmp/cuadra.db bin/cuadra-sidecar &
+TOKEN=$(...login...)
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9090/api/v1/biometric/status
+# → {"vendor":"HID/Crossmatch","model":"U.are.U 4500 (disabled at build)","connected":false,"available":false}
+```
+
+## Próxima sesión sugerida
+
+Sesión 6 (UC-033..UC-036, dashboard read models + reports cross-context):
+queries que usan `application/reports/` para retención, ingresos,
+asistencia. Esta sesión expone `checkins.ListByMember` ya — reports
+podrá agregarlo por gym/rango sin tocar el BC.

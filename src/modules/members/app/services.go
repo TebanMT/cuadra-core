@@ -22,11 +22,22 @@ type MemberService struct {
 	Members         memRepo.MemberRepository
 	Memberships     memRepo.MembershipRepository
 	MembershipTypes memRepo.MembershipTypeRepository
+	// Fingerprints is optional — older callers (billing in Sesión 3) don't
+	// need it. Sesión 5 wires it in for checkins/UC-029. Use the setter
+	// WithFingerprints to attach without breaking existing constructors.
+	Fingerprints memRepo.FingerprintRepository
 }
 
 func NewMemberService(members memRepo.MemberRepository, memberships memRepo.MembershipRepository,
 	mtypes memRepo.MembershipTypeRepository) *MemberService {
 	return &MemberService{Members: members, Memberships: memberships, MembershipTypes: mtypes}
+}
+
+// WithFingerprints attaches the fingerprint repository so checkins can call
+// LoadFingerprintsForGym. Returns the same pointer so callers can chain.
+func (s *MemberService) WithFingerprints(fp memRepo.FingerprintRepository) *MemberService {
+	s.Fingerprints = fp
+	return s
 }
 
 // RenewMembershipForPaymentInput is the cross-BC input from billing/UC-018.
@@ -178,6 +189,49 @@ func (s *MemberService) GetAccessStatus(ctx context.Context, tx sharedDomain.Tra
 		CurrentMembership: mw.CurrentMembership,
 		Status:            st,
 	}, nil
+}
+
+// LoadFingerprintsForGymInput is consumed by the kiosko at boot (UC-029
+// step 4 needs the full candidate set in memory before Identify can run).
+type LoadFingerprintsForGymInput struct {
+	GymID uuid.UUID
+}
+
+// LoadFingerprintsForGymOutput carries the per-member encrypted blobs ready
+// to feed biometric.Reader.Identify.
+type LoadFingerprintsForGymOutput struct {
+	Templates []EncryptedFingerprint
+}
+
+// EncryptedFingerprint is the cross-BC view checkins consumes. It mirrors
+// biometric.EncryptedTemplate but lives in the members BC so checkins doesn't
+// have to depend on the biometric package directly.
+type EncryptedFingerprint struct {
+	MemberID  uuid.UUID
+	Encrypted []byte
+	Format    string
+}
+
+// LoadFingerprintsForGym returns every active fingerprint blob in the gym.
+// Caller (sidecar kiosko goroutine) decrypts on its side via the GMK kept in
+// keychain.
+func (s *MemberService) LoadFingerprintsForGym(ctx context.Context, tx sharedDomain.Transaction, in LoadFingerprintsForGymInput) (*LoadFingerprintsForGymOutput, error) {
+	if s.Fingerprints == nil {
+		return &LoadFingerprintsForGymOutput{}, nil
+	}
+	rows, err := s.Fingerprints.ListByGym(tx, in.GymID)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
+	out := &LoadFingerprintsForGymOutput{Templates: make([]EncryptedFingerprint, 0, len(rows))}
+	for _, fp := range rows {
+		out.Templates = append(out.Templates, EncryptedFingerprint{
+			MemberID:  fp.MemberID,
+			Encrypted: fp.TemplateEncrypted,
+			Format:    fp.TemplateFormat,
+		})
+	}
+	return out, nil
 }
 
 // Compile-time assertion: domain types are reachable from this package without

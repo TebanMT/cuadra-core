@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
+	fpDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/fingerprint"
 	memberDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/member"
 	membershipDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/membership"
 	mtDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/membership_type"
@@ -83,4 +84,38 @@ type MembershipRepository interface {
 type MembershipAdjustmentRepository interface {
 	Create(tx sharedDomain.Transaction, a *membershipDomain.MembershipAdjustment) (*membershipDomain.MembershipAdjustment, error)
 	ListByMembership(tx sharedDomain.Transaction, membershipID uuid.UUID) ([]*membershipDomain.MembershipAdjustment, error)
+}
+
+// PinCandidate is one (member_id, pin_hash) row used by checkins/UC-032's
+// bcrypt scan. Shape mirrors what MemberPinCandidateLister returns; lives
+// here so both the members infra repos and the checkins use case can refer
+// to the same type without an infra→app cycle.
+type PinCandidate struct {
+	MemberID uuid.UUID
+	PinHash  string
+}
+
+// MemberPinCandidateLister is the optional capability the checkins BC asks
+// from MemberRepository. Both Postgres and SQLite member repos implement it.
+type MemberPinCandidateLister interface {
+	ListPinCandidates(tx sharedDomain.Transaction, gymID uuid.UUID) ([]PinCandidate, error)
+}
+
+// FingerprintRepository — UC-028 + the read paths checkins/Sesión 5 needs.
+//
+// Templates are stored *encrypted* (ADR-006 §2). The repo doesn't know the
+// GMK; it just shovels bytes. Decryption happens in the Reader implementation
+// inside the kiosko process.
+type FingerprintRepository interface {
+	Create(tx sharedDomain.Transaction, fp *fpDomain.MemberFingerprint) (*fpDomain.MemberFingerprint, error)
+	// Update bumps version + persists soft-delete or re-enrollment.
+	Update(tx sharedDomain.Transaction, fp *fpDomain.MemberFingerprint) (*fpDomain.MemberFingerprint, error)
+	// GetByMember returns the active fingerprint for a member, or (nil, nil)
+	// if there is none. UC-028 uses this to reject duplicate registrations
+	// (DA-28.2 — 1 huella por socio en MVP).
+	GetByMember(tx sharedDomain.Transaction, memberID uuid.UUID) (*fpDomain.MemberFingerprint, error)
+	// ListByGym returns every active (deleted_at IS NULL) fingerprint in the
+	// gym. The kiosko loads this once at boot and again whenever a new
+	// enrollment fires (UC-029 step 4 needs the full candidate set in memory).
+	ListByGym(tx sharedDomain.Transaction, gymID uuid.UUID) ([]*fpDomain.MemberFingerprint, error)
 }

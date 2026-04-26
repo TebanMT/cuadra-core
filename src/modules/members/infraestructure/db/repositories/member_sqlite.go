@@ -310,6 +310,32 @@ func (r *MemberSQLiteRepository) GetWithCurrentMembership(tx sharedDomain.Transa
 	return out, nil
 }
 
+// ListPinCandidates — see member_postgres.go for the contract.
+func (r *MemberSQLiteRepository) ListPinCandidates(tx sharedDomain.Transaction, gymID uuid.UUID) ([]memRepo.PinCandidate, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	type pinRow struct {
+		ID      string `db:"id"`
+		PinHash string `db:"pin_hash"`
+	}
+	var rows []pinRow
+	err := stx.Select(context.Background(), &rows,
+		`SELECT id, pin_hash FROM members
+		 WHERE gym_id = ? AND pin_hash IS NOT NULL AND deleted_at IS NULL AND status = 'active'`,
+		gymID.String())
+	if err != nil {
+		return nil, err
+	}
+	out := make([]memRepo.PinCandidate, 0, len(rows))
+	for _, row := range rows {
+		id, perr := uuid.Parse(row.ID)
+		if perr != nil {
+			continue
+		}
+		out = append(out, memRepo.PinCandidate{MemberID: id, PinHash: row.PinHash})
+	}
+	return out, nil
+}
+
 // ---------------------------------------------------------------------------
 // Mappers — Member
 // ---------------------------------------------------------------------------

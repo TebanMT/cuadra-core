@@ -11,6 +11,7 @@ import (
 	"strconv"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 
 	infraDB "github.com/cuadra/cuadra-core/infraestructure/db"
@@ -22,18 +23,28 @@ import (
 	memRepoLite "github.com/cuadra/cuadra-core/src/modules/members/infraestructure/db/repositories"
 	memCtrl "github.com/cuadra/cuadra-core/src/modules/members/interfaces/controllers"
 
+	chkApp "github.com/cuadra/cuadra-core/src/modules/checkins/app"
+	chkRepoLite "github.com/cuadra/cuadra-core/src/modules/checkins/infraestructure/db/repositories"
+	chkCtrl "github.com/cuadra/cuadra-core/src/modules/checkins/interfaces/controllers"
+
 	billingApp "github.com/cuadra/cuadra-core/src/modules/billing/app"
 	folioSvc "github.com/cuadra/cuadra-core/src/modules/billing/domain/folio"
 	billingRepoLite "github.com/cuadra/cuadra-core/src/modules/billing/infraestructure/db/repositories"
 	billingCtrl "github.com/cuadra/cuadra-core/src/modules/billing/interfaces/controllers"
 
+	prodApp "github.com/cuadra/cuadra-core/src/modules/products/app"
+	prodRepoLite "github.com/cuadra/cuadra-core/src/modules/products/infraestructure/db/repositories"
+	prodCtrl "github.com/cuadra/cuadra-core/src/modules/products/interfaces/controllers"
+
 	usersApp "github.com/cuadra/cuadra-core/src/modules/users/app"
 	usersRepoLite "github.com/cuadra/cuadra-core/src/modules/users/infraestructure/db/repositories"
 	usersCtrl "github.com/cuadra/cuadra-core/src/modules/users/interfaces/controllers"
 
+	reportsApp "github.com/cuadra/cuadra-core/src/application/reports"
 	"github.com/cuadra/cuadra-core/src/shared/audit"
 	"github.com/cuadra/cuadra-core/src/shared/auth"
 	"github.com/cuadra/cuadra-core/src/shared/biometric"
+	bcrypto "github.com/cuadra/cuadra-core/src/shared/biometric/crypto"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 	"github.com/cuadra/cuadra-core/src/shared/email"
 	"github.com/cuadra/cuadra-core/src/shared/sync"
@@ -66,6 +77,14 @@ func main() {
 	membershipRepo := memRepoLite.NewMembershipSQLiteRepository()
 	adjustmentRepo := memRepoLite.NewMembershipAdjustmentSQLiteRepository()
 	paymentRepo := billingRepoLite.NewPaymentSQLiteRepository()
+	saleRepo := billingRepoLite.NewSaleSQLiteRepository()
+	saleItemRepo := billingRepoLite.NewSaleItemSQLiteRepository()
+	cashCloseReader := billingRepoLite.NewCashCloseSQLiteReader()
+	cashCloseEventRepo := billingRepoLite.NewCashCloseEventSQLiteRepository()
+	productRepo := prodRepoLite.NewProductSQLiteRepository()
+	stockMovementRepo := prodRepoLite.NewStockMovementSQLiteRepository()
+	fingerprintRepo := memRepoLite.NewFingerprintSQLiteRepository()
+	checkinRepo := chkRepoLite.NewCheckinSQLiteRepository()
 
 	// ── Shared services ────────────────────────────────────────────────────
 	tokens := auth.NewJWTService(envOrDefault("JWT_SECRET", "sidecar-dev-secret-do-not-use-in-prod"))
@@ -73,8 +92,14 @@ func main() {
 	emailSender := email.NewStdoutSender()
 	trialDays := envInt("TRIAL_DURATION_DAYS", 30)
 
-	// Biometric reader is wired but unused in Sesión 1 — UC-028 lives in Sesión 5.
-	_ = biometric.NewDigitalPersonaReader()
+	// Biometric reader (UC-028, UC-029, UC-031). The actual implementation is
+	// chosen by build tag (digitalpersona.go for `bio_dp`, mock.go for
+	// `bio_mock`, digitalpersona_disabled.go for the default dev sidecar).
+	bioReader := biometric.NewDigitalPersonaReader()
+	gmkProvider := bcrypto.NewInMemoryGMKProvider()
+	// TODO(humano — Sesión 8): swap InMemoryGMKProvider for an OS-keychain
+	// provider that reads cuadra.gmk.<gym_id> via Tauri command. The current
+	// in-memory provider is dev-only and forgets keys on restart.
 
 	// Sidecar use cases — password-reset / refresh-blacklist flows (UC-003,
 	// UC-004, UC-008/9 token revocation) live cloud-side, so the sidecar
@@ -103,7 +128,20 @@ func main() {
 	toggleMember := memApp.NewToggleMemberStatus(memberRepo, uow, recorder)
 	lockExpiry := memApp.NewLockMembershipExpiry(membershipRepo, adjustmentRepo, uow, recorder)
 	assignPin := memApp.NewAssignPin(memberRepo, uow, recorder)
-	memberSvc := memApp.NewMemberService(memberRepo, membershipRepo, mtRepo)
+	memberSvc := memApp.NewMemberService(memberRepo, membershipRepo, mtRepo).WithFingerprints(fingerprintRepo)
+
+	// ── Biometric + Checkins (Sesión 5) ───────────────────────────────────
+	registerFingerprint := memApp.NewRegisterFingerprint(memberRepo, fingerprintRepo, gmkProvider, uow, recorder)
+	checkinManual := chkApp.NewCheckinManual(memberSvc, checkinRepo, uow, recorder)
+	checkinPin := chkApp.NewCheckinByPin(memberSvc, memberRepo, checkinRepo, uow, recorder, nil)
+	checkinOverride := chkApp.NewOverrideCheckin(memberSvc, checkinRepo, uow, recorder)
+	checkinFingerprint := chkApp.NewCheckinByFingerprint(memberSvc, checkinRepo, bioReader, uow, recorder)
+	kioskEvents := chkApp.NewKioskBroadcaster()
+	// kioskGymID is left zero until the operator logs in — the kiosko start
+	// endpoint sets it from the auth context. For now we wire a placeholder
+	// loop with uuid.Nil; Start() will be called by the controller with the
+	// real gym ID. (TODO Sesión 6: bind GymID at Start time.)
+	kioskLoop := chkApp.NewKioskLoop(uuid.Nil, bioReader, checkinFingerprint, kioskEvents)
 
 	// ── Billing (Sesión 3) ────────────────────────────────────────────────
 	folios := folioSvc.NewGenerator(paymentRepo)
@@ -113,6 +151,17 @@ func main() {
 	sendReceipt := billingApp.NewSendReceipt(paymentRepo, uow)
 	listMemberPayments := billingApp.NewListMemberPayments(paymentRepo, memberRepo, uow)
 	refundPayment := billingApp.NewRefundPayment(paymentRepo, folios, memberSvc, uow, recorder)
+
+	// ── Products + Billing pt.2 (Sesión 4) ────────────────────────────────
+	productSvc := prodApp.NewProductService(productRepo, stockMovementRepo)
+	createProduct := prodApp.NewCreateProduct(productRepo, stockMovementRepo, uow, recorder)
+	updateProduct := prodApp.NewUpdateProduct(productRepo, uow, recorder)
+	deactivateProduct := prodApp.NewDeactivateProduct(productRepo, uow, recorder)
+	listProducts := prodApp.NewListProducts(productRepo, uow)
+	adjustStock := prodApp.NewAdjustStock(productRepo, stockMovementRepo, uow, recorder)
+	registerSale := billingApp.NewRegisterSale(paymentRepo, saleRepo, saleItemRepo, folios, productSvc, memberRepo, uow, recorder, billingApp.NoopPublisher{})
+	refundSale := billingApp.NewRefundSale(saleRepo, refundPayment, uow)
+	cashClose := reportsApp.NewCashClose(cashCloseReader, cashCloseEventRepo, uow, recorder)
 
 	authCtrl := usersCtrl.NewAuthController(usersCtrl.AuthController{
 		Signup:           signup,
@@ -132,7 +181,11 @@ func main() {
 	})
 	mtCtrl := memCtrl.NewMembershipTypeController(createMT, updateMT, deactivateMT, listMT, tokens)
 	memberCtrl := memCtrl.NewMemberController(createMember, updateMember, listMembers, memberDetail, toggleMember, lockExpiry, assignPin, tokens)
-	paymentCtrl := billingCtrl.NewPaymentController(registerPayment, settlePayment, receiptPayment, sendReceipt, listMemberPayments, refundPayment, tokens)
+	fingerprintCtrl := memCtrl.NewFingerprintController(registerFingerprint, tokens)
+	paymentCtrl := billingCtrl.NewPaymentController(registerPayment, settlePayment, receiptPayment, sendReceipt, listMemberPayments, refundPayment, registerSale, refundSale, cashClose, tokens)
+	productCtrl := prodCtrl.NewProductController(createProduct, updateProduct, deactivateProduct, listProducts, adjustStock, tokens)
+	checkinCtrl := chkCtrl.NewCheckinController(checkinManual, checkinPin, checkinOverride, tokens)
+	kioskCtrl := chkCtrl.NewKioskController(checkinFingerprint, kioskLoop, kioskEvents, bioReader, tokens)
 
 	if os.Getenv("ENVIRONMENT") == "production" {
 		gin.SetMode(gin.ReleaseMode)
@@ -145,7 +198,11 @@ func main() {
 	authCtrl.RegisterRoutes(r)
 	mtCtrl.RegisterRoutes(r)
 	memberCtrl.RegisterRoutes(r)
+	fingerprintCtrl.RegisterRoutes(r)
 	paymentCtrl.RegisterRoutes(r)
+	productCtrl.RegisterRoutes(r)
+	checkinCtrl.RegisterRoutes(r)
+	kioskCtrl.RegisterRoutes(r)
 
 	port := envOrDefault("SIDECAR_PORT", "9090")
 	// ADR-003 §2.2: print the port to stdout so Tauri can capture it.

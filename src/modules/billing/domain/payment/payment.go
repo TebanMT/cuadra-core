@@ -181,6 +181,50 @@ func NewBalanceSettlementPayment(
 	}, nil
 }
 
+// NewProductSalePayment builds a Payment row for UC-025 (concept='product').
+// `total` is the post-discount cart total (caller computed it from the Sale
+// aggregate). `memberID` is optional (anonymous walk-in sale — DA-25.3).
+func NewProductSalePayment(
+	id, gymID, operatorID uuid.UUID,
+	memberID *uuid.UUID,
+	folio string,
+	total float64,
+	method string,
+	paymentDate, now time.Time,
+	notes *string,
+) (*Payment, error) {
+	if !validMethod(method) {
+		if method == "" {
+			return nil, billingErrors.ErrPaymentMethodMissing
+		}
+		return nil, billingErrors.ErrPaymentMethodInvalid
+	}
+	if total <= 0 {
+		return nil, billingErrors.ErrAmountInvalid
+	}
+	if err := validateNotes(notes); err != nil {
+		return nil, err
+	}
+	if paymentDate.IsZero() {
+		return nil, billingErrors.ErrPaymentDateInvalid
+	}
+	return &Payment{
+		ID:            id,
+		GymID:         gymID,
+		Version:       1,
+		Folio:         folio,
+		MemberID:      memberID,
+		Amount:        roundCents(total),
+		PaymentMethod: method,
+		Concept:       ConceptProduct,
+		PaymentDate:   truncateDate(paymentDate),
+		Notes:         notes,
+		OperatorID:    operatorID,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}, nil
+}
+
 // NewRefundPayment builds a UC-022 refund row. `amount` is positive on input;
 // it's stored as a negative number (DA-22.1). `reason` is mandatory.
 func NewRefundPayment(

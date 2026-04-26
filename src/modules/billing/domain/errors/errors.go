@@ -40,4 +40,11 @@ var (
 	ErrAlreadyRefunded        = errors.New("este pago ya fue cancelado previamente")
 	ErrRefundReasonRequired   = errors.New("la razón de la cancelación es obligatoria")
 	ErrRefundOnlyOwner        = errors.New("solo el dueño puede cancelar pagos")
+
+	// Sale (UC-025/UC-026)
+	ErrSaleEmpty               = errors.New("el carrito de venta está vacío")
+	ErrSaleItemNameRequired    = errors.New("falta el nombre del producto en la línea de venta")
+	ErrSaleItemPriceInvalid    = errors.New("el precio del producto en la venta debe ser mayor a cero")
+	ErrSaleItemQuantityInvalid = errors.New("la cantidad de la línea de venta debe ser mayor a cero")
+	ErrSaleNotFound            = errors.New("venta no encontrada")
 )

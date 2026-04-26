@@ -268,6 +268,30 @@ func (r *MemberPostgresRepository) GetWithCurrentMembership(tx sharedDomain.Tran
 	return out, nil
 }
 
+// ListPinCandidates returns (member_id, pin_hash) for every active member in
+// `gymID` who has a PIN assigned. Used by checkins/UC-032 — see comment on
+// MemberPostgresRepository.PinHashCollidesInGym for the rationale of bcrypt
+// iteration in Go-land instead of an SQL hash compare.
+func (r *MemberPostgresRepository) ListPinCandidates(tx sharedDomain.Transaction, gymID uuid.UUID) ([]memRepo.PinCandidate, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	var rows []struct {
+		ID      uuid.UUID
+		PinHash string
+	}
+	err := gormTx.Model(&models.MemberModel{}).
+		Where("gym_id = ? AND pin_hash IS NOT NULL AND deleted_at IS NULL AND status = ?", gymID, memberDomain.StatusActive).
+		Select("id, pin_hash").
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	out := make([]memRepo.PinCandidate, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, memRepo.PinCandidate{MemberID: row.ID, PinHash: row.PinHash})
+	}
+	return out, nil
+}
+
 // ---------------------------------------------------------------------------
 // Mappers
 // ---------------------------------------------------------------------------

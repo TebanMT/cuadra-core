@@ -291,4 +291,3 @@ var winAnsiSubst = map[rune]byte{
 	'°': 0xB0,
 	// fallback used by string substitutions
 }
-

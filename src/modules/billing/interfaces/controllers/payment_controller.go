@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	reportsApp "github.com/cuadra/cuadra-core/src/application/reports"
 	billingApp "github.com/cuadra/cuadra-core/src/modules/billing/app"
 	paymentDomain "github.com/cuadra/cuadra-core/src/modules/billing/domain/payment"
 	"github.com/cuadra/cuadra-core/src/shared/auth"
@@ -23,7 +24,7 @@ var (
 	errBadAuth = errors.New("autenticación requerida")
 )
 
-// PaymentController bundles UC-018 ... UC-022.
+// PaymentController bundles UC-018 ... UC-022 + UC-025/UC-026/UC-027.
 type PaymentController struct {
 	Register     *billingApp.RegisterMembershipPayment
 	Settle       *billingApp.SettlePendingBalance
@@ -31,6 +32,9 @@ type PaymentController struct {
 	SendReceipt  *billingApp.SendReceipt
 	ListByMember *billingApp.ListMemberPayments
 	Refund       *billingApp.RefundPayment
+	RegisterSale *billingApp.RegisterSale
+	RefundSale   *billingApp.RefundSale
+	CashClose    *reportsApp.CashClose
 	Tokens       auth.TokenService
 }
 
@@ -41,11 +45,16 @@ func NewPaymentController(
 	send *billingApp.SendReceipt,
 	listByMember *billingApp.ListMemberPayments,
 	refund *billingApp.RefundPayment,
+	registerSale *billingApp.RegisterSale,
+	refundSale *billingApp.RefundSale,
+	cashClose *reportsApp.CashClose,
 	tokens auth.TokenService,
 ) *PaymentController {
 	return &PaymentController{
 		Register: register, Settle: settle, Receipt: receipt, SendReceipt: send,
-		ListByMember: listByMember, Refund: refund, Tokens: tokens,
+		ListByMember: listByMember, Refund: refund,
+		RegisterSale: registerSale, RefundSale: refundSale, CashClose: cashClose,
+		Tokens: tokens,
 	}
 }
 
@@ -59,6 +68,10 @@ func (ctrl *PaymentController) RegisterRoutes(r *gin.Engine) {
 		api.POST("/payments/:id/send-receipt", ctrl.handleSendReceipt)
 		api.GET("/members/:id/payments", ctrl.handleListByMember)
 		api.POST("/payments/:id/refund", middleware.RequireOwner(), ctrl.handleRefund)
+		api.POST("/sales", ctrl.handleRegisterSale)
+		api.POST("/sales/:id/refund", middleware.RequireOwner(), ctrl.handleRefundSale)
+		api.GET("/cash-close", ctrl.handleCashCloseReport)
+		api.POST("/cash-close", ctrl.handleCashClose)
 	}
 }
 
@@ -402,6 +415,234 @@ func parseUUIDParam(c *gin.Context, name string) (uuid.UUID, bool) {
 		return uuid.Nil, false
 	}
 	return id, true
+}
+
+// ---------------------------------------------------------------------------
+// UC-025/UC-026/UC-027 — Sales + cash close
+// ---------------------------------------------------------------------------
+
+type saleLineReq struct {
+	ProductID string `json:"product_id" validate:"required,uuid"`
+	Quantity  int    `json:"quantity" validate:"required,min=1"`
+}
+
+type registerSaleReq struct {
+	Method      string        `json:"method" validate:"required,oneof=cash transfer card"`
+	MemberID    *string       `json:"member_id,omitempty"`
+	Discount    float64       `json:"discount,omitempty"`
+	PaymentDate string        `json:"payment_date,omitempty"`
+	Notes       *string       `json:"notes,omitempty"`
+	Items       []saleLineReq `json:"items" validate:"required,min=1,dive"`
+}
+
+type saleItemResp struct {
+	ProductID   uuid.UUID `json:"product_id"`
+	ProductName string    `json:"product_name"`
+	UnitPrice   float64   `json:"unit_price"`
+	Quantity    int       `json:"quantity"`
+	LineTotal   float64   `json:"line_total"`
+	StockAfter  int       `json:"stock_after"`
+}
+
+type registerSaleResp struct {
+	SaleID    uuid.UUID      `json:"sale_id"`
+	PaymentID uuid.UUID      `json:"payment_id"`
+	Folio     string         `json:"folio"`
+	Subtotal  float64        `json:"subtotal"`
+	Discount  float64        `json:"discount"`
+	Total     float64        `json:"total"`
+	Items     []saleItemResp `json:"items"`
+}
+
+type refundSaleReq struct {
+	Reason string `json:"reason" validate:"required,min=3,max=500"`
+	Method string `json:"method" validate:"required,oneof=cash transfer card"`
+}
+
+type refundSaleResp struct {
+	RefundID uuid.UUID `json:"refund_id"`
+	Amount   float64   `json:"amount"`
+}
+
+type operatorTotalResp struct {
+	OperatorID uuid.UUID `json:"operator_id"`
+	Total      float64   `json:"total"`
+	PaymentsN  int       `json:"payments"`
+}
+
+type cashCloseReportResp struct {
+	Date        string              `json:"date"`
+	ByMethod    map[string]float64  `json:"by_method"`
+	ByConcept   map[string]float64  `json:"by_concept"`
+	ByOperator  []operatorTotalResp `json:"by_operator"`
+	GrandTotal  float64             `json:"grand_total"`
+	RefundTotal float64             `json:"refund_total"`
+}
+
+type cashCloseReq struct {
+	Date              string   `json:"date" validate:"required"`
+	CountedCash       *float64 `json:"counted_cash,omitempty"`
+	DiscrepancyReason *string  `json:"discrepancy_reason,omitempty"`
+}
+
+type cashCloseResp struct {
+	CashCloseID    uuid.UUID `json:"cash_close_id"`
+	CalculatedCash float64   `json:"calculated_cash"`
+	CountedCash    *float64  `json:"counted_cash,omitempty"`
+	Discrepancy    *float64  `json:"discrepancy,omitempty"`
+}
+
+func (ctrl *PaymentController) handleRegisterSale(c *gin.Context) {
+	gymID, _ := middleware.GetGymID(c)
+	userID, _ := middleware.GetUserID(c)
+	var req registerSaleReq
+	if !bindJSON(c, &req) {
+		return
+	}
+	items := make([]billingApp.SaleLineInput, len(req.Items))
+	for i, it := range req.Items {
+		pid, err := uuid.Parse(it.ProductID)
+		if err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, errBadID)
+			return
+		}
+		items[i] = billingApp.SaleLineInput{ProductID: pid, Quantity: it.Quantity}
+	}
+	var memberID *uuid.UUID
+	if req.MemberID != nil && *req.MemberID != "" {
+		mid, err := uuid.Parse(*req.MemberID)
+		if err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, errBadID)
+			return
+		}
+		memberID = &mid
+	}
+	paymentDate := time.Now().UTC()
+	if req.PaymentDate != "" {
+		t, err := time.Parse("2006-01-02", req.PaymentDate)
+		if err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, err)
+			return
+		}
+		paymentDate = t
+	}
+	out, err := ctrl.RegisterSale.Execute(c.Request.Context(), billingApp.RegisterSaleInput{
+		GymID:       gymID,
+		ActorUserID: userID,
+		Method:      req.Method,
+		MemberID:    memberID,
+		Discount:    req.Discount,
+		PaymentDate: paymentDate,
+		Notes:       req.Notes,
+		Items:       items,
+	})
+	if err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	respItems := make([]saleItemResp, len(out.Items))
+	for i, it := range out.Items {
+		respItems[i] = saleItemResp{
+			ProductID: it.ProductID, ProductName: it.ProductName,
+			UnitPrice: it.UnitPrice, Quantity: it.Quantity,
+			LineTotal: it.LineTotal, StockAfter: it.StockAfter,
+		}
+	}
+	utils.JsonResponse(c, http.StatusCreated, registerSaleResp{
+		SaleID: out.SaleID, PaymentID: out.PaymentID, Folio: out.Folio,
+		Subtotal: out.Subtotal, Discount: out.Discount, Total: out.Total,
+		Items: respItems,
+	})
+}
+
+func (ctrl *PaymentController) handleRefundSale(c *gin.Context) {
+	gymID, _ := middleware.GetGymID(c)
+	userID, _ := middleware.GetUserID(c)
+	id, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	var req refundSaleReq
+	if !bindJSON(c, &req) {
+		return
+	}
+	out, err := ctrl.RefundSale.Execute(c.Request.Context(), billingApp.RefundSaleInput{
+		GymID:       gymID,
+		ActorUserID: userID,
+		SaleID:      id,
+		Reason:      req.Reason,
+		Method:      req.Method,
+	})
+	if err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	utils.JsonResponse(c, http.StatusCreated, refundSaleResp{
+		RefundID: out.RefundID, Amount: out.Amount,
+	})
+}
+
+func (ctrl *PaymentController) handleCashCloseReport(c *gin.Context) {
+	gymID, _ := middleware.GetGymID(c)
+	dateStr := c.DefaultQuery("date", time.Now().UTC().Format("2006-01-02"))
+	date, err := time.Parse("2006-01-02", dateStr)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err)
+		return
+	}
+	out, err := ctrl.CashClose.Report(c.Request.Context(), reportsApp.CashCloseReportInput{
+		GymID: gymID, Date: date,
+	})
+	if err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	ops := make([]operatorTotalResp, len(out.Totals.ByOperator))
+	for i, o := range out.Totals.ByOperator {
+		ops[i] = operatorTotalResp{OperatorID: o.OperatorID, Total: o.Total, PaymentsN: o.PaymentsN}
+	}
+	utils.JsonResponse(c, http.StatusOK, cashCloseReportResp{
+		Date:        date.Format("2006-01-02"),
+		ByMethod:    out.Totals.ByMethod,
+		ByConcept:   out.Totals.ByConcept,
+		ByOperator:  ops,
+		GrandTotal:  out.Totals.GrandTotal,
+		RefundTotal: out.Totals.RefundTotal,
+	})
+}
+
+func (ctrl *PaymentController) handleCashClose(c *gin.Context) {
+	gymID, _ := middleware.GetGymID(c)
+	userID, _ := middleware.GetUserID(c)
+	var req cashCloseReq
+	if !bindJSON(c, &req) {
+		return
+	}
+	date, err := time.Parse("2006-01-02", req.Date)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err)
+		return
+	}
+	out, err := ctrl.CashClose.Close(c.Request.Context(), reportsApp.CashCloseInput{
+		GymID:             gymID,
+		ActorUserID:       userID,
+		Date:              date,
+		CountedCash:       req.CountedCash,
+		DiscrepancyReason: req.DiscrepancyReason,
+	})
+	if err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	resp := cashCloseResp{
+		CashCloseID:    out.CashCloseID,
+		CalculatedCash: out.CalculatedCash,
+		CountedCash:    out.CountedCash,
+	}
+	if out.Discrepancy != nil {
+		resp.Discrepancy = out.Discrepancy
+	}
+	utils.JsonResponse(c, http.StatusCreated, resp)
 }
 
 func toPaymentResp(p *paymentDomain.Payment) paymentResp {
