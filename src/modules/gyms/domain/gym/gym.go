@@ -308,6 +308,31 @@ func (g *Gym) ApplyProfileUpdate(u ProfileUpdate) error {
 	return nil
 }
 
+// ConnectWhatsApp records the gym's WhatsApp Business number + the optional
+// provider-side token (Twilio sub-account auth or Meta access token). Used
+// by UC-037 after the verification ceremony succeeds. `now` is the
+// connection moment — after this point notifications.dispatcher will route
+// outbound messages through the configured number.
+func (g *Gym) ConnectWhatsApp(phone string, tokenEnc []byte, now time.Time) error {
+	v := strings.TrimSpace(phone)
+	if v == "" || !whatsappRegex.MatchString(v) {
+		return gymErrors.ErrInvalidWhatsApp
+	}
+	g.WhatsAppBusinessPhone = &v
+	if len(tokenEnc) > 0 {
+		g.WhatsAppBusinessTokenEnc = tokenEnc
+	}
+	g.WhatsAppConnectedAt = &now
+	g.Version++
+	g.UpdatedAt = now
+	return nil
+}
+
+// IsWhatsAppConnected reports whether the gym has finished UC-037.
+func (g *Gym) IsWhatsAppConnected() bool {
+	return g.WhatsAppConnectedAt != nil && g.WhatsAppBusinessPhone != nil && *g.WhatsAppBusinessPhone != ""
+}
+
 func assignColor(target **string, raw string) error {
 	v := strings.TrimSpace(raw)
 	if v == "" {

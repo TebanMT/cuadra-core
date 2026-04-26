@@ -108,7 +108,10 @@ func (uc *RegisterMembershipPayment) Execute(ctx context.Context, in RegisterMem
 		return nil, sharedDomain.NewValidationError(billingErrors.ErrPaymentMethodMissing)
 	}
 
-	var out RegisterMembershipPaymentOutput
+	var (
+		out RegisterMembershipPaymentOutput
+		evt PaymentCompletedEvent
+	)
 	err := uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
 		// 1. Member sanity check: must exist + belong to gym.
 		member, err := uc.Members.GetByID(tx, in.MemberID)
@@ -212,9 +215,11 @@ func (uc *RegisterMembershipPayment) Execute(ctx context.Context, in RegisterMem
 			At:        now,
 		})
 
-		// 9. Emit event for notifications (Sesión 7).
+		// 9. Capture the event data — publish happens AFTER tx commits
+		//    (standard domain-event pattern; subscribers should not run in
+		//    the writer's transaction).
 		mid := in.MemberID
-		uc.Publisher.PublishPaymentCompleted(ctx, PaymentCompletedEvent{
+		evt = PaymentCompletedEvent{
 			GymID:          in.GymID,
 			PaymentID:      p.ID,
 			MemberID:       &mid,
@@ -223,7 +228,7 @@ func (uc *RegisterMembershipPayment) Execute(ctx context.Context, in RegisterMem
 			Folio:          p.Folio,
 			OperatorID:     in.ActorUserID,
 			BalancePending: p.BalancePending,
-		})
+		}
 
 		out = RegisterMembershipPaymentOutput{
 			PaymentID:       p.ID,
@@ -243,6 +248,7 @@ func (uc *RegisterMembershipPayment) Execute(ctx context.Context, in RegisterMem
 	if err != nil {
 		return nil, err
 	}
+	uc.Publisher.PublishPaymentCompleted(ctx, evt)
 	return &out, nil
 }
 

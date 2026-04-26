@@ -3,10 +3,13 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -37,7 +40,16 @@ import (
 	usersRepoPg "github.com/cuadra/cuadra-core/src/modules/users/infraestructure/db/repositories"
 	usersCtrl "github.com/cuadra/cuadra-core/src/modules/users/interfaces/controllers"
 
+	notiApp "github.com/cuadra/cuadra-core/src/modules/notifications/app"
+	notiDomain "github.com/cuadra/cuadra-core/src/modules/notifications/domain"
+	notiRepoPg "github.com/cuadra/cuadra-core/src/modules/notifications/infraestructure/db/repositories"
+	notiEmail "github.com/cuadra/cuadra-core/src/modules/notifications/infraestructure/email"
+	notiWhatsApp "github.com/cuadra/cuadra-core/src/modules/notifications/infraestructure/whatsapp"
+	notiCtrl "github.com/cuadra/cuadra-core/src/modules/notifications/interfaces/controllers"
+
 	reportsApp "github.com/cuadra/cuadra-core/src/application/reports"
+	reportsInfra "github.com/cuadra/cuadra-core/src/application/reports/infraestructure"
+	reportsCtrl "github.com/cuadra/cuadra-core/src/application/reports/interfaces"
 	"github.com/cuadra/cuadra-core/src/shared/audit"
 	"github.com/cuadra/cuadra-core/src/shared/auth"
 	bcrypto "github.com/cuadra/cuadra-core/src/shared/biometric/crypto"
@@ -78,6 +90,12 @@ func main() {
 	stockMovementRepo := prodRepoPg.NewStockMovementPostgresRepository()
 	fingerprintRepo := memRepoPg.NewFingerprintPostgresRepository()
 	checkinRepo := chkRepoPg.NewCheckinPostgresRepository()
+	contactAttemptRepo := memRepoPg.NewContactAttemptPostgresRepository()
+	reportsReader := reportsInfra.NewPostgresReader()
+	notificationRepo := notiRepoPg.NewNotificationPostgresRepository()
+	templateRepo := notiRepoPg.NewTemplateOverridePostgresRepository()
+	whatsappEventRepo := notiRepoPg.NewWhatsAppEventPostgresRepository()
+	expiryReader := notiRepoPg.NewExpiryPostgresReader()
 
 	// ── Shared services ────────────────────────────────────────────────────
 	tokens := auth.NewJWTService(mustEnv("JWT_SECRET"))
@@ -85,6 +103,10 @@ func main() {
 	emailSender := email.NewStdoutSender()
 	trialDays := envInt("TRIAL_DURATION_DAYS", 30)
 	baseURL := envOrDefault("PUBLIC_BASE_URL", "https://cuadra.app")
+
+	// ── Notifications providers (Sesión 7 / ADR-007) ─────────────────────
+	whatsappProvider := buildWhatsAppProvider(baseURL)
+	notiEmailProvider := buildEmailProvider()
 
 	// ── Use cases ──────────────────────────────────────────────────────────
 	signup := usersApp.NewSignupOwner(userRepo, gymRepo, uow, tokens, recorder, trialDays)
@@ -126,9 +148,23 @@ func main() {
 	checkinPin := chkApp.NewCheckinByPin(memberSvc, memberRepo, checkinRepo, uow, recorder, nil)
 	checkinOverride := chkApp.NewOverrideCheckin(memberSvc, checkinRepo, uow, recorder)
 
+	// ── Notifications (Sesión 7) ──────────────────────────────────────────
+	enqueueReceipt := notiApp.NewEnqueueReceipt(notificationRepo, gymRepo, memberRepo, uow)
+	enqueueExpiry := notiApp.NewEnqueueExpiryReminder(notificationRepo, expiryReader, uow)
+	enqueueOwnerAlert := notiApp.NewEnqueueOwnerAlert(notificationRepo, gymRepo, userRepo, uow)
+	dispatchNoti := notiApp.NewDispatchNotification(notificationRepo, templateRepo, gymRepo, whatsappProvider, notiEmailProvider, uow)
+	connectWhatsApp := notiApp.NewConnectWhatsApp(gymRepo, whatsappProvider, uow, recorder)
+	whatsappStatus := notiApp.NewGetWhatsAppStatus(gymRepo, uow)
+	listTemplates := notiApp.NewListTemplates(templateRepo, uow)
+	updateTemplate := notiApp.NewUpdateTemplate(templateRepo, uow, recorder)
+	broadcast := notiApp.NewBroadcast(notificationRepo, memberRepo, gymRepo, uow, recorder)
+	listNotifications := notiApp.NewListNotifications(notificationRepo, uow)
+	processWebhook := notiApp.NewProcessWebhook(notificationRepo, whatsappEventRepo, uow)
+	billingSubscriber := notiApp.NewBillingEventSubscriber(enqueueReceipt)
+
 	// ── Billing (Sesión 3) ────────────────────────────────────────────────
 	folios := folioSvc.NewGenerator(paymentRepo)
-	registerPayment := billingApp.NewRegisterMembershipPayment(paymentRepo, folios, memberSvc, memberRepo, uow, recorder, billingApp.NoopPublisher{})
+	registerPayment := billingApp.NewRegisterMembershipPayment(paymentRepo, folios, memberSvc, memberRepo, uow, recorder, billingSubscriber)
 	settlePayment := billingApp.NewSettlePendingBalance(paymentRepo, folios, uow, recorder)
 	receiptPayment := billingApp.NewGenerateReceipt(paymentRepo, gymRepo, memberRepo, uow)
 	sendReceipt := billingApp.NewSendReceipt(paymentRepo, uow)
@@ -142,9 +178,16 @@ func main() {
 	deactivateProduct := prodApp.NewDeactivateProduct(productRepo, uow, recorder)
 	listProducts := prodApp.NewListProducts(productRepo, uow)
 	adjustStock := prodApp.NewAdjustStock(productRepo, stockMovementRepo, uow, recorder)
-	registerSale := billingApp.NewRegisterSale(paymentRepo, saleRepo, saleItemRepo, folios, productSvc, memberRepo, uow, recorder, billingApp.NoopPublisher{})
+	registerSale := billingApp.NewRegisterSale(paymentRepo, saleRepo, saleItemRepo, folios, productSvc, memberRepo, uow, recorder, billingSubscriber)
 	refundSale := billingApp.NewRefundSale(saleRepo, refundPayment, uow)
 	cashClose := reportsApp.NewCashClose(cashCloseReader, cashCloseEventRepo, uow, recorder)
+
+	// ── Reports application layer (Sesión 6) ─────────────────────────────
+	dashboard := reportsApp.NewDashboard(reportsReader, uow, 60*time.Second)
+	attentionRequired := reportsApp.NewAttentionRequired(reportsReader, uow)
+	exportReport := reportsApp.NewExportReport(reportsReader, gymRepo, uow, attentionRequired)
+	markContacted := memApp.NewMarkContacted(memberRepo, contactAttemptRepo, uow, recorder)
+	markLost := memApp.NewMarkLost(memberRepo, uow, recorder)
 
 	// ── Controllers ────────────────────────────────────────────────────────
 	authCtrl := usersCtrl.NewAuthController(usersCtrl.AuthController{
@@ -171,6 +214,11 @@ func main() {
 	paymentCtrl := billingCtrl.NewPaymentController(registerPayment, settlePayment, receiptPayment, sendReceipt, listMemberPayments, refundPayment, registerSale, refundSale, cashClose, tokens)
 	productCtrl := prodCtrl.NewProductController(createProduct, updateProduct, deactivateProduct, listProducts, adjustStock, tokens)
 	checkinCtrl := chkCtrl.NewCheckinController(checkinManual, checkinPin, checkinOverride, tokens)
+	reportsController := reportsCtrl.NewReportsController(dashboard, attentionRequired, exportReport, markContacted, markLost, tokens)
+	notificationsCtrl := notiCtrl.NewController(connectWhatsApp, whatsappStatus, listTemplates, updateTemplate, broadcast, listNotifications, tokens)
+	twilioWebhookURL := envOrDefault("TWILIO_WEBHOOK_URL", baseURL+"/api/v1/webhooks/twilio")
+	notiWebhookCtrl := notiCtrl.NewWebhookController(processWebhook, envOrDefault("TWILIO_AUTH_TOKEN", ""), twilioWebhookURL)
+	_ = enqueueOwnerAlert // wired into future hooks; kept resolved so build doesn't drop it.
 
 	// ── Gin router ────────────────────────────────────────────────────────
 	if os.Getenv("ENVIRONMENT") == "production" {
@@ -187,6 +235,19 @@ func main() {
 	paymentCtrl.RegisterRoutes(r)
 	productCtrl.RegisterRoutes(r)
 	checkinCtrl.RegisterRoutes(r)
+	reportsController.RegisterRoutes(r)
+	notificationsCtrl.RegisterRoutes(r)
+	notiWebhookCtrl.RegisterRoutes(r)
+
+	// Background workers (Sesión 7 §dispatcher + scheduler).
+	bgCtx, cancelBg := context.WithCancel(context.Background())
+	defer cancelBg()
+	dispatchInterval := time.Duration(envInt("NOTIFICATIONS_DISPATCH_INTERVAL_S", 5)) * time.Second
+	expiryInterval := time.Duration(envInt("NOTIFICATIONS_EXPIRY_INTERVAL_M", 60)) * time.Minute
+	dispatchWorker := notiApp.NewWorker(dispatchNoti, dispatchInterval)
+	expiryScheduler := notiApp.NewScheduler(enqueueExpiry, expiryInterval)
+	go dispatchWorker.Start(bgCtx)
+	go expiryScheduler.Start(bgCtx)
 
 	port := envOrDefault("PORT", "8080")
 	log.Printf("cuadra-server starting on :%s", port)
@@ -220,4 +281,59 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+// buildWhatsAppProvider wires the configured WhatsApp provider. When
+// `WHATSAPP_PROVIDER=twilio` and creds are present, the Twilio impl is
+// used; otherwise we fall back to stdout (logs only, dev-friendly).
+func buildWhatsAppProvider(baseURL string) notiDomain.WhatsAppProvider {
+	provider := strings.ToLower(envOrDefault("WHATSAPP_PROVIDER", "stdout"))
+	if provider == "twilio" {
+		sid := os.Getenv("TWILIO_ACCOUNT_SID")
+		token := os.Getenv("TWILIO_AUTH_TOKEN")
+		if sid == "" || token == "" {
+			log.Printf("[notifications] TWILIO creds missing — falling back to stdout provider")
+			return notiWhatsApp.NewStdoutProvider()
+		}
+		opts := notiWhatsApp.TwilioOptions{
+			AccountSID:        sid,
+			AuthToken:         token,
+			StatusCallbackURL: envOrDefault("TWILIO_WEBHOOK_URL", baseURL+"/api/v1/webhooks/twilio"),
+		}
+		p, err := notiWhatsApp.NewTwilioProvider(opts)
+		if err != nil {
+			log.Printf("[notifications] twilio init failed: %v — using stdout fallback", err)
+			return notiWhatsApp.NewStdoutProvider()
+		}
+		return p
+	}
+	if provider == "mock" {
+		return notiWhatsApp.NewMockProvider()
+	}
+	return notiWhatsApp.NewStdoutProvider()
+}
+
+// buildEmailProvider wires the configured email provider for cross-BC use
+// (notifications-side EmailProvider, separate from the legacy
+// shared/email.Sender used by users/auth flows).
+func buildEmailProvider() notiDomain.EmailProvider {
+	provider := strings.ToLower(envOrDefault("EMAIL_PROVIDER", "stdout"))
+	if provider == "resend" {
+		key := os.Getenv("RESEND_API_KEY")
+		from := envOrDefault("EMAIL_FROM", "noreply@cuadra.app")
+		if key == "" {
+			log.Printf("[notifications] RESEND_API_KEY missing — falling back to stdout email provider")
+			return notiEmail.NewStdoutProvider()
+		}
+		p, err := notiEmail.NewResendProvider(notiEmail.ResendOptions{APIKey: key, From: from})
+		if err != nil {
+			log.Printf("[notifications] resend init failed: %v — using stdout fallback", err)
+			return notiEmail.NewStdoutProvider()
+		}
+		return p
+	}
+	if provider == "mock" {
+		return notiEmail.NewMockProvider()
+	}
+	return notiEmail.NewStdoutProvider()
 }

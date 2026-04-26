@@ -7,13 +7,16 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/jmoiron/sqlx"
 )
 
 // ApplySQLiteMigrations runs every .sql file under db_migrations/sqlite/.
-// Same idempotency contract as the Postgres counterpart.
+// Like the Postgres runner, files whose numeric prefix is already recorded
+// in `_migrations` are skipped — necessary because SQLite's ALTER TABLE has
+// no IF NOT EXISTS clause.
 func ApplySQLiteMigrations(db *sqlx.DB, dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -27,7 +30,19 @@ func ApplySQLiteMigrations(db *sqlx.DB, dir string) error {
 		files = append(files, filepath.Join(dir, e.Name()))
 	}
 	sort.Strings(files)
+
+	applied, err := loadAppliedSQLiteMigrations(db)
+	if err != nil {
+		applied = map[int]struct{}{}
+	}
+
 	for _, f := range files {
+		v, ok := sqliteVersionFromFilename(filepath.Base(f))
+		if ok {
+			if _, done := applied[v]; done {
+				continue
+			}
+		}
 		raw, err := os.ReadFile(f)
 		if err != nil {
 			return fmt.Errorf("read %q: %w", f, err)
@@ -37,4 +52,28 @@ func ApplySQLiteMigrations(db *sqlx.DB, dir string) error {
 		}
 	}
 	return nil
+}
+
+func loadAppliedSQLiteMigrations(db *sqlx.DB) (map[int]struct{}, error) {
+	var versions []int
+	if err := db.Select(&versions, "SELECT version FROM _migrations"); err != nil {
+		return nil, err
+	}
+	out := make(map[int]struct{}, len(versions))
+	for _, v := range versions {
+		out[v] = struct{}{}
+	}
+	return out, nil
+}
+
+func sqliteVersionFromFilename(name string) (int, bool) {
+	cut := strings.IndexByte(name, '_')
+	if cut <= 0 {
+		return 0, false
+	}
+	v, err := strconv.Atoi(name[:cut])
+	if err != nil {
+		return 0, false
+	}
+	return v, true
 }

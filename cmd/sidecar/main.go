@@ -40,6 +40,12 @@ import (
 	usersRepoLite "github.com/cuadra/cuadra-core/src/modules/users/infraestructure/db/repositories"
 	usersCtrl "github.com/cuadra/cuadra-core/src/modules/users/interfaces/controllers"
 
+	notiApp "github.com/cuadra/cuadra-core/src/modules/notifications/app"
+	notiRepoLite "github.com/cuadra/cuadra-core/src/modules/notifications/infraestructure/db/repositories"
+	notiEmail "github.com/cuadra/cuadra-core/src/modules/notifications/infraestructure/email"
+	notiWhatsApp "github.com/cuadra/cuadra-core/src/modules/notifications/infraestructure/whatsapp"
+	notiCtrl "github.com/cuadra/cuadra-core/src/modules/notifications/interfaces/controllers"
+
 	reportsApp "github.com/cuadra/cuadra-core/src/application/reports"
 	"github.com/cuadra/cuadra-core/src/shared/audit"
 	"github.com/cuadra/cuadra-core/src/shared/auth"
@@ -85,6 +91,8 @@ func main() {
 	stockMovementRepo := prodRepoLite.NewStockMovementSQLiteRepository()
 	fingerprintRepo := memRepoLite.NewFingerprintSQLiteRepository()
 	checkinRepo := chkRepoLite.NewCheckinSQLiteRepository()
+	notificationRepo := notiRepoLite.NewNotificationSQLiteRepository()
+	templateRepo := notiRepoLite.NewTemplateOverrideSQLiteRepository()
 
 	// ── Shared services ────────────────────────────────────────────────────
 	tokens := auth.NewJWTService(envOrDefault("JWT_SECRET", "sidecar-dev-secret-do-not-use-in-prod"))
@@ -143,9 +151,24 @@ func main() {
 	// real gym ID. (TODO Sesión 6: bind GymID at Start time.)
 	kioskLoop := chkApp.NewKioskLoop(uuid.Nil, bioReader, checkinFingerprint, kioskEvents)
 
+	// ── Notifications (Sesión 7) — sidecar enqueues only; cloud worker
+	// drains the synced rows. The mock WhatsApp provider keeps connect
+	// flows and tests usable offline.
+	whatsappMock := notiWhatsApp.NewStdoutProvider()
+	emailMock := notiEmail.NewStdoutProvider()
+	enqueueReceipt := notiApp.NewEnqueueReceipt(notificationRepo, gymRepo, memberRepo, uow)
+	connectWhatsApp := notiApp.NewConnectWhatsApp(gymRepo, whatsappMock, uow, recorder)
+	whatsappStatus := notiApp.NewGetWhatsAppStatus(gymRepo, uow)
+	listTemplates := notiApp.NewListTemplates(templateRepo, uow)
+	updateTemplate := notiApp.NewUpdateTemplate(templateRepo, uow, recorder)
+	broadcast := notiApp.NewBroadcast(notificationRepo, memberRepo, gymRepo, uow, recorder)
+	listNotifications := notiApp.NewListNotifications(notificationRepo, uow)
+	billingSubscriber := notiApp.NewBillingEventSubscriber(enqueueReceipt)
+	_ = emailMock
+
 	// ── Billing (Sesión 3) ────────────────────────────────────────────────
 	folios := folioSvc.NewGenerator(paymentRepo)
-	registerPayment := billingApp.NewRegisterMembershipPayment(paymentRepo, folios, memberSvc, memberRepo, uow, recorder, billingApp.NoopPublisher{})
+	registerPayment := billingApp.NewRegisterMembershipPayment(paymentRepo, folios, memberSvc, memberRepo, uow, recorder, billingSubscriber)
 	settlePayment := billingApp.NewSettlePendingBalance(paymentRepo, folios, uow, recorder)
 	receiptPayment := billingApp.NewGenerateReceipt(paymentRepo, gymRepo, memberRepo, uow)
 	sendReceipt := billingApp.NewSendReceipt(paymentRepo, uow)
@@ -159,7 +182,7 @@ func main() {
 	deactivateProduct := prodApp.NewDeactivateProduct(productRepo, uow, recorder)
 	listProducts := prodApp.NewListProducts(productRepo, uow)
 	adjustStock := prodApp.NewAdjustStock(productRepo, stockMovementRepo, uow, recorder)
-	registerSale := billingApp.NewRegisterSale(paymentRepo, saleRepo, saleItemRepo, folios, productSvc, memberRepo, uow, recorder, billingApp.NoopPublisher{})
+	registerSale := billingApp.NewRegisterSale(paymentRepo, saleRepo, saleItemRepo, folios, productSvc, memberRepo, uow, recorder, billingSubscriber)
 	refundSale := billingApp.NewRefundSale(saleRepo, refundPayment, uow)
 	cashClose := reportsApp.NewCashClose(cashCloseReader, cashCloseEventRepo, uow, recorder)
 
@@ -186,6 +209,7 @@ func main() {
 	productCtrl := prodCtrl.NewProductController(createProduct, updateProduct, deactivateProduct, listProducts, adjustStock, tokens)
 	checkinCtrl := chkCtrl.NewCheckinController(checkinManual, checkinPin, checkinOverride, tokens)
 	kioskCtrl := chkCtrl.NewKioskController(checkinFingerprint, kioskLoop, kioskEvents, bioReader, tokens)
+	notificationsCtrl := notiCtrl.NewController(connectWhatsApp, whatsappStatus, listTemplates, updateTemplate, broadcast, listNotifications, tokens)
 
 	if os.Getenv("ENVIRONMENT") == "production" {
 		gin.SetMode(gin.ReleaseMode)
@@ -203,6 +227,7 @@ func main() {
 	productCtrl.RegisterRoutes(r)
 	checkinCtrl.RegisterRoutes(r)
 	kioskCtrl.RegisterRoutes(r)
+	notificationsCtrl.RegisterRoutes(r)
 
 	port := envOrDefault("SIDECAR_PORT", "9090")
 	// ADR-003 §2.2: print the port to stdout so Tauri can capture it.

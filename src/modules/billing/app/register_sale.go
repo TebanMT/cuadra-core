@@ -124,7 +124,10 @@ func (uc *RegisterSale) Execute(ctx context.Context, in RegisterSaleInput) (*Reg
 		saleItemIDs[i] = uuid.New()
 	}
 
-	var out RegisterSaleOutput
+	var (
+		out RegisterSaleOutput
+		evt PaymentCompletedEvent
+	)
 	err := uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
 		// Optional member sanity check.
 		if in.MemberID != nil {
@@ -230,7 +233,7 @@ func (uc *RegisterSale) Execute(ctx context.Context, in RegisterSaleInput) (*Reg
 			UserAgent: audit.UAFromContext(ctx),
 			At:        now,
 		})
-		uc.Publisher.PublishPaymentCompleted(ctx, PaymentCompletedEvent{
+		evt = PaymentCompletedEvent{
 			GymID:      in.GymID,
 			PaymentID:  p.ID,
 			MemberID:   in.MemberID,
@@ -238,7 +241,7 @@ func (uc *RegisterSale) Execute(ctx context.Context, in RegisterSaleInput) (*Reg
 			Amount:     p.Amount,
 			Folio:      p.Folio,
 			OperatorID: in.ActorUserID,
-		})
+		}
 
 		items := make([]SaleItemOutput, len(s.Items))
 		for i, si := range s.Items {
@@ -266,5 +269,6 @@ func (uc *RegisterSale) Execute(ctx context.Context, in RegisterSaleInput) (*Reg
 	if err != nil {
 		return nil, err
 	}
+	uc.Publisher.PublishPaymentCompleted(ctx, evt)
 	return &out, nil
 }
