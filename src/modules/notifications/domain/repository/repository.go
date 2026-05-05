@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	alertDomain "github.com/cuadra/cuadra-core/src/modules/notifications/domain/alertconfig"
 	eventDomain "github.com/cuadra/cuadra-core/src/modules/notifications/domain/event"
 	notiDomain "github.com/cuadra/cuadra-core/src/modules/notifications/domain/notification"
 	tplDomain "github.com/cuadra/cuadra-core/src/modules/notifications/domain/template"
@@ -46,4 +47,14 @@ type TemplateOverrideRepository interface {
 type WhatsAppEventRepository interface {
 	Create(tx sharedDomain.Transaction, e *eventDomain.WhatsAppEvent) (*eventDomain.WhatsAppEvent, error)
 	ListByNotification(tx sharedDomain.Transaction, notificationID uuid.UUID) ([]*eventDomain.WhatsAppEvent, error)
+}
+
+// AlertConfigRepository — `owner_alert_configs`. Defaults live in code
+// (alertconfig.Defaults); rows exist only when the owner has flipped the
+// toggle. GetByGymAndKey returns (nil, nil) when no override is present —
+// callers fall back to alertconfig.LookupDefault.
+type AlertConfigRepository interface {
+	Upsert(tx sharedDomain.Transaction, c *alertDomain.Config) (*alertDomain.Config, error)
+	GetByGymAndKey(tx sharedDomain.Transaction, gymID uuid.UUID, key alertDomain.Key) (*alertDomain.Config, error)
+	ListByGym(tx sharedDomain.Transaction, gymID uuid.UUID) ([]*alertDomain.Config, error)
 }

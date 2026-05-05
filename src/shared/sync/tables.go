@@ -16,6 +16,13 @@ type EntityTable struct {
 	Type    string
 	Table   string
 	Columns []string
+	// CompositeKey, when non-empty, names the natural-key columns the
+	// projector and store use instead of the implicit `id`. Tables with
+	// no surrogate id (e.g. owner_alert_configs keyed by
+	// (gym_id, alert_key)) declare it here so the upsert hits ON CONFLICT
+	// (col, ...) and the wire `entity_id` is treated as a composed string
+	// rather than a UUID. Empty means "use id" — every legacy table.
+	CompositeKey []string
 }
 
 // SyncedTables is the canonical, ordered registry of every entity that
@@ -198,6 +205,19 @@ var SyncedTables = []EntityTable{
 			"entity_type", "entity_id", "action", "actor_user_id",
 			"changes", "ip_address", "user_agent",
 		},
+	},
+	{
+		// owner_alert_configs has no surrogate id — its identity is the
+		// (gym_id, alert_key) pair. The sidecar composes entity_id as
+		// "<gym_id>:<alert_key>" for sync_queue dedupe; the projector
+		// applies composite-key UPSERT using CompositeKey below and
+		// reads alert_key out of the payload.
+		Type:  "owner_alert_configs",
+		Table: "owner_alert_configs",
+		Columns: []string{
+			"gym_id", "alert_key", "enabled", "version", "updated_at", "deleted_at",
+		},
+		CompositeKey: []string{"gym_id", "alert_key"},
 	},
 }
 

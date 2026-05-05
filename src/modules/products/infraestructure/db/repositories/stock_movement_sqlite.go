@@ -141,15 +141,10 @@ func enqueueStockMovement(stx *sharedDomain.SqlxTransaction, m *stockMovementDom
 	if stx.Queue == nil {
 		return nil
 	}
-	reason := ""
-	if m.Reason != nil {
-		reason = *m.Reason
-	}
-	saleItem := ""
-	if m.SaleItemID != nil {
-		saleItem = m.SaleItemID.String()
-	}
-	var cost float64
+	// All NOT NULL columns must be in the payload — the cloud projector's
+	// UPSERT only emits columns present in the map, and a missing required
+	// column on first-sight INSERT triggers a 23502 NOT NULL violation.
+	var cost any
 	if m.Cost != nil {
 		cost = *m.Cost
 	}
@@ -157,14 +152,15 @@ func enqueueStockMovement(stx *sharedDomain.SqlxTransaction, m *stockMovementDom
 		"id":            m.ID.String(),
 		"gym_id":        m.GymID.String(),
 		"version":       m.Version,
+		"created_at":    m.CreatedAt.UnixMilli(),
+		"updated_at":    m.UpdatedAt.UnixMilli(),
 		"product_id":    m.ProductID.String(),
 		"movement_type": m.MovementType,
 		"delta":         m.Delta,
-		"reason":        reason,
+		"reason":        strPtrOrNil(m.Reason),
 		"cost":          cost,
-		"sale_item_id":  saleItem,
+		"sale_item_id":  uuidPtrOrNil(m.SaleItemID),
 		"operator_id":   m.OperatorID.String(),
-		"updated_at":    m.UpdatedAt.UnixMilli(),
 	})
 	if err != nil {
 		return err

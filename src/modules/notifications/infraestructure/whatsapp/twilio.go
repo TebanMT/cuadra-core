@@ -27,6 +27,7 @@ type TwilioProvider struct {
 	client            *twilio.RestClient
 	statusCallbackURL string
 	templateContent   map[string]string // template_key -> Twilio Content SID (HX...)
+	otpFrom           string            // Cuadra master sender for UC-037 OTPs (E.164)
 }
 
 // TwilioOptions wires the provider. AccountSID / AuthToken are normally
@@ -42,6 +43,10 @@ type TwilioOptions struct {
 	AuthToken           string
 	StatusCallbackURL   string
 	TemplateContentSIDs map[string]string
+	// OTPFromNumber is Cuadra's master WhatsApp business number used to
+	// deliver UC-037 connect-step OTPs. It's distinct from the per-gym
+	// `cfg.Phone` because at OTP time the gym hasn't connected yet. E.164.
+	OTPFromNumber string
 }
 
 // NewTwilioProvider returns a configured provider. Returns nil-config error
@@ -62,6 +67,7 @@ func NewTwilioProvider(opts TwilioOptions) (*TwilioProvider, error) {
 		client:            cli,
 		statusCallbackURL: opts.StatusCallbackURL,
 		templateContent:   opts.TemplateContentSIDs,
+		otpFrom:           strings.TrimSpace(opts.OTPFromNumber),
 	}, nil
 }
 
@@ -149,6 +155,52 @@ func (p *TwilioProvider) SendFreeform(
 	}
 	return *resp.Sid, nil
 }
+
+// SendOTP delivers the UC-037 connect-step verification code over WhatsApp.
+// Uses Cuadra's master sender (`OTPFromNumber`). The content must be an
+// approved authentication template — Meta forbids freeform OTP delivery.
+// The template key is registered as `whatsapp_connect_otp` and its Twilio
+// Content SID lives in TemplateContentSIDs. Falls back to a freeform body
+// when the SID isn't configured (sandbox / dev) so the operator on a
+// sandbox number can still complete the flow.
+func (p *TwilioProvider) SendOTP(ctx context.Context, phone, code string) error {
+	from, err := whatsappAddress(p.otpFrom)
+	if err != nil {
+		return err
+	}
+	to, err := whatsappAddress(phone)
+	if err != nil {
+		return err
+	}
+	params := &twilioApi.CreateMessageParams{}
+	params.SetFrom(from)
+	params.SetTo(to)
+	if p.statusCallbackURL != "" {
+		params.SetStatusCallback(p.statusCallbackURL)
+	}
+	if contentSID, ok := p.templateContent[tplDomain.WhatsAppConnectOTPKey]; ok && contentSID != "" {
+		params.SetContentSid(contentSID)
+		params.SetContentVariables(fmt.Sprintf(`{"1":%q}`, code))
+	} else {
+		body, rerr := tplDomain.Render(otpFreeformBody, map[string]string{"code": code})
+		if rerr != nil {
+			return rerr
+		}
+		params.SetBody(body)
+	}
+	resp, err := p.client.Api.CreateMessage(params)
+	if err != nil {
+		return fmt.Errorf("%w: %v", notiErrors.ErrSendFailedRetry, err)
+	}
+	if resp == nil || resp.Sid == nil || *resp.Sid == "" {
+		return notiErrors.ErrSendFailedRetry
+	}
+	return nil
+}
+
+// otpFreeformBody is used only when the approved template SID isn't
+// configured (dev sandbox). It mirrors the template copy.
+const otpFreeformBody = "Tu código de verificación de Cuadra es {code}. Vence en 10 minutos."
 
 // RegisterSender stubs the UC-037 onboarding flow. Real Twilio sender
 // registration requires a multi-step "WhatsApp Sender" provisioning that

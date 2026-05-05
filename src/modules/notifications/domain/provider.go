@@ -47,6 +47,13 @@ type WhatsAppProvider interface {
 	// is provider-specific — for Twilio, the SID is created and the
 	// owner finalises in their dashboard.
 	RegisterSender(ctx context.Context, phone string) (senderID string, err error)
+
+	// SendOTP delivers a one-time verification code to `phone` over
+	// WhatsApp. Backs the UC-037 connect-step (the operator types the
+	// code they received in /whatsapp/connect). The implementation must
+	// use a pre-approved authentication-category template — Meta forbids
+	// freeform OTP delivery. Phone is E.164.
+	SendOTP(ctx context.Context, phone, code string) error
 }
 
 // EmailProvider is the (much smaller) email surface. MVP only the security

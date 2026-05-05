@@ -239,20 +239,20 @@ func enqueueSale(stx *sharedDomain.SqlxTransaction, s *saleDomain.Sale) error {
 	if stx.Queue == nil {
 		return nil
 	}
-	memberID := ""
-	if s.MemberID != nil {
-		memberID = s.MemberID.String()
-	}
+	// All NOT NULL columns must be in the payload — the cloud projector's
+	// UPSERT only emits columns present in the map, and a missing required
+	// column on first-sight INSERT triggers a 23502 NOT NULL violation.
 	payload, err := json.Marshal(map[string]any{
 		"id":         s.ID.String(),
 		"gym_id":     s.GymID.String(),
 		"version":    s.Version,
+		"created_at": s.CreatedAt.UnixMilli(),
+		"updated_at": s.UpdatedAt.UnixMilli(),
 		"payment_id": s.PaymentID.String(),
-		"member_id":  memberID,
+		"member_id":  uuidPtrOrNil(s.MemberID),
 		"subtotal":   s.Subtotal,
 		"discount":   s.Discount,
 		"total":      s.Total,
-		"updated_at": s.UpdatedAt.UnixMilli(),
 	})
 	if err != nil {
 		return err
@@ -264,17 +264,21 @@ func enqueueSaleItem(stx *sharedDomain.SqlxTransaction, it *saleDomain.SaleItem)
 	if stx.Queue == nil {
 		return nil
 	}
+	// All NOT NULL columns must be in the payload — the cloud projector's
+	// UPSERT only emits columns present in the map, and a missing required
+	// column on first-sight INSERT triggers a 23502 NOT NULL violation.
 	payload, err := json.Marshal(map[string]any{
 		"id":                    it.ID.String(),
 		"gym_id":                it.GymID.String(),
 		"version":               it.Version,
+		"created_at":            it.CreatedAt.UnixMilli(),
+		"updated_at":            it.UpdatedAt.UnixMilli(),
 		"sale_id":               it.SaleID.String(),
 		"product_id":            it.ProductID.String(),
 		"product_name_snapshot": it.ProductNameSnapshot,
 		"unit_price_snapshot":   it.UnitPriceSnapshot,
 		"quantity":              it.Quantity,
 		"line_total":            it.LineTotal,
-		"updated_at":            it.UpdatedAt.UnixMilli(),
 	})
 	if err != nil {
 		return err

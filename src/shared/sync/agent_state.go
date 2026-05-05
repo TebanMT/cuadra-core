@@ -24,6 +24,7 @@ const (
 	keyLastError              = "last_error"
 	keyConsecutiveFailures    = "consecutive_failures"
 	keyNextRetryAt            = "next_retry_at_ms"
+	keySidecarToken           = "sidecar_token"
 )
 
 // State is the in-memory projection of sync_state. Use ReadState / WriteState
@@ -37,6 +38,7 @@ type State struct {
 	LastError              string
 	ConsecutiveFailures    int
 	NextRetryAt            time.Time
+	SidecarToken           string
 }
 
 // ReadState — fetches all known sync_state rows for this device. Missing
@@ -73,6 +75,8 @@ func ReadState(ctx context.Context, tx sharedDomain.Transaction) (State, error) 
 			}
 		case keyNextRetryAt:
 			s.NextRetryAt = parseMs(r.Value)
+		case keySidecarToken:
+			s.SidecarToken = r.Value
 		}
 	}
 	return s, nil
@@ -147,6 +151,14 @@ func SetConsecutiveFailures(ctx context.Context, tx sharedDomain.Transaction, n 
 
 func SetNextRetryAt(ctx context.Context, tx sharedDomain.Transaction, t time.Time) error {
 	return SetKV(ctx, tx, keyNextRetryAt, strconv.FormatInt(t.UnixMilli(), 10))
+}
+
+// SetSidecarToken persists the long-lived sidecar credential (sk_live_…)
+// minted by the cloud on operator login. The agent rereads it from
+// sync_state on its AgentReload callback so the next sync tick picks up
+// the new credential without restarting the binary.
+func SetSidecarToken(ctx context.Context, tx sharedDomain.Transaction, token string) error {
+	return SetKV(ctx, tx, keySidecarToken, token)
 }
 
 func parseMs(s string) time.Time {

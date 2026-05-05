@@ -15,4 +15,6 @@ var (
 	ErrInvalidColor         = errors.New("color inválido (hex #RRGGBB)")
 	ErrInvalidPaymentMethod = errors.New("método de pago no soportado")
 	ErrPaymentMethodsEmpty  = errors.New("debes aceptar al menos un método de pago")
+	ErrInvalidKioskVolume   = errors.New("volumen del kiosko fuera de rango (0..100)")
+	ErrInvalidKioskFeedback = errors.New("duración del feedback fuera de rango (500..30000 ms)")
 )

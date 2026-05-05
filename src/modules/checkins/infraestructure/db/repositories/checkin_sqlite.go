@@ -13,8 +13,11 @@ import (
 
 	checkinDomain "github.com/cuadra/cuadra-core/src/modules/checkins/domain/checkin"
 	chkErrors "github.com/cuadra/cuadra-core/src/modules/checkins/domain/errors"
+	chkRepo "github.com/cuadra/cuadra-core/src/modules/checkins/domain/repository"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 )
+
+const sqliteCheckinDateFmt = "2006-01-02"
 
 type CheckinSQLiteRepository struct{}
 
@@ -106,6 +109,93 @@ func (r *CheckinSQLiteRepository) ListByMember(tx sharedDomain.Transaction, memb
 	return out, nil
 }
 
+func (r *CheckinSQLiteRepository) CountTodayByGym(tx sharedDomain.Transaction, gymID uuid.UUID, today time.Time) (int, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	start := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, time.UTC).UnixMilli()
+	end := start + int64(24*time.Hour/time.Millisecond)
+	var n int
+	err := stx.Get(context.Background(), &n, `
+		SELECT COUNT(1) FROM checkins
+		WHERE gym_id = ? AND deleted_at IS NULL
+		  AND result LIKE 'allowed%'
+		  AND checkin_at >= ? AND checkin_at < ?`,
+		gymID.String(), start, end)
+	return n, err
+}
+
+func (r *CheckinSQLiteRepository) ListRecentByGym(tx sharedDomain.Transaction, gymID uuid.UUID, limit int) ([]chkRepo.RecentCheckinRow, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	type row struct {
+		ID             string         `db:"id"`
+		MemberID       sql.NullString `db:"member_id"`
+		MemberName     sql.NullString `db:"member_name"`
+		Method         string         `db:"method"`
+		Result         string         `db:"result"`
+		ManualOverride int            `db:"manual_override"`
+		OverrideReason sql.NullString `db:"override_reason"`
+		OperatorName   sql.NullString `db:"operator_name"`
+		CheckinAt      int64          `db:"checkin_at"`
+		ExpiryDate     sql.NullString `db:"expiry_date"`
+	}
+	var rows []row
+	if err := stx.Select(context.Background(), &rows, `
+		SELECT c.id, c.member_id,
+		       m.full_name AS member_name,
+		       c.method, c.result, c.manual_override, c.override_reason,
+		       u.full_name AS operator_name,
+		       c.checkin_at,
+		       (SELECT ms.expiry_date FROM memberships ms
+		        WHERE ms.member_id = c.member_id
+		          AND ms.status = 'active' AND ms.deleted_at IS NULL
+		        LIMIT 1) AS expiry_date
+		FROM checkins c
+		LEFT JOIN members m ON m.id = c.member_id AND m.deleted_at IS NULL
+		LEFT JOIN users u ON u.id = c.operator_id AND u.deleted_at IS NULL
+		WHERE c.gym_id = ? AND c.deleted_at IS NULL
+		ORDER BY c.checkin_at DESC
+		LIMIT ?`, gymID.String(), limit); err != nil {
+		return nil, err
+	}
+	out := make([]chkRepo.RecentCheckinRow, 0, len(rows))
+	for _, x := range rows {
+		id, _ := uuid.Parse(x.ID)
+		entry := chkRepo.RecentCheckinRow{
+			ID:             id,
+			Method:         x.Method,
+			Result:         x.Result,
+			ManualOverride: x.ManualOverride == 1,
+			CheckinAt:      time.UnixMilli(x.CheckinAt).UTC(),
+		}
+		if x.MemberID.Valid {
+			mid, _ := uuid.Parse(x.MemberID.String)
+			entry.MemberID = &mid
+		}
+		if x.MemberName.Valid {
+			v := x.MemberName.String
+			entry.MemberName = &v
+		}
+		if x.OverrideReason.Valid {
+			v := x.OverrideReason.String
+			entry.OverrideReason = &v
+		}
+		if x.OperatorName.Valid {
+			v := x.OperatorName.String
+			entry.OperatorName = &v
+		}
+		if x.ExpiryDate.Valid {
+			t, err := time.Parse(sqliteCheckinDateFmt, x.ExpiryDate.String)
+			if err == nil {
+				entry.ExpiryDate = &t
+			}
+		}
+		out = append(out, entry)
+	}
+	return out, nil
+}
+
 // ---------------------------------------------------------------------------
 // Mappers
 // ---------------------------------------------------------------------------
@@ -172,23 +262,37 @@ func enqueueCheckin(stx *sharedDomain.SqlxTransaction, c *checkinDomain.Checkin)
 	if stx.Queue == nil {
 		return nil
 	}
+	// All NOT NULL columns must be in the payload — the cloud projector's
+	// UPSERT only emits columns present in the map, and a missing required
+	// column on first-sight INSERT triggers a 23502 NOT NULL violation.
 	payload, err := json.Marshal(map[string]any{
 		"id":              c.ID.String(),
 		"gym_id":          c.GymID.String(),
 		"version":         c.Version,
+		"created_at":      c.CreatedAt.UnixMilli(),
+		"updated_at":      c.UpdatedAt.UnixMilli(),
 		"member_id":       c.MemberID.String(),
 		"checkin_at":      c.CheckinAt.UnixMilli(),
 		"method":          c.Method,
 		"result":          c.Result,
 		"operator_id":     nullableUUIDString(c.OperatorID),
 		"manual_override": c.ManualOverride,
-		"override_reason": c.OverrideReason,
-		"updated_at":      c.UpdatedAt.UnixMilli(),
+		"override_reason": strPtrOrNil(c.OverrideReason),
 	})
 	if err != nil {
 		return err
 	}
 	return stx.EnqueueSync(context.Background(), "checkins", c.ID.String(), "upsert", payload, c.Version)
+}
+
+// strPtrOrNil returns the dereferenced string for non-nil pointers and
+// untyped nil otherwise. Using nil instead of "" for nullable Postgres
+// columns avoids relying on the projector's empty-string nullification.
+func strPtrOrNil(p *string) any {
+	if p == nil {
+		return nil
+	}
+	return *p
 }
 
 func nullableUUIDString(p *uuid.UUID) any {

@@ -18,6 +18,7 @@ var (
 	ErrPasswordTooShort      = errors.New("la contraseña debe tener al menos 8 caracteres")
 	ErrPasswordMismatch      = errors.New("las contraseñas no coinciden")
 	ErrNameRequired          = errors.New("el nombre completo es obligatorio")
+	ErrNameLooksLikeEmail    = errors.New("ese se ve como un correo. Escribe tu nombre")
 	ErrInvalidCredentials    = errors.New("correo o contraseña incorrectos")
 	ErrAccountInactive       = errors.New("tu cuenta está desactivada. Contacta al dueño del gimnasio")
 	ErrInvalidResetToken     = errors.New("este link ya no es válido")

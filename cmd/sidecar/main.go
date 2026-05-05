@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -49,12 +50,16 @@ import (
 	notiCtrl "github.com/cuadra/cuadra-core/src/modules/notifications/interfaces/controllers"
 
 	reportsApp "github.com/cuadra/cuadra-core/src/application/reports"
+	reportsInfra "github.com/cuadra/cuadra-core/src/application/reports/infraestructure"
+	reportsCtrl "github.com/cuadra/cuadra-core/src/application/reports/interfaces"
 	"github.com/cuadra/cuadra-core/src/shared/audit"
+	"github.com/cuadra/cuadra-core/src/shared/accesswebhook"
 	"github.com/cuadra/cuadra-core/src/shared/auth"
 	"github.com/cuadra/cuadra-core/src/shared/biometric"
 	bcrypto "github.com/cuadra/cuadra-core/src/shared/biometric/crypto"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 	"github.com/cuadra/cuadra-core/src/shared/email"
+	"github.com/cuadra/cuadra-core/src/shared/middleware"
 	syncShared "github.com/cuadra/cuadra-core/src/shared/sync"
 )
 
@@ -93,11 +98,25 @@ func main() {
 	stockMovementRepo := prodRepoLite.NewStockMovementSQLiteRepository()
 	fingerprintRepo := memRepoLite.NewFingerprintSQLiteRepository()
 	checkinRepo := chkRepoLite.NewCheckinSQLiteRepository()
+	contactAttemptRepo := memRepoLite.NewContactAttemptSQLiteRepository()
+	reportsReader := reportsInfra.NewSQLiteReader()
 	notificationRepo := notiRepoLite.NewNotificationSQLiteRepository()
 	templateRepo := notiRepoLite.NewTemplateOverrideSQLiteRepository()
+	alertConfigRepo := notiRepoLite.NewAlertConfigSQLiteRepository()
 
 	// ── Shared services ────────────────────────────────────────────────────
-	tokens := auth.NewJWTService(envOrDefault("JWT_SECRET", "sidecar-dev-secret-do-not-use-in-prod"))
+	// Sidecar JWTs are issued for the on-premise reception screen — there
+	// is no shared device and no realistic threat model that justifies
+	// kicking the operator off mid-shift, so we mint effectively-eternal
+	// tokens (≈100 years). The desktop's only logout is the explicit
+	// "Cerrar sesión" action; everything else (refresh, restart, sleep)
+	// keeps the session alive. Override via env if you ever need otherwise.
+	accessTTL := time.Duration(envInt("ACCESS_TOKEN_TTL_HOURS", 24*365*100)) * time.Hour
+	refreshTTL := time.Duration(envInt("REFRESH_TOKEN_TTL_HOURS", 24*365*100)) * time.Hour
+	tokens := auth.NewJWTServiceWithDurations(
+		envOrDefault("JWT_SECRET", "sidecar-dev-secret-do-not-use-in-prod"),
+		accessTTL, refreshTTL,
+	)
 	recorder := audit.NewSQLiteRecorder()
 	emailSender := email.NewStdoutSender()
 	trialDays := envInt("TRIAL_DURATION_DAYS", 30)
@@ -159,10 +178,13 @@ func main() {
 	whatsappMock := notiWhatsApp.NewStdoutProvider()
 	emailMock := notiEmail.NewStdoutProvider()
 	enqueueReceipt := notiApp.NewEnqueueReceipt(notificationRepo, gymRepo, memberRepo, uow)
+	enqueueOwnerAlert := notiApp.NewEnqueueOwnerAlert(notificationRepo, gymRepo, userRepo, alertConfigRepo, uow)
 	connectWhatsApp := notiApp.NewConnectWhatsApp(gymRepo, whatsappMock, uow, recorder)
 	whatsappStatus := notiApp.NewGetWhatsAppStatus(gymRepo, uow)
 	listTemplates := notiApp.NewListTemplates(templateRepo, uow)
 	updateTemplate := notiApp.NewUpdateTemplate(templateRepo, uow, recorder)
+	listOwnerAlerts := notiApp.NewListOwnerAlerts(alertConfigRepo, uow)
+	updateOwnerAlert := notiApp.NewUpdateOwnerAlert(alertConfigRepo, uow, recorder)
 	broadcast := notiApp.NewBroadcast(notificationRepo, memberRepo, gymRepo, uow, recorder)
 	listNotifications := notiApp.NewListNotifications(notificationRepo, uow)
 	billingSubscriber := notiApp.NewBillingEventSubscriber(enqueueReceipt)
@@ -175,6 +197,7 @@ func main() {
 	receiptPayment := billingApp.NewGenerateReceipt(paymentRepo, gymRepo, memberRepo, uow)
 	sendReceipt := billingApp.NewSendReceipt(paymentRepo, uow)
 	listMemberPayments := billingApp.NewListMemberPayments(paymentRepo, memberRepo, uow)
+	listGymPayments := billingApp.NewListGymPayments(paymentRepo, memberRepo, uow)
 	refundPayment := billingApp.NewRefundPayment(paymentRepo, folios, memberSvc, uow, recorder)
 
 	// ── Products + Billing pt.2 (Sesión 4) ────────────────────────────────
@@ -186,7 +209,18 @@ func main() {
 	adjustStock := prodApp.NewAdjustStock(productRepo, stockMovementRepo, uow, recorder)
 	registerSale := billingApp.NewRegisterSale(paymentRepo, saleRepo, saleItemRepo, folios, productSvc, memberRepo, uow, recorder, billingSubscriber)
 	refundSale := billingApp.NewRefundSale(saleRepo, refundPayment, uow)
-	cashClose := reportsApp.NewCashClose(cashCloseReader, cashCloseEventRepo, uow, recorder)
+	cashClose := reportsApp.NewCashClose(cashCloseReader, cashCloseEventRepo, uow, recorder).
+		WithSubscriber(notiApp.NewCashCloseAlertSubscriber(enqueueOwnerAlert))
+
+	// ── Reports application layer (Sesión 6) — same use cases as the cloud,
+	// but reading from the local SQLite. The dashboard cache TTL matches the
+	// server build (60s) so the FE behaves identically online/offline.
+	dashboard := reportsApp.NewDashboard(reportsReader, uow, 60*time.Second)
+	attentionRequired := reportsApp.NewAttentionRequired(reportsReader, uow)
+	rangeReport := reportsApp.NewRangeReport(reportsReader, uow)
+	exportReport := reportsApp.NewExportReport(reportsReader, gymRepo, uow, attentionRequired)
+	markContacted := memApp.NewMarkContacted(memberRepo, contactAttemptRepo, uow, recorder)
+	markLost := memApp.NewMarkLost(memberRepo, uow, recorder)
 
 	authCtrl := usersCtrl.NewAuthController(usersCtrl.AuthController{
 		Signup:           signup,
@@ -203,25 +237,69 @@ func main() {
 		RequestTransfer:  requestTransfer,
 		ConfirmTransfer:  confirmTransfer,
 		Tokens:           tokens,
+		Gyms:             gymRepo,
+		Users:            userRepo,
+		MembershipTypes:  mtRepo,
+		UoW:              uow,
+		UploadsDir:       envOrDefault("UPLOADS_DIR", "./tmp/uploads"),
 	})
 	mtCtrl := memCtrl.NewMembershipTypeController(createMT, updateMT, deactivateMT, listMT, tokens)
 	memberCtrl := memCtrl.NewMemberController(createMember, updateMember, listMembers, memberDetail, toggleMember, lockExpiry, assignPin, tokens)
 	fingerprintCtrl := memCtrl.NewFingerprintController(registerFingerprint, tokens)
-	paymentCtrl := billingCtrl.NewPaymentController(registerPayment, settlePayment, receiptPayment, sendReceipt, listMemberPayments, refundPayment, registerSale, refundSale, cashClose, tokens)
+	paymentCtrl := billingCtrl.NewPaymentController(registerPayment, settlePayment, receiptPayment, sendReceipt, listMemberPayments, listGymPayments, refundPayment, registerSale, refundSale, cashClose, tokens)
 	productCtrl := prodCtrl.NewProductController(createProduct, updateProduct, deactivateProduct, listProducts, adjustStock, tokens)
-	checkinCtrl := chkCtrl.NewCheckinController(checkinManual, checkinPin, checkinOverride, tokens)
-	kioskCtrl := chkCtrl.NewKioskController(checkinFingerprint, kioskLoop, kioskEvents, bioReader, tokens)
-	notificationsCtrl := notiCtrl.NewController(connectWhatsApp, whatsappStatus, listTemplates, updateTemplate, broadcast, listNotifications, tokens)
+	fingerprintAvailable := func() bool { return bioReader.Available(context.Background()) }
+	// Outbound access-granted webhook (Fase 1 differentiator: lets the gym
+	// drive any turnstile / cerradura over HTTP). URL + HMAC secret live in
+	// gyms.kiosk_settings; dispatcher reads them per-call.
+	accessWebhook := accesswebhook.NewHTTPDispatcher(uow, gymRepo)
+	checkinCtrl := chkCtrl.NewCheckinController(checkinManual, checkinPin, checkinOverride, checkinRepo, uow, fingerprintAvailable, tokens).
+		WithWebhook(accessWebhook)
+	kioskCtrl := chkCtrl.NewKioskController(checkinFingerprint, kioskLoop, kioskEvents, bioReader, tokens).
+		WithSibling(checkinCtrl)
+	notificationsCtrl := notiCtrl.NewController(connectWhatsApp, whatsappStatus, listTemplates, updateTemplate, broadcast, listNotifications, listOwnerAlerts, updateOwnerAlert, whatsappMock, tokens)
+	reportsController := reportsCtrl.NewReportsController(dashboard, attentionRequired, rangeReport, exportReport, markContacted, markLost, tokens)
 
 	if os.Getenv("ENVIRONMENT") == "production" {
 		gin.SetMode(gin.ReleaseMode)
 	}
 	r := gin.Default()
+	r.Use(middleware.CORS(middleware.CORSConfig{
+		AllowedOrigins: parseOrigins(envOrDefault("CORS_ALLOWED_ORIGINS", "http://localhost:5173,tauri://localhost,http://tauri.localhost")),
+	}))
 	r.Use(localTokenMiddleware(envOrDefault("LOCAL_AUTH_TOKEN", "")))
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "cuadra-sidecar"})
 	})
-	authCtrl.RegisterRoutes(r)
+	// Auth routing on the sidecar:
+	//   /api/v1/auth/{signup,login,refresh,logout,forgot-password,reset-password,
+	//                  verify-password,redeem-installer}  → SidecarAuthProxy
+	//                                                        (forwards to cloud
+	//                                                        + persists sidecar
+	//                                                        token + caches
+	//                                                        offline credentials
+	//                                                        + resigns JWTs)
+	//   /api/v1/auth/me                                    → local AuthController
+	//   /api/v1/users/*                                    → local AuthController
+	//   /api/v1/gyms/me/*                                  → local AuthController
+	//
+	// The cloud's signup/login response includes a sidecar_token that the
+	// proxy stores in sync_state; the agent picks it up automatically and
+	// stops depending on the operator's JWT.
+	clientID, deviceLabel := mustEnsureSidecarClientID(uow)
+	cloudURL := envOrDefault("CUADRA_CLOUD_URL", "https://api.cuadra.app")
+	authProxy := usersCtrl.NewSidecarAuthProxy(usersCtrl.SidecarAuthProxy{
+		CloudURL:    cloudURL,
+		UoW:         uow,
+		LocalTokens: tokens,
+		ClientID:    clientID,
+		DeviceLabel: deviceLabel,
+	})
+	authProxy.RegisterRoutes(r)
+	authCtrl.RegisterMeRoute(r)
+	authCtrl.RegisterAccountRoutes(r)
+	authCtrl.RegisterOperatorRoutes(r)
+	authCtrl.RegisterUploadsRoute(r)
 	mtCtrl.RegisterRoutes(r)
 	memberCtrl.RegisterRoutes(r)
 	fingerprintCtrl.RegisterRoutes(r)
@@ -230,29 +308,27 @@ func main() {
 	checkinCtrl.RegisterRoutes(r)
 	kioskCtrl.RegisterRoutes(r)
 	notificationsCtrl.RegisterRoutes(r)
+	reportsController.RegisterRoutes(r)
 
 	// ── Sync agent (Sesión 8 / ADR-001) ──────────────────────────────────
-	// The agent is started after routes are registered so /sync/status sees
-	// the live snapshot. The desktop frontend hands the cloud JWT to the
-	// agent via POST /api/v1/sync/auth after a successful login, so we
-	// don't need to share JWT secrets across the cloud↔sidecar boundary.
-	cloudURL := os.Getenv("CUADRA_CLOUD_URL")
+	// The agent reads its sk_live_* sidecar credential from sync_state on
+	// boot — the SidecarAuthProxy persisted it during the operator's first
+	// online login (ADR-008 §3.3). The agent never sees an operator JWT.
 	syncInterval := time.Duration(envInt("SYNC_INTERVAL_S", 30)) * time.Second
 	agent := syncShared.NewAgent(syncShared.AgentConfig{
 		BaseURL:  cloudURL,
 		Interval: syncInterval,
 		Logger:   log.New(os.Stderr, "[sync] ", log.LstdFlags),
 	}, db, uow)
+	// Wire the proxy's reload callback so a fresh login bumps the agent
+	// without waiting for the next tick.
+	authProxy.AgentReload = agent.TriggerNow
 	syncStatusCtrl := syncShared.NewStatusController(agent)
 	syncStatusCtrl.RegisterRoutes(r)
 
 	syncCtx, cancelSync := context.WithCancel(context.Background())
 	defer cancelSync()
-	if cloudURL != "" {
-		go agent.Run(syncCtx)
-	} else {
-		log.Printf("[sync] CUADRA_CLOUD_URL empty — agent dormant; /sync/status will report initial state only")
-	}
+	go agent.Run(syncCtx)
 
 	port := envOrDefault("SIDECAR_PORT", "9090")
 	// ADR-003 §2.2: print the port to stdout so Tauri can capture it.
@@ -261,6 +337,31 @@ func main() {
 	if err := r.Run("127.0.0.1:" + port); err != nil {
 		log.Fatalf("gin: %v", err)
 	}
+}
+
+// mustEnsureSidecarClientID materialises the per-installation UUID from
+// sync_state (creating it if missing) and resolves a human-readable label
+// for the dashboard's "active devices" panel.
+func mustEnsureSidecarClientID(uow sharedDomain.UnitOfWork) (uuid.UUID, string) {
+	var id uuid.UUID
+	if err := uow.Command(context.Background(), func(tx sharedDomain.Transaction) error {
+		got, err := syncShared.EnsureClientID(context.Background(), tx)
+		if err != nil {
+			return err
+		}
+		id = got
+		return nil
+	}); err != nil {
+		log.Fatalf("ensure client_id: %v", err)
+	}
+	label, err := os.Hostname()
+	if err != nil || label == "" {
+		label = "cuadra-sidecar"
+	}
+	if v := os.Getenv("CUADRA_DEVICE_LABEL"); v != "" {
+		label = v
+	}
+	return id, label
 }
 
 // localTokenMiddleware enforces the X-Local-Token header (ADR-003 §2.3) when
@@ -276,6 +377,17 @@ func localTokenMiddleware(expected string) gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+func parseOrigins(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if s := strings.TrimSpace(p); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func envOrDefault(key, fallback string) string {

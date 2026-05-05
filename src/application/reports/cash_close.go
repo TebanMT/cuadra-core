@@ -47,17 +47,48 @@ type CashCloseOutput struct {
 	Discrepancy    *float64
 }
 
+// CashCloseSubscriber is the post-commit hook fired after a successful
+// Close(). Today only the notifications BC subscribes (owner alert
+// `cash_close_diff`); kept generic so other BCs can plug in later without
+// reaching back into reports/. Errors from the subscriber are logged but
+// not surfaced — the cierre row already committed and the operator
+// should not see a 5xx for a downstream alert hiccup.
+type CashCloseSubscriber interface {
+	OnCashCloseClosed(ctx context.Context, evt CashCloseClosedEvent)
+}
+
+// CashCloseClosedEvent is the payload handed to subscribers. Discrepancy
+// is nil when no count was recorded, zero when the count matched, non-zero
+// when there's a gap — subscribers decide how to react.
+type CashCloseClosedEvent struct {
+	GymID          uuid.UUID
+	ActorUserID    uuid.UUID
+	CloseDate      time.Time
+	CalculatedCash float64
+	CountedCash    *float64
+	Discrepancy    *float64
+	ClosedAt       time.Time
+}
+
 // CashClose is the UC-027 use case. Two methods: Report() reads, Close() writes.
 type CashClose struct {
-	Reader billingRepo.CashCloseReader
-	Events billingRepo.CashCloseEventRepository
-	UoW    sharedDomain.UnitOfWork
-	Audit  audit.Recorder
+	Reader      billingRepo.CashCloseReader
+	Events      billingRepo.CashCloseEventRepository
+	UoW         sharedDomain.UnitOfWork
+	Audit       audit.Recorder
+	Subscribers []CashCloseSubscriber
 }
 
 func NewCashClose(reader billingRepo.CashCloseReader, events billingRepo.CashCloseEventRepository,
 	uow sharedDomain.UnitOfWork, recorder audit.Recorder) *CashClose {
 	return &CashClose{Reader: reader, Events: events, UoW: uow, Audit: recorder}
+}
+
+// WithSubscriber appends a post-commit subscriber. Returns the receiver so
+// main.go can fluently chain `.WithSubscriber(...)`.
+func (uc *CashClose) WithSubscriber(s CashCloseSubscriber) *CashClose {
+	uc.Subscribers = append(uc.Subscribers, s)
+	return uc
 }
 
 // Report runs the per-day aggregation. Read-only — uses Query() not Command().
@@ -130,6 +161,25 @@ func (uc *CashClose) Close(ctx context.Context, in CashCloseInput) (*CashCloseOu
 	})
 	if err != nil {
 		return nil, err
+	}
+	// Post-commit fan-out. We pass the same data we just persisted so the
+	// subscriber doesn't have to re-read the cierre row. Subscribers run
+	// synchronously inside the same request — they're expected to do
+	// minimal work (e.g. enqueue a notification row) and never perform
+	// network IO here.
+	if len(uc.Subscribers) > 0 {
+		evt := CashCloseClosedEvent{
+			GymID:          in.GymID,
+			ActorUserID:    in.ActorUserID,
+			CloseDate:      in.Date,
+			CalculatedCash: out.CalculatedCash,
+			CountedCash:    out.CountedCash,
+			Discrepancy:    out.Discrepancy,
+			ClosedAt:       now,
+		}
+		for _, s := range uc.Subscribers {
+			s.OnCashCloseClosed(ctx, evt)
+		}
 	}
 	return &out, nil
 }

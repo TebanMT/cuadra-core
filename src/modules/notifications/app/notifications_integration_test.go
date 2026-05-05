@@ -62,6 +62,7 @@ func newFixture(t *testing.T) *fixture {
 	for _, mig := range []string{
 		"../../../../db_migrations/sqlite/001_init_schema.sql",
 		"../../../../db_migrations/sqlite/002_notifications.sql",
+		"../../../../db_migrations/sqlite/004_owner_alert_configs.sql",
 	} {
 		schema, err := os.ReadFile(mig)
 		if err != nil {

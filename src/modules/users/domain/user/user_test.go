@@ -46,6 +46,9 @@ func TestValidateFullName(t *testing.T) {
 	if err := userDomain.ValidateFullName("ab"); err == nil {
 		t.Errorf("expected error for too-short name")
 	}
+	if err := userDomain.ValidateFullName("foo@bar.com"); err != userErrors.ErrNameLooksLikeEmail {
+		t.Errorf("email-shaped name: got %v, want ErrNameLooksLikeEmail", err)
+	}
 }
 
 func TestSetActive(t *testing.T) {

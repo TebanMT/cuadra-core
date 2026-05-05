@@ -88,6 +88,110 @@ func NewTrialGym(id uuid.UUID, trialDays int, now time.Time) *Gym {
 // IsSetupComplete reports whether the gym wizard finished (UC-001 step 5).
 func (g *Gym) IsSetupComplete() bool { return g.SetupCompletedAt != nil }
 
+// ---------------------------------------------------------------------------
+// Subscription lifecycle (Fase 1, charging the gym owner).
+// ---------------------------------------------------------------------------
+// Transitions are deliberately permissive: the source of truth is the payment
+// processor (Stripe / Mercado Pago). The cloud accepts any state change those
+// processors push and reflects it. The only thing this layer enforces is the
+// enum + the version bump.
+
+// ActivateSubscription marks the gym as paying on `plan`, with the next billing
+// cycle ending at endsAt (nil = indefinite, e.g. annual rolling plans). Called
+// by the subscriptions use case on `subscription.created` and on
+// `invoice.paid` events.
+func (g *Gym) ActivateSubscription(plan string, endsAt *time.Time, now time.Time) error {
+	if plan != PlanProMonthly && plan != PlanProAnnual {
+		return gymErrors.ErrSetupIncomplete
+	}
+	g.SubscriptionPlan = plan
+	g.SubscriptionStatus = StatusActive
+	g.SubscriptionEndsAt = endsAt
+	// Trial implicitly ends the moment a real plan kicks in. We don't clear
+	// `TrialEndsAt` so the FE can keep showing "tu trial era de X días" copy.
+	g.Version++
+	g.UpdatedAt = now
+	return nil
+}
+
+// MarkPastDue is called when the processor reports a failed charge or expired
+// card. UI surfaces a non-blocking warning; access is NOT cut here — the
+// founder is in barrio gyms where killing the app the day a card expires is
+// the wrong product call. Repeated past_due → eventual Cancel.
+func (g *Gym) MarkPastDue(now time.Time) {
+	g.SubscriptionStatus = StatusPastDue
+	g.Version++
+	g.UpdatedAt = now
+}
+
+// Cancel marks the subscription cancelled. SubscriptionEndsAt acts as a
+// grace-period signal: the FE keeps unlocking features until that moment.
+func (g *Gym) Cancel(now time.Time) {
+	g.SubscriptionStatus = StatusCancelled
+	g.Version++
+	g.UpdatedAt = now
+}
+
+// ExtendTrial pushes TrialEndsAt forward by `days` (admin / sales tool, not a
+// processor event). Idempotent on already-extended trials.
+func (g *Gym) ExtendTrial(days int, now time.Time) {
+	if days <= 0 {
+		return
+	}
+	base := now
+	if g.TrialEndsAt != nil && g.TrialEndsAt.After(now) {
+		base = *g.TrialEndsAt
+	}
+	t := base.Add(time.Duration(days) * 24 * time.Hour)
+	g.TrialEndsAt = &t
+	if g.SubscriptionPlan == PlanTrial {
+		g.SubscriptionStatus = StatusActive
+	}
+	g.Version++
+	g.UpdatedAt = now
+}
+
+// IsTrialExpired reports whether the gym is in trial AND the trial window
+// has already lapsed at `now`. Returns false for paid plans.
+func (g *Gym) IsTrialExpired(now time.Time) bool {
+	if g.SubscriptionPlan != PlanTrial {
+		return false
+	}
+	if g.TrialEndsAt == nil {
+		return false
+	}
+	return g.TrialEndsAt.Before(now)
+}
+
+// HasActiveAccess returns whether the gym should currently be allowed to
+// operate (sync, billing, kiosk). The rule:
+//   - active + trial not expired      → allow
+//   - active + paid plan              → allow
+//   - past_due                        → allow (warning only — see MarkPastDue)
+//   - cancelled + within grace window → allow
+//   - everything else                 → deny
+//
+// The DESKTOP app never hard-blocks via this — the cloud server uses it to
+// decide whether to keep accepting sync writes from a long-uncollected gym.
+func (g *Gym) HasActiveAccess(now time.Time) bool {
+	switch g.SubscriptionStatus {
+	case StatusActive:
+		if g.SubscriptionPlan == PlanTrial {
+			return !g.IsTrialExpired(now)
+		}
+		return true
+	case StatusPastDue:
+		return true
+	case StatusCancelled:
+		if g.SubscriptionEndsAt != nil && g.SubscriptionEndsAt.After(now) {
+			return true
+		}
+		return false
+	default:
+		return false
+	}
+}
+
 // SetupStep figures out which wizard step the user lands on if they bail
 // mid-flow (UC-001 alt: wizard interrupted). The order matches USE-CASES:
 //
@@ -199,6 +303,18 @@ type ProfileUpdate struct {
 	SecondaryColor *string
 	OpenTime       *string
 	CloseTime      *string
+	// KioskVolume / KioskFeedbackTTLMs map onto KioskSettings["audio_volume"]
+	// and KioskSettings["feedback_ttl_ms"] respectively. Cosmetic kiosk knobs
+	// (DA-031.5); pointers so the wire layer can patch one without touching
+	// the other.
+	KioskVolume        *int
+	KioskFeedbackTTLMs *int
+	// AccessWebhookURL is the outbound URL invoked when a checkin resolves
+	// to allowed. Empty string clears the setting. Stored in KioskSettings.
+	AccessWebhookURL *string
+	// AccessWebhookSecret is an HMAC shared secret. Empty string clears,
+	// nil keeps existing.
+	AccessWebhookSecret *string
 }
 
 func (g *Gym) ApplyProfileUpdate(u ProfileUpdate) error {
@@ -301,6 +417,54 @@ func (g *Gym) ApplyProfileUpdate(u ProfileUpdate) error {
 			g.CloseTime = nil
 		} else {
 			g.CloseTime = &v
+		}
+	}
+	if u.KioskVolume != nil {
+		v := *u.KioskVolume
+		if v < 0 || v > 100 {
+			return gymErrors.ErrInvalidKioskVolume
+		}
+		if g.KioskSettings == nil {
+			g.KioskSettings = map[string]any{}
+		}
+		g.KioskSettings["audio_volume"] = v
+	}
+	if u.KioskFeedbackTTLMs != nil {
+		v := *u.KioskFeedbackTTLMs
+		if v < 500 || v > 30000 {
+			return gymErrors.ErrInvalidKioskFeedback
+		}
+		if g.KioskSettings == nil {
+			g.KioskSettings = map[string]any{}
+		}
+		g.KioskSettings["feedback_ttl_ms"] = v
+	}
+	if u.AccessWebhookURL != nil {
+		v := strings.TrimSpace(*u.AccessWebhookURL)
+		if g.KioskSettings == nil {
+			g.KioskSettings = map[string]any{}
+		}
+		if v == "" {
+			delete(g.KioskSettings, "access_webhook_url")
+		} else {
+			// Light validation — allow http(s) URLs only. The webhook is
+			// outbound from the sidecar so http://localhost:3000/door is
+			// legitimately useful for a Pi on the same LAN as the kiosk.
+			if !strings.HasPrefix(v, "http://") && !strings.HasPrefix(v, "https://") {
+				return gymErrors.ErrInvalidKioskFeedback
+			}
+			g.KioskSettings["access_webhook_url"] = v
+		}
+	}
+	if u.AccessWebhookSecret != nil {
+		v := strings.TrimSpace(*u.AccessWebhookSecret)
+		if g.KioskSettings == nil {
+			g.KioskSettings = map[string]any{}
+		}
+		if v == "" {
+			delete(g.KioskSettings, "access_webhook_secret")
+		} else {
+			g.KioskSettings["access_webhook_secret"] = v
 		}
 	}
 	g.Version++

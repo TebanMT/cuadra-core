@@ -306,10 +306,19 @@ func enqueueMembership(stx *sharedDomain.SqlxTransaction, m *membershipDomain.Me
 	if stx.Queue == nil {
 		return nil
 	}
+	// All NOT NULL columns must be in the payload — the cloud projector's
+	// UPSERT only emits columns present in the map, and a missing required
+	// column on first-sight INSERT triggers a 23502 NOT NULL violation.
+	var replacedBy any
+	if m.ReplacedBy != nil {
+		replacedBy = m.ReplacedBy.String()
+	}
 	payload, err := json.Marshal(map[string]any{
 		"id":                     m.ID.String(),
 		"gym_id":                 m.GymID.String(),
 		"version":                m.Version,
+		"created_at":             m.CreatedAt.UnixMilli(),
+		"updated_at":             m.UpdatedAt.UnixMilli(),
 		"member_id":              m.MemberID.String(),
 		"membership_type_id":     m.MembershipTypeID.String(),
 		"type_name_snapshot":     m.TypeNameSnapshot,
@@ -318,7 +327,7 @@ func enqueueMembership(stx *sharedDomain.SqlxTransaction, m *membershipDomain.Me
 		"start_date":             m.StartDate.UTC().Format(dateLayout),
 		"expiry_date":            m.ExpiryDate.UTC().Format(dateLayout),
 		"status":                 m.Status,
-		"updated_at":             m.UpdatedAt.UnixMilli(),
+		"replaced_by":            replacedBy,
 	})
 	if err != nil {
 		return err

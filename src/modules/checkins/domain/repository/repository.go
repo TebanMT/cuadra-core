@@ -22,4 +22,29 @@ type CheckinRepository interface {
 	// counter (see app/checkin_by_pin.go). Kept here for future "failed
 	// attempts" persistence if needed.
 	ListByMember(tx sharedDomain.Transaction, memberID uuid.UUID, since time.Time, limit int) ([]*checkinDomain.Checkin, error)
+	// CountTodayByGym is the count tile that lives at the top of the
+	// reception screen. `today` is interpreted at day granularity in UTC.
+	CountTodayByGym(tx sharedDomain.Transaction, gymID uuid.UUID, today time.Time) (int, error)
+	// ListRecentByGym returns the latest N checkins for the gym joined with
+	// member and operator names so the FE doesn't have to round-trip per
+	// row. The active membership's expiry is included for the "vence en X
+	// días" badge — same query the kiosk shows after a successful pass.
+	ListRecentByGym(tx sharedDomain.Transaction, gymID uuid.UUID, limit int) ([]RecentCheckinRow, error)
+}
+
+// RecentCheckinRow is the flat shape consumed by GET /api/v1/checkins
+// (UC-032). expiry comes from the member's currently-active membership at
+// query time — a recent list is a rolling view, so showing the present
+// expiry rather than a snapshot is the more useful behaviour.
+type RecentCheckinRow struct {
+	ID             uuid.UUID
+	MemberID       *uuid.UUID
+	MemberName     *string
+	Method         string
+	Result         string
+	ManualOverride bool
+	OverrideReason *string
+	OperatorName   *string
+	CheckinAt      time.Time
+	ExpiryDate     *time.Time
 }

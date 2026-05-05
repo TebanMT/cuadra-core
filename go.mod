@@ -11,6 +11,7 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/jung-kurt/gofpdf v1.16.2
 	github.com/mattn/go-sqlite3 v1.14.24
+	github.com/stripe/stripe-go/v82 v82.5.1
 	github.com/twilio/twilio-go v1.30.5
 	github.com/xuri/excelize/v2 v2.10.1
 	golang.org/x/crypto v0.48.0

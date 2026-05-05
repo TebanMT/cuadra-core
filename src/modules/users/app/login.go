@@ -25,7 +25,10 @@ type LoginInput struct {
 type LoginOutput struct {
 	UserID             uuid.UUID
 	GymID              uuid.UUID
+	FullName           string
+	Email              string
 	Role               string
+	GymName            *string
 	AccessToken        string
 	RefreshToken       string
 	SetupCompleted     bool
@@ -60,7 +63,10 @@ func (uc *Login) Execute(ctx context.Context, in LoginInput) (LoginOutput, error
 	var (
 		userID     uuid.UUID
 		gymID      uuid.UUID
+		fullName   string
+		email      string
 		role       string
+		gymName    *string
 		setupDone  bool
 		trialEnd   *time.Time
 		plan       string
@@ -99,7 +105,10 @@ func (uc *Login) Execute(ctx context.Context, in LoginInput) (LoginOutput, error
 
 		userID = user.ID
 		gymID = user.GymID
+		fullName = user.FullName
+		email = user.Email
 		role = user.Role
+		gymName = gym.Name
 		setupDone = gym.IsSetupComplete()
 		trialEnd = gym.TrialEndsAt
 		plan = gym.SubscriptionPlan
@@ -122,7 +131,10 @@ func (uc *Login) Execute(ctx context.Context, in LoginInput) (LoginOutput, error
 	return LoginOutput{
 		UserID:             userID,
 		GymID:              gymID,
+		FullName:           fullName,
+		Email:              email,
 		Role:               role,
+		GymName:            gymName,
 		AccessToken:        access,
 		RefreshToken:       refresh,
 		SetupCompleted:     setupDone,

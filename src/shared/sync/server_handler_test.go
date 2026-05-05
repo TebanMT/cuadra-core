@@ -221,7 +221,7 @@ func newTestHandler(t *testing.T) (*gin.Engine, *memStore, uuid.UUID, string, *M
 		t.Fatalf("issue token: %v", err)
 	}
 	metrics := NewMetrics()
-	h := NewHandler(memUoW{}, store, &memConflictLogger{}, tokens, metrics)
+	h := NewHandler(memUoW{}, store, &memConflictLogger{}, tokens, nil, metrics)
 	r := gin.New()
 	h.RegisterRoutes(r)
 	return r, store, gymID, tok, metrics

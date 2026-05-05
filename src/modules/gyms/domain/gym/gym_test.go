@@ -87,6 +87,42 @@ func TestProfileUpdateRFC(t *testing.T) {
 	}
 }
 
+func TestProfileUpdateKioskSettings(t *testing.T) {
+	now := time.Now().UTC()
+	g := gymDomain.NewTrialGym(uuid.New(), 30, now)
+	vol := 55
+	ttl := 2500
+	if err := g.ApplyProfileUpdate(gymDomain.ProfileUpdate{KioskVolume: &vol, KioskFeedbackTTLMs: &ttl}); err != nil {
+		t.Fatalf("kiosk update: %v", err)
+	}
+	if got, _ := g.KioskSettings["audio_volume"].(int); got != 55 {
+		t.Errorf("audio_volume = %v, want 55", g.KioskSettings["audio_volume"])
+	}
+	if got, _ := g.KioskSettings["feedback_ttl_ms"].(int); got != 2500 {
+		t.Errorf("feedback_ttl_ms = %v, want 2500", g.KioskSettings["feedback_ttl_ms"])
+	}
+
+	bad := 200
+	if err := g.ApplyProfileUpdate(gymDomain.ProfileUpdate{KioskVolume: &bad}); err == nil {
+		t.Errorf("vol > 100 should fail")
+	}
+	tooSmall := 100
+	if err := g.ApplyProfileUpdate(gymDomain.ProfileUpdate{KioskFeedbackTTLMs: &tooSmall}); err == nil {
+		t.Errorf("ttl < 500 should fail")
+	}
+
+	// Nil KioskSettings (loaded from a row that never had one) must still
+	// accept the update — the mutator allocates the map on demand.
+	g2 := gymDomain.NewTrialGym(uuid.New(), 30, now)
+	g2.KioskSettings = nil
+	if err := g2.ApplyProfileUpdate(gymDomain.ProfileUpdate{KioskVolume: &vol}); err != nil {
+		t.Fatalf("nil map: %v", err)
+	}
+	if g2.KioskSettings["audio_volume"] != 55 {
+		t.Errorf("expected audio_volume seeded, got %v", g2.KioskSettings)
+	}
+}
+
 func TestNextSetupStep(t *testing.T) {
 	now := time.Now().UTC()
 	g := gymDomain.NewTrialGym(uuid.New(), 30, now)

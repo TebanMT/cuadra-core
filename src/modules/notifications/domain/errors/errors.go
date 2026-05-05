@@ -47,4 +47,7 @@ var (
 	// Webhooks
 	ErrInvalidSignature = errors.New("firma del webhook inválida")
 	ErrInvalidPayload   = errors.New("payload del webhook inválido")
+
+	// Owner-alert config (UC-040 DA-40.1)
+	ErrAlertKeyUnknown = errors.New("clave de alerta desconocida")
 )

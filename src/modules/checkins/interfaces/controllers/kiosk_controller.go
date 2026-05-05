@@ -32,6 +32,10 @@ type KioskController struct {
 	Events      *chkApp.KioskBroadcaster
 	Reader      biometric.Reader
 	Tokens      auth.TokenService
+	// Sibling controller — we call its dispatch helper after each
+	// allowed fingerprint checkin so the access webhook fires from the
+	// kiosk path too. Optional; nil → no-op.
+	Sibling *CheckinController
 }
 
 func NewKioskController(
@@ -45,6 +49,13 @@ func NewKioskController(
 		Fingerprint: fingerprint, Loop: loop, Events: events,
 		Reader: reader, Tokens: tokens,
 	}
+}
+
+// WithSibling injects the regular CheckinController so the kiosk path can
+// reuse its access-webhook dispatch logic. Builder-style; returns receiver.
+func (c *KioskController) WithSibling(sibling *CheckinController) *KioskController {
+	c.Sibling = sibling
+	return c
 }
 
 func (c *KioskController) RegisterRoutes(r *gin.Engine) {
@@ -127,6 +138,9 @@ func (c *KioskController) handleFingerprintCheckin(ctx *gin.Context) {
 	if err != nil {
 		utils.ErrorResponse(ctx, utils.DomainErrorToHttpCode(err), err)
 		return
+	}
+	if c.Sibling != nil {
+		c.Sibling.dispatchAccessWebhook(ctx, out)
 	}
 	utils.JsonResponse(ctx, http.StatusCreated, toCheckinResp(out))
 }

@@ -15,9 +15,11 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// Token durations. Refresh shorter than the 30d in the spec (UC-002 says 30d
-// for desktop sessions); we use 30d here which the server can shorten via env
-// later if the threat model changes.
+// Default token durations. Cloud server uses these as-is so the web
+// dashboard sees a 15-min access window. Sidecar overrides via
+// NewJWTServiceWithDurations to issue effectively-eternal tokens — the
+// reception screen at the gym must never log the operator out
+// involuntarily (CUADRA-SPEC offline-first principle).
 const (
 	AccessTokenDuration  = 15 * time.Minute
 	RefreshTokenDuration = 30 * 24 * time.Hour
@@ -54,19 +56,34 @@ type TokenService interface {
 }
 
 type JWTService struct {
-	secret []byte
+	secret     []byte
+	accessTTL  time.Duration
+	refreshTTL time.Duration
 }
 
 func NewJWTService(secret string) *JWTService {
-	return &JWTService{secret: []byte(secret)}
+	return NewJWTServiceWithDurations(secret, AccessTokenDuration, RefreshTokenDuration)
+}
+
+// NewJWTServiceWithDurations returns a JWTService that mints tokens with the
+// specified TTLs. Used by the sidecar to issue long-lived credentials so the
+// reception screen never sees an involuntary logout.
+func NewJWTServiceWithDurations(secret string, access, refresh time.Duration) *JWTService {
+	if access <= 0 {
+		access = AccessTokenDuration
+	}
+	if refresh <= 0 {
+		refresh = RefreshTokenDuration
+	}
+	return &JWTService{secret: []byte(secret), accessTTL: access, refreshTTL: refresh}
 }
 
 func (s *JWTService) GenerateAccessToken(userID, gymID uuid.UUID, role string) (string, error) {
-	return s.generate(userID, gymID, role, "access", AccessTokenDuration)
+	return s.generate(userID, gymID, role, "access", s.accessTTL)
 }
 
 func (s *JWTService) GenerateRefreshToken(userID, gymID uuid.UUID, role string) (string, error) {
-	return s.generate(userID, gymID, role, "refresh", RefreshTokenDuration)
+	return s.generate(userID, gymID, role, "refresh", s.refreshTTL)
 }
 
 func (s *JWTService) ValidateAccessToken(token string) (Claims, error) {

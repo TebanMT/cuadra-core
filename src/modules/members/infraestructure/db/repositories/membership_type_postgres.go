@@ -89,6 +89,15 @@ func (r *MembershipTypePostgresRepository) CountActiveMembershipsByType(tx share
 	return int(n), err
 }
 
+func (r *MembershipTypePostgresRepository) CountByGym(tx sharedDomain.Transaction, gymID uuid.UUID) (int, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	var n int64
+	err := gormTx.Model(&models.MembershipTypeModel{}).
+		Where("gym_id = ? AND deleted_at IS NULL", gymID).
+		Count(&n).Error
+	return int(n), err
+}
+
 func mtToModel(mt *mtDomain.MembershipType) models.MembershipTypeModel {
 	return models.MembershipTypeModel{
 		ID:                   mt.ID,

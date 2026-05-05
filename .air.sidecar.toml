@@ -1,0 +1,15 @@
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  cmd = "go build -tags sidecar -o tmp/cuadra-sidecar ./cmd/sidecar"
+  bin = "tmp/cuadra-sidecar"
+  delay = 800
+  exclude_dir = ["tmp", "bin", "dist", "db_migrations"]
+  include_ext = ["go"]
+  # SQLite holds an fcntl lock on cuadra.db; releasing on process exit is
+  # immediate, so 0s kill_delay is enough.
+  kill_delay = "0s"
+
+[log]
+  time = false

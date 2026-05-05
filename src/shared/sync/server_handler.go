@@ -14,31 +14,39 @@ import (
 	"github.com/cuadra/cuadra-core/src/shared/auth"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 	"github.com/cuadra/cuadra-core/src/shared/middleware"
+	"github.com/cuadra/cuadra-core/src/shared/sidecartoken"
 )
 
 // Handler wires the cloud-side /sync endpoints. It is intentionally small —
 // all heavy lifting lives in Store and ConflictLogger so this file stays a
 // thin HTTP adapter.
 type Handler struct {
-	UoW       sharedDomain.UnitOfWork
-	Store     Store
-	Conflicts ConflictLogger
-	Tokens    auth.TokenService
-	Metrics   *Metrics
+	UoW          sharedDomain.UnitOfWork
+	Store        Store
+	Conflicts    ConflictLogger
+	Tokens       auth.TokenService
+	SidecarStore sidecartoken.Store
+	Metrics      *Metrics
 }
 
-func NewHandler(uow sharedDomain.UnitOfWork, store Store, conflicts ConflictLogger, tokens auth.TokenService, metrics *Metrics) *Handler {
+func NewHandler(uow sharedDomain.UnitOfWork, store Store, conflicts ConflictLogger, tokens auth.TokenService, sidecarStore sidecartoken.Store, metrics *Metrics) *Handler {
 	if metrics == nil {
 		metrics = NewMetrics()
 	}
-	return &Handler{UoW: uow, Store: store, Conflicts: conflicts, Tokens: tokens, Metrics: metrics}
+	return &Handler{UoW: uow, Store: store, Conflicts: conflicts, Tokens: tokens, SidecarStore: sidecarStore, Metrics: metrics}
 }
 
 // RegisterRoutes mounts the four cloud sync endpoints + the metrics
-// endpoint at /_internal/metrics (ADR-001 §5).
+// endpoint at /_internal/metrics (ADR-001 §5). The auth gate accepts both
+// sk_live_* sidecar credentials and operator JWTs (ADR-008 §3.2) so the
+// migration window keeps working sidecars on either path.
 func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api := r.Group("/api/v1/sync")
-	api.Use(middleware.AuthMiddleware(h.Tokens))
+	if h.SidecarStore != nil {
+		api.Use(middleware.SidecarOrJWTMiddleware(h.Tokens, h.SidecarStore))
+	} else {
+		api.Use(middleware.AuthMiddleware(h.Tokens))
+	}
 	api.POST("/push", h.Push)
 	api.GET("/pull", h.Pull)
 	api.GET("/full", h.FullSync)

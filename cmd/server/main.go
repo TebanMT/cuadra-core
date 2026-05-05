@@ -47,6 +47,12 @@ import (
 	notiWhatsApp "github.com/cuadra/cuadra-core/src/modules/notifications/infraestructure/whatsapp"
 	notiCtrl "github.com/cuadra/cuadra-core/src/modules/notifications/interfaces/controllers"
 
+	subApp "github.com/cuadra/cuadra-core/src/modules/subscriptions/app"
+	subDomain "github.com/cuadra/cuadra-core/src/modules/subscriptions/domain"
+	subDB "github.com/cuadra/cuadra-core/src/modules/subscriptions/infraestructure/db"
+	subPay "github.com/cuadra/cuadra-core/src/modules/subscriptions/infraestructure/payments"
+	subCtrl "github.com/cuadra/cuadra-core/src/modules/subscriptions/interfaces/controllers"
+
 	reportsApp "github.com/cuadra/cuadra-core/src/application/reports"
 	reportsInfra "github.com/cuadra/cuadra-core/src/application/reports/infraestructure"
 	reportsCtrl "github.com/cuadra/cuadra-core/src/application/reports/interfaces"
@@ -55,6 +61,9 @@ import (
 	bcrypto "github.com/cuadra/cuadra-core/src/shared/biometric/crypto"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 	"github.com/cuadra/cuadra-core/src/shared/email"
+	"github.com/cuadra/cuadra-core/src/shared/installerbootstrap"
+	"github.com/cuadra/cuadra-core/src/shared/middleware"
+	"github.com/cuadra/cuadra-core/src/shared/sidecartoken"
 	syncShared "github.com/cuadra/cuadra-core/src/shared/sync"
 )
 
@@ -96,6 +105,7 @@ func main() {
 	notificationRepo := notiRepoPg.NewNotificationPostgresRepository()
 	templateRepo := notiRepoPg.NewTemplateOverridePostgresRepository()
 	whatsappEventRepo := notiRepoPg.NewWhatsAppEventPostgresRepository()
+	alertConfigRepo := notiRepoPg.NewAlertConfigPostgresRepository()
 	expiryReader := notiRepoPg.NewExpiryPostgresReader()
 
 	// ── Shared services ────────────────────────────────────────────────────
@@ -110,6 +120,12 @@ func main() {
 	notiEmailProvider := buildEmailProvider()
 
 	// ── Use cases ──────────────────────────────────────────────────────────
+	sidecarStore := sidecartoken.NewPostgresStore(db)
+	installerStore := installerbootstrap.NewPostgresStore(db)
+	sidecarBootstrap := usersApp.NewBootstrapSidecarToken(sidecarStore, uow)
+	issueInstaller := usersApp.NewIssueInstallerBootstrap(installerStore)
+	redeemInstaller := usersApp.NewRedeemInstallerBootstrap(installerStore, userRepo, gymRepo, uow, tokens, sidecarBootstrap)
+
 	signup := usersApp.NewSignupOwner(userRepo, gymRepo, uow, tokens, recorder, trialDays)
 	login := usersApp.NewLogin(userRepo, gymRepo, uow, tokens, recorder)
 	logout := usersApp.NewLogout(blRepo, uow, tokens, recorder)
@@ -152,12 +168,14 @@ func main() {
 	// ── Notifications (Sesión 7) ──────────────────────────────────────────
 	enqueueReceipt := notiApp.NewEnqueueReceipt(notificationRepo, gymRepo, memberRepo, uow)
 	enqueueExpiry := notiApp.NewEnqueueExpiryReminder(notificationRepo, expiryReader, uow)
-	enqueueOwnerAlert := notiApp.NewEnqueueOwnerAlert(notificationRepo, gymRepo, userRepo, uow)
+	enqueueOwnerAlert := notiApp.NewEnqueueOwnerAlert(notificationRepo, gymRepo, userRepo, alertConfigRepo, uow)
 	dispatchNoti := notiApp.NewDispatchNotification(notificationRepo, templateRepo, gymRepo, whatsappProvider, notiEmailProvider, uow)
 	connectWhatsApp := notiApp.NewConnectWhatsApp(gymRepo, whatsappProvider, uow, recorder)
 	whatsappStatus := notiApp.NewGetWhatsAppStatus(gymRepo, uow)
 	listTemplates := notiApp.NewListTemplates(templateRepo, uow)
 	updateTemplate := notiApp.NewUpdateTemplate(templateRepo, uow, recorder)
+	listOwnerAlerts := notiApp.NewListOwnerAlerts(alertConfigRepo, uow)
+	updateOwnerAlert := notiApp.NewUpdateOwnerAlert(alertConfigRepo, uow, recorder)
 	broadcast := notiApp.NewBroadcast(notificationRepo, memberRepo, gymRepo, uow, recorder)
 	listNotifications := notiApp.NewListNotifications(notificationRepo, uow)
 	processWebhook := notiApp.NewProcessWebhook(notificationRepo, whatsappEventRepo, uow)
@@ -170,6 +188,7 @@ func main() {
 	receiptPayment := billingApp.NewGenerateReceipt(paymentRepo, gymRepo, memberRepo, uow)
 	sendReceipt := billingApp.NewSendReceipt(paymentRepo, uow)
 	listMemberPayments := billingApp.NewListMemberPayments(paymentRepo, memberRepo, uow)
+	listGymPayments := billingApp.NewListGymPayments(paymentRepo, memberRepo, uow)
 	refundPayment := billingApp.NewRefundPayment(paymentRepo, folios, memberSvc, uow, recorder)
 
 	// ── Products + Billing pt.2 (Sesión 4) ────────────────────────────────
@@ -181,11 +200,13 @@ func main() {
 	adjustStock := prodApp.NewAdjustStock(productRepo, stockMovementRepo, uow, recorder)
 	registerSale := billingApp.NewRegisterSale(paymentRepo, saleRepo, saleItemRepo, folios, productSvc, memberRepo, uow, recorder, billingSubscriber)
 	refundSale := billingApp.NewRefundSale(saleRepo, refundPayment, uow)
-	cashClose := reportsApp.NewCashClose(cashCloseReader, cashCloseEventRepo, uow, recorder)
+	cashClose := reportsApp.NewCashClose(cashCloseReader, cashCloseEventRepo, uow, recorder).
+		WithSubscriber(notiApp.NewCashCloseAlertSubscriber(enqueueOwnerAlert))
 
 	// ── Reports application layer (Sesión 6) ─────────────────────────────
 	dashboard := reportsApp.NewDashboard(reportsReader, uow, 60*time.Second)
 	attentionRequired := reportsApp.NewAttentionRequired(reportsReader, uow)
+	rangeReport := reportsApp.NewRangeReport(reportsReader, uow)
 	exportReport := reportsApp.NewExportReport(reportsReader, gymRepo, uow, attentionRequired)
 	markContacted := memApp.NewMarkContacted(memberRepo, contactAttemptRepo, uow, recorder)
 	markLost := memApp.NewMarkLost(memberRepo, uow, recorder)
@@ -207,29 +228,56 @@ func main() {
 		ResetOpPassword:  resetOp,
 		RequestTransfer:  requestTransfer,
 		ConfirmTransfer:  confirmTransfer,
-		Tokens:           tokens,
+		Tokens:             tokens,
+		Gyms:               gymRepo,
+		Users:              userRepo,
+		MembershipTypes:    mtRepo,
+		UoW:                uow,
+		UploadsDir:         envOrDefault("UPLOADS_DIR", "./tmp/uploads"),
+		SidecarBootstrap:   sidecarBootstrap,
+		InstallerBootstrap: issueInstaller,
+		RedeemInstaller:    redeemInstaller,
 	})
 	mtCtrl := memCtrl.NewMembershipTypeController(createMT, updateMT, deactivateMT, listMT, tokens)
 	memberCtrl := memCtrl.NewMemberController(createMember, updateMember, listMembers, memberDetail, toggleMember, lockExpiry, assignPin, tokens)
 	fingerprintCtrl := memCtrl.NewFingerprintController(registerFingerprint, tokens)
-	paymentCtrl := billingCtrl.NewPaymentController(registerPayment, settlePayment, receiptPayment, sendReceipt, listMemberPayments, refundPayment, registerSale, refundSale, cashClose, tokens)
+	paymentCtrl := billingCtrl.NewPaymentController(registerPayment, settlePayment, receiptPayment, sendReceipt, listMemberPayments, listGymPayments, refundPayment, registerSale, refundSale, cashClose, tokens)
 	productCtrl := prodCtrl.NewProductController(createProduct, updateProduct, deactivateProduct, listProducts, adjustStock, tokens)
-	checkinCtrl := chkCtrl.NewCheckinController(checkinManual, checkinPin, checkinOverride, tokens)
-	reportsController := reportsCtrl.NewReportsController(dashboard, attentionRequired, exportReport, markContacted, markLost, tokens)
-	notificationsCtrl := notiCtrl.NewController(connectWhatsApp, whatsappStatus, listTemplates, updateTemplate, broadcast, listNotifications, tokens)
+	// Cloud has no biometric reader — fingerprint flows live on the sidecar.
+	checkinCtrl := chkCtrl.NewCheckinController(checkinManual, checkinPin, checkinOverride, checkinRepo, uow, nil, tokens)
+	reportsController := reportsCtrl.NewReportsController(dashboard, attentionRequired, rangeReport, exportReport, markContacted, markLost, tokens)
+	notificationsCtrl := notiCtrl.NewController(connectWhatsApp, whatsappStatus, listTemplates, updateTemplate, broadcast, listNotifications, listOwnerAlerts, updateOwnerAlert, whatsappProvider, tokens)
+
+	// ── Subscriptions (Fase 1: cobranza al dueño) ─────────────────────────
+	subEventRepo := subDB.NewEventPostgresRepository()
+	recordSubEvent := subApp.NewRecordEvent(subEventRepo, gymRepo, uow, recorder)
+	getSubscription := subApp.NewGetSubscription(subEventRepo, gymRepo, uow)
+	subVerifier := subCtrl.NewWebhookVerifier(
+		envOrDefault("STRIPE_WEBHOOK_SECRET", ""),
+		envOrDefault("MERCADOPAGO_WEBHOOK_SECRET", ""),
+		os.Getenv("ENVIRONMENT") == "production",
+	)
+	subGateways := buildSubscriptionGateways()
+	billingSuccessURL := envOrDefault("BILLING_SUCCESS_URL", baseURL+"/settings/billing?status=success")
+	billingCancelURL := envOrDefault("BILLING_CANCEL_URL", baseURL+"/settings/billing?status=cancelled")
+	startCheckout := subApp.NewStartCheckout(subGateways, gymRepo, userRepo, uow, billingSuccessURL, billingCancelURL)
+	subscriptionsCtrl := subCtrl.NewSubscriptionController(recordSubEvent, getSubscription, startCheckout, subVerifier, tokens)
 	twilioWebhookURL := envOrDefault("TWILIO_WEBHOOK_URL", baseURL+"/api/v1/webhooks/twilio")
 	notiWebhookCtrl := notiCtrl.NewWebhookController(processWebhook, envOrDefault("TWILIO_AUTH_TOKEN", ""), twilioWebhookURL)
-	_ = enqueueOwnerAlert // wired into future hooks; kept resolved so build doesn't drop it.
 
 	// ── Gin router ────────────────────────────────────────────────────────
 	if os.Getenv("ENVIRONMENT") == "production" {
 		gin.SetMode(gin.ReleaseMode)
 	}
 	r := gin.Default()
+	r.Use(middleware.CORS(middleware.CORSConfig{
+		AllowedOrigins: parseOrigins(envOrDefault("CORS_ALLOWED_ORIGINS", "http://localhost:5174")),
+	}))
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "cuadra-server"})
 	})
 	authCtrl.RegisterRoutes(r)
+	authCtrl.RegisterUploadsRoute(r)
 	mtCtrl.RegisterRoutes(r)
 	memberCtrl.RegisterRoutes(r)
 	fingerprintCtrl.RegisterRoutes(r)
@@ -239,6 +287,7 @@ func main() {
 	reportsController.RegisterRoutes(r)
 	notificationsCtrl.RegisterRoutes(r)
 	notiWebhookCtrl.RegisterRoutes(r)
+	subscriptionsCtrl.RegisterRoutes(r)
 
 	// Sync protocol (Sesión 8 / ADR-001) — push/pull/full + Prometheus
 	// metrics at /_internal/metrics. The handler depends only on the UoW
@@ -246,7 +295,7 @@ func main() {
 	syncMetrics := syncShared.NewMetrics()
 	syncStore := syncShared.NewPostgresStore()
 	syncConflicts := syncShared.NewConflictLogger()
-	syncHandler := syncShared.NewHandler(uow, syncStore, syncConflicts, tokens, syncMetrics)
+	syncHandler := syncShared.NewHandler(uow, syncStore, syncConflicts, tokens, sidecarStore, syncMetrics)
 	syncHandler.RegisterRoutes(r)
 
 	// Background workers (Sesión 7 §dispatcher + scheduler).
@@ -281,6 +330,17 @@ func envOrDefault(key, fallback string) string {
 	return fallback
 }
 
+func parseOrigins(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if s := strings.TrimSpace(p); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 func envInt(key string, fallback int) int {
 	v := os.Getenv(key)
 	if v == "" {
@@ -291,6 +351,50 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+func envFloat(key string, fallback float64) float64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return fallback
+	}
+	return f
+}
+
+// buildSubscriptionGateways registers a CheckoutGateway for each processor
+// whose creds are present. Missing creds → that provider stays absent from
+// the map; the use case maps that to ErrGatewayUnavailable so the FE shows
+// "this method isn't available" instead of crashing.
+//
+// Required for Stripe: STRIPE_SECRET_KEY + STRIPE_PRICE_STANDARD/PLUS (price
+// ids created in the Stripe MX dashboard). Required for MP: MP_ACCESS_TOKEN
+// + MP_AMOUNT_STANDARD/PLUS (amounts in MXN per month).
+func buildSubscriptionGateways() map[subDomain.Provider]subDomain.CheckoutGateway {
+	out := map[subDomain.Provider]subDomain.CheckoutGateway{}
+	if g := subPay.NewStripeGateway(subPay.StripeConfig{
+		SecretKey:     os.Getenv("STRIPE_SECRET_KEY"),
+		PriceStandard: os.Getenv("STRIPE_PRICE_STANDARD"),
+		PricePlus:     os.Getenv("STRIPE_PRICE_PLUS"),
+	}); g != nil {
+		out[subDomain.ProviderStripe] = g
+	} else {
+		log.Printf("[subscriptions] STRIPE_SECRET_KEY missing — Stripe checkout disabled")
+	}
+	if g := subPay.NewMercadoPagoGateway(subPay.MercadoPagoConfig{
+		AccessToken:    os.Getenv("MP_ACCESS_TOKEN"),
+		AmountStandard: envFloat("MP_AMOUNT_STANDARD", 0),
+		AmountPlus:     envFloat("MP_AMOUNT_PLUS", 0),
+		BackURL:        os.Getenv("MP_BACK_URL"),
+	}); g != nil {
+		out[subDomain.ProviderMercadoPago] = g
+	} else {
+		log.Printf("[subscriptions] MP_ACCESS_TOKEN missing — Mercado Pago checkout disabled")
+	}
+	return out
 }
 
 // buildWhatsAppProvider wires the configured WhatsApp provider. When
@@ -309,6 +413,7 @@ func buildWhatsAppProvider(baseURL string) notiDomain.WhatsAppProvider {
 			AccountSID:        sid,
 			AuthToken:         token,
 			StatusCallbackURL: envOrDefault("TWILIO_WEBHOOK_URL", baseURL+"/api/v1/webhooks/twilio"),
+			OTPFromNumber:     envOrDefault("TWILIO_OTP_FROM", ""),
 		}
 		p, err := notiWhatsApp.NewTwilioProvider(opts)
 		if err != nil {

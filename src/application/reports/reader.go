@@ -39,21 +39,41 @@ type Reader interface {
 	ListMembersForExport(tx sharedDomain.Transaction, gymID uuid.UUID, today time.Time) ([]MemberExportRow, error)
 	ListPaymentsForExport(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) ([]PaymentExportRow, error)
 	ListSalesForExport(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) ([]SaleExportRow, error)
+
+	// Range report extras (UC-036 — totals + breakdowns over an arbitrary
+	// window; complement the dashboard KPIs).
+	CountNewMembersBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (int, error)
+	CountCheckinsBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (int, error)
+	SumRefundsBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (float64, error)
+	IncomeByMethodBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (map[string]float64, error)
+	TopMembersBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time, limit int) ([]TopMemberRow, error)
+	CheckinsDailySeries(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) ([]DailyCount, error)
+
+	// ListRecentPayments returns the latest non-refund payments for a gym,
+	// ordered by payment_date DESC then created_at DESC. Used by the
+	// dashboard's "últimos cobros" widget.
+	ListRecentPayments(tx sharedDomain.Transaction, gymID uuid.UUID, limit int) ([]RecentPaymentRow, error)
 }
 
 // DailyIncome — one bar of the dashboard chart (UC-033).
+//
+// JSON tags son explícitos porque el wire layer (reports_controller) emite
+// esta struct DIRECTAMENTE como `income_30d` / `income_by_day` sin DTO
+// intermedio. Sin tags, Go marshalaba como "Date"/"Total" y la gráfica
+// del FE (que lee data.date / data.total) renderizaba vacío.
 type DailyIncome struct {
-	Date  time.Time
-	Total float64
+	Date  time.Time `json:"date"`
+	Total float64   `json:"total"`
 }
 
 // MemberExpiringRow — vencen ≤7 días.
 type MemberExpiringRow struct {
-	MemberID   uuid.UUID
-	FullName   string
-	Phone      string
-	ExpiryDate time.Time
-	DaysLeft   int
+	MemberID       uuid.UUID
+	FullName       string
+	Phone          string
+	ExpiryDate     time.Time
+	DaysLeft       int
+	MembershipType string
 }
 
 // MemberExpiredRow — vencidos hace ≤60 días, sin marca lost, sin contacto reciente.
@@ -64,6 +84,8 @@ type MemberExpiredRow struct {
 	ExpiryDate           time.Time
 	DaysOverdue          int
 	LastContactAttemptAt *time.Time
+	MembershipType       string
+	ContactAttemptsCount int
 }
 
 // MemberInactiveRow — status='active' AND no checkin >21 días.
@@ -124,6 +146,19 @@ type PaymentExportRow struct {
 	Discount       float64
 	BalancePending float64
 	OperatorEmail  *string
+}
+
+// RecentPaymentRow — one entry of the dashboard's "últimos cobros" widget.
+// Member fields are nullable because product-only sales do not link to a
+// member.
+type RecentPaymentRow struct {
+	ID          uuid.UUID
+	MemberID    *uuid.UUID
+	MemberName  *string
+	Amount      float64
+	Method      string
+	Concept     string
+	PaymentDate time.Time
 }
 
 // SaleExportRow — flat row for the ventas export.

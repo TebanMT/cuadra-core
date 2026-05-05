@@ -25,6 +25,9 @@ type MembershipTypeRepository interface {
 	// CountActiveMembershipsByType returns how many memberships (status=active)
 	// reference this type. Used to decide whether deactivation is the only option.
 	CountActiveMembershipsByType(tx sharedDomain.Transaction, typeID uuid.UUID) (int, error)
+	// CountByGym returns the number of (non-deleted) membership types for a gym.
+	// Used by GET /gyms/me/setup-status to decide the next setup step.
+	CountByGym(tx sharedDomain.Transaction, gymID uuid.UUID) (int, error)
 }
 
 // MemberRepository — UC-012..UC-016, UC-032, UC-035.
@@ -46,6 +49,11 @@ type MemberRepository interface {
 	// "" / "active" / "expiring_soon" / "expired" / "inactive".
 	List(tx sharedDomain.Transaction, q ListQuery) ([]*MemberWithMembership, int, error)
 	GetWithCurrentMembership(tx sharedDomain.Transaction, gymID, memberID uuid.UUID) (*MemberWithMembership, error)
+	// GetNamesByIDs returns id→full_name for the given members. Missing IDs
+	// (deleted, or other gym) are simply omitted from the result map. Used by
+	// cross-context read paths (e.g. billing's gym-wide cobros list) to avoid
+	// the N+1 of GetByID per row.
+	GetNamesByIDs(tx sharedDomain.Transaction, ids []uuid.UUID) (map[uuid.UUID]string, error)
 }
 
 // ListQuery is the input for UC-014.

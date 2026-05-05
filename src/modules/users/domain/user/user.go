@@ -165,11 +165,18 @@ func ValidatePassword(password string) error {
 	return nil
 }
 
-// ValidateFullName enforces 3..100 (UC-001 step 1).
+// ValidateFullName enforces 3..100 (UC-001 step 1) and rejects email-shaped
+// strings — early on we had reports of operators registering with their email
+// as their name, which then surfaced as "Hola, foo@bar.com" in the dashboard.
+// A full name has no @ in it; treat that as a clear signal the user pasted
+// the wrong field.
 func ValidateFullName(name string) error {
 	v := strings.TrimSpace(name)
 	if len(v) < 3 || len(v) > 100 {
 		return userErrors.ErrNameRequired
+	}
+	if strings.ContainsRune(v, '@') {
+		return userErrors.ErrNameLooksLikeEmail
 	}
 	return nil
 }

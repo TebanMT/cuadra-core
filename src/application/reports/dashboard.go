@@ -35,6 +35,26 @@ type DashboardOutput struct {
 	TodayCashTotal     float64            `json:"today_cash_total"`
 
 	IncomeLast30Days []DailyIncome `json:"income_last_30_days"`
+
+	// AttentionSummary holds the six counts the FE renders as a quick
+	// glance into the persecución list. Computed by `len(...)` over the
+	// same queries AttentionRequired uses.
+	AttentionSummary AttentionSummary `json:"attention_summary"`
+
+	// RecentPayments is the "últimos cobros" widget data — last N
+	// non-refund payments, newest first.
+	RecentPayments []RecentPaymentRow `json:"recent_payments"`
+}
+
+// AttentionSummary holds the six counters surfaced on the dashboard's
+// "atención inmediata" tile.
+type AttentionSummary struct {
+	ExpiringSoon        int `json:"expiring_soon"`
+	ExpiredRecoverable  int `json:"expired_recoverable"`
+	InactiveInvoluntary int `json:"inactive_involuntary"`
+	LowStock            int `json:"low_stock"`
+	PendingBalance      int `json:"pending_balance"`
+	BirthdaysToday      int `json:"birthdays_today"`
 }
 
 // KPI is the typical "value + delta" tile.
@@ -124,6 +144,40 @@ func (uc *Dashboard) Execute(ctx context.Context, in DashboardInput) (*Dashboard
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}
 
+	// Attention summary counts (DA-34.1 thresholds — kept in sync with
+	// AttentionRequired). Reuses the list queries; for a single gym the
+	// dataset is small enough that loading rows just to count them is
+	// cheaper than maintaining a parallel set of count queries.
+	expiringList, err := uc.Reader.ListExpiringSoon(tx, in.GymID, today, attnExpiringSoonDays)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
+	expiredList, err := uc.Reader.ListExpiredRecoverable(tx, in.GymID, today, attnRecoverableMaxDays, attnStaleContactDays)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
+	inactiveList, err := uc.Reader.ListInactiveInvoluntary(tx, in.GymID, today, attnInactiveAbsentDays)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
+	lowStockList, err := uc.Reader.ListLowStock(tx, in.GymID)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
+	pendingList, err := uc.Reader.ListPendingBalances(tx, in.GymID)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
+	birthdayList, err := uc.Reader.ListBirthdaysOn(tx, in.GymID, today)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
+
+	recent, err := uc.Reader.ListRecentPayments(tx, in.GymID, recentPaymentsLimit)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
+
 	out := &DashboardOutput{
 		GeneratedAt:        now,
 		ActiveMembers:      newKPI(float64(activeNow), float64(activePrev)),
@@ -133,10 +187,30 @@ func (uc *Dashboard) Execute(ctx context.Context, in DashboardInput) (*Dashboard
 		TodayCash:          todayCash,
 		TodayCashTotal:     totalToday,
 		IncomeLast30Days:   series,
+		AttentionSummary: AttentionSummary{
+			ExpiringSoon:        len(expiringList),
+			ExpiredRecoverable:  len(expiredList),
+			InactiveInvoluntary: len(inactiveList),
+			LowStock:            len(lowStockList),
+			PendingBalance:      len(pendingList),
+			BirthdaysToday:      len(birthdayList),
+		},
+		RecentPayments: recent,
 	}
 	uc.cache.Put(in.GymID, out)
 	return out, nil
 }
+
+// Mirrors of AttentionRequired's thresholds — kept here as separate const
+// names so an accidental rename in one place doesn't silently change the
+// other. Both stay in lockstep until product asks otherwise.
+const (
+	attnExpiringSoonDays   = 7
+	attnRecoverableMaxDays = 60
+	attnStaleContactDays   = 7
+	attnInactiveAbsentDays = 21
+	recentPaymentsLimit    = 10
+)
 
 func newKPI(current, previous float64) KPI {
 	k := KPI{Current: current, Previous: previous, Delta: current - previous}

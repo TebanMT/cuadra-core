@@ -4,6 +4,7 @@
 package controllers
 
 import (
+	"errors"
 	"net/http"
 	"time"
 
@@ -12,8 +13,12 @@ import (
 
 	gymApp "github.com/cuadra/cuadra-core/src/modules/gyms/app"
 	gymDomain "github.com/cuadra/cuadra-core/src/modules/gyms/domain/gym"
+	gymRepo "github.com/cuadra/cuadra-core/src/modules/gyms/domain/repository"
 	usersApp "github.com/cuadra/cuadra-core/src/modules/users/app"
+	usersRepo "github.com/cuadra/cuadra-core/src/modules/users/domain/repository"
 	"github.com/cuadra/cuadra-core/src/shared/auth"
+	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
+	"github.com/cuadra/cuadra-core/src/shared/installerbootstrap"
 	"github.com/cuadra/cuadra-core/src/shared/middleware"
 	"github.com/cuadra/cuadra-core/src/shared/utils"
 )
@@ -37,6 +42,59 @@ type AuthController struct {
 	RequestTransfer  *usersApp.RequestTransferOwnership
 	ConfirmTransfer  *usersApp.ConfirmTransferOwnership
 	Tokens           auth.TokenService
+	// Read deps used by me_controller.go for GET /auth/me, GET /gyms/me, and
+	// GET /gyms/me/setup-status. They're optional in the sense that nil-safe
+	// guards in the handlers turn them into 500s — main.go is expected to
+	// wire them.
+	Gyms            gymRepo.GymRepository
+	Users           usersRepo.UserRepository
+	MembershipTypes membershipTypeReader
+	UoW             sharedDomain.UnitOfWork
+	// UploadsDir is the on-disk root for asset uploads (gym logo today).
+	// Empty disables the feature: /me/logo returns 500 and
+	// RegisterUploadsRoute is a no-op.
+	UploadsDir string
+	// SidecarBootstrap mints a sk_live_* credential for sidecar callers
+	// (identified by X-Cuadra-Client-ID). Optional — when nil, login/signup
+	// responses simply omit the sidecar_token field.
+	SidecarBootstrap *usersApp.BootstrapSidecarToken
+	// InstallerBootstrap mints single-use codes the dashboard hands the
+	// owner after web signup. Optional — when nil the endpoint 501s.
+	InstallerBootstrap *usersApp.IssueInstallerBootstrap
+	// RedeemInstaller swaps a one-time bootstrap code for a full session
+	// (operator JWTs + sidecar credential). Optional — when nil the
+	// endpoint 501s.
+	RedeemInstaller *usersApp.RedeemInstallerBootstrap
+}
+
+// membershipTypeReader is the slim subset of MembershipTypeRepository the
+// setup-status handler needs (just a count). Defined here so this controller
+// doesn't import the whole members module.
+type membershipTypeReader interface {
+	CountByGym(tx sharedDomain.Transaction, gymID uuid.UUID) (int, error)
+}
+
+// HeaderClientID is the client-supplied UUID identifying a sidecar
+// installation across logins. Cloud uses it to look up / mint the active
+// sidecar_credentials row (ADR-008 §3.3).
+const HeaderClientID = "X-Cuadra-Client-ID"
+
+// HeaderDeviceLabel is an opaque, human-readable hint (hostname, model name)
+// shown on the dashboard's "active devices" panel.
+const HeaderDeviceLabel = "X-Cuadra-Device-Label"
+
+// readClientID parses the X-Cuadra-Client-ID header. Returns uuid.Nil on
+// any error so callers can simply skip sidecar bootstrap when absent.
+func readClientID(c *gin.Context) uuid.UUID {
+	raw := c.GetHeader(HeaderClientID)
+	if raw == "" {
+		return uuid.Nil
+	}
+	id, err := uuid.Parse(raw)
+	if err != nil {
+		return uuid.Nil
+	}
+	return id
 }
 
 func NewAuthController(deps AuthController) *AuthController { c := deps; return &c }
@@ -50,18 +108,35 @@ func (ctrl *AuthController) RegisterRoutes(r *gin.Engine) {
 		authGrp.POST("/logout", ctrl.handleLogout)
 		authGrp.POST("/forgot-password", ctrl.handleForgotPassword)
 		authGrp.POST("/reset-password", ctrl.handleResetPassword)
+		authGrp.POST("/redeem-installer", ctrl.handleRedeemInstaller)
 	}
 
-	gyms := api.Group("/gyms")
-	gyms.Use(middleware.AuthMiddleware(ctrl.Tokens))
-	{
-		gyms.PATCH("/me/setup", ctrl.handleUpdateSetup)                  // step 2
-		gyms.POST("/me/setup/complete", ctrl.handleCompleteSetup)        // step 5
-		gyms.PATCH("/me/payment-methods", ctrl.handleUpdatePaymentMeths) // step 4
-		gyms.PATCH("/me", middleware.RequireOwner(), ctrl.handleUpdateProfile)
-		gyms.POST("/me/transfer-ownership", middleware.RequireOwner(), ctrl.handleTransferOwnership)
-	}
+	authedAuth := api.Group("/auth")
+	authedAuth.Use(middleware.AuthMiddleware(ctrl.Tokens))
+	authedAuth.GET("/me", ctrl.handleGetMe)
+	authedAuth.PATCH("/me", ctrl.handleUpdateMe)
+	authedAuth.POST("/installer-token", ctrl.handleIssueInstaller)
 
+	ctrl.RegisterAccountRoutes(r)
+	ctrl.RegisterOperatorRoutes(r)
+}
+
+// RegisterMeRoute exposes the read-only `GET /api/v1/auth/me` endpoint.
+// Split out so the sidecar can wire it alongside SidecarAuthProxy (which
+// owns the rest of /auth/*) — me is intentionally local-only on the
+// sidecar so the FE's hydrate flow doesn't depend on cloud connectivity.
+func (ctrl *AuthController) RegisterMeRoute(r *gin.Engine) {
+	authed := r.Group("/api/v1/auth")
+	authed.Use(middleware.AuthMiddleware(ctrl.Tokens))
+	authed.GET("/me", ctrl.handleGetMe)
+	authed.PATCH("/me", ctrl.handleUpdateMe)
+}
+
+// RegisterOperatorRoutes registers the operator-management subset
+// (`/api/v1/users/*`). Split out so the sidecar can wire it alongside
+// SidecarAuthProxy without re-registering the auth subset.
+func (ctrl *AuthController) RegisterOperatorRoutes(r *gin.Engine) {
+	api := r.Group("/api/v1")
 	users := api.Group("/users")
 	users.Use(middleware.AuthMiddleware(ctrl.Tokens))
 	{
@@ -70,6 +145,40 @@ func (ctrl *AuthController) RegisterRoutes(r *gin.Engine) {
 		users.PATCH("/:id/active", middleware.RequireOwner(), ctrl.handleToggleActive)
 		users.POST("/:id/reset-password", middleware.RequireOwner(), ctrl.handleResetOpPassword)
 	}
+}
+
+// RegisterAccountRoutes registers the gym-account subset (`/api/v1/gyms/me/*`)
+// in isolation. Tests that only exercise the gym profile / logo flow can use
+// this without wiring all the operator-management dependencies that
+// RegisterRoutes pulls in.
+func (ctrl *AuthController) RegisterAccountRoutes(r *gin.Engine) {
+	api := r.Group("/api/v1")
+	gyms := api.Group("/gyms")
+	gyms.Use(middleware.AuthMiddleware(ctrl.Tokens))
+	{
+		gyms.GET("/me", ctrl.handleGetGymProfile)
+		gyms.GET("/me/setup-status", ctrl.handleSetupStatus)
+		gyms.PATCH("/me/setup", ctrl.handleUpdateSetup)                  // step 2
+		gyms.POST("/me/setup/complete", ctrl.handleCompleteSetup)        // step 5
+		gyms.PATCH("/me/payment-methods", ctrl.handleUpdatePaymentMeths) // step 4
+		// PATCH /me uses the FE-driven shape (whatsapp_number, legal_name,
+		// kiosk_volume, …). The legacy handleUpdateProfile is dead code kept
+		// around for direct test callers; the wire handler is the active path.
+		gyms.PATCH("/me", middleware.RequireOwner(), ctrl.handleUpdateProfileWire)
+		gyms.POST("/me/logo", middleware.RequireOwner(), ctrl.handleUploadLogo)
+		gyms.POST("/me/transfer-ownership", middleware.RequireOwner(), ctrl.handleTransferOwnership)
+	}
+}
+
+// RegisterUploadsRoute exposes UploadsDir at GET /uploads/* as a public,
+// auth-free route so the FE can render <img src="/uploads/<gym_id>/<file>">
+// directly. A no-op when UploadsDir is unset, so the route only appears once
+// the binary is configured for it.
+func (ctrl *AuthController) RegisterUploadsRoute(r *gin.Engine) {
+	if ctrl.UploadsDir == "" {
+		return
+	}
+	r.Static("/uploads", ctrl.UploadsDir)
 }
 
 // ---------------------------------------------------------------------------
@@ -89,6 +198,7 @@ type signupResp struct {
 	AccessToken    string    `json:"access_token"`
 	RefreshToken   string    `json:"refresh_token"`
 	SetupCompleted bool      `json:"setup_completed"`
+	SidecarToken   string    `json:"sidecar_token,omitempty"`
 }
 
 type loginReq struct {
@@ -99,13 +209,17 @@ type loginReq struct {
 type loginResp struct {
 	UserID             uuid.UUID  `json:"user_id"`
 	GymID              uuid.UUID  `json:"gym_id"`
+	FullName           string     `json:"full_name"`
+	Email              string     `json:"email"`
 	Role               string     `json:"role"`
+	GymName            *string    `json:"gym_name"`
 	AccessToken        string     `json:"access_token"`
 	RefreshToken       string     `json:"refresh_token"`
 	SetupCompleted     bool       `json:"setup_completed"`
 	TrialEndsAt        *time.Time `json:"trial_ends_at,omitempty"`
 	SubscriptionPlan   string     `json:"subscription_plan"`
 	MustChangePassword bool       `json:"must_change_password"`
+	SidecarToken       string     `json:"sidecar_token,omitempty"`
 }
 
 type logoutReq struct {
@@ -174,6 +288,30 @@ type transferReq struct {
 	Code         string    `json:"code,omitempty"`
 }
 
+type installerTokenResp struct {
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+type redeemInstallerReq struct {
+	Token string `json:"token" validate:"required"`
+}
+
+type redeemInstallerResp struct {
+	UserID           uuid.UUID  `json:"user_id"`
+	GymID            uuid.UUID  `json:"gym_id"`
+	FullName         string     `json:"full_name"`
+	Email            string     `json:"email"`
+	Role             string     `json:"role"`
+	GymName          *string    `json:"gym_name"`
+	AccessToken      string     `json:"access_token"`
+	RefreshToken     string     `json:"refresh_token"`
+	SetupCompleted   bool       `json:"setup_completed"`
+	TrialEndsAt      *time.Time `json:"trial_ends_at,omitempty"`
+	SubscriptionPlan string     `json:"subscription_plan"`
+	SidecarToken     string     `json:"sidecar_token,omitempty"`
+}
+
 // ---------------------------------------------------------------------------
 // Handlers — wide and dumb on purpose. All business logic lives in app/.
 // ---------------------------------------------------------------------------
@@ -197,6 +335,7 @@ func (ctrl *AuthController) handleSignup(c *gin.Context) {
 		AccessToken:    out.AccessToken,
 		RefreshToken:   out.RefreshToken,
 		SetupCompleted: out.SetupCompleted,
+		SidecarToken:   ctrl.maybeMintSidecarToken(c, out.UserID, out.GymID),
 	})
 }
 
@@ -213,14 +352,45 @@ func (ctrl *AuthController) handleLogin(c *gin.Context) {
 	utils.JsonResponse(c, http.StatusOK, loginResp{
 		UserID:             out.UserID,
 		GymID:              out.GymID,
+		FullName:           out.FullName,
+		Email:              out.Email,
 		Role:               out.Role,
+		GymName:            out.GymName,
 		AccessToken:        out.AccessToken,
 		RefreshToken:       out.RefreshToken,
 		SetupCompleted:     out.SetupCompleted,
 		TrialEndsAt:        out.TrialEndsAt,
 		SubscriptionPlan:   out.SubscriptionPlan,
 		MustChangePassword: out.MustChangePassword,
+		SidecarToken:       ctrl.maybeMintSidecarToken(c, out.UserID, out.GymID),
 	})
+}
+
+// maybeMintSidecarToken inspects X-Cuadra-Client-ID and (when present) calls
+// BootstrapSidecarToken to give the sidecar caller its long-lived sk_live_*
+// credential in the same response. Idempotent — returns "" when the gym
+// already has an active credential for this client_id, telling the sidecar
+// to keep its previously stored token.
+func (ctrl *AuthController) maybeMintSidecarToken(c *gin.Context, userID, gymID uuid.UUID) string {
+	if ctrl.SidecarBootstrap == nil {
+		return ""
+	}
+	clientID := readClientID(c)
+	if clientID == uuid.Nil {
+		return ""
+	}
+	tok, err := ctrl.SidecarBootstrap.Execute(c.Request.Context(), usersApp.BootstrapSidecarTokenInput{
+		GymID:       gymID,
+		UserID:      userID,
+		ClientID:    clientID,
+		DeviceLabel: c.GetHeader(HeaderDeviceLabel),
+	})
+	if err != nil {
+		// Non-fatal — login already succeeded. The sidecar will re-attempt
+		// on its next login if anything went wrong here.
+		return ""
+	}
+	return tok
 }
 
 func (ctrl *AuthController) handleLogout(c *gin.Context) {
@@ -257,6 +427,87 @@ func (ctrl *AuthController) handleResetPassword(c *gin.Context) {
 	}
 	utils.JsonResponse(c, http.StatusOK, gin.H{"ok": true})
 }
+
+// handleIssueInstaller — POST /api/v1/auth/installer-token (auth required).
+// Owner-only call from the dashboard right after web signup. Returns a
+// single-use code the operator hands to the desktop installer for a
+// zero-password first-launch session.
+func (ctrl *AuthController) handleIssueInstaller(c *gin.Context) {
+	if ctrl.InstallerBootstrap == nil {
+		utils.ErrorResponse(c, http.StatusNotImplemented, errInstallerBootstrapDisabled)
+		return
+	}
+	gymID, ok := middleware.GetGymID(c)
+	if !ok {
+		utils.ErrorResponse(c, http.StatusUnauthorized, errInstallerBootstrapNoAuth)
+		return
+	}
+	userID, _ := middleware.GetUserID(c)
+	out, err := ctrl.InstallerBootstrap.Execute(c.Request.Context(), usersApp.IssueInstallerBootstrapInput{
+		GymID: gymID, UserID: userID,
+	})
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, err)
+		return
+	}
+	utils.JsonResponse(c, http.StatusCreated, installerTokenResp{
+		Token:     out.Token,
+		ExpiresAt: out.ExpiresAt,
+	})
+}
+
+// handleRedeemInstaller — POST /api/v1/auth/redeem-installer (no auth).
+// The desktop's first launch posts the bootstrap code (alongside its
+// X-Cuadra-Client-ID header) to swap it for a full session: operator JWTs
+// + sk_live_* sidecar credential. Single-use; subsequent attempts get 410.
+func (ctrl *AuthController) handleRedeemInstaller(c *gin.Context) {
+	if ctrl.RedeemInstaller == nil {
+		utils.ErrorResponse(c, http.StatusNotImplemented, errInstallerBootstrapDisabled)
+		return
+	}
+	var req redeemInstallerReq
+	if !bind(c, &req) {
+		return
+	}
+	clientID := readClientID(c)
+	out, err := ctrl.RedeemInstaller.Execute(c.Request.Context(), usersApp.RedeemInstallerBootstrapInput{
+		Token:       req.Token,
+		ClientID:    clientID,
+		DeviceLabel: c.GetHeader(HeaderDeviceLabel),
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, installerbootstrap.ErrNotFound):
+			utils.ErrorResponse(c, http.StatusNotFound, err)
+		case errors.Is(err, installerbootstrap.ErrAlreadyRedeemed):
+			utils.ErrorResponse(c, http.StatusGone, err)
+		case errors.Is(err, installerbootstrap.ErrExpired):
+			utils.ErrorResponse(c, http.StatusGone, err)
+		default:
+			utils.ErrorResponse(c, http.StatusInternalServerError, err)
+		}
+		return
+	}
+	utils.JsonResponse(c, http.StatusOK, redeemInstallerResp{
+		UserID:           out.UserID,
+		GymID:            out.GymID,
+		FullName:         out.FullName,
+		Email:            out.Email,
+		Role:             out.Role,
+		GymName:          out.GymName,
+		AccessToken:      out.AccessToken,
+		RefreshToken:     out.RefreshToken,
+		SetupCompleted:   out.SetupCompleted,
+		TrialEndsAt:      out.TrialEndsAt,
+		SubscriptionPlan: out.SubscriptionPlan,
+		SidecarToken:     out.SidecarToken,
+	})
+}
+
+var (
+	errInstallerBootstrapDisabled = errors.New("installer bootstrap not configured on this server")
+	errInstallerBootstrapNoAuth   = errors.New("autenticación requerida")
+)
 
 func (ctrl *AuthController) handleUpdateSetup(c *gin.Context) {
 	gymID, ok := middleware.GetGymID(c)

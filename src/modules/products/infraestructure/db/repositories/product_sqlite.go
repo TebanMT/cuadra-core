@@ -218,29 +218,44 @@ func enqueueProduct(stx *sharedDomain.SqlxTransaction, p *productDomain.Product)
 	if stx.Queue == nil {
 		return nil
 	}
-	cat := ""
-	if p.Category != nil {
-		cat = *p.Category
-	}
-	img := ""
-	if p.ImageURL != nil {
-		img = *p.ImageURL
-	}
+	// All NOT NULL columns must be in the payload — the cloud projector's
+	// UPSERT only emits columns present in the map, and a missing required
+	// column on first-sight INSERT triggers a 23502 NOT NULL violation.
 	payload, err := json.Marshal(map[string]any{
 		"id":            p.ID.String(),
 		"gym_id":        p.GymID.String(),
 		"version":       p.Version,
+		"created_at":    p.CreatedAt.UnixMilli(),
+		"updated_at":    p.UpdatedAt.UnixMilli(),
 		"name":          p.Name,
 		"price":         p.Price,
 		"stock":         p.Stock,
 		"stock_minimum": p.StockMinimum,
-		"category":      cat,
-		"image_url":     img,
+		"category":      strPtrOrNil(p.Category),
+		"image_url":     strPtrOrNil(p.ImageURL),
 		"active":        p.Active,
-		"updated_at":    p.UpdatedAt.UnixMilli(),
 	})
 	if err != nil {
 		return err
 	}
 	return stx.EnqueueSync(context.Background(), "products", p.ID.String(), "upsert", payload, p.Version)
+}
+
+// strPtrOrNil returns the dereferenced string for non-nil pointers and
+// untyped nil otherwise. Using nil instead of "" for nullable Postgres
+// columns avoids relying on the projector's empty-string nullification.
+func strPtrOrNil(p *string) any {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+// uuidPtrOrNil returns the UUID's string form for non-nil pointers and
+// untyped nil otherwise — same rationale as strPtrOrNil for FK columns.
+func uuidPtrOrNil(u *uuid.UUID) any {
+	if u == nil {
+		return nil
+	}
+	return u.String()
 }

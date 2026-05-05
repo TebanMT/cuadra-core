@@ -132,6 +132,40 @@ func (r *MemberSQLiteRepository) GetByID(tx sharedDomain.Transaction, id uuid.UU
 	return memberFromRow(&row), nil
 }
 
+func (r *MemberSQLiteRepository) GetNamesByIDs(tx sharedDomain.Transaction, ids []uuid.UUID) (map[uuid.UUID]string, error) {
+	out := make(map[uuid.UUID]string, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id.String()
+	}
+	q := fmt.Sprintf(
+		`SELECT id, full_name FROM members WHERE id IN (%s) AND deleted_at IS NULL`,
+		strings.Join(placeholders, ","),
+	)
+	type row struct {
+		ID       string `db:"id"`
+		FullName string `db:"full_name"`
+	}
+	var rows []row
+	if err := stx.Select(context.Background(), &rows, q, args...); err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		id, err := uuid.Parse(r.ID)
+		if err != nil {
+			continue
+		}
+		out[id] = r.FullName
+	}
+	return out, nil
+}
+
 func (r *MemberSQLiteRepository) ExistsByGymAndPhone(tx sharedDomain.Transaction, gymID uuid.UUID, phone string) (bool, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	var n int
@@ -442,20 +476,33 @@ func memberFromRow(r *sqliteMemberRow) *memberDomain.Member {
 	return m
 }
 
+func strPtrOrNil(p *string) any {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
 func enqueueMember(stx *sharedDomain.SqlxTransaction, m *memberDomain.Member) error {
 	if stx.Queue == nil {
 		return nil
 	}
+	// All NOT NULL columns must be in the payload — the cloud projector's
+	// UPSERT only emits columns present in the map, and a missing required
+	// column on first-sight INSERT triggers a 23502 NOT NULL violation.
 	payload, err := json.Marshal(map[string]any{
 		"id":              m.ID.String(),
 		"gym_id":          m.GymID.String(),
 		"version":         m.Version,
+		"created_at":      m.CreatedAt.UnixMilli(),
+		"updated_at":      m.UpdatedAt.UnixMilli(),
 		"folio":           m.Folio,
 		"full_name":       m.FullName,
 		"phone":           m.Phone,
+		"email":           strPtrOrNil(m.Email),
 		"status":          m.Status,
 		"enrollment_paid": m.EnrollmentPaid,
-		"updated_at":      m.UpdatedAt.UnixMilli(),
+		"created_by":      m.CreatedBy.String(),
 	})
 	if err != nil {
 		return err

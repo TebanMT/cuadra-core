@@ -33,6 +33,15 @@ type fakeReader struct {
 	exportPayments []reports.PaymentExportRow
 	exportSales    []reports.SaleExportRow
 
+	recentPayments []reports.RecentPaymentRow
+
+	newMembersCount int
+	checkinsCount   int
+	refundsAmount   float64
+	incomeByMethod  map[string]float64
+	topMembers      []reports.TopMemberRow
+	checkinsByDay   []reports.DailyCount
+
 	activeCalls int
 	incomeCalls int
 }
@@ -92,6 +101,27 @@ func (r *fakeReader) ListPaymentsForExport(_ sharedDomain.Transaction, _ uuid.UU
 }
 func (r *fakeReader) ListSalesForExport(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time) ([]reports.SaleExportRow, error) {
 	return r.exportSales, nil
+}
+func (r *fakeReader) CountNewMembersBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time) (int, error) {
+	return r.newMembersCount, nil
+}
+func (r *fakeReader) CountCheckinsBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time) (int, error) {
+	return r.checkinsCount, nil
+}
+func (r *fakeReader) SumRefundsBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time) (float64, error) {
+	return r.refundsAmount, nil
+}
+func (r *fakeReader) IncomeByMethodBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time) (map[string]float64, error) {
+	return r.incomeByMethod, nil
+}
+func (r *fakeReader) TopMembersBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time, _ int) ([]reports.TopMemberRow, error) {
+	return r.topMembers, nil
+}
+func (r *fakeReader) CheckinsDailySeries(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time) ([]reports.DailyCount, error) {
+	return r.checkinsByDay, nil
+}
+func (r *fakeReader) ListRecentPayments(_ sharedDomain.Transaction, _ uuid.UUID, _ int) ([]reports.RecentPaymentRow, error) {
+	return r.recentPayments, nil
 }
 
 // fakeUoW returns a no-op transaction. Reports use cases never actually

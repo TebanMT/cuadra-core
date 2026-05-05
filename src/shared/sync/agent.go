@@ -249,9 +249,26 @@ func (a *Agent) bootstrap(ctx context.Context) error {
 			NextRetryAt:            st.NextRetryAt,
 			InitialSyncCompletedAt: st.InitialSyncCompletedAt,
 		}
-		_ = a.state.LastSyncedAt
+		// Restore the persisted Bearer credential so the agent can resume
+		// syncing after a sidecar restart without waiting for the desktop
+		// to re-push it. The desktop pushes again whenever its access token
+		// rotates (login / refresh / hydrate), keeping this row fresh.
+		if st.SidecarToken != "" {
+			a.token = st.SidecarToken
+		}
 		a.mu.Unlock()
 		return nil
+	})
+}
+
+// SetTokenAndPersist updates the in-memory token AND writes it to sync_state
+// so it survives a sidecar restart. Empty token clears both. Falls back to
+// in-memory only if the persist write fails — the agent stays usable while
+// next bootstrap re-tries the read.
+func (a *Agent) SetTokenAndPersist(ctx context.Context, t string) error {
+	a.SetToken(t)
+	return a.uow.Command(ctx, func(tx sharedDomain.Transaction) error {
+		return SetSidecarToken(ctx, tx, t)
 	})
 }
 

@@ -40,7 +40,10 @@ func (s *StatusController) SetAuth(c *gin.Context) {
 		return
 	}
 	if s.Agent != nil {
-		s.Agent.SetToken(req.Token)
+		// Persist alongside in-memory so the credential survives a sidecar
+		// restart. Persist errors don't fail the call — the agent still has
+		// the token in memory and the next /sync/auth will retry.
+		_ = s.Agent.SetTokenAndPersist(c.Request.Context(), req.Token)
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }

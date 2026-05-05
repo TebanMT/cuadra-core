@@ -31,6 +31,7 @@ type PaymentController struct {
 	Receipt      *billingApp.GenerateReceipt
 	SendReceipt  *billingApp.SendReceipt
 	ListByMember *billingApp.ListMemberPayments
+	ListByGym    *billingApp.ListGymPayments
 	Refund       *billingApp.RefundPayment
 	RegisterSale *billingApp.RegisterSale
 	RefundSale   *billingApp.RefundSale
@@ -44,6 +45,7 @@ func NewPaymentController(
 	receipt *billingApp.GenerateReceipt,
 	send *billingApp.SendReceipt,
 	listByMember *billingApp.ListMemberPayments,
+	listByGym *billingApp.ListGymPayments,
 	refund *billingApp.RefundPayment,
 	registerSale *billingApp.RegisterSale,
 	refundSale *billingApp.RefundSale,
@@ -52,7 +54,7 @@ func NewPaymentController(
 ) *PaymentController {
 	return &PaymentController{
 		Register: register, Settle: settle, Receipt: receipt, SendReceipt: send,
-		ListByMember: listByMember, Refund: refund,
+		ListByMember: listByMember, ListByGym: listByGym, Refund: refund,
 		RegisterSale: registerSale, RefundSale: refundSale, CashClose: cashClose,
 		Tokens: tokens,
 	}
@@ -67,6 +69,7 @@ func (ctrl *PaymentController) RegisterRoutes(r *gin.Engine) {
 		api.GET("/payments/:id/receipt.pdf", ctrl.handleReceipt)
 		api.POST("/payments/:id/send-receipt", ctrl.handleSendReceipt)
 		api.GET("/members/:id/payments", ctrl.handleListByMember)
+		api.GET("/payments", ctrl.handleListByGym)
 		api.POST("/payments/:id/refund", middleware.RequireOwner(), ctrl.handleRefund)
 		api.POST("/sales", ctrl.handleRegisterSale)
 		api.POST("/sales/:id/refund", middleware.RequireOwner(), ctrl.handleRefundSale)
@@ -140,7 +143,9 @@ type refundResp struct {
 type paymentResp struct {
 	ID              uuid.UUID  `json:"id"`
 	Folio           string     `json:"folio"`
+	Reference       string     `json:"reference"`
 	MemberID        *uuid.UUID `json:"member_id,omitempty"`
+	MemberName      string     `json:"member_name,omitempty"`
 	Amount          float64    `json:"amount"`
 	PaymentMethod   string     `json:"payment_method"`
 	Concept         string     `json:"concept"`
@@ -159,6 +164,21 @@ type listPaymentsResp struct {
 	Total    int           `json:"total"`
 	Page     int           `json:"page"`
 	PageSize int           `json:"page_size"`
+}
+
+// listGymPaymentsResp adds a `total_paid` rollup to the listPaymentsResp
+// shape so the cobranza screen can render the day/week/month total in the
+// header without the FE having to sum locally (would be wrong with
+// pagination cutting the page).
+type listGymPaymentsResp struct {
+	Items         []paymentResp `json:"items"`
+	Total         int           `json:"total"`
+	Page          int           `json:"page"`
+	PageSize      int           `json:"page_size"`
+	TotalPaid     float64       `json:"total_paid"`
+	CashTotal     float64       `json:"cash_total"`
+	TransferTotal float64       `json:"transfer_total"`
+	CardTotal     float64       `json:"card_total"`
 }
 
 // ---------------------------------------------------------------------------
@@ -346,6 +366,61 @@ func (ctrl *PaymentController) handleListByMember(c *gin.Context) {
 	}
 	utils.JsonResponse(c, http.StatusOK, listPaymentsResp{
 		Items: items, Total: out.Total, Page: out.Page, PageSize: out.PageSize,
+	})
+}
+
+// handleListByGym backs GET /api/v1/payments — gym-wide cobranza screen.
+// Defaults to "today" when neither from nor to is provided so the operator
+// arriving at the screen sees what's been collected so far.
+func (ctrl *PaymentController) handleListByGym(c *gin.Context) {
+	gymID, _ := middleware.GetGymID(c)
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
+	var from, to time.Time
+	now := time.Now().UTC()
+	if v := c.Query("from"); v != "" {
+		if t, err := time.Parse("2006-01-02", v); err == nil {
+			from = t
+		}
+	}
+	if v := c.Query("to"); v != "" {
+		if t, err := time.Parse("2006-01-02", v); err == nil {
+			to = t
+		}
+	}
+	if from.IsZero() && to.IsZero() {
+		// Default: today only.
+		from = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+		to = from
+	}
+	out, err := ctrl.ListByGym.Execute(c.Request.Context(), billingApp.ListGymPaymentsInput{
+		GymID:         gymID,
+		ConceptFilter: c.Query("concept"),
+		From:          from,
+		To:            to,
+		Page:          page,
+		PageSize:      pageSize,
+	})
+	if err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	items := make([]paymentResp, 0, len(out.Items))
+	for _, p := range out.Items {
+		row := toPaymentResp(p)
+		if p.MemberID != nil {
+			if name, ok := out.MemberNames[*p.MemberID]; ok {
+				row.MemberName = name
+			}
+		}
+		items = append(items, row)
+	}
+	utils.JsonResponse(c, http.StatusOK, listGymPaymentsResp{
+		Items: items, Total: out.Total, Page: out.Page, PageSize: out.PageSize,
+		TotalPaid:     out.TotalPaid,
+		CashTotal:     out.CashTotal,
+		TransferTotal: out.TransferTotal,
+		CardTotal:     out.CardTotal,
 	})
 }
 
@@ -649,6 +724,7 @@ func toPaymentResp(p *paymentDomain.Payment) paymentResp {
 	return paymentResp{
 		ID:              p.ID,
 		Folio:           p.Folio,
+		Reference:       p.Folio, // FE alias — comprobantes use this as folio.
 		MemberID:        p.MemberID,
 		Amount:          p.Amount,
 		PaymentMethod:   p.PaymentMethod,

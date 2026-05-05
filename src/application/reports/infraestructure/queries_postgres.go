@@ -141,14 +141,16 @@ func (r *PostgresReader) ListExpiringSoon(tx sharedDomain.Transaction, gymID uui
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	endDate := today.AddDate(0, 0, days)
 	type row struct {
-		MemberID   uuid.UUID
-		FullName   string
-		Phone      string
-		ExpiryDate time.Time
+		MemberID       uuid.UUID
+		FullName       string
+		Phone          string
+		ExpiryDate     time.Time
+		MembershipType string
 	}
 	var rows []row
 	if err := gormTx.Raw(`
-		SELECT m.id AS member_id, m.full_name, m.phone, ms.expiry_date
+		SELECT m.id AS member_id, m.full_name, m.phone, ms.expiry_date,
+		       ms.type_name_snapshot AS membership_type
 		FROM members m
 		JOIN memberships ms ON ms.member_id = m.id AND ms.deleted_at IS NULL
 		WHERE m.gym_id = ? AND m.deleted_at IS NULL
@@ -162,11 +164,12 @@ func (r *PostgresReader) ListExpiringSoon(tx sharedDomain.Transaction, gymID uui
 	out := make([]reports.MemberExpiringRow, len(rows))
 	for i, x := range rows {
 		out[i] = reports.MemberExpiringRow{
-			MemberID:   x.MemberID,
-			FullName:   x.FullName,
-			Phone:      x.Phone,
-			ExpiryDate: x.ExpiryDate,
-			DaysLeft:   daysBetween(today, x.ExpiryDate),
+			MemberID:       x.MemberID,
+			FullName:       x.FullName,
+			Phone:          x.Phone,
+			ExpiryDate:     x.ExpiryDate,
+			DaysLeft:       daysBetween(today, x.ExpiryDate),
+			MembershipType: x.MembershipType,
 		}
 	}
 	return out, nil
@@ -182,12 +185,17 @@ func (r *PostgresReader) ListExpiredRecoverable(tx sharedDomain.Transaction, gym
 		Phone                string
 		ExpiryDate           time.Time
 		LastContactAttemptAt *time.Time
+		MembershipType       string
+		ContactAttemptsCount int
 	}
 	var rows []row
 	if err := gormTx.Raw(`
 		SELECT m.id AS member_id, m.full_name, m.phone,
 		       ms.expiry_date,
-		       m.last_contact_attempt_at
+		       m.last_contact_attempt_at,
+		       ms.type_name_snapshot AS membership_type,
+		       (SELECT COUNT(1) FROM contact_attempts ca
+		        WHERE ca.member_id = m.id AND ca.deleted_at IS NULL) AS contact_attempts_count
 		FROM members m
 		JOIN memberships ms ON ms.member_id = m.id AND ms.deleted_at IS NULL
 		WHERE m.gym_id = ? AND m.deleted_at IS NULL
@@ -207,6 +215,8 @@ func (r *PostgresReader) ListExpiredRecoverable(tx sharedDomain.Transaction, gym
 			ExpiryDate:           x.ExpiryDate,
 			DaysOverdue:          -daysBetween(today, x.ExpiryDate),
 			LastContactAttemptAt: x.LastContactAttemptAt,
+			MembershipType:       x.MembershipType,
+			ContactAttemptsCount: x.ContactAttemptsCount,
 		}
 	}
 	return out, nil
@@ -456,6 +466,170 @@ func (r *PostgresReader) ListSalesForExport(tx sharedDomain.Transaction, gymID u
 	out := make([]reports.SaleExportRow, len(rows))
 	for i, x := range rows {
 		out[i] = reports.SaleExportRow(x)
+	}
+	return out, nil
+}
+
+// ---------------------------------------------------------------------------
+// Range report extras (UC-036)
+// ---------------------------------------------------------------------------
+
+func (r *PostgresReader) CountNewMembersBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (int, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	var n int64
+	// Calendar-day window: members whose registration falls in [from..to].
+	// created_at is TIMESTAMPTZ; treat it as a date for filtering so the
+	// bounds match the FE's date-only period selector.
+	err := gormTx.Raw(`
+		SELECT COUNT(*) FROM members
+		WHERE gym_id = ? AND deleted_at IS NULL
+		  AND created_at::date >= ? AND created_at::date <= ?`,
+		gymID, from.Format(dateFmt), to.Format(dateFmt)).Scan(&n).Error
+	return int(n), err
+}
+
+func (r *PostgresReader) CountCheckinsBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (int, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	var n int64
+	err := gormTx.Raw(`
+		SELECT COUNT(*) FROM checkins
+		WHERE gym_id = ? AND deleted_at IS NULL
+		  AND result LIKE 'allowed%'
+		  AND checkin_at::date >= ? AND checkin_at::date <= ?`,
+		gymID, from.Format(dateFmt), to.Format(dateFmt)).Scan(&n).Error
+	return int(n), err
+}
+
+func (r *PostgresReader) SumRefundsBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (float64, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	var total float64
+	// Refund rows are stored with negative amounts (concept='refund'); the
+	// dashboard surfaces the absolute value so the operator sees "Devuelto:
+	// $250" not "-$250".
+	err := gormTx.Raw(`
+		SELECT COALESCE(SUM(ABS(amount)), 0) FROM payments
+		WHERE gym_id = ? AND deleted_at IS NULL
+		  AND concept = 'refund'
+		  AND payment_date >= ? AND payment_date <= ?`,
+		gymID, from.Format(dateFmt), to.Format(dateFmt)).Scan(&total).Error
+	return total, err
+}
+
+func (r *PostgresReader) IncomeByMethodBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (map[string]float64, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	type row struct {
+		Method string
+		Total  float64
+	}
+	var rows []row
+	if err := gormTx.Raw(`
+		SELECT payment_method AS method, COALESCE(SUM(amount), 0) AS total
+		FROM payments
+		WHERE gym_id = ? AND deleted_at IS NULL
+		  AND concept <> 'refund'
+		  AND payment_date >= ? AND payment_date <= ?
+		GROUP BY payment_method`,
+		gymID, from.Format(dateFmt), to.Format(dateFmt)).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[string]float64, len(rows))
+	for _, r := range rows {
+		out[r.Method] = r.Total
+	}
+	return out, nil
+}
+
+func (r *PostgresReader) TopMembersBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time, limit int) ([]reports.TopMemberRow, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	if limit <= 0 {
+		limit = 5
+	}
+	type row struct {
+		MemberID      uuid.UUID
+		FullName      string
+		TotalPaid     float64
+		PaymentsCount int
+	}
+	var rows []row
+	if err := gormTx.Raw(`
+		SELECT p.member_id, m.full_name,
+		       COALESCE(SUM(p.amount), 0) AS total_paid,
+		       COUNT(*) AS payments_count
+		FROM payments p
+		JOIN members m ON m.id = p.member_id AND m.deleted_at IS NULL
+		WHERE p.gym_id = ? AND p.deleted_at IS NULL
+		  AND p.concept <> 'refund'
+		  AND p.member_id IS NOT NULL
+		  AND p.payment_date >= ? AND p.payment_date <= ?
+		GROUP BY p.member_id, m.full_name
+		ORDER BY total_paid DESC
+		LIMIT ?`,
+		gymID, from.Format(dateFmt), to.Format(dateFmt), limit).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]reports.TopMemberRow, len(rows))
+	for i, x := range rows {
+		out[i] = reports.TopMemberRow(x)
+	}
+	return out, nil
+}
+
+func (r *PostgresReader) CheckinsDailySeries(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) ([]reports.DailyCount, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	type row struct {
+		Day   time.Time
+		Count int
+	}
+	var rows []row
+	if err := gormTx.Raw(`
+		SELECT checkin_at::date AS day, COUNT(*) AS count
+		FROM checkins
+		WHERE gym_id = ? AND deleted_at IS NULL
+		  AND result LIKE 'allowed%'
+		  AND checkin_at::date >= ? AND checkin_at::date <= ?
+		GROUP BY checkin_at::date
+		ORDER BY checkin_at::date`,
+		gymID, from.Format(dateFmt), to.Format(dateFmt)).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]reports.DailyCount, len(rows))
+	for i, x := range rows {
+		out[i] = reports.DailyCount{Date: x.Day, Count: x.Count}
+	}
+	return out, nil
+}
+
+func (r *PostgresReader) ListRecentPayments(tx sharedDomain.Transaction, gymID uuid.UUID, limit int) ([]reports.RecentPaymentRow, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	if limit <= 0 {
+		limit = 10
+	}
+	type row struct {
+		ID          uuid.UUID
+		MemberID    *uuid.UUID
+		MemberName  *string
+		Amount      float64
+		Method      string
+		Concept     string
+		PaymentDate time.Time
+	}
+	var rows []row
+	if err := gormTx.Raw(`
+		SELECT p.id, p.member_id,
+		       m.full_name AS member_name,
+		       p.amount, p.payment_method AS method, p.concept,
+		       p.payment_date
+		FROM payments p
+		LEFT JOIN members m ON m.id = p.member_id AND m.deleted_at IS NULL
+		WHERE p.gym_id = ? AND p.deleted_at IS NULL
+		  AND p.concept <> 'refund'
+		ORDER BY p.payment_date DESC, p.created_at DESC
+		LIMIT ?`, gymID, limit).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]reports.RecentPaymentRow, len(rows))
+	for i, x := range rows {
+		out[i] = reports.RecentPaymentRow(x)
 	}
 	return out, nil
 }

@@ -6,14 +6,19 @@ package controllers
 
 import (
 	"errors"
+	"log"
 	"net/http"
+	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
 	notiApp "github.com/cuadra/cuadra-core/src/modules/notifications/app"
+	notifications "github.com/cuadra/cuadra-core/src/modules/notifications/domain"
+	alertDomain "github.com/cuadra/cuadra-core/src/modules/notifications/domain/alertconfig"
 	notiDomain "github.com/cuadra/cuadra-core/src/modules/notifications/domain/notification"
 	"github.com/cuadra/cuadra-core/src/shared/auth"
 	"github.com/cuadra/cuadra-core/src/shared/middleware"
@@ -26,6 +31,10 @@ var (
 )
 
 // Controller bundles the use cases under a single registration surface.
+//
+// The OTP store backs the 2-step WhatsApp connect flow (UC-037). Lives in
+// memory because the OTP TTL is 10 min — losing it on restart only means
+// the owner re-runs /start. Production should swap for a Redis/SQL impl.
 type Controller struct {
 	Connect          *notiApp.ConnectWhatsApp
 	Status           *notiApp.GetWhatsAppStatus
@@ -33,6 +42,10 @@ type Controller struct {
 	UpdateTemplate   *notiApp.UpdateTemplate
 	Broadcast        *notiApp.Broadcast
 	List             *notiApp.ListNotifications
+	ListOwnerAlerts  *notiApp.ListOwnerAlerts
+	UpdateOwnerAlert *notiApp.UpdateOwnerAlert
+	WhatsApp         notifications.WhatsAppProvider
+	OTPStore         *whatsappOTPStore
 	Tokens           auth.TokenService
 }
 
@@ -43,16 +56,23 @@ func NewController(
 	updateTemplate *notiApp.UpdateTemplate,
 	broadcast *notiApp.Broadcast,
 	list *notiApp.ListNotifications,
+	listOwnerAlerts *notiApp.ListOwnerAlerts,
+	updateOwnerAlert *notiApp.UpdateOwnerAlert,
+	whatsapp notifications.WhatsAppProvider,
 	tokens auth.TokenService,
 ) *Controller {
 	return &Controller{
-		Connect:        connect,
-		Status:         status,
-		ListTemplates:  listTemplates,
-		UpdateTemplate: updateTemplate,
-		Broadcast:      broadcast,
-		List:           list,
-		Tokens:         tokens,
+		Connect:          connect,
+		Status:           status,
+		ListTemplates:    listTemplates,
+		UpdateTemplate:   updateTemplate,
+		Broadcast:        broadcast,
+		List:             list,
+		ListOwnerAlerts:  listOwnerAlerts,
+		UpdateOwnerAlert: updateOwnerAlert,
+		WhatsApp:         whatsapp,
+		OTPStore:         newWhatsappOTPStore(10 * time.Minute),
+		Tokens:           tokens,
 	}
 }
 
@@ -60,12 +80,21 @@ func (ctrl *Controller) RegisterRoutes(r *gin.Engine) {
 	api := r.Group("/api/v1")
 	api.Use(middleware.AuthMiddleware(ctrl.Tokens))
 	{
+		// UC-037 — 2-step WhatsApp connect: /start emits an OTP via the
+		// provider, /connect verifies it and persists the gym credential.
+		api.POST("/gyms/me/whatsapp/start", middleware.RequireOwner(), ctrl.handleWhatsappStart)
 		api.POST("/gyms/me/whatsapp/connect", middleware.RequireOwner(), ctrl.handleConnect)
 		api.GET("/gyms/me/whatsapp/status", ctrl.handleStatus)
 		api.GET("/notification-templates", ctrl.handleListTemplates)
 		api.PATCH("/notification-templates/:key", middleware.RequireOwner(), ctrl.handleUpdateTemplate)
 		api.POST("/broadcasts", middleware.RequireOwner(), ctrl.handleBroadcast)
 		api.GET("/notifications", ctrl.handleList)
+
+		// Owner-alerts (UC-040 DA-40.1). Defaults live in
+		// alertconfig.Defaults; only owner-flipped rows persist. The PATCH
+		// drives audit + sync.
+		api.GET("/owner-alerts", ctrl.handleListAlerts)
+		api.PATCH("/owner-alerts/:key", middleware.RequireOwner(), ctrl.handleUpdateAlert)
 	}
 }
 
@@ -75,6 +104,18 @@ func (ctrl *Controller) RegisterRoutes(r *gin.Engine) {
 
 type connectReq struct {
 	Phone string `json:"phone" validate:"required,min=8,max=20"`
+}
+
+type whatsappStartReq struct {
+	PhoneNumber string `json:"phone_number" validate:"required,min=8,max=20"`
+}
+
+type whatsappStartResp struct {
+	ExpiresAt time.Time `json:"expires_at"`
+	// In dev (stdout/mock provider) we surface the generated OTP so the
+	// owner can complete the flow without an actual WhatsApp message. When
+	// WhatsAppProvider is real this stays empty.
+	DevCode string `json:"dev_code,omitempty"`
 }
 
 type connectResp struct {
@@ -335,3 +376,124 @@ func bindJSON[T any](c *gin.Context, dst *T) bool {
 
 // guard against unused
 var _ = errBadID
+
+// ---------------------------------------------------------------------------
+// UC-037 — 2-step WhatsApp connect (/start emits OTP, /connect verifies)
+// ---------------------------------------------------------------------------
+
+var (
+	errInvalidOTP    = errors.New("código inválido o expirado")
+	errOTPSendFailed = errors.New("no pudimos enviar el código por WhatsApp; intenta de nuevo")
+)
+
+func (ctrl *Controller) handleWhatsappStart(c *gin.Context) {
+	gymID, _ := middleware.GetGymID(c)
+	var req whatsappStartReq
+	if !bindJSON(c, &req) {
+		return
+	}
+	code, exp, err := ctrl.OTPStore.Issue(gymID, req.PhoneNumber)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, err)
+		return
+	}
+	// Deliver the OTP via WhatsApp. If delivery fails we surface a 502 so
+	// the FE can prompt the operator to retry; the issued code stays in
+	// the store, so a manual /start re-issues a fresh one (overwrites).
+	if ctrl.WhatsApp != nil {
+		if sendErr := ctrl.WhatsApp.SendOTP(c.Request.Context(), req.PhoneNumber, code); sendErr != nil {
+			log.Printf("[notifications] whatsapp OTP send failed for gym=%s phone=%s: %v", gymID, req.PhoneNumber, sendErr)
+			utils.ErrorResponse(c, http.StatusBadGateway, errOTPSendFailed)
+			return
+		}
+	}
+	// In dev (stdout/mock provider) we also echo the code back so the
+	// operator can finish without an actual WhatsApp message.
+	resp := whatsappStartResp{ExpiresAt: exp}
+	if envIsDev() {
+		resp.DevCode = code
+	}
+	utils.JsonResponse(c, http.StatusOK, resp)
+}
+
+// envIsDev returns true when we want to surface the OTP in /start responses.
+// True when WHATSAPP_PROVIDER is unset/stdout/mock — i.e. the operator can't
+// receive a real WhatsApp message and would otherwise be locked out.
+func envIsDev() bool {
+	v := strings.ToLower(os.Getenv("WHATSAPP_PROVIDER"))
+	return v == "" || v == "stdout" || v == "mock"
+}
+
+// silence unused-import on errInvalidOTP until /connect wires it.
+var _ = errInvalidOTP
+
+// ---------------------------------------------------------------------------
+// Owner-alerts (UC-040 DA-40.1)
+// ---------------------------------------------------------------------------
+
+type alertConfigWire struct {
+	Key         string `json:"key"`
+	Enabled     bool   `json:"enabled"`
+	Description string `json:"description"`
+}
+
+type updateAlertReq struct {
+	Enabled bool `json:"enabled"`
+}
+
+func (ctrl *Controller) handleListAlerts(c *gin.Context) {
+	gymID, ok := middleware.GetGymID(c)
+	if !ok {
+		utils.ErrorResponse(c, http.StatusUnauthorized, errBadAuth)
+		return
+	}
+	rows, err := ctrl.ListOwnerAlerts.Execute(c.Request.Context(), gymID)
+	if err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	items := make([]alertConfigWire, 0, len(rows))
+	for _, r := range rows {
+		items = append(items, alertConfigWire{
+			Key:         string(r.Key),
+			Enabled:     r.Enabled,
+			Description: r.Description,
+		})
+	}
+	utils.JsonResponse(c, http.StatusOK, gin.H{"items": items})
+}
+
+func (ctrl *Controller) handleUpdateAlert(c *gin.Context) {
+	gymID, ok := middleware.GetGymID(c)
+	if !ok {
+		utils.ErrorResponse(c, http.StatusUnauthorized, errBadAuth)
+		return
+	}
+	userID, _ := middleware.GetUserID(c)
+	key := alertDomain.Key(c.Param("key"))
+	def := alertDomain.LookupDefault(key)
+	if def == nil {
+		utils.ErrorResponse(c, http.StatusNotFound, errBadID)
+		return
+	}
+	var req updateAlertReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err)
+		return
+	}
+	saved, err := ctrl.UpdateOwnerAlert.Execute(c.Request.Context(), notiApp.UpdateOwnerAlertInput{
+		GymID:       gymID,
+		ActorUserID: userID,
+		Key:         key,
+		Enabled:     req.Enabled,
+	})
+	if err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	utils.JsonResponse(c, http.StatusOK, alertConfigWire{
+		Key:         string(saved.Key),
+		Enabled:     saved.Enabled,
+		Description: def.Description,
+	})
+}

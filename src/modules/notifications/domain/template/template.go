@@ -132,8 +132,23 @@ func DefaultLibrary() []Definition {
 			Variables: []string{"full_name", "gym_name", "temp_password"},
 			Body:      "Hola {full_name}, {gym_name} te creó una cuenta en Cuadra. Tu contraseña temporal: {temp_password}",
 		},
+		{
+			// UC-037 connect-step OTP. Sent from Cuadra's master WhatsApp
+			// business number to the gym owner's number; once verified,
+			// the gym's own number takes over outbound traffic.
+			Key:       "whatsapp_connect_otp",
+			Channel:   ChannelWhatsApp,
+			Category:  CategoryAuthentication,
+			Variables: []string{"code"},
+			Body:      "Tu código de verificación de Cuadra es {code}. Vence en 10 minutos.",
+		},
 	}
 }
+
+// WhatsAppConnectOTPKey is the canonical template key used for the UC-037
+// connect-step verification code. Exposed as a constant so providers and
+// the controller agree on the same wire identifier.
+const WhatsAppConnectOTPKey = "whatsapp_connect_otp"
 
 // LookupDefault returns the default Definition for a key, or nil if unknown.
 func LookupDefault(key string) *Definition {

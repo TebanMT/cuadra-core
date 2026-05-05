@@ -127,6 +127,9 @@ func (s *PostgresStore) UpsertOne(
 		if err := s.insertRow(ctx, g, gymID, item.EntityType, entityID, item.ClientVersion, item.Payload, now, deletedAt); err != nil {
 			return UpsertResult{}, err
 		}
+		if err := project(g, item.EntityType, gymID, entityID, item.Payload); err != nil {
+			return UpsertResult{}, err
+		}
 		return UpsertResult{
 			Status:          StatusAccepted,
 			ServerVersion:   item.ClientVersion,
@@ -138,6 +141,9 @@ func (s *PostgresStore) UpsertOne(
 	if row.Version < item.ClientVersion {
 		// Client is newer — accept.
 		if err := s.updateRow(ctx, g, gymID, item.EntityType, entityID, item.ClientVersion, item.Payload, now, deletedAt); err != nil {
+			return UpsertResult{}, err
+		}
+		if err := project(g, item.EntityType, gymID, entityID, item.Payload); err != nil {
 			return UpsertResult{}, err
 		}
 		return UpsertResult{
@@ -157,6 +163,9 @@ func (s *PostgresStore) UpsertOne(
 			newVersion = item.ClientVersion + 1
 		}
 		if err := s.updateRow(ctx, g, gymID, item.EntityType, entityID, newVersion, item.Payload, now, deletedAt); err != nil {
+			return UpsertResult{}, err
+		}
+		if err := project(g, item.EntityType, gymID, entityID, item.Payload); err != nil {
 			return UpsertResult{}, err
 		}
 		return UpsertResult{
@@ -350,9 +359,17 @@ func (s *PostgresStore) ListForFullSync(
 			   )
 			 ORDER BY server_updated_at ASC, entity_id ASC
 			 LIMIT ?`
+		// Postgres rejects "" bound to a uuid column with SQLSTATE 22P02. The
+		// cursor's EntityID is empty on the very first call (no previous row
+		// to break the timestamp tie against) — substitute uuid.Nil so the
+		// `entity_id > ?` branch matches every real id.
+		entityIDArg := currentCursor.EntityID
+		if entityIDArg == "" {
+			entityIDArg = uuid.Nil.String()
+		}
 		rows, err := g.WithContext(ctx).Raw(q,
 			gymID, entityType,
-			currentCursor.After, currentCursor.After, currentCursor.EntityID,
+			currentCursor.After, currentCursor.After, entityIDArg,
 			remaining+1,
 		).Rows()
 		if err != nil {

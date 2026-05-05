@@ -137,6 +137,15 @@ func (r *MembershipTypeSQLiteRepository) CountActiveMembershipsByType(tx sharedD
 	return n, err
 }
 
+func (r *MembershipTypeSQLiteRepository) CountByGym(tx sharedDomain.Transaction, gymID uuid.UUID) (int, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	var n int
+	err := stx.Get(context.Background(), &n,
+		`SELECT COUNT(1) FROM membership_types WHERE gym_id = ? AND deleted_at IS NULL`,
+		gymID.String())
+	return n, err
+}
+
 func mtToRow(mt *mtDomain.MembershipType) sqliteMTRow {
 	row := sqliteMTRow{
 		ID:             mt.ID.String(),

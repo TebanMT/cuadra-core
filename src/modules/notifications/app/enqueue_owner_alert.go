@@ -10,21 +10,23 @@ import (
 
 	gymRepo "github.com/cuadra/cuadra-core/src/modules/gyms/domain/repository"
 	usersRepo "github.com/cuadra/cuadra-core/src/modules/users/domain/repository"
+	alertDomain "github.com/cuadra/cuadra-core/src/modules/notifications/domain/alertconfig"
 	notiDomain "github.com/cuadra/cuadra-core/src/modules/notifications/domain/notification"
 	notiRepo "github.com/cuadra/cuadra-core/src/modules/notifications/domain/repository"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 )
 
-// OwnerAlertKind enumerates the trigger types covered by UC-040. New kinds
-// can be added without API changes — the variable map is the contract.
-type OwnerAlertKind string
+// OwnerAlertKind aliases the canonical alertconfig.Key — keeping the
+// trigger vocabulary identical to the toggle vocabulary lets the dispatch
+// path consult the config repo directly with no translation step.
+type OwnerAlertKind = alertDomain.Key
 
 const (
-	OwnerAlertLowStock        OwnerAlertKind = "low_stock"
-	OwnerAlertExpiredBatch    OwnerAlertKind = "expired_batch"
-	OwnerAlertCashCloseDiff   OwnerAlertKind = "cash_close_diff"
-	OwnerAlertNoCobrosToday   OwnerAlertKind = "no_cobros_today"
-	OwnerAlertVIPNotPresent   OwnerAlertKind = "vip_not_present"
+	OwnerAlertLowStock         = alertDomain.KeyLowStock
+	OwnerAlertExpiredNoContact = alertDomain.KeyExpiredNoContact
+	OwnerAlertVIPMemberNoVisit = alertDomain.KeyVIPMemberNoVisit
+	OwnerAlertCashCloseDiff    = alertDomain.KeyCashCloseDiff
+	OwnerAlertNoPaymentsToday  = alertDomain.KeyNoPaymentsToday
 )
 
 // EnqueueOwnerAlertInput is what the cron / event hook hands to the use
@@ -47,10 +49,17 @@ type EnqueueOwnerAlertOutput struct {
 
 // EnqueueOwnerAlert is UC-040. The owner is a User row with role=owner —
 // we look up the gym's owner and enqueue a WhatsApp message to them.
+//
+// The Configs repo is consulted before each enqueue: when the owner has
+// disabled the alert key we skip silently (Skipped=true,
+// SkippedReason="alert_disabled"). When Configs is nil — older callers,
+// tests — gating is bypassed and every kind enqueues, so callers that
+// haven't migrated yet keep their existing behaviour.
 type EnqueueOwnerAlert struct {
 	Notifications notiRepo.NotificationRepository
 	Gyms          gymRepo.GymRepository
 	Users         usersRepo.UserRepository
+	Configs       notiRepo.AlertConfigRepository
 	UoW           sharedDomain.UnitOfWork
 }
 
@@ -58,9 +67,16 @@ func NewEnqueueOwnerAlert(
 	notifications notiRepo.NotificationRepository,
 	gyms gymRepo.GymRepository,
 	users usersRepo.UserRepository,
+	configs notiRepo.AlertConfigRepository,
 	uow sharedDomain.UnitOfWork,
 ) *EnqueueOwnerAlert {
-	return &EnqueueOwnerAlert{Notifications: notifications, Gyms: gyms, Users: users, UoW: uow}
+	return &EnqueueOwnerAlert{
+		Notifications: notifications,
+		Gyms:          gyms,
+		Users:         users,
+		Configs:       configs,
+		UoW:           uow,
+	}
 }
 
 func (uc *EnqueueOwnerAlert) Execute(ctx context.Context, in EnqueueOwnerAlertInput) (*EnqueueOwnerAlertOutput, error) {
@@ -75,6 +91,17 @@ func (uc *EnqueueOwnerAlert) Execute(ctx context.Context, in EnqueueOwnerAlertIn
 	}
 
 	err := uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
+		if uc.Configs != nil {
+			enabled, err := IsOwnerAlertEnabled(tx, uc.Configs, in.GymID, in.Kind)
+			if err != nil {
+				return sharedDomain.NewUnexpectedError(err)
+			}
+			if !enabled {
+				out.Skipped = true
+				out.SkippedReason = "alert_disabled"
+				return nil
+			}
+		}
 		gym, err := uc.Gyms.GetByID(tx, in.GymID)
 		if err != nil {
 			return err
@@ -158,11 +185,14 @@ func ownerAlertTemplate(k OwnerAlertKind) (string, bool) {
 	switch k {
 	case OwnerAlertLowStock:
 		return "owner_alert_low_stock", true
-	case OwnerAlertExpiredBatch:
+	case OwnerAlertExpiredNoContact:
 		return "owner_alert_expired_batch", true
 	case OwnerAlertCashCloseDiff:
 		return "owner_alert_cash_close_diff", true
 	default:
+		// vip_member_no_visit and no_payments_today have no matching
+		// WhatsApp template yet — callers see SkippedReason="unknown_alert_kind"
+		// until the template library catches up.
 		return "", false
 	}
 }

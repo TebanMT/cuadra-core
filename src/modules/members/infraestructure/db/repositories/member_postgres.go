@@ -57,6 +57,29 @@ func (r *MemberPostgresRepository) GetByID(tx sharedDomain.Transaction, id uuid.
 	return memberFromModel(&row), nil
 }
 
+func (r *MemberPostgresRepository) GetNamesByIDs(tx sharedDomain.Transaction, ids []uuid.UUID) (map[uuid.UUID]string, error) {
+	out := make(map[uuid.UUID]string, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	var rows []struct {
+		ID       uuid.UUID `gorm:"column:id"`
+		FullName string    `gorm:"column:full_name"`
+	}
+	err := gormTx.Model(&models.MemberModel{}).
+		Select("id", "full_name").
+		Where("id IN ? AND deleted_at IS NULL", ids).
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		out[r.ID] = r.FullName
+	}
+	return out, nil
+}
+
 func (r *MemberPostgresRepository) ExistsByGymAndPhone(tx sharedDomain.Transaction, gymID uuid.UUID, phone string) (bool, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	var n int64

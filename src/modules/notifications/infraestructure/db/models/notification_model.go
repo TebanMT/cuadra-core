@@ -66,3 +66,17 @@ type WhatsAppEventModel struct {
 }
 
 func (WhatsAppEventModel) TableName() string { return "whatsapp_events" }
+
+// AlertConfigModel mirrors `owner_alert_configs`. Composite PK
+// (gym_id, alert_key) — there's no surrogate id; the natural key is the
+// row's identity end-to-end through sync.
+type AlertConfigModel struct {
+	GymID     uuid.UUID  `gorm:"type:uuid;primaryKey;column:gym_id"`
+	AlertKey  string     `gorm:"primaryKey;column:alert_key"`
+	Enabled   bool       `gorm:"not null;default:true;column:enabled"`
+	Version   int        `gorm:"not null;default:1;column:version"`
+	UpdatedAt time.Time  `gorm:"not null;column:updated_at"`
+	DeletedAt *time.Time `gorm:"column:deleted_at"`
+}
+
+func (AlertConfigModel) TableName() string { return "owner_alert_configs" }

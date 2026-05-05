@@ -23,6 +23,8 @@ type MockSent struct {
 	Vars           map[string]string
 	Body           string // rendered body (freeform) or empty for template sends
 	IsFreeform     bool
+	IsOTP          bool   // true when captured via SendOTP
+	OTPCode        string // populated when IsOTP
 	ProviderMsgID  string
 	At             time.Time
 	ForceFailRetry bool
@@ -118,6 +120,36 @@ func (m *MockProvider) RegisterSender(_ context.Context, phone string) (string, 
 	return "MOCK_SENDER_" + phone, nil
 }
 
+// SendOTP captures a UC-037 connect-step OTP. Tests assert against
+// LastSent().OTPCode and IsOTP=true. Honours FailNext / FailNextHard the
+// same way the other send paths do so the controller's error branch is
+// testable.
+func (m *MockProvider) SendOTP(_ context.Context, phone, code string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.FailNextHard {
+		m.FailNextHard = false
+		return notiErrors.ErrSendFailedFinal
+	}
+	if m.FailNext > 0 {
+		m.FailNext--
+		return notiErrors.ErrSendFailedRetry
+	}
+
+	sid := "MOCK" + strings.ReplaceAll(uuid.New().String(), "-", "")[:24]
+	m.Sent = append(m.Sent, MockSent{
+		Recipient:     phone,
+		TemplateKey:   tplDomain.WhatsAppConnectOTPKey,
+		Vars:          map[string]string{"code": code},
+		IsOTP:         true,
+		OTPCode:       code,
+		ProviderMsgID: sid,
+		At:            time.Now().UTC(),
+	})
+	return nil
+}
+
 // SentCount returns how many messages have been captured.
 func (m *MockProvider) SentCount() int {
 	m.mu.Lock()
@@ -171,4 +203,9 @@ func (StdoutProvider) SendFreeform(_ context.Context, cfg notiDomain.GymWhatsApp
 func (StdoutProvider) RegisterSender(_ context.Context, phone string) (string, error) {
 	log.Printf("[whatsapp/stdout] register sender phone=%s", phone)
 	return "STDOUT_SENDER", nil
+}
+
+func (StdoutProvider) SendOTP(_ context.Context, phone, code string) error {
+	log.Printf("[whatsapp/stdout] otp to=%s code=%s", phone, code)
+	return nil
 }

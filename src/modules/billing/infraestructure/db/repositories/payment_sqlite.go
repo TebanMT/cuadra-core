@@ -286,23 +286,27 @@ func enqueuePayment(stx *sharedDomain.SqlxTransaction, p *paymentDomain.Payment)
 	if stx.Queue == nil {
 		return nil
 	}
+	// All NOT NULL columns must be in the payload — the cloud projector's
+	// UPSERT only emits columns present in the map, and a missing required
+	// column on first-sight INSERT triggers a 23502 NOT NULL violation.
 	payload, err := json.Marshal(map[string]any{
 		"id":                p.ID.String(),
 		"gym_id":            p.GymID.String(),
 		"version":           p.Version,
+		"created_at":        p.CreatedAt.UnixMilli(),
+		"updated_at":        p.UpdatedAt.UnixMilli(),
 		"folio":             p.Folio,
-		"member_id":         optStr(p.MemberID),
+		"member_id":         uuidPtrOrNil(p.MemberID),
 		"amount":            p.Amount,
 		"payment_method":    p.PaymentMethod,
 		"concept":           p.Concept,
-		"parent_payment_id": optStr(p.ParentPaymentID),
+		"parent_payment_id": uuidPtrOrNil(p.ParentPaymentID),
 		"discount_amount":   p.DiscountAmount,
-		"discount_reason":   ptrOrEmpty(p.DiscountReason),
+		"discount_reason":   strPtrOrNil(p.DiscountReason),
 		"balance_pending":   p.BalancePending,
 		"payment_date":      p.PaymentDate.UTC().Format(dateLayout),
-		"notes":             ptrOrEmpty(p.Notes),
+		"notes":             strPtrOrNil(p.Notes),
 		"operator_id":       p.OperatorID.String(),
-		"updated_at":        p.UpdatedAt.UnixMilli(),
 	})
 	if err != nil {
 		return err
@@ -310,16 +314,21 @@ func enqueuePayment(stx *sharedDomain.SqlxTransaction, p *paymentDomain.Payment)
 	return stx.EnqueueSync(context.Background(), "payments", p.ID.String(), "upsert", payload, p.Version)
 }
 
-func optStr(u *uuid.UUID) string {
-	if u == nil {
-		return ""
+// strPtrOrNil returns the dereferenced string for non-nil pointers and
+// untyped nil otherwise. Using nil instead of "" for nullable Postgres
+// columns avoids relying on the projector's empty-string nullification.
+func strPtrOrNil(p *string) any {
+	if p == nil {
+		return nil
 	}
-	return u.String()
+	return *p
 }
 
-func ptrOrEmpty(s *string) string {
-	if s == nil {
-		return ""
+// uuidPtrOrNil returns the UUID's string form for non-nil pointers and
+// untyped nil otherwise — same rationale as strPtrOrNil for FK columns.
+func uuidPtrOrNil(u *uuid.UUID) any {
+	if u == nil {
+		return nil
 	}
-	return *s
+	return u.String()
 }
