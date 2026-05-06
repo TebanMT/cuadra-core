@@ -29,8 +29,8 @@ type ListGymPaymentsOutput struct {
 	Total         int
 	Page          int
 	PageSize      int
-	TotalPaid     float64            // sum of non-refund amounts in the filtered window
-	CashTotal     float64            // breakdown by method (excludes refunds + soft-deleted)
+	TotalPaid     float64 // sum of non-refund amounts in the filtered window
+	CashTotal     float64 // breakdown by method (excludes refunds + soft-deleted)
 	TransferTotal float64
 	CardTotal     float64
 	MemberNames   map[uuid.UUID]string // id → full_name for the rows in this page

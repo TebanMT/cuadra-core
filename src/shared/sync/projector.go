@@ -262,9 +262,10 @@ func isTimestampColumn(name string) bool {
 //
 // The sidecar's enqueue helpers default optional `*string` fields to `""`
 // when nil, which round-trips through JSON as the empty string. Postgres
-// distinguishes `''` from NULL — and several nullable columns have CHECK
-// constraints (e.g. `chk_membership_types_frequency`) that explicitly
-// reject `''`. Converting empty strings to nil here unifies the two
+// distinguishes the empty string from NULL — and several nullable
+// columns have CHECK constraints (e.g. `chk_membership_types_frequency`)
+// that explicitly reject empty strings. Converting empty strings to nil
+// here unifies the two
 // representations on the projector boundary, so neither side has to
 // migrate. NOT NULL columns whose payload is genuinely `""` would still
 // fail the constraint after this — but the existing enqueue code never

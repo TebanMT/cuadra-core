@@ -32,19 +32,19 @@ import (
 )
 
 type fixture struct {
-	t           *testing.T
-	db          *sqlx.DB
-	uow         sharedDomain.UnitOfWork
-	gymRepo     *gymRepoLite.GymSQLiteRepository
-	memberRepo  *memRepoLite.MemberSQLiteRepository
-	notiRepo    *notiRepoLite.NotificationSQLiteRepository
-	gymID       uuid.UUID
-	ownerID     uuid.UUID
-	memberID    uuid.UUID
-	planID      uuid.UUID
-	registerUC  *billingApp.RegisterMembershipPayment
-	connectUC   *notiApp.ConnectWhatsApp
-	provider    *whatsapp.MockProvider
+	t          *testing.T
+	db         *sqlx.DB
+	uow        sharedDomain.UnitOfWork
+	gymRepo    *gymRepoLite.GymSQLiteRepository
+	memberRepo *memRepoLite.MemberSQLiteRepository
+	notiRepo   *notiRepoLite.NotificationSQLiteRepository
+	gymID      uuid.UUID
+	ownerID    uuid.UUID
+	memberID   uuid.UUID
+	planID     uuid.UUID
+	registerUC *billingApp.RegisterMembershipPayment
+	connectUC  *notiApp.ConnectWhatsApp
+	provider   *whatsapp.MockProvider
 }
 
 func newFixture(t *testing.T) *fixture {

@@ -9,8 +9,8 @@ import (
 
 	gymRepo "github.com/cuadra/cuadra-core/src/modules/gyms/domain/repository"
 	memRepo "github.com/cuadra/cuadra-core/src/modules/members/domain/repository"
-	notiDomain "github.com/cuadra/cuadra-core/src/modules/notifications/domain/notification"
 	notiErrors "github.com/cuadra/cuadra-core/src/modules/notifications/domain/errors"
+	notiDomain "github.com/cuadra/cuadra-core/src/modules/notifications/domain/notification"
 	notiRepo "github.com/cuadra/cuadra-core/src/modules/notifications/domain/repository"
 	"github.com/cuadra/cuadra-core/src/shared/audit"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"

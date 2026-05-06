@@ -92,6 +92,10 @@ jobs:
         run: go test -tags "server sidecar" -race -count=1 ./...
 
   build:
+    # Solo gastar minutos de runner si lint + test pasan. Si falla
+    # cualquiera de los dos, no tiene sentido cross-compilar — el
+    # binario nunca se va a deployar de todos modos.
+    needs: [lint, test]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

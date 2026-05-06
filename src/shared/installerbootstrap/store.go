@@ -36,13 +36,13 @@ func (s *PostgresStore) Insert(ctx context.Context, gymID, userID uuid.UUID, has
 // see ErrNotFound.
 func (s *PostgresStore) Redeem(ctx context.Context, hash []byte, now time.Time) (Bootstrap, error) {
 	var rec struct {
-		ID                uuid.UUID
-		GymID             uuid.UUID `gorm:"column:gym_id"`
-		CreatedByUserID   uuid.UUID `gorm:"column:created_by_user_id"`
-		CreatedAt         time.Time `gorm:"column:created_at"`
-		ExpiresAt         time.Time `gorm:"column:expires_at"`
-		RedeemedAt        *time.Time `gorm:"column:redeemed_at"`
-		AlreadyRedeemed   bool       `gorm:"column:already_redeemed"`
+		ID              uuid.UUID
+		GymID           uuid.UUID  `gorm:"column:gym_id"`
+		CreatedByUserID uuid.UUID  `gorm:"column:created_by_user_id"`
+		CreatedAt       time.Time  `gorm:"column:created_at"`
+		ExpiresAt       time.Time  `gorm:"column:expires_at"`
+		RedeemedAt      *time.Time `gorm:"column:redeemed_at"`
+		AlreadyRedeemed bool       `gorm:"column:already_redeemed"`
 	}
 	// CTE so we can distinguish "already redeemed" (row exists, redeemed_at
 	// not null) from "expired/never existed" (no row matched the filter).

@@ -147,15 +147,15 @@ type cashTodayWire struct {
 }
 
 type dashboardWire struct {
-	GeneratedAt      time.Time                  `json:"generated_at"`
-	ActiveMembers    kpiTrendWire               `json:"active_members"`
-	IncomeMonth      kpiTrendWire               `json:"income_month"`
-	ExpiringWeek     kpiTrendWire               `json:"expiring_week"`
-	Recoverable      kpiTrendWire               `json:"recoverable"`
-	Income30d        []reportsApp.DailyIncome   `json:"income_30d"`
+	GeneratedAt      time.Time                   `json:"generated_at"`
+	ActiveMembers    kpiTrendWire                `json:"active_members"`
+	IncomeMonth      kpiTrendWire                `json:"income_month"`
+	ExpiringWeek     kpiTrendWire                `json:"expiring_week"`
+	Recoverable      kpiTrendWire                `json:"recoverable"`
+	Income30d        []reportsApp.DailyIncome    `json:"income_30d"`
 	AttentionSummary reportsApp.AttentionSummary `json:"attention_summary"`
-	RecentPayments   []recentPaymentWire        `json:"recent_payments"`
-	CashToday        cashTodayWire              `json:"cash_today"`
+	RecentPayments   []recentPaymentWire         `json:"recent_payments"`
+	CashToday        cashTodayWire               `json:"cash_today"`
 }
 
 func toDashboardWire(d *reportsApp.DashboardOutput) dashboardWire {
@@ -400,16 +400,16 @@ func timePtrToISO(t *time.Time) *string {
 // dashboard's cached widget, attention_required_count is the sum across
 // the six attention summary buckets.
 type rangeWire struct {
-	Period                 string                       `json:"period"`
-	From                   string                       `json:"from"`
-	To                     string                       `json:"to"`
-	Totals                 reportsApp.RangeTotals       `json:"totals"`
-	IncomeByDay            []reportsApp.DailyIncome     `json:"income_by_day"`
-	CheckinsByDay          []reportsApp.DailyCount      `json:"checkins_by_day"`
-	IncomeByMethod         map[string]float64           `json:"income_by_method"`
-	TopMembers             []reportsApp.TopMemberRow    `json:"top_members"`
-	RecentPayments         []recentPaymentWire          `json:"recent_payments"`
-	AttentionRequiredCount int                          `json:"attention_required_count"`
+	Period                 string                    `json:"period"`
+	From                   string                    `json:"from"`
+	To                     string                    `json:"to"`
+	Totals                 reportsApp.RangeTotals    `json:"totals"`
+	IncomeByDay            []reportsApp.DailyIncome  `json:"income_by_day"`
+	CheckinsByDay          []reportsApp.DailyCount   `json:"checkins_by_day"`
+	IncomeByMethod         map[string]float64        `json:"income_by_method"`
+	TopMembers             []reportsApp.TopMemberRow `json:"top_members"`
+	RecentPayments         []recentPaymentWire       `json:"recent_payments"`
+	AttentionRequiredCount int                       `json:"attention_required_count"`
 }
 
 func toRangeWire(r *reportsApp.RangeReportOutput, dash *reportsApp.DashboardOutput) rangeWire {

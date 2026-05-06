@@ -42,16 +42,16 @@ const (
 // in case a future migration / dispute needs it. The cloud is the source of
 // truth for billing — sidecars never see this table.
 type Event struct {
-	ID            uuid.UUID
-	GymID         uuid.UUID
-	Provider      Provider
-	Type          EventType
-	ExternalID    string         // Stripe event id / MP notification id (idempotency)
-	Plan          string         // resulting Gym.SubscriptionPlan
-	Amount        *float64       // optional, what was charged
-	Currency      *string        // "MXN", etc.
-	PeriodEndsAt  *time.Time     // resulting Gym.SubscriptionEndsAt
-	RawPayload    map[string]any // verbatim provider JSON
-	OccurredAt    time.Time      // processor-reported timestamp
-	RecordedAt    time.Time      // when we persisted the row
+	ID           uuid.UUID
+	GymID        uuid.UUID
+	Provider     Provider
+	Type         EventType
+	ExternalID   string         // Stripe event id / MP notification id (idempotency)
+	Plan         string         // resulting Gym.SubscriptionPlan
+	Amount       *float64       // optional, what was charged
+	Currency     *string        // "MXN", etc.
+	PeriodEndsAt *time.Time     // resulting Gym.SubscriptionEndsAt
+	RawPayload   map[string]any // verbatim provider JSON
+	OccurredAt   time.Time      // processor-reported timestamp
+	RecordedAt   time.Time      // when we persisted the row
 }

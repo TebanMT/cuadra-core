@@ -264,9 +264,9 @@ func ensureGymAndOwner(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID, cr
 		if err := tx.Create(&usersModels.UserModel{
 			ID: ownerID, GymID: gymID, Version: 1,
 			CreatedAt: now, UpdatedAt: now,
-			Email: strings.ToLower(strings.TrimSpace(ownerEmail)),
+			Email:        strings.ToLower(strings.TrimSpace(ownerEmail)),
 			PasswordHash: string(hash),
-			FullName: fullName, Role: "owner", Active: true,
+			FullName:     fullName, Role: "owner", Active: true,
 		}).Error; err != nil {
 			return fmt.Errorf("create owner: %w", err)
 		}
@@ -323,13 +323,13 @@ func (s *sourceData) print() {
 }
 
 type srcMembresia struct {
-	ID              int
-	Nombre          string
-	Estado          int
-	FechaCreacion   *time.Time
-	Precio          float64
+	ID                   int
+	Nombre               string
+	Estado               int
+	FechaCreacion        *time.Time
+	Precio               float64
 	Meses, Semanas, Dias int
-	IDTipoMembresia int
+	IDTipoMembresia      int
 }
 
 type srcProducto struct {
@@ -344,15 +344,15 @@ type srcProducto struct {
 }
 
 type srcSocio struct {
-	ID              int
-	Estado          int
-	FechaCreacion   *time.Time
+	ID                       int
+	Estado                   int
+	FechaCreacion            *time.Time
 	Nombre, Paterno, Materno string
-	Telefono        string
-	Observaciones   string
-	Clave           string
-	FechaNacimiento *time.Time
-	Correo          string
+	Telefono                 string
+	Observaciones            string
+	Clave                    string
+	FechaNacimiento          *time.Time
+	Correo                   string
 }
 
 type srcSocioMembresia struct {
@@ -389,10 +389,10 @@ type srcSalida struct {
 }
 
 type srcDetalleSalida struct {
-	ID            int
-	IDProducto    int
+	ID             int
+	IDProducto     int
 	PrecioUnitario float64
-	IDSalida      int
+	IDSalida       int
 }
 
 type srcEntrada struct {
@@ -418,15 +418,15 @@ type srcVisita struct {
 }
 
 type srcCut struct {
-	ID         int
-	Date       *time.Time
-	DateStart  *time.Time
-	DateEnd    *time.Time
-	Estado     int
-	CashStart  float64
-	CashEnd    float64
-	Income     float64
-	Egress     float64
+	ID          int
+	Date        *time.Time
+	DateStart   *time.Time
+	DateEnd     *time.Time
+	Estado      int
+	CashStart   float64
+	CashEnd     float64
+	Income      float64
+	Egress      float64
 	Observation string
 }
 
@@ -437,19 +437,19 @@ type srcCut struct {
 func parseDump(dump string) sourceData {
 	var s sourceData
 	tables := map[string]func([]value){
-		"configuracion":        func(v []value) { c := parseConfiguracion(v); s.config = &c },
-		"usuario":              func(v []value) { s.users = append(s.users, parseUsuario(v)) },
-		"membresia":            func(v []value) { s.memberships = append(s.memberships, parseMembresia(v)) },
-		"producto":             func(v []value) { s.products = append(s.products, parseProducto(v)) },
-		"socio":                func(v []value) { s.socios = append(s.socios, parseSocio(v)) },
-		"sociomembresia":       func(v []value) { s.socioMembs = append(s.socioMembs, parseSocioMembresia(v)) },
-		"sociomembresia_pago":  func(v []value) { s.socioMembsPagos = append(s.socioMembsPagos, parseSocioMembresiaPago(v)) },
-		"salida":               func(v []value) { s.salidas = append(s.salidas, parseSalida(v)) },
-		"detallesalida":        func(v []value) { s.detSalidas = append(s.detSalidas, parseDetalleSalida(v)) },
-		"entrada":              func(v []value) { s.entradas = append(s.entradas, parseEntrada(v)) },
-		"detalleentrada":       func(v []value) { s.detEntradas = append(s.detEntradas, parseDetalleEntrada(v)) },
-		"visita":               func(v []value) { s.visitas = append(s.visitas, parseVisita(v)) },
-		"cut":                  func(v []value) { s.cuts = append(s.cuts, parseCut(v)) },
+		"configuracion":       func(v []value) { c := parseConfiguracion(v); s.config = &c },
+		"usuario":             func(v []value) { s.users = append(s.users, parseUsuario(v)) },
+		"membresia":           func(v []value) { s.memberships = append(s.memberships, parseMembresia(v)) },
+		"producto":            func(v []value) { s.products = append(s.products, parseProducto(v)) },
+		"socio":               func(v []value) { s.socios = append(s.socios, parseSocio(v)) },
+		"sociomembresia":      func(v []value) { s.socioMembs = append(s.socioMembs, parseSocioMembresia(v)) },
+		"sociomembresia_pago": func(v []value) { s.socioMembsPagos = append(s.socioMembsPagos, parseSocioMembresiaPago(v)) },
+		"salida":              func(v []value) { s.salidas = append(s.salidas, parseSalida(v)) },
+		"detallesalida":       func(v []value) { s.detSalidas = append(s.detSalidas, parseDetalleSalida(v)) },
+		"entrada":             func(v []value) { s.entradas = append(s.entradas, parseEntrada(v)) },
+		"detalleentrada":      func(v []value) { s.detEntradas = append(s.detEntradas, parseDetalleEntrada(v)) },
+		"visita":              func(v []value) { s.visitas = append(s.visitas, parseVisita(v)) },
+		"cut":                 func(v []value) { s.cuts = append(s.cuts, parseCut(v)) },
 	}
 	streamInserts(dump, tables)
 	return s
@@ -1059,26 +1059,26 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 		}
 		row := memModels.MembershipTypeModel{
 			ID: id, GymID: gymID, Version: 1,
-			CreatedAt: derefTime(m.FechaCreacion, now),
-			UpdatedAt: now,
-			DeletedAt: deletedAt,
-			Name:      m.Nombre,
-			Price:     m.Precio,
+			CreatedAt:    derefTime(m.FechaCreacion, now),
+			UpdatedAt:    now,
+			DeletedAt:    deletedAt,
+			Name:         m.Nombre,
+			Price:        m.Precio,
 			DurationDays: durationDays(m.Meses, m.Semanas, m.Dias),
-			Active:    m.Estado == 1,
+			Active:       m.Estado == 1,
 		}
 		if err := tx.Create(&row).Error; err != nil {
 			return fmt.Errorf("membresia %d: %w", m.ID, err)
 		}
 		if err := emitSyncEntity(tx, gymID, id, "membership_types", 1, deletedAt, now, map[string]any{
-			"created_at":     row.CreatedAt.UnixMilli(),
-			"updated_at":     row.UpdatedAt.UnixMilli(),
-			"name":           row.Name,
-			"price":          toCents(row.Price),
-			"duration_days":  row.DurationDays,
-			"enrollment_fee": 0,
+			"created_at":      row.CreatedAt.UnixMilli(),
+			"updated_at":      row.UpdatedAt.UnixMilli(),
+			"name":            row.Name,
+			"price":           toCents(row.Price),
+			"duration_days":   row.DurationDays,
+			"enrollment_fee":  0,
 			"maintenance_fee": 0,
-			"active":         row.Active,
+			"active":          row.Active,
 		}); err != nil {
 			return fmt.Errorf("emit membership_types %d: %w", m.ID, err)
 		}
@@ -1100,26 +1100,26 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 		}
 		row := prodModels.ProductModel{
 			ID: id, GymID: gymID, Version: 1,
-			CreatedAt: derefTime(p.FechaCreacion, now),
-			UpdatedAt: now,
-			DeletedAt: deletedAt,
-			Name:      p.Nombre,
-			Price:     p.Precio,
-			Stock:     0,
+			CreatedAt:    derefTime(p.FechaCreacion, now),
+			UpdatedAt:    now,
+			DeletedAt:    deletedAt,
+			Name:         p.Nombre,
+			Price:        p.Precio,
+			Stock:        0,
 			StockMinimum: 0,
-			Active:    p.Estado == 1,
+			Active:       p.Estado == 1,
 		}
 		if err := tx.Create(&row).Error; err != nil {
 			return fmt.Errorf("producto %d: %w", p.ID, err)
 		}
 		if err := emitSyncEntity(tx, gymID, id, "products", 1, deletedAt, now, map[string]any{
-			"created_at":     row.CreatedAt.UnixMilli(),
-			"updated_at":     row.UpdatedAt.UnixMilli(),
-			"name":           row.Name,
-			"price":          toCents(row.Price),
-			"stock":          0,
-			"stock_minimum":  0,
-			"active":         row.Active,
+			"created_at":    row.CreatedAt.UnixMilli(),
+			"updated_at":    row.UpdatedAt.UnixMilli(),
+			"name":          row.Name,
+			"price":         toCents(row.Price),
+			"stock":         0,
+			"stock_minimum": 0,
+			"active":        row.Active,
 		}); err != nil {
 			return fmt.Errorf("emit product %d: %w", p.ID, err)
 		}
@@ -1206,8 +1206,8 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 	membIDs := map[int]uuid.UUID{}
 
 	type prepared struct {
-		legacyID int
-		row      memModels.MembershipModel
+		legacyID     int
+		row          memModels.MembershipModel
 		legacyEstado int
 	}
 	var prep []prepared
@@ -1244,20 +1244,20 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 			status = "cancelled"
 		}
 		prep = append(prep, prepared{
-			legacyID: sm.ID,
+			legacyID:     sm.ID,
 			legacyEstado: sm.Estado,
 			row: memModels.MembershipModel{
 				ID: id, GymID: gymID, Version: 1,
-				CreatedAt: derefTime(sm.FechaCreacion, now),
-				UpdatedAt: now,
-				MemberID: memberID,
-				MembershipTypeID: typeID,
-				TypeNameSnapshot: typeName,
-				PriceSnapshot:    typePrice,
+				CreatedAt:            derefTime(sm.FechaCreacion, now),
+				UpdatedAt:            now,
+				MemberID:             memberID,
+				MembershipTypeID:     typeID,
+				TypeNameSnapshot:     typeName,
+				PriceSnapshot:        typePrice,
 				DurationDaysSnapshot: durationDays(sm.Meses, sm.Semanas, sm.Dias),
-				StartDate:        startOfDay(startDate),
-				ExpiryDate:       startOfDay(expiry),
-				Status:           status,
+				StartDate:            startOfDay(startDate),
+				ExpiryDate:           startOfDay(expiry),
+				Status:               status,
 			},
 		})
 	}
@@ -1289,16 +1289,16 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 			return fmt.Errorf("sociomembresia %d: %w", p.legacyID, err)
 		}
 		if err := emitSyncEntity(tx, gymID, row.ID, "memberships", 1, nil, now, map[string]any{
-			"created_at":              row.CreatedAt.UnixMilli(),
-			"updated_at":              row.UpdatedAt.UnixMilli(),
-			"member_id":               row.MemberID.String(),
-			"membership_type_id":      row.MembershipTypeID.String(),
-			"type_name_snapshot":      row.TypeNameSnapshot,
-			"price_snapshot":          toCents(row.PriceSnapshot),
-			"duration_days_snapshot":  row.DurationDaysSnapshot,
-			"start_date":              dateStr(row.StartDate),
-			"expiry_date":             dateStr(row.ExpiryDate),
-			"status":                  row.Status,
+			"created_at":             row.CreatedAt.UnixMilli(),
+			"updated_at":             row.UpdatedAt.UnixMilli(),
+			"member_id":              row.MemberID.String(),
+			"membership_type_id":     row.MembershipTypeID.String(),
+			"type_name_snapshot":     row.TypeNameSnapshot,
+			"price_snapshot":         toCents(row.PriceSnapshot),
+			"duration_days_snapshot": row.DurationDaysSnapshot,
+			"start_date":             dateStr(row.StartDate),
+			"expiry_date":            dateStr(row.ExpiryDate),
+			"status":                 row.Status,
 		}); err != nil {
 			return fmt.Errorf("emit membership %d: %w", p.legacyID, err)
 		}
@@ -1324,18 +1324,18 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 		}
 		paymentID := legacyID("sociomembresia_pago", p.ID)
 		row := billingModels.PaymentModel{
-			ID: paymentID,
+			ID:    paymentID,
 			GymID: gymID, Version: 1,
-			CreatedAt: derefTime(p.Fecha, now),
-			UpdatedAt: now,
-			DeletedAt: deletedAt,
-			Folio:     fmt.Sprintf("MEM-%05d", p.ID),
-			MemberID:  memberID,
-			Amount:    p.Importe,
+			CreatedAt:     derefTime(p.Fecha, now),
+			UpdatedAt:     now,
+			DeletedAt:     deletedAt,
+			Folio:         fmt.Sprintf("MEM-%05d", p.ID),
+			MemberID:      memberID,
+			Amount:        p.Importe,
 			PaymentMethod: mapPaymentMethod(p.IDTypePayment),
-			Concept:   "membership",
-			PaymentDate: dateOnly(derefTime(p.Fecha, now)),
-			OperatorID:  ownerID,
+			Concept:       "membership",
+			PaymentDate:   dateOnly(derefTime(p.Fecha, now)),
+			OperatorID:    ownerID,
 		}
 		if err := tx.Create(&row).Error; err != nil {
 			return fmt.Errorf("sociomembresia_pago %d: %w", p.ID, err)
@@ -1381,15 +1381,15 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 		}
 		payment := billingModels.PaymentModel{
 			ID: paymentID, GymID: gymID, Version: 1,
-			CreatedAt: derefTime(s.FechaCreacion, now),
-			UpdatedAt: now,
-			DeletedAt: deletedAt,
-			Folio:     fmt.Sprintf("PROD-%05d", s.ID),
-			Amount:    s.Total,
+			CreatedAt:     derefTime(s.FechaCreacion, now),
+			UpdatedAt:     now,
+			DeletedAt:     deletedAt,
+			Folio:         fmt.Sprintf("PROD-%05d", s.ID),
+			Amount:        s.Total,
 			PaymentMethod: mapPaymentMethod(s.IDTypePayment),
-			Concept:   "product",
-			PaymentDate: dateOnly(derefTime(s.FechaCreacion, now)),
-			OperatorID:  ownerID,
+			Concept:       "product",
+			PaymentDate:   dateOnly(derefTime(s.FechaCreacion, now)),
+			OperatorID:    ownerID,
 		}
 		if err := tx.Create(&payment).Error; err != nil {
 			return fmt.Errorf("salida payment %d: %w", s.ID, err)
@@ -1457,11 +1457,11 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 			}
 			item := billingModels.SaleItemModel{
 				ID: itemID, GymID: gymID, Version: 1,
-				CreatedAt: derefTime(s.FechaCreacion, now),
-				UpdatedAt: now,
-				DeletedAt: deletedAt,
-				SaleID:    saleID,
-				ProductID: pUUID,
+				CreatedAt:           derefTime(s.FechaCreacion, now),
+				UpdatedAt:           now,
+				DeletedAt:           deletedAt,
+				SaleID:              saleID,
+				ProductID:           pUUID,
 				ProductNameSnapshot: prodNames[prodID],
 				UnitPriceSnapshot:   g.price,
 				Quantity:            g.qty,
@@ -1471,14 +1471,14 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 				return fmt.Errorf("salida item %d/%d: %w", s.ID, prodID, err)
 			}
 			if err := emitSyncEntity(tx, gymID, itemID, "sale_items", 1, deletedAt, now, map[string]any{
-				"created_at":             item.CreatedAt.UnixMilli(),
-				"updated_at":             item.UpdatedAt.UnixMilli(),
-				"sale_id":                item.SaleID.String(),
-				"product_id":             item.ProductID.String(),
-				"product_name_snapshot":  item.ProductNameSnapshot,
-				"unit_price_snapshot":    toCents(item.UnitPriceSnapshot),
-				"quantity":               item.Quantity,
-				"line_total":             toCents(item.LineTotal),
+				"created_at":            item.CreatedAt.UnixMilli(),
+				"updated_at":            item.UpdatedAt.UnixMilli(),
+				"sale_id":               item.SaleID.String(),
+				"product_id":            item.ProductID.String(),
+				"product_name_snapshot": item.ProductNameSnapshot,
+				"unit_price_snapshot":   toCents(item.UnitPriceSnapshot),
+				"quantity":              item.Quantity,
+				"line_total":            toCents(item.LineTotal),
 			}); err != nil {
 				return fmt.Errorf("emit sale_item %d/%d: %w", s.ID, prodID, err)
 			}
@@ -1486,12 +1486,12 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 			delta := -g.qty
 			movID := legacyID("salida_mov", int(itemID.ID()))
 			mov := prodModels.StockMovementModel{
-				ID: movID,
+				ID:    movID,
 				GymID: gymID, Version: 1,
-				CreatedAt: derefTime(s.FechaCreacion, now),
-				UpdatedAt: now,
-				DeletedAt: deletedAt,
-				ProductID: pUUID,
+				CreatedAt:    derefTime(s.FechaCreacion, now),
+				UpdatedAt:    now,
+				DeletedAt:    deletedAt,
+				ProductID:    pUUID,
 				MovementType: "sale",
 				Delta:        delta,
 				SaleItemID:   &itemID,
@@ -1547,11 +1547,11 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 			cost := g.cost
 			movID := legacyID(fmt.Sprintf("entrada_mov_%d", e.ID), prodID)
 			mov := prodModels.StockMovementModel{
-				ID: movID,
+				ID:    movID,
 				GymID: gymID, Version: 1,
-				CreatedAt: derefTime(e.FechaCreacion, now),
-				UpdatedAt: now,
-				ProductID: pUUID,
+				CreatedAt:    derefTime(e.FechaCreacion, now),
+				UpdatedAt:    now,
+				ProductID:    pUUID,
 				MovementType: "restock",
 				Delta:        g.qty,
 				Cost:         &cost,
@@ -1627,14 +1627,14 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 		}
 		chkID := legacyID("visita", v.ID)
 		row := chkModels.CheckinModel{
-			ID: chkID,
+			ID:    chkID,
 			GymID: gymID, Version: 1,
-			CreatedAt: derefTime(v.FechaCreacion, now),
-			UpdatedAt: now,
-			MemberID:  mid,
-			CheckinAt: derefTime(v.FechaCreacion, now),
-			Method:    "manual",
-			Result:    "allowed_active",
+			CreatedAt:  derefTime(v.FechaCreacion, now),
+			UpdatedAt:  now,
+			MemberID:   mid,
+			CheckinAt:  derefTime(v.FechaCreacion, now),
+			Method:     "manual",
+			Result:     "allowed_active",
 			OperatorID: &ownerID,
 		}
 		if err := tx.Create(&row).Error; err != nil {
@@ -1670,15 +1670,15 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 		}
 		ccID := legacyID("cut", c.ID)
 		row := billingModels.CashCloseEventModel{
-			ID: ccID,
+			ID:    ccID,
 			GymID: gymID, Version: 1,
-			CreatedAt: derefTime(c.Date, now),
-			UpdatedAt: now,
-			DeletedAt: deletedAt,
-			CloseDate: closeDate,
-			CalculatedCash: c.Income - c.Egress + c.CashStart,
+			CreatedAt:         derefTime(c.Date, now),
+			UpdatedAt:         now,
+			DeletedAt:         deletedAt,
+			CloseDate:         closeDate,
+			CalculatedCash:    c.Income - c.Egress + c.CashStart,
 			DiscrepancyReason: obs,
-			ClosedBy: ownerID,
+			ClosedBy:          ownerID,
 		}
 		if err := tx.Create(&row).Error; err != nil {
 			return fmt.Errorf("cut %d: %w", c.ID, err)

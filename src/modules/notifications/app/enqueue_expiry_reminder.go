@@ -38,7 +38,7 @@ func NewEnqueueExpiryReminder(
 
 // expiryStage maps a day-offset to (templateKey, idempotency suffix).
 type expiryStage struct {
-	OffsetDays int
+	OffsetDays  int
 	TemplateKey string
 }
 

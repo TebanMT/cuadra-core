@@ -46,8 +46,8 @@ func (f *fakeStore) Insert(_ context.Context, gymID, clientID, userID uuid.UUID,
 	}{gymID, clientID, userID, hash, deviceLabel}
 	return sidecartoken.Credential{ID: uuid.New(), GymID: gymID, ClientID: clientID, UserID: userID}, nil
 }
-func (f *fakeStore) RevokeActive(context.Context, uuid.UUID, uuid.UUID) error  { return nil }
-func (f *fakeStore) RevokeIdle(context.Context, time.Time) (int64, error)      { return 0, nil }
+func (f *fakeStore) RevokeActive(context.Context, uuid.UUID, uuid.UUID) error { return nil }
+func (f *fakeStore) RevokeIdle(context.Context, time.Time) (int64, error)     { return 0, nil }
 
 func TestBootstrap_MintsWhenNoActiveCredential(t *testing.T) {
 	store := &fakeStore{}

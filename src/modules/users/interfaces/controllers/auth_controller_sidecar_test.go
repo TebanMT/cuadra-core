@@ -56,14 +56,14 @@ func setupSidecarTestDB(t *testing.T) (*sqlx.DB, sharedDomain.UnitOfWork) {
 
 // fakeCloud captures the proxied request and returns a configurable response.
 type fakeCloud struct {
-	srv          *httptest.Server
-	gotPath      string
-	gotMethod    string
-	gotHeaders   http.Header
-	gotBody      []byte
-	respStatus   int
-	respBody     []byte
-	hits         atomic.Int32
+	srv        *httptest.Server
+	gotPath    string
+	gotMethod  string
+	gotHeaders http.Header
+	gotBody    []byte
+	respStatus int
+	respBody   []byte
+	hits       atomic.Int32
 }
 
 func newFakeCloud(t *testing.T) *fakeCloud {

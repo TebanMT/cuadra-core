@@ -60,13 +60,13 @@ func (uc *IssueInstallerBootstrap) Execute(ctx context.Context, in IssueInstalle
 // invokes BootstrapSidecarToken so the desktop receives its sk_live_* in
 // the same response.
 type RedeemInstallerBootstrap struct {
-	Store         installerbootstrap.Store
-	Users         userRepo.UserRepository
-	Gyms          gymRepo.GymRepository
-	UoW           sharedDomain.UnitOfWork
-	Tokens        auth.TokenService
-	SidecarBoot   *BootstrapSidecarToken
-	NowFunc       func() time.Time
+	Store       installerbootstrap.Store
+	Users       userRepo.UserRepository
+	Gyms        gymRepo.GymRepository
+	UoW         sharedDomain.UnitOfWork
+	Tokens      auth.TokenService
+	SidecarBoot *BootstrapSidecarToken
+	NowFunc     func() time.Time
 }
 
 func NewRedeemInstallerBootstrap(

@@ -23,11 +23,11 @@ import (
 type Key string
 
 const (
-	KeyLowStock          Key = "low_stock"
-	KeyExpiredNoContact  Key = "expired_no_contact"
-	KeyVIPMemberNoVisit  Key = "vip_member_no_visit"
-	KeyCashCloseDiff     Key = "cash_close_diff"
-	KeyNoPaymentsToday   Key = "no_payments_today"
+	KeyLowStock         Key = "low_stock"
+	KeyExpiredNoContact Key = "expired_no_contact"
+	KeyVIPMemberNoVisit Key = "vip_member_no_visit"
+	KeyCashCloseDiff    Key = "cash_close_diff"
+	KeyNoPaymentsToday  Key = "no_payments_today"
 )
 
 // Definition is the immutable metadata that backs the GET /owner-alerts

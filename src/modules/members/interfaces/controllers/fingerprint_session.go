@@ -43,7 +43,7 @@ type FingerprintSessionController struct {
 
 type fingerprintSession struct {
 	MemberID      uuid.UUID
-	Status        string  // "waiting" | "capturing" | "success" | "failed"
+	Status        string // "waiting" | "capturing" | "success" | "failed"
 	CapturesDone  int
 	CapturesTotal int
 	LastQuality   *int

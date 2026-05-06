@@ -35,13 +35,13 @@ import (
 
 // Event is the JSON body posted to the configured URL.
 type Event struct {
-	Schema       string    `json:"schema"`
-	GymID        uuid.UUID `json:"gym_id"`
-	MemberID     uuid.UUID `json:"member_id"`
-	MemberName   string    `json:"member_name"`
-	Method       string    `json:"method"`
-	Result       string    `json:"result"` // "allowed_active" | "allowed_expiring_soon"
-	OccurredAt   time.Time `json:"occurred_at"`
+	Schema     string    `json:"schema"`
+	GymID      uuid.UUID `json:"gym_id"`
+	MemberID   uuid.UUID `json:"member_id"`
+	MemberName string    `json:"member_name"`
+	Method     string    `json:"method"`
+	Result     string    `json:"result"` // "allowed_active" | "allowed_expiring_soon"
+	OccurredAt time.Time `json:"occurred_at"`
 }
 
 // Dispatcher is what callers (checkin controller) talk to. The interface is

@@ -66,27 +66,27 @@ func (g *MercadoPagoGateway) Provider() subDomain.Provider { return subDomain.Pr
 // inline-decode the JSON shape rather than importing a SDK to avoid a heavy
 // transitive dep tree for a single endpoint.
 type preapprovalRequest struct {
-	Reason            string                  `json:"reason"`
-	ExternalReference string                  `json:"external_reference"`
-	PayerEmail        string                  `json:"payer_email,omitempty"`
-	BackURL           string                  `json:"back_url"`
-	Status            string                  `json:"status"` // "pending" — payer authorises in MP UI
+	Reason            string                   `json:"reason"`
+	ExternalReference string                   `json:"external_reference"`
+	PayerEmail        string                   `json:"payer_email,omitempty"`
+	BackURL           string                   `json:"back_url"`
+	Status            string                   `json:"status"` // "pending" — payer authorises in MP UI
 	AutoRecurring     preapprovalAutoRecurring `json:"auto_recurring"`
 }
 
 type preapprovalAutoRecurring struct {
-	Frequency        int     `json:"frequency"`
-	FrequencyType    string  `json:"frequency_type"` // "months"
+	Frequency         int     `json:"frequency"`
+	FrequencyType     string  `json:"frequency_type"` // "months"
 	TransactionAmount float64 `json:"transaction_amount"`
-	CurrencyID       string  `json:"currency_id"` // "MXN"
+	CurrencyID        string  `json:"currency_id"` // "MXN"
 }
 
 type preapprovalResponse struct {
-	ID         string `json:"id"`
-	InitPoint  string `json:"init_point"`
-	Status     string `json:"status"`
-	Message    string `json:"message"`
-	Error      string `json:"error"`
+	ID        string `json:"id"`
+	InitPoint string `json:"init_point"`
+	Status    string `json:"status"`
+	Message   string `json:"message"`
+	Error     string `json:"error"`
 }
 
 func (g *MercadoPagoGateway) StartCheckout(ctx context.Context, in subDomain.CheckoutRequest) (subDomain.CheckoutResult, error) {

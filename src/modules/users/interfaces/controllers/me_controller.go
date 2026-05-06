@@ -114,19 +114,19 @@ type gymProfileWire struct {
 // pointer so callers can patch a subset; the controller maps to the domain
 // ProfileUpdate (which uses the BE-internal naming).
 type updateGymProfileWireReq struct {
-	Name               *string `json:"name,omitempty"`
-	City               *string `json:"city,omitempty"`
-	WhatsAppNumber     *string `json:"whatsapp_number,omitempty"`
-	Timezone           *string `json:"timezone,omitempty"`
-	RFC                *string `json:"rfc,omitempty"`
-	LegalName          *string `json:"legal_name,omitempty"`
-	PostalCode         *string `json:"postal_code,omitempty"`
-	TaxRegime          *string `json:"tax_regime,omitempty"`
-	LogoURL            *string `json:"logo_url,omitempty"`
-	PrimaryColor       *string `json:"primary_color,omitempty"`
-	SecondaryColor     *string `json:"secondary_color,omitempty"`
-	OpenTime           *string `json:"open_time,omitempty"`
-	CloseTime          *string `json:"close_time,omitempty"`
+	Name                *string `json:"name,omitempty"`
+	City                *string `json:"city,omitempty"`
+	WhatsAppNumber      *string `json:"whatsapp_number,omitempty"`
+	Timezone            *string `json:"timezone,omitempty"`
+	RFC                 *string `json:"rfc,omitempty"`
+	LegalName           *string `json:"legal_name,omitempty"`
+	PostalCode          *string `json:"postal_code,omitempty"`
+	TaxRegime           *string `json:"tax_regime,omitempty"`
+	LogoURL             *string `json:"logo_url,omitempty"`
+	PrimaryColor        *string `json:"primary_color,omitempty"`
+	SecondaryColor      *string `json:"secondary_color,omitempty"`
+	OpenTime            *string `json:"open_time,omitempty"`
+	CloseTime           *string `json:"close_time,omitempty"`
 	KioskVolume         *int    `json:"kiosk_volume,omitempty"`
 	KioskFeedbackTTLMs  *int    `json:"kiosk_feedback_ttl_ms,omitempty"`
 	AccessWebhookURL    *string `json:"access_webhook_url,omitempty"`
@@ -135,13 +135,13 @@ type updateGymProfileWireReq struct {
 
 // setupStatusWire mirrors cuadra-desktop's SetupStatus from useSetupStatus.
 type setupStatusWire struct {
-	CurrentStep          int               `json:"current_step"`
-	SetupCompleted       bool              `json:"setup_completed"`
-	GymName              *string           `json:"gym_name"`
-	City                 *string           `json:"city"`
-	WhatsApp             *string           `json:"whatsapp"`
-	MembershipTypesCount int               `json:"membership_types_count"`
-	PaymentMethods       map[string]bool   `json:"payment_methods"`
+	CurrentStep          int             `json:"current_step"`
+	SetupCompleted       bool            `json:"setup_completed"`
+	GymName              *string         `json:"gym_name"`
+	City                 *string         `json:"city"`
+	WhatsApp             *string         `json:"whatsapp"`
+	MembershipTypesCount int             `json:"membership_types_count"`
+	PaymentMethods       map[string]bool `json:"payment_methods"`
 }
 
 // ---------------------------------------------------------------------------

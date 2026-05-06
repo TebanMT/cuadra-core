@@ -9,10 +9,10 @@ import (
 	"github.com/google/uuid"
 
 	gymRepo "github.com/cuadra/cuadra-core/src/modules/gyms/domain/repository"
-	usersRepo "github.com/cuadra/cuadra-core/src/modules/users/domain/repository"
 	alertDomain "github.com/cuadra/cuadra-core/src/modules/notifications/domain/alertconfig"
 	notiDomain "github.com/cuadra/cuadra-core/src/modules/notifications/domain/notification"
 	notiRepo "github.com/cuadra/cuadra-core/src/modules/notifications/domain/repository"
+	usersRepo "github.com/cuadra/cuadra-core/src/modules/users/domain/repository"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 )
 

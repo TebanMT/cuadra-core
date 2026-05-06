@@ -1,11 +1,11 @@
 // Package controllers exposes the subscription HTTP surface.
 //
 // Two flavors of routes:
-//   1. /api/v1/subscriptions/me     — authenticated, owner-only, gym reads its
-//                                      own subscription state + recent events.
-//   2. /api/v1/webhooks/{stripe,mercadopago}
-//                                   — public, signature-verified by helper,
-//                                      processor pushes events here.
+//  1. /api/v1/subscriptions/me     — authenticated, owner-only, gym reads its
+//     own subscription state + recent events.
+//  2. /api/v1/webhooks/{stripe,mercadopago}
+//     — public, signature-verified by helper,
+//     processor pushes events here.
 //
 // Webhook signature verification is intentionally a small set of helpers (see
 // `helpers.go`) so we can swap in real Stripe/MP SDKs once we have keys

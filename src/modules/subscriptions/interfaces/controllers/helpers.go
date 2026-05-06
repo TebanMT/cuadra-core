@@ -17,9 +17,9 @@ import (
 // Mercado Pago keeps its inline HMAC since MP has no Go SDK helper.
 //
 // Behaviour:
-//   * If a secret is empty (env var unset), verification *passes* in
+//   - If a secret is empty (env var unset), verification *passes* in
 //     development. This unblocks local testing before keys are provisioned.
-//   * In production (StrictDev=true) an empty secret rejects every request.
+//   - In production (StrictDev=true) an empty secret rejects every request.
 type WebhookVerifier struct {
 	StripeSecret      string
 	MercadoPagoSecret string

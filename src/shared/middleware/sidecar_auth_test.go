@@ -19,12 +19,12 @@ import (
 
 // fakeStore is an in-memory sidecartoken.Store used by middleware tests.
 type fakeStore struct {
-	cred       sidecartoken.Credential
-	hash       []byte
-	notFound   bool
-	touched    int32
-	touchErr   error
-	lookupErr  error
+	cred      sidecartoken.Credential
+	hash      []byte
+	notFound  bool
+	touched   int32
+	touchErr  error
+	lookupErr error
 }
 
 func (f *fakeStore) LookupActiveByHash(ctx context.Context, hash []byte) (sidecartoken.Credential, error) {

@@ -12,8 +12,8 @@ import (
 	"github.com/twilio/twilio-go/client"
 
 	notiApp "github.com/cuadra/cuadra-core/src/modules/notifications/app"
-	eventDomain "github.com/cuadra/cuadra-core/src/modules/notifications/domain/event"
 	notiErrors "github.com/cuadra/cuadra-core/src/modules/notifications/domain/errors"
+	eventDomain "github.com/cuadra/cuadra-core/src/modules/notifications/domain/event"
 	"github.com/cuadra/cuadra-core/src/shared/utils"
 )
 

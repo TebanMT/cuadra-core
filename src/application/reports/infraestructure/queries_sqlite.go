@@ -7,16 +7,16 @@
 // (CUADRA-SPEC §offline-first).
 //
 // Schema differences vs Postgres that drove these queries:
-//   * UUIDs are TEXT (`gym_id.String()` at the binding edge).
-//   * created_at/updated_at/checkin_at/last_contact_attempt_at are stored as
+//   - UUIDs are TEXT (`gym_id.String()` at the binding edge).
+//   - created_at/updated_at/checkin_at/last_contact_attempt_at are stored as
 //     INTEGER unix milliseconds — date casting goes through
 //     `date(col/1000, 'unixepoch')`.
-//   * payment_date / start_date / expiry_date / birthdate are TEXT in
+//   - payment_date / start_date / expiry_date / birthdate are TEXT in
 //     `YYYY-MM-DD`, so direct lexicographic comparisons work.
-//   * Money is stored in cents (INTEGER); we divide by 100 at the edge to
+//   - Money is stored in cents (INTEGER); we divide by 100 at the edge to
 //     match the float64 contract on Reader.
-//   * `EXTRACT(MONTH/DAY FROM birthdate)` becomes `strftime('%m'/'%d', …)`.
-//   * Postgres `DISTINCT ON` is rewritten as a `ROW_NUMBER() OVER (...)`
+//   - `EXTRACT(MONTH/DAY FROM birthdate)` becomes `strftime('%m'/'%d', …)`.
+//   - Postgres `DISTINCT ON` is rewritten as a `ROW_NUMBER() OVER (...)`
 //     window function (SQLite ≥3.25 has these).
 package infraestructure
 
