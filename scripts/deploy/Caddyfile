@@ -1,0 +1,52 @@
+# Caddyfile — reverse proxy api.cuadra.app → cuadra-server (127.0.0.1:8080).
+#
+# Caddy maneja TLS automáticamente vía Let's Encrypt (HTTP-01 challenge).
+# Se instala en /etc/caddy/Caddyfile y se recarga con:
+#   sudo systemctl reload caddy
+#
+# Test config:
+#   sudo caddy validate --config /etc/caddy/Caddyfile
+#
+# Reload sin downtime:
+#   sudo systemctl reload caddy
+#
+# Logs:
+#   journalctl -u caddy -f
+
+api.cuadra.app {
+	# Subir el límite de body — los uploads de fotos de socios pueden pesar.
+	# Cuadra valida tamaño en aplicación; esto solo evita el 413 del proxy.
+	request_body {
+		max_size 25MB
+	}
+
+	# Encabezados de seguridad básicos. CORS lo maneja la app (depende del
+	# origin), aquí solo ponemos los static.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# Removemos el header `Server` por defecto (info disclosure mínima).
+		-Server
+	}
+
+	# Proxy al binario Go en localhost.
+	reverse_proxy 127.0.0.1:8080 {
+		# Health checks pasivos — si el upstream está caído, Caddy lo marca y
+		# devuelve 502 sin esperar timeout.
+		fail_duration 10s
+		max_fails 3
+
+		# Headers para que la app sepa el client real (rate-limit, logs, etc).
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+
+	# Logs estructurados a journal. Si quieres archivo separado, cambiar por:
+	#   output file /var/log/caddy/api-access.log
+	log {
+		output stderr
+		format json
+	}
+}

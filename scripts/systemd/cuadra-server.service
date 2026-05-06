@@ -1,0 +1,45 @@
+[Unit]
+Description=Cuadra Server (cloud API)
+Documentation=https://github.com/esteban/cuadra-core
+After=network-online.target postgresql.service
+Wants=network-online.target
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=cuadra
+Group=cuadra
+WorkingDirectory=/opt/cuadra
+ExecStart=/opt/cuadra/bin/cuadra-server
+EnvironmentFile=/opt/cuadra/cuadra-server.env
+
+# Restart policy — si el binario crashea, reintenta cada 5s.
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Logs — al journal, capturable con `journalctl -u cuadra-server -f`.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cuadra-server
+
+# Hardening (defense in depth — el proceso no necesita más que su workdir).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/cuadra /var/log/cuadra
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+
+# Límites razonables para un CX33 (8 GB RAM).
+LimitNOFILE=65536
+MemoryMax=4G
+
+[Install]
+WantedBy=multi-user.target

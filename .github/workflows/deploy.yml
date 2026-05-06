@@ -1,0 +1,195 @@
+# Deploy cuadra-server → Hetzner CX33.
+#
+# Triggered automáticamente en push a main, después de que CI pasa.
+# Reusa el binario que `build` ya compiló (no recompila) y lo manda al
+# servidor con el mismo flujo que scripts/deploy/02-deploy-binary.sh:
+# scp atómico → rsync migraciones → psql → systemctl restart.
+#
+# Required GitHub repo secrets (Settings → Secrets and variables →
+# Actions → Repository secrets):
+#
+#   DEPLOY_HOST          IP o hostname del Hetzner. Ej: 204.168.214.238
+#                        o api.cuadra.app. Para el SSH conviene la IP
+#                        directa y reservar api.cuadra.app para el smoke
+#                        test, pero cualquiera funciona.
+#
+#   DEPLOY_SSH_KEY       Private key (formato OpenSSH, completa con
+#                        BEGIN/END) de un par dedicado para el deploy.
+#                        Genera uno aparte de tu key personal con:
+#                          ssh-keygen -t ed25519 -f deploy_key -C "gha-deploy"
+#                        Sube la pública a /home/cuadra/.ssh/authorized_keys
+#                        en el server (append, no overwrite).
+#
+#   DEPLOY_KNOWN_HOSTS   Output de `ssh-keyscan -H <DEPLOY_HOST>`.
+#                        Esto fija el host key para evitar MITM y
+#                        confirmaciones interactivas. Regenerar si el
+#                        servidor se reinstala (cambian las host keys).
+#
+# Optional secrets:
+#
+#   SMOKE_TEST_URL       URL pública del health endpoint para verificar
+#                        después del restart. Default: https://api.cuadra.app/health
+#                        Si todavía no tienes DNS configurado, puedes
+#                        ponerle https://<DEPLOY_HOST>/health (con el
+#                        cert self-signed que Caddy usa antes del
+#                        primer ACME) — el step lo deja como warning si
+#                        falla, no como error.
+
+name: Deploy cuadra-server
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+# Solo un deploy a la vez. Si hay otro push mientras este corre, se
+# encola; no cancelamos in-progress porque a media transferencia el
+# servicio queda en estado raro.
+concurrency:
+  group: deploy-cuadra-server
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # Solo si CI pasó (o si fue gatillado a mano).
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main')
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    environment:
+      # Marca el deploy como "production" en GitHub Environments —
+      # útil para protected deploys + manual approval si decides
+      # activarlo en Settings → Environments.
+      name: production
+      url: https://api.cuadra.app
+
+    steps:
+      - name: Checkout (para migraciones SQL)
+        uses: actions/checkout@v4
+
+      - name: Descargar binario del run de CI
+        # Cuando lo dispara workflow_run, el artefacto vive en el run
+        # que lo gatilló — no en este. Por eso filtramos por run-id.
+        if: github.event_name == 'workflow_run'
+        uses: actions/download-artifact@v4
+        with:
+          name: cuadra-server-linux-amd64
+          path: bin/
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Build (fallback para workflow_dispatch)
+        # workflow_dispatch no tiene artefacto previo. Cross-compilamos
+        # acá mismo con la misma flag config que CI.
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GOOS: linux
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: |
+          # Setup-go a mano porque solo entramos a este branch a veces.
+          curl -fsSL https://go.dev/dl/go1.25.3.linux-amd64.tar.gz \
+            | sudo tar -C /usr/local -xz
+          export PATH=$PATH:/usr/local/go/bin
+          go build -tags server -trimpath -ldflags="-s -w" \
+            -o bin/cuadra-server-linux-amd64 ./cmd/server
+
+      - name: Verificar binario
+        run: |
+          test -x bin/cuadra-server-linux-amd64
+          ls -lh bin/cuadra-server-linux-amd64
+          file bin/cuadra-server-linux-amd64
+
+      - name: Setup SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+
+      - name: Configurar known_hosts
+        # No usamos ssh-keyscan en vivo — eso sería TOFU y MITMable.
+        # El secret DEPLOY_KNOWN_HOSTS lo regeneras a mano con:
+        #   ssh-keyscan -H <DEPLOY_HOST> | base64
+        # (o sin base64 si prefieres pegarlo plano en el secret).
+        env:
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          echo "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Subir binario (atómico)
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          REMOTE_BIN=/opt/cuadra/bin/cuadra-server
+          scp bin/cuadra-server-linux-amd64 \
+            cuadra@${DEPLOY_HOST}:${REMOTE_BIN}.new
+          ssh cuadra@${DEPLOY_HOST} "
+            set -e
+            chmod +x ${REMOTE_BIN}.new
+            mv ${REMOTE_BIN}.new ${REMOTE_BIN}
+          "
+
+      - name: Sincronizar migraciones SQL
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          rsync -avz --delete \
+            db_migrations/postgres/ \
+            cuadra@${DEPLOY_HOST}:/opt/cuadra/migrations/
+
+      - name: Aplicar migraciones
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          ssh cuadra@${DEPLOY_HOST} bash -s <<'EOF'
+          set -euo pipefail
+          source /opt/cuadra/cuadra-server.env
+          for f in $(ls -1 /opt/cuadra/migrations/*.sql | sort); do
+            echo "  applying $(basename "$f")"
+            psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -f "$f" >/dev/null
+          done
+          echo "✓ Migraciones aplicadas"
+          EOF
+
+      - name: Reiniciar cuadra-server
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          ssh cuadra@${DEPLOY_HOST} 'sudo /bin/systemctl restart cuadra-server'
+
+          # Esperamos a que systemd reporte active. Si en 30s no está
+          # corriendo, falla el deploy y nos avisa.
+          for i in $(seq 1 15); do
+            status=$(ssh cuadra@${DEPLOY_HOST} 'sudo /bin/systemctl is-active cuadra-server' || true)
+            if [ "$status" = "active" ]; then
+              echo "✓ cuadra-server activo"
+              exit 0
+            fi
+            echo "(intento $i) status=$status — esperando..."
+            sleep 2
+          done
+
+          echo "::error::cuadra-server no quedó activo después del restart"
+          ssh cuadra@${DEPLOY_HOST} 'sudo /bin/systemctl status cuadra-server --no-pager -l | tail -30'
+          ssh cuadra@${DEPLOY_HOST} 'sudo /bin/journalctl -u cuadra-server -n 50 --no-pager'
+          exit 1
+
+      - name: Smoke test (público)
+        # No es bloqueante — si DNS o cert TLS aún no están listos,
+        # solo emite warning. La verificación dura es el `is-active`
+        # del paso anterior.
+        continue-on-error: true
+        env:
+          URL: ${{ secrets.SMOKE_TEST_URL || 'https://api.cuadra.app/health' }}
+        run: |
+          echo "→ GET ${URL}"
+          curl --fail --show-error --silent --max-time 10 -i "${URL}" || \
+            echo "::warning::Smoke test falló — revisa DNS / cert TLS / endpoint /health"
