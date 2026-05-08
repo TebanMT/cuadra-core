@@ -4,7 +4,7 @@
 #   - lint:   gofmt + go vet (servidor + sidecar).
 #   - test:   go test -tags "server sidecar" con Postgres real (las
 #             migraciones se aplican antes de los tests).
-#   - build:  cross-compile cuadra-server linux/amd64 — verifica que el
+#   - build:  cross-compile tinta-server linux/amd64 — verifica que el
 #             binario que se va a deployar de verdad linkea sin warnings.
 #
 # El job `deploy` vive en deploy.yml y se gatea con éxito de estos tres.
@@ -55,14 +55,14 @@ jobs:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_USER: cuadra
-          POSTGRES_PASSWORD: cuadra_dev
-          POSTGRES_DB: cuadra
+          POSTGRES_USER: tinta
+          POSTGRES_PASSWORD: tinta_dev
+          POSTGRES_DB: tinta
         ports:
           - 5432:5432
         # Health check para que el step que sigue espere a que arranque.
         options: >-
-          --health-cmd "pg_isready -U cuadra -d cuadra"
+          --health-cmd "pg_isready -U tinta -d tinta"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
@@ -71,8 +71,8 @@ jobs:
       # Las dos formas que el repo usa: DB_URL la lee el Makefile,
       # DATABASE_URL la leen los tests de integración (sidecartoken,
       # etc). Apuntan al mismo Postgres del service container.
-      DB_URL: postgresql://cuadra:cuadra_dev@localhost:5432/cuadra?sslmode=disable
-      DATABASE_URL: postgresql://cuadra:cuadra_dev@localhost:5432/cuadra?sslmode=disable
+      DB_URL: postgresql://tinta:tinta_dev@localhost:5432/tinta?sslmode=disable
+      DATABASE_URL: postgresql://tinta:tinta_dev@localhost:5432/tinta?sslmode=disable
 
     steps:
       - uses: actions/checkout@v4
@@ -106,30 +106,30 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
-      - name: Cross-compile cuadra-server (linux/amd64)
+      - name: Cross-compile tinta-server (linux/amd64)
         env:
           GOOS: linux
           GOARCH: amd64
           CGO_ENABLED: "0"
         run: |
           go build -tags server -trimpath -ldflags="-s -w" \
-            -o bin/cuadra-server-linux-amd64 ./cmd/server
-          ls -lh bin/cuadra-server-linux-amd64
+            -o bin/tinta-server-linux-amd64 ./cmd/server
+          ls -lh bin/tinta-server-linux-amd64
 
       - name: Build sidecar (host arch, CGO)
         # Solo verificamos que linkee — el binario que de verdad se
         # bundlea con Tauri lo construye cuadra-desktop en su propio CI.
         env:
           CGO_ENABLED: "1"
-        run: go build -tags sidecar -o bin/cuadra-sidecar ./cmd/sidecar
+        run: go build -tags sidecar -o bin/tinta-sidecar ./cmd/sidecar
 
-      - name: Subir artefacto (cuadra-server linux/amd64)
+      - name: Subir artefacto (tinta-server linux/amd64)
         # Lo guardamos para que deploy.yml lo descargue sin recompilar.
         # Retención corta — solo se usa en el deploy inmediato.
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@v4
         with:
-          name: cuadra-server-linux-amd64
-          path: bin/cuadra-server-linux-amd64
+          name: tinta-server-linux-amd64
+          path: bin/tinta-server-linux-amd64
           retention-days: 7
           if-no-files-found: error

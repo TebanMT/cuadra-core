@@ -1,6 +1,6 @@
-# Deploy de cuadra-server a Hetzner
+# Deploy de tinta-server a Hetzner
 
-Pipeline para llevar `cuadra-server` (API cloud) de cero a producción
+Pipeline para llevar `tinta-server` (API cloud) de cero a producción
 en un Hetzner CX33 fresh con Ubuntu 24.04.
 
 > Si solo vas a hacer **redeploy de un cambio de código** después del
@@ -15,10 +15,10 @@ laptop (tú)
    │  ssh cuadra @ deploys de rutina
    ▼
 Hetzner CX33 (Helsinki)        ← public IP, ufw 22/80/443
-   ├── Caddy   :80 :443        → reverse proxy api.cuadra.app
+   ├── Caddy   :80 :443        → reverse proxy api.entinta.app
    │     │
    │     ▼
-   ├── cuadra-server :8080     ← Go binary, systemd service
+   ├── tinta-server :8080     ← Go binary, systemd service
    │     │
    │     ▼
    ├── Postgres 16  :5432      ← localhost only
@@ -26,7 +26,7 @@ Hetzner CX33 (Helsinki)        ← public IP, ufw 22/80/443
    └── pg_dump → Cloudflare R2 ← cron diario 03:15 UTC
 ```
 
-DNS: `api.cuadra.app A 204.168.214.238` (record proxied=OFF en Cloudflare,
+DNS: `api.entinta.app A 204.168.214.238` (record proxied=OFF en Cloudflare,
 porque Caddy ya saca cert Let's Encrypt — si lo proxeas, el HTTP-01
 challenge se rompe a menos que actives "Full strict" + cert).
 
@@ -50,7 +50,7 @@ ssh root@204.168.214.238 'bash /tmp/00-bootstrap.sh'
 ```
 
 Esto instala Caddy, Postgres 16, Go 1.25.3, ufw + fail2ban, crea el
-usuario `cuadra` con sudo limitado a `systemctl restart cuadra-server`,
+usuario `cuadra` con sudo limitado a `systemctl restart tinta-server`,
 y endurece SSH (no root password, no password auth).
 
 ### 3. Postgres: crear DB
@@ -70,28 +70,28 @@ Generar los secretos en tu laptop:
 
 ```bash
 echo "JWT_SECRET=$(openssl rand -base64 64 | tr -d '\n')"
-echo "CUADRA_SMK_BASE64=$(openssl rand -base64 32)"
+echo "TINTA_SMK_BASE64=$(openssl rand -base64 32)"
 ```
 
-Crear `cuadra-server.env` localmente (NO lo commits — el repo solo tiene
+Crear `tinta-server.env` localmente (NO lo commits — el repo solo tiene
 el `.example`):
 
 ```bash
-cp scripts/deploy/cuadra-server.env.example /tmp/cuadra-server.env
-$EDITOR /tmp/cuadra-server.env   # mete DATABASE_URL, JWT_SECRET, SMK, etc.
+cp scripts/deploy/tinta-server.env.example /tmp/tinta-server.env
+$EDITOR /tmp/tinta-server.env   # mete DATABASE_URL, JWT_SECRET, SMK, etc.
 ```
 
 Subirlo al server con permisos correctos:
 
 ```bash
-scp /tmp/cuadra-server.env root@204.168.214.238:/tmp/
+scp /tmp/tinta-server.env root@204.168.214.238:/tmp/
 ssh root@204.168.214.238 '
-  install -o cuadra -g cuadra -m 600 /tmp/cuadra-server.env /opt/cuadra/cuadra-server.env
-  rm /tmp/cuadra-server.env
+  install -o tinta -g tinta -m 600 /tmp/tinta-server.env /opt/tinta/tinta-server.env
+  rm /tmp/tinta-server.env
 '
 
 # Borrar la copia local también — fue temporal.
-rm /tmp/cuadra-server.env
+rm /tmp/tinta-server.env
 ```
 
 ### 5. Instalar systemd unit + Caddyfile
@@ -100,9 +100,9 @@ rm /tmp/cuadra-server.env
 SERVER=204.168.214.238 bash scripts/deploy/install-system-files.sh
 ```
 
-> Antes de este paso el DNS `api.cuadra.app → 204.168.214.238` ya tiene
+> Antes de este paso el DNS `api.entinta.app → 204.168.214.238` ya tiene
 > que estar propagado. Caddy va a sacar el cert TLS la primera vez que
-> alguien hace HTTP a `api.cuadra.app`. Verifica con `dig api.cuadra.app`.
+> alguien hace HTTP a `api.entinta.app`. Verifica con `dig api.entinta.app`.
 
 ### 6. Primer deploy del binario
 
@@ -114,13 +114,13 @@ Esto cross-compila para `linux/amd64`, sube el binario, corre las
 migraciones SQL, y reinicia el servicio. Logs:
 
 ```bash
-ssh cuadra@204.168.214.238 'sudo journalctl -u cuadra-server -f'
+ssh tinta@204.168.214.238 'sudo journalctl -u tinta-server -f'
 ```
 
 Smoke test desde tu laptop:
 
 ```bash
-curl -i https://api.cuadra.app/health
+curl -i https://api.entinta.app/health
 ```
 
 ### 7. Backups a R2 (opcional pero recomendado)
@@ -145,7 +145,7 @@ Eso es todo. El script:
 3. `rsync` de las migraciones SQL.
 4. `psql -f` de cada migración nueva (idempotentes — el server las
    chequea por nombre, así que repetir está bien si las hiciste así).
-5. `sudo systemctl restart cuadra-server`.
+5. `sudo systemctl restart tinta-server`.
 6. Smoke check al endpoint local.
 
 Flags útiles:
@@ -161,40 +161,40 @@ SERVER=... SKIP_RESTART=1 bash scripts/deploy/02-deploy-binary.sh
 
 ## Cambios de configuración del sistema
 
-Si tocas `cuadra-server.service` o el `Caddyfile` en este repo:
+Si tocas `tinta-server.service` o el `Caddyfile` en este repo:
 
 ```bash
 SERVER=204.168.214.238 bash scripts/deploy/install-system-files.sh
 ```
 
 Si tocas el `.env` en el server: nada automatizado — edítalo a mano y
-`sudo systemctl restart cuadra-server`.
+`sudo systemctl restart tinta-server`.
 
 ## Troubleshooting rápido
 
 ```bash
 # ¿Está corriendo el server?
-ssh cuadra@$SERVER 'sudo systemctl status cuadra-server'
+ssh tinta@$SERVER 'sudo systemctl status tinta-server'
 
 # Logs en vivo
-ssh cuadra@$SERVER 'sudo journalctl -u cuadra-server -f'
+ssh tinta@$SERVER 'sudo journalctl -u tinta-server -f'
 
 # Logs de Caddy (TLS, requests cortados)
-ssh cuadra@$SERVER 'sudo journalctl -u caddy -f'
+ssh tinta@$SERVER 'sudo journalctl -u caddy -f'
 
 # ¿Postgres responde?
-ssh cuadra@$SERVER 'sudo -u postgres psql -c "\l" | grep cuadra'
+ssh tinta@$SERVER 'sudo -u postgres psql -c "\l" | grep cuadra'
 
 # ¿El binario corre a mano? (debug de configuración)
-ssh cuadra@$SERVER '
-  source /opt/cuadra/cuadra-server.env
-  /opt/cuadra/bin/cuadra-server
+ssh tinta@$SERVER '
+  source /opt/tinta/tinta-server.env
+  /opt/tinta/bin/tinta-server
 '
 ```
 
 ## Rollback
 
-Cada deploy sobrescribe `/opt/cuadra/bin/cuadra-server`. No hay
+Cada deploy sobrescribe `/opt/tinta/bin/tinta-server`. No hay
 versiones; si necesitas volver atrás, build con el commit anterior y
 re-deploy. Si el rollback es urgente:
 

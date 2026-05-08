@@ -9,14 +9,14 @@ Corre en **cada PR + push a main + workflow_dispatch**.
 |---|---|
 | `lint` | `gofmt -l` (debe estar vacío) + `go vet` con tag `server` y `sidecar`. |
 | `test` | Levanta Postgres 16 como service, aplica `db_migrations/postgres/`, y corre `go test -tags "server sidecar" -race -count=1 ./...`. Esto incluye los integration tests que gatean en `DATABASE_URL`. |
-| `build` | Cross-compila `cuadra-server` para `linux/amd64` con `CGO_ENABLED=0` y verifica que el sidecar también compile (CGO on, host arch). En `push` a main sube el binario como artifact para que `deploy.yml` lo reuse. |
+| `build` | Cross-compila `tinta-server` para `linux/amd64` con `CGO_ENABLED=0` y verifica que el sidecar también compile (CGO on, host arch). En `push` a main sube el binario como artifact para que `deploy.yml` lo reuse. |
 
 ### `deploy.yml`
 Corre en **push a main (después de CI) y workflow_dispatch manual**.
 
-Reusa el binario de CI (no recompila), lo manda al Hetzner CX33 con `scp` atómico, sincroniza `db_migrations/postgres/`, las aplica con `psql -v ON_ERROR_STOP=1`, y reinicia `cuadra-server` vía `sudo systemctl`.
+Reusa el binario de CI (no recompila), lo manda al Hetzner CX33 con `scp` atómico, sincroniza `db_migrations/postgres/`, las aplica con `psql -v ON_ERROR_STOP=1`, y reinicia `tinta-server` vía `sudo systemctl`.
 
-Si `cuadra-server` no queda `is-active` en 30s, falla el job y dumpea `journalctl -u cuadra-server -n 50`.
+Si `tinta-server` no queda `is-active` en 30s, falla el job y dumpea `journalctl -u tinta-server -n 50`.
 
 ## Configuración inicial (una sola vez)
 
@@ -25,23 +25,23 @@ Si `cuadra-server` no queda `is-active` en 30s, falla el job y dumpea `journalct
 En tu laptop, **no reuses tu key personal**:
 
 ```bash
-ssh-keygen -t ed25519 -f ~/.ssh/cuadra-deploy -C "gha-deploy@cuadra-core" -N ""
+ssh-keygen -t ed25519 -f ~/.ssh/tinta-deploy -C "gha-deploy@tinta" -N ""
 ```
 
-Eso genera `~/.ssh/cuadra-deploy` (privada) y `~/.ssh/cuadra-deploy.pub` (pública).
+Eso genera `~/.ssh/tinta-deploy` (privada) y `~/.ssh/tinta-deploy.pub` (pública).
 
 ### 2. Autorizar la key pública en el server
 
 ```bash
-cat ~/.ssh/cuadra-deploy.pub | ssh cuadra@204.168.214.238 \
+cat ~/.ssh/tinta-deploy.pub | ssh tinta@204.168.214.238 \
   'cat >> ~/.ssh/authorized_keys'
 ```
 
 Verifica que entra:
 
 ```bash
-ssh -i ~/.ssh/cuadra-deploy cuadra@204.168.214.238 'whoami'
-# → cuadra
+ssh -i ~/.ssh/tinta-deploy tinta@204.168.214.238 'whoami'
+# → tinta
 ```
 
 ### 3. Capturar el host key del server
@@ -58,10 +58,10 @@ Repo → **Settings → Secrets and variables → Actions → New repository sec
 
 | Nombre | Valor |
 |---|---|
-| `DEPLOY_HOST` | `204.168.214.238` (o `api.cuadra.app` cuando el DNS esté listo) |
-| `DEPLOY_SSH_KEY` | Contenido completo de `~/.ssh/cuadra-deploy` (incluyendo `-----BEGIN OPENSSH PRIVATE KEY-----` y `-----END...-----`) |
+| `DEPLOY_HOST` | `204.168.214.238` (o `api.entinta.app` cuando el DNS esté listo) |
+| `DEPLOY_SSH_KEY` | Contenido completo de `~/.ssh/tinta-deploy` (incluyendo `-----BEGIN OPENSSH PRIVATE KEY-----` y `-----END...-----`) |
 | `DEPLOY_KNOWN_HOSTS` | Contenido completo de `/tmp/known_hosts` |
-| `SMOKE_TEST_URL` | (opcional) `https://api.cuadra.app/health`. Default si no se setea. |
+| `SMOKE_TEST_URL` | (opcional) `https://api.entinta.app/health`. Default si no se setea. |
 
 ### 5. Configurar el environment "production" (opcional)
 
@@ -83,9 +83,9 @@ Si no lo configuras, el workflow corre sin gating manual — el merge a main ya 
      - scp atómico
      - rsync migraciones
      - psql -f de cada *.sql
-     - sudo systemctl restart cuadra-server
+     - sudo systemctl restart tinta-server
      - poll is-active hasta 30s
-     - smoke test https://api.cuadra.app/health
+     - smoke test https://api.entinta.app/health
 4. Ves "✓" en el PR + check verde en Actions.
 ```
 
@@ -95,7 +95,7 @@ Total: ~5-6 min desde merge hasta servicio reiniciado.
 
 Cuando quieres deployar un commit que no está en main, o re-correr el último deploy:
 
-1. **Actions** tab → **Deploy cuadra-server** → **Run workflow** → elegir branch/tag.
+1. **Actions** tab → **Deploy tinta-server** → **Run workflow** → elegir branch/tag.
 2. El workflow recompila desde el código del branch elegido (no usa artifact, porque no hubo CI).
 
 Para rollback rápido:
@@ -118,14 +118,14 @@ Si la deploy key se compromete:
 
 ```bash
 # 1. Generar nueva.
-ssh-keygen -t ed25519 -f ~/.ssh/cuadra-deploy-new -C "gha-deploy@cuadra-core" -N ""
+ssh-keygen -t ed25519 -f ~/.ssh/tinta-deploy-new -C "gha-deploy@tinta" -N ""
 
 # 2. Autorizar la nueva.
-cat ~/.ssh/cuadra-deploy-new.pub | ssh cuadra@$DEPLOY_HOST 'cat >> ~/.ssh/authorized_keys'
+cat ~/.ssh/tinta-deploy-new.pub | ssh tinta@$DEPLOY_HOST 'cat >> ~/.ssh/authorized_keys'
 
 # 3. Quitar la vieja.
-ssh cuadra@$DEPLOY_HOST '
-  grep -v "gha-deploy@cuadra-core" ~/.ssh/authorized_keys > /tmp/ak
+ssh tinta@$DEPLOY_HOST '
+  grep -v "gha-deploy@tinta" ~/.ssh/authorized_keys > /tmp/ak
   mv /tmp/ak ~/.ssh/authorized_keys
   chmod 600 ~/.ssh/authorized_keys
 '
@@ -133,24 +133,24 @@ ssh cuadra@$DEPLOY_HOST '
 
 # 4. Update secret DEPLOY_SSH_KEY en GitHub con la nueva privada.
 # 5. Borrá la key vieja localmente.
-shred -u ~/.ssh/cuadra-deploy ~/.ssh/cuadra-deploy.pub
-mv ~/.ssh/cuadra-deploy-new ~/.ssh/cuadra-deploy
-mv ~/.ssh/cuadra-deploy-new.pub ~/.ssh/cuadra-deploy.pub
+shred -u ~/.ssh/tinta-deploy ~/.ssh/tinta-deploy.pub
+mv ~/.ssh/tinta-deploy-new ~/.ssh/tinta-deploy
+mv ~/.ssh/tinta-deploy-new.pub ~/.ssh/tinta-deploy.pub
 ```
 
 ## Troubleshooting
 
 **`Permission denied (publickey)` al hacer scp:**
-- La pub no quedó en `~/.ssh/authorized_keys` del usuario `cuadra`. Verifica con `ssh -i ~/.ssh/cuadra-deploy cuadra@$DEPLOY_HOST 'cat ~/.ssh/authorized_keys'`.
+- La pub no quedó en `~/.ssh/authorized_keys` del usuario `tinta`. Verifica con `ssh -i ~/.ssh/tinta-deploy tinta@$DEPLOY_HOST 'cat ~/.ssh/authorized_keys'`.
 
 **`Host key verification failed`:**
 - `DEPLOY_KNOWN_HOSTS` está vacío o desfasado. Re-genera con `ssh-keyscan -H` y reemplaza el secret.
 
 **`sudo: a password is required`:**
-- El sudoers de `00-bootstrap.sh` no se aplicó. Verifica `/etc/sudoers.d/cuadra-systemctl` en el server.
+- El sudoers de `00-bootstrap.sh` no se aplicó. Verifica `/etc/sudoers.d/tinta-systemctl` en el server.
 
 **Migraciones fallan con `permission denied for schema public`:**
-- El user `cuadra` no tiene permisos. Re-correr `01-create-db.sh` (es idempotente y rota el GRANT).
+- El user `tinta` no tiene permisos. Re-correr `01-create-db.sh` (es idempotente y rota el GRANT).
 
 **Tests pasan en local pero no en CI:**
 - En CI se aplican migraciones desde cero contra Postgres limpio. Si tu test asume datos, agrega un seed/setup propio.

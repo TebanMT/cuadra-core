@@ -274,7 +274,7 @@ func main() {
 		AllowedOrigins: parseOrigins(envOrDefault("CORS_ALLOWED_ORIGINS", "http://localhost:5174")),
 	}))
 	r.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "cuadra-server"})
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "tinta-server"})
 	})
 	authCtrl.RegisterRoutes(r)
 	authCtrl.RegisterUploadsRoute(r)
@@ -309,7 +309,7 @@ func main() {
 	go expiryScheduler.Start(bgCtx)
 
 	port := envOrDefault("PORT", "8080")
-	log.Printf("cuadra-server starting on :%s", port)
+	log.Printf("tinta-server starting on :%s", port)
 	if err := r.Run(":" + port); err != nil {
 		log.Fatalf("gin: %v", err)
 	}

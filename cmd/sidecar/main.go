@@ -333,7 +333,7 @@ func main() {
 	port := envOrDefault("SIDECAR_PORT", "9090")
 	// ADR-003 §2.2: print the port to stdout so Tauri can capture it.
 	fmt.Printf("LISTENING_ON=%s\n", port)
-	log.Printf("cuadra-sidecar starting on 127.0.0.1:%s db=%s", port, dbPath)
+	log.Printf("tinta-sidecar starting on 127.0.0.1:%s db=%s", port, dbPath)
 	if err := r.Run("127.0.0.1:" + port); err != nil {
 		log.Fatalf("gin: %v", err)
 	}
@@ -356,9 +356,9 @@ func mustEnsureSidecarClientID(uow sharedDomain.UnitOfWork) (uuid.UUID, string) 
 	}
 	label, err := os.Hostname()
 	if err != nil || label == "" {
-		label = "cuadra-sidecar"
+		label = "tinta-sidecar"
 	}
-	if v := os.Getenv("CUADRA_DEVICE_LABEL"); v != "" {
+	if v := os.Getenv("TINTA_DEVICE_LABEL"); v != "" {
 		label = v
 	}
 	return id, label

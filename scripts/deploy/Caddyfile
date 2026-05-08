@@ -1,4 +1,4 @@
-# Caddyfile — reverse proxy api.cuadra.app → cuadra-server (127.0.0.1:8080).
+# Caddyfile — reverse proxy api.entinta.app → tinta-server (127.0.0.1:8080).
 #
 # Caddy maneja TLS automáticamente vía Let's Encrypt (HTTP-01 challenge).
 # Se instala en /etc/caddy/Caddyfile y se recarga con:
@@ -13,7 +13,7 @@
 # Logs:
 #   journalctl -u caddy -f
 
-api.cuadra.app {
+api.entinta.app {
 	# Subir el límite de body — los uploads de fotos de socios pueden pesar.
 	# Cuadra valida tamaño en aplicación; esto solo evita el 413 del proxy.
 	request_body {

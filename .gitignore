@@ -1,5 +1,14 @@
 tmp/
+
+# Cualquier .env (variables runtime). NUNCA se commitean — contienen
+# JWT_SECRET, TINTA_SMK_BASE64, DATABASE_URL con password, API keys de
+# Stripe/MP/Resend/Twilio, etc. Filtración = compromiso total.
+# Solo los `.example` (templates sin valores reales) se versionan.
 .env
+.env.*
+!.env.example
+!*.env.example
+
 *.db
 *.db-journal
 *.db-shm

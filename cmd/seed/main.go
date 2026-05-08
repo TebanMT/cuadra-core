@@ -31,7 +31,7 @@ import (
 func main() {
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
-		dsn = "postgresql://cuadra:cuadra_dev@localhost:5432/cuadra?sslmode=disable"
+		dsn = "postgresql://tinta:tinta_dev@localhost:5432/tinta?sslmode=disable"
 	}
 	db := infraDB.InitPostgres(dsn)
 	defer infraDB.ClosePostgres()

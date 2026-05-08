@@ -1,5 +1,5 @@
 [Unit]
-Description=Cuadra Server (cloud API)
+Description=Tinta Server (cloud API)
 Documentation=https://github.com/esteban/cuadra-core
 After=network-online.target postgresql.service
 Wants=network-online.target
@@ -7,11 +7,11 @@ Requires=postgresql.service
 
 [Service]
 Type=simple
-User=cuadra
-Group=cuadra
-WorkingDirectory=/opt/cuadra
-ExecStart=/opt/cuadra/bin/cuadra-server
-EnvironmentFile=/opt/cuadra/cuadra-server.env
+User=tinta
+Group=tinta
+WorkingDirectory=/opt/tinta
+ExecStart=/opt/tinta/bin/tinta-server
+EnvironmentFile=/opt/tinta/tinta-server.env
 
 # Restart policy — si el binario crashea, reintenta cada 5s.
 Restart=on-failure
@@ -19,17 +19,17 @@ RestartSec=5s
 StartLimitIntervalSec=60
 StartLimitBurst=5
 
-# Logs — al journal, capturable con `journalctl -u cuadra-server -f`.
+# Logs — al journal, capturable con `journalctl -u tinta-server -f`.
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=cuadra-server
+SyslogIdentifier=tinta-server
 
 # Hardening (defense in depth — el proceso no necesita más que su workdir).
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/cuadra /var/log/cuadra
+ReadWritePaths=/var/lib/tinta /var/log/tinta
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true

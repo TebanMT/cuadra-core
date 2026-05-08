@@ -4,8 +4,8 @@
 # Qué hace:
 #   1. Actualiza el sistema y agrega los repos que necesitamos.
 #   2. Instala paquetes: Caddy, PostgreSQL 16, Go, ufw, fail2ban.
-#   3. Crea el usuario `cuadra` (sin password, solo SSH key) y le da sudo
-#      sin password para systemctl restart cuadra-server.
+#   3. Crea el usuario `tinta` (sin password, solo SSH key) y le da sudo
+#      sin password para systemctl restart tinta-server.
 #   4. Configura ufw (firewall): SSH/22, HTTP/80, HTTPS/443.
 #   5. Endurece SSH: deshabilita login root + password auth.
 #
@@ -24,26 +24,67 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 # ── 1. Sistema base ─────────────────────────────────────────────────
+# Esperar a que cualquier `unattended-upgrades` que arrancó al boot
+# termine — sino el `apt-get install` siguiente puede competir por el
+# lock y dejar paquetes a medias.
+while pgrep -x unattended-upgrade >/dev/null 2>&1; do
+  echo "→ esperando que termine unattended-upgrades..."
+  sleep 5
+done
+
 apt-get update
 apt-get -y full-upgrade
+
+# Instalación en una pasada. Dividida visualmente por categoría para
+# debug si algún paquete falta en la distribución elegida.
 apt-get -y install \
   ca-certificates curl gnupg lsb-release \
   ufw fail2ban unattended-upgrades \
-  postgresql-16 postgresql-contrib-16 \
+  postgresql postgresql-contrib \
   build-essential git tmux jq htop \
   rsync
 
+# Sanity check post-install — `apt-get -y install` con muchos paquetes
+# puede devolver 0 aunque uno específico haya fallado. Verificar que los
+# críticos quedaron bien antes de seguir.
+id postgres >/dev/null 2>&1 || {
+  echo "::error:: PostgreSQL no se instaló — el user 'postgres' no existe."
+  echo "Reintentando install explícito..."
+  apt-get update
+  apt-get -y install postgresql postgresql-contrib
+  id postgres >/dev/null
+}
+command -v psql >/dev/null || {
+  echo "::error:: cliente psql no disponible después del install."
+  exit 1
+}
+echo "✓ Postgres listo: $(psql --version | head -1)"
+
 # ── 2. Caddy (HTTPS reverse proxy con cert auto) ───────────────────
-if ! command -v caddy >/dev/null; then
+# Re-instala si el binario falta O si /etc/caddy no existe (señal de
+# install corrupto del paso anterior). Idempotente — si ya está bien,
+# no hace nada destructivo.
+if ! command -v caddy >/dev/null 2>&1 || [ ! -d /etc/caddy ]; then
+  apt-get -y install debian-keyring debian-archive-keyring apt-transport-https
+
   curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
     | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+
+  # `> file` (no `tee`) para sobrescribir limpio cualquier basura previa.
   curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
-    | tee /etc/apt/sources.list.d/caddy-stable.list
+    > /etc/apt/sources.list.d/caddy-stable.list
+
   apt-get update
   apt-get -y install caddy
+
+  # Sanity check — si esto falla, abortamos. Mejor que un 404 silencioso
+  # cuando el primer deploy intente plantar el Caddyfile.
+  command -v caddy >/dev/null
+  test -d /etc/caddy
+  echo "✓ Caddy instalado: $(caddy version)"
 fi
 
-# ── 3. Go (para compilar cuadra-server in-place o si scp builds) ───
+# ── 3. Go (para compilar tinta-server in-place o si scp builds) ───
 GO_VERSION="1.25.3"
 if ! command -v go >/dev/null || [[ "$(go version)" != *"go${GO_VERSION}"* ]]; then
   curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tgz
@@ -54,27 +95,27 @@ if ! command -v go >/dev/null || [[ "$(go version)" != *"go${GO_VERSION}"* ]]; t
   ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
 fi
 
-# ── 4. Usuario `cuadra` ─────────────────────────────────────────────
-if ! id -u cuadra >/dev/null 2>&1; then
-  useradd -m -s /bin/bash cuadra
-  usermod -aG sudo cuadra
+# ── 4. Usuario `tinta` ─────────────────────────────────────────────
+if ! id -u tinta >/dev/null 2>&1; then
+  useradd -m -s /bin/bash tinta
+  usermod -aG sudo tinta
 fi
 
-# Copiar la SSH key del root para que el deploy pueda hacer ssh cuadra@host.
-mkdir -p /home/cuadra/.ssh
-chmod 700 /home/cuadra/.ssh
+# Copiar la SSH key del root para que el deploy pueda hacer ssh tinta@host.
+mkdir -p /home/tinta/.ssh
+chmod 700 /home/tinta/.ssh
 if [ -f /root/.ssh/authorized_keys ]; then
-  cp /root/.ssh/authorized_keys /home/cuadra/.ssh/authorized_keys
-  chmod 600 /home/cuadra/.ssh/authorized_keys
+  cp /root/.ssh/authorized_keys /home/tinta/.ssh/authorized_keys
+  chmod 600 /home/tinta/.ssh/authorized_keys
 fi
-chown -R cuadra:cuadra /home/cuadra/.ssh
+chown -R tinta:tinta /home/tinta/.ssh
 
-# Sudoers: que `cuadra` pueda restartar el service sin password (útil para
+# Sudoers: que `tinta` pueda restartar el service sin password (útil para
 # el script de deploy posterior).
-cat > /etc/sudoers.d/cuadra-systemctl <<'EOF'
-cuadra ALL=(root) NOPASSWD: /bin/systemctl start cuadra-server, /bin/systemctl stop cuadra-server, /bin/systemctl restart cuadra-server, /bin/systemctl status cuadra-server, /bin/systemctl reload caddy, /bin/systemctl restart caddy
+cat > /etc/sudoers.d/tinta-systemctl <<'EOF'
+tinta ALL=(root) NOPASSWD: /bin/systemctl start tinta-server, /bin/systemctl stop tinta-server, /bin/systemctl restart tinta-server, /bin/systemctl status tinta-server, /bin/systemctl reload caddy, /bin/systemctl restart caddy
 EOF
-chmod 440 /etc/sudoers.d/cuadra-systemctl
+chmod 440 /etc/sudoers.d/tinta-systemctl
 
 # ── 5. Firewall (ufw) ──────────────────────────────────────────────
 ufw --force reset
@@ -82,7 +123,7 @@ ufw default deny incoming
 ufw default allow outgoing
 ufw allow OpenSSH
 ufw allow 80/tcp comment "HTTP (Caddy redirect a HTTPS)"
-ufw allow 443/tcp comment "HTTPS (Caddy → cuadra-server)"
+ufw allow 443/tcp comment "HTTPS (Caddy → tinta-server)"
 ufw --force enable
 
 # ── 6. SSH hardening ───────────────────────────────────────────────
@@ -105,11 +146,11 @@ systemctl enable --now postgresql
 echo "Postgres status:"
 sudo -u postgres psql -c '\conninfo'
 
-# ── 10. Directorios para cuadra ────────────────────────────────────
-install -d -o cuadra -g cuadra -m 755 /var/lib/cuadra/uploads
-install -d -o cuadra -g cuadra -m 755 /var/log/cuadra
-install -d -o cuadra -g cuadra -m 755 /opt/cuadra/bin
-install -d -o cuadra -g cuadra -m 755 /opt/cuadra/migrations
+# ── 10. Directorios para tinta ─────────────────────────────────────
+install -d -o tinta -g tinta -m 755 /var/lib/tinta/uploads
+install -d -o tinta -g tinta -m 755 /var/log/tinta
+install -d -o tinta -g tinta -m 755 /opt/tinta/bin
+install -d -o tinta -g tinta -m 755 /opt/tinta/migrations
 
 echo ""
 echo "✓ Bootstrap completo."

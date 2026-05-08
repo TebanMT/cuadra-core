@@ -3,20 +3,20 @@ version: "3.9"
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: cuadra-postgres
+    container_name: tinta-postgres
     environment:
-      POSTGRES_USER: cuadra
-      POSTGRES_PASSWORD: cuadra_dev
-      POSTGRES_DB: cuadra
+      POSTGRES_USER: tinta
+      POSTGRES_PASSWORD: tinta_dev
+      POSTGRES_DB: tinta
     ports:
       - "5432:5432"
     volumes:
-      - cuadra_pgdata:/var/lib/postgresql/data
+      - tinta_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U cuadra"]
+      test: [ "CMD-SHELL", "pg_isready -U tinta" ]
       interval: 5s
       timeout: 3s
       retries: 5
 
 volumes:
-  cuadra_pgdata:
+  tinta_pgdata:

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # 03-backup.sh — pg_dump + upload a Cloudflare R2 (S3-compatible).
 #
-# Vive en /opt/cuadra/bin/backup.sh en el servidor y se corre cada noche
-# vía cron del usuario `cuadra`. Conserva 7 dailies + 4 weeklies + 12
+# Vive en /opt/tinta/bin/backup.sh en el servidor y se corre cada noche
+# vía cron del usuario `tinta`. Conserva 7 dailies + 4 weeklies + 12
 # monthlies (rotation hecha en R2 con lifecycle rules).
 #
 # Setup en el servidor (una sola vez, como root):
@@ -10,40 +10,40 @@
 #   1. apt-get -y install awscli postgresql-client-16
 #
 #   2. Crear bucket en https://dash.cloudflare.com/?to=/:account/r2 — name:
-#      cuadra-backups (private). Anota el Account ID.
+#      tinta-backups (private). Anota el Account ID.
 #
 #   3. Crear API token: R2 → Manage R2 API Tokens → "Object Read & Write"
 #      scoped al bucket. Te da access_key + secret + endpoint
 #      https://<acct>.r2.cloudflarestorage.com.
 #
-#   4. Como `cuadra` user:
-#        sudo -u cuadra mkdir -p /home/cuadra/.aws
-#        sudo -u cuadra tee /home/cuadra/.aws/credentials >/dev/null <<E
+#   4. Como `tinta` user:
+#        sudo -u tinta mkdir -p /home/tinta/.aws
+#        sudo -u tinta tee /home/tinta/.aws/credentials >/dev/null <<E
 #        [r2]
 #        aws_access_key_id=...
 #        aws_secret_access_key=...
 #        E
-#        sudo chmod 600 /home/cuadra/.aws/credentials
-#        sudo chown -R cuadra:cuadra /home/cuadra/.aws
+#        sudo chmod 600 /home/tinta/.aws/credentials
+#        sudo chown -R tinta:tinta /home/tinta/.aws
 #
 #   5. Subir este script:
-#        scp 03-backup.sh cuadra@$SERVER:/opt/cuadra/bin/backup.sh
-#        ssh cuadra@$SERVER "chmod +x /opt/cuadra/bin/backup.sh"
+#        scp 03-backup.sh tinta@$SERVER:/opt/tinta/bin/backup.sh
+#        ssh tinta@$SERVER "chmod +x /opt/tinta/bin/backup.sh"
 #
-#   6. Cron entry (como cuadra):
+#   6. Cron entry (como tinta):
 #        crontab -e
 #        # Daily at 03:15 UTC (= 21:15 CDMX, después del cierre del gym).
-#        15 3 * * * /opt/cuadra/bin/backup.sh >> /var/log/cuadra/backup.log 2>&1
+#        15 3 * * * /opt/tinta/bin/backup.sh >> /var/log/tinta/backup.log 2>&1
 #
 # Variables que el script espera leer del .env del servidor:
 #   DATABASE_URL   — para pg_dump.
-#   R2_BUCKET      — name del bucket (default cuadra-backups).
+#   R2_BUCKET      — name del bucket (default tinta-backups).
 #   R2_ENDPOINT    — https://<acct>.r2.cloudflarestorage.com
 #   R2_PROFILE     — profile name en ~/.aws/credentials (default r2).
 
 set -euo pipefail
 
-ENV_FILE="${ENV_FILE:-/opt/cuadra/cuadra-server.env}"
+ENV_FILE="${ENV_FILE:-/opt/tinta/tinta-server.env}"
 if [ -f "${ENV_FILE}" ]; then
   # shellcheck disable=SC1090
   set -a; source "${ENV_FILE}"; set +a
@@ -51,14 +51,14 @@ fi
 
 : "${DATABASE_URL:?Falta DATABASE_URL — revisar ${ENV_FILE}}"
 : "${R2_ENDPOINT:?Falta R2_ENDPOINT (ej: https://abc123.r2.cloudflarestorage.com)}"
-R2_BUCKET="${R2_BUCKET:-cuadra-backups}"
+R2_BUCKET="${R2_BUCKET:-tinta-backups}"
 R2_PROFILE="${R2_PROFILE:-r2}"
 
 DATE_UTC=$(date -u +%Y-%m-%dT%H-%M-%SZ)
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "${TMPDIR}"' EXIT
 
-DUMP_FILE="${TMPDIR}/cuadra-${DATE_UTC}.sql.gz"
+DUMP_FILE="${TMPDIR}/tinta-${DATE_UTC}.sql.gz"
 
 echo "[$(date -u +%FT%TZ)] → pg_dump → ${DUMP_FILE}"
 # --no-owner --no-privileges para que el restore sea portable. -F p (plain)
@@ -71,7 +71,7 @@ pg_dump "${DATABASE_URL}" \
 SIZE=$(du -h "${DUMP_FILE}" | cut -f1)
 echo "[$(date -u +%FT%TZ)] dump size: ${SIZE}"
 
-# Subida a R2. Path: <bucket>/postgres/YYYY/MM/cuadra-<ts>.sql.gz
+# Subida a R2. Path: <bucket>/postgres/YYYY/MM/tinta-<ts>.sql.gz
 YEAR=$(date -u +%Y)
 MONTH=$(date -u +%m)
 S3_KEY="postgres/${YEAR}/${MONTH}/$(basename "${DUMP_FILE}")"

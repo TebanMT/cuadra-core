@@ -2,8 +2,8 @@ root = "."
 tmp_dir = "tmp"
 
 [build]
-  cmd = "go build -tags server -o tmp/cuadra-server ./cmd/server"
-  bin = "tmp/cuadra-server"
+  cmd = "go build -tags server -o tmp/tinta-server ./cmd/server"
+  bin = "tmp/tinta-server"
   delay = 800
   exclude_dir = ["tmp", "bin", "dist", "db_migrations"]
   include_ext = ["go"]

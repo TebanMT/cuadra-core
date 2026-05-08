@@ -13,15 +13,15 @@
 #     bash 01-create-db.sh
 #
 # Después de correr esto, anota DATABASE_URL para meterla en el .env del
-# servidor (ver scripts/deploy/cuadra-server.env.example).
+# servidor (ver scripts/deploy/tinta-server.env.example).
 
 set -euo pipefail
 
 : "${SERVER:?Falta SERVER (ip o hostname del Hetzner)}"
 : "${DB_PASSWORD:?Falta DB_PASSWORD — generala con: openssl rand -base64 32 | tr -d '/+=' | head -c 32}"
 
-DB_USER="${DB_USER:-cuadra}"
-DB_NAME="${DB_NAME:-cuadra}"
+DB_USER="${DB_USER:-tinta}"
+DB_NAME="${DB_NAME:-tinta}"
 SSH_USER="${SSH_USER:-root}"
 
 echo "→ Creando role y database en Postgres del servidor ${SERVER}..."

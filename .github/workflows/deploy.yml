@@ -1,4 +1,4 @@
-# Deploy cuadra-server → Hetzner CX33.
+# Deploy tinta-server → Hetzner CX33.
 #
 # Triggered automáticamente en push a main, después de que CI pasa.
 # Reusa el binario que `build` ya compiló (no recompila) y lo manda al
@@ -9,15 +9,15 @@
 # Actions → Repository secrets):
 #
 #   DEPLOY_HOST          IP o hostname del Hetzner. Ej: 204.168.214.238
-#                        o api.cuadra.app. Para el SSH conviene la IP
-#                        directa y reservar api.cuadra.app para el smoke
+#                        o api.entinta.app. Para el SSH conviene la IP
+#                        directa y reservar api.entinta.app para el smoke
 #                        test, pero cualquiera funciona.
 #
 #   DEPLOY_SSH_KEY       Private key (formato OpenSSH, completa con
 #                        BEGIN/END) de un par dedicado para el deploy.
 #                        Genera uno aparte de tu key personal con:
 #                          ssh-keygen -t ed25519 -f deploy_key -C "gha-deploy"
-#                        Sube la pública a /home/cuadra/.ssh/authorized_keys
+#                        Sube la pública a /home/tinta/.ssh/authorized_keys
 #                        en el server (append, no overwrite).
 #
 #   DEPLOY_KNOWN_HOSTS   Output de `ssh-keyscan -H <DEPLOY_HOST>`.
@@ -28,14 +28,14 @@
 # Optional secrets:
 #
 #   SMOKE_TEST_URL       URL pública del health endpoint para verificar
-#                        después del restart. Default: https://api.cuadra.app/health
+#                        después del restart. Default: https://api.entinta.app/health
 #                        Si todavía no tienes DNS configurado, puedes
 #                        ponerle https://<DEPLOY_HOST>/health (con el
 #                        cert self-signed que Caddy usa antes del
 #                        primer ACME) — el step lo deja como warning si
 #                        falla, no como error.
 
-name: Deploy cuadra-server
+name: Deploy tinta-server
 
 on:
   workflow_run:
@@ -48,7 +48,7 @@ on:
 # encola; no cancelamos in-progress porque a media transferencia el
 # servicio queda en estado raro.
 concurrency:
-  group: deploy-cuadra-server
+  group: deploy-tinta-server
   cancel-in-progress: false
 
 jobs:
@@ -67,7 +67,7 @@ jobs:
       # útil para protected deploys + manual approval si decides
       # activarlo en Settings → Environments.
       name: production
-      url: https://api.cuadra.app
+      url: https://api.entinta.app
 
     steps:
       - name: Checkout (para migraciones SQL)
@@ -79,7 +79,7 @@ jobs:
         if: github.event_name == 'workflow_run'
         uses: actions/download-artifact@v4
         with:
-          name: cuadra-server-linux-amd64
+          name: tinta-server-linux-amd64
           path: bin/
           github-token: ${{ secrets.GITHUB_TOKEN }}
           run-id: ${{ github.event.workflow_run.id }}
@@ -98,13 +98,13 @@ jobs:
             | sudo tar -C /usr/local -xz
           export PATH=$PATH:/usr/local/go/bin
           go build -tags server -trimpath -ldflags="-s -w" \
-            -o bin/cuadra-server-linux-amd64 ./cmd/server
+            -o bin/tinta-server-linux-amd64 ./cmd/server
 
       - name: Verificar binario
         run: |
-          test -x bin/cuadra-server-linux-amd64
-          ls -lh bin/cuadra-server-linux-amd64
-          file bin/cuadra-server-linux-amd64
+          test -x bin/tinta-server-linux-amd64
+          ls -lh bin/tinta-server-linux-amd64
+          file bin/tinta-server-linux-amd64
 
       - name: Setup SSH agent
         uses: webfactory/ssh-agent@v0.9.0
@@ -128,10 +128,10 @@ jobs:
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
         run: |
-          REMOTE_BIN=/opt/cuadra/bin/cuadra-server
-          scp bin/cuadra-server-linux-amd64 \
-            cuadra@${DEPLOY_HOST}:${REMOTE_BIN}.new
-          ssh cuadra@${DEPLOY_HOST} "
+          REMOTE_BIN=/opt/tinta/bin/tinta-server
+          scp bin/tinta-server-linux-amd64 \
+            tinta@${DEPLOY_HOST}:${REMOTE_BIN}.new
+          ssh tinta@${DEPLOY_HOST} "
             set -e
             chmod +x ${REMOTE_BIN}.new
             mv ${REMOTE_BIN}.new ${REMOTE_BIN}
@@ -143,43 +143,43 @@ jobs:
         run: |
           rsync -avz --delete \
             db_migrations/postgres/ \
-            cuadra@${DEPLOY_HOST}:/opt/cuadra/migrations/
+            tinta@${DEPLOY_HOST}:/opt/tinta/migrations/
 
       - name: Aplicar migraciones
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
         run: |
-          ssh cuadra@${DEPLOY_HOST} bash -s <<'EOF'
+          ssh tinta@${DEPLOY_HOST} bash -s <<'EOF'
           set -euo pipefail
-          source /opt/cuadra/cuadra-server.env
-          for f in $(ls -1 /opt/cuadra/migrations/*.sql | sort); do
+          source /opt/tinta/tinta-server.env
+          for f in $(ls -1 /opt/tinta/migrations/*.sql | sort); do
             echo "  applying $(basename "$f")"
             psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -f "$f" >/dev/null
           done
           echo "✓ Migraciones aplicadas"
           EOF
 
-      - name: Reiniciar cuadra-server
+      - name: Reiniciar tinta-server
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
         run: |
-          ssh cuadra@${DEPLOY_HOST} 'sudo /bin/systemctl restart cuadra-server'
+          ssh tinta@${DEPLOY_HOST} 'sudo /bin/systemctl restart tinta-server'
 
           # Esperamos a que systemd reporte active. Si en 30s no está
           # corriendo, falla el deploy y nos avisa.
           for i in $(seq 1 15); do
-            status=$(ssh cuadra@${DEPLOY_HOST} 'sudo /bin/systemctl is-active cuadra-server' || true)
+            status=$(ssh tinta@${DEPLOY_HOST} 'sudo /bin/systemctl is-active tinta-server' || true)
             if [ "$status" = "active" ]; then
-              echo "✓ cuadra-server activo"
+              echo "✓ tinta-server activo"
               exit 0
             fi
             echo "(intento $i) status=$status — esperando..."
             sleep 2
           done
 
-          echo "::error::cuadra-server no quedó activo después del restart"
-          ssh cuadra@${DEPLOY_HOST} 'sudo /bin/systemctl status cuadra-server --no-pager -l | tail -30'
-          ssh cuadra@${DEPLOY_HOST} 'sudo /bin/journalctl -u cuadra-server -n 50 --no-pager'
+          echo "::error::tinta-server no quedó activo después del restart"
+          ssh tinta@${DEPLOY_HOST} 'sudo /bin/systemctl status tinta-server --no-pager -l | tail -30'
+          ssh tinta@${DEPLOY_HOST} 'sudo /bin/journalctl -u tinta-server -n 50 --no-pager'
           exit 1
 
       - name: Smoke test (público)
@@ -188,7 +188,7 @@ jobs:
         # del paso anterior.
         continue-on-error: true
         env:
-          URL: ${{ secrets.SMOKE_TEST_URL || 'https://api.cuadra.app/health' }}
+          URL: ${{ secrets.SMOKE_TEST_URL || 'https://api.entinta.app/health' }}
         run: |
           echo "→ GET ${URL}"
           curl --fail --show-error --silent --max-time 10 -i "${URL}" || \

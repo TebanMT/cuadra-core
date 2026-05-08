@@ -1,8 +1,8 @@
 .PHONY: help tidy build build-server build-sidecar run-server run-sidecar dev-server dev-sidecar test test-unit test-integration vet fmt fmt-check docker-up docker-down migrate-postgres migrate-sqlite migrate-reset-postgres seed import-gym clean
 
 # --- Defaults ---
-DB_URL ?= postgresql://cuadra:cuadra_dev@localhost:5432/cuadra?sslmode=disable
-SIDECAR_DB ?= ./tmp/cuadra.db
+DB_URL ?= postgresql://tinta:tinta_dev@localhost:5432/tinta?sslmode=disable
+SIDECAR_DB ?= ./tmp/tinta.db
 
 help:
 	@echo "Targets:"
@@ -32,7 +32,7 @@ tidy:
 build: build-server build-sidecar
 
 build-server:
-	go build -tags server -o bin/cuadra-server ./cmd/server
+	go build -tags server -o bin/tinta-server ./cmd/server
 
 build-sidecar:
 	go build -tags sidecar -o bin/cuadra-sidecar ./cmd/sidecar
