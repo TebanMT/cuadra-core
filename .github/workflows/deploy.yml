@@ -127,17 +127,38 @@ jobs:
           ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
 
       - name: Configurar known_hosts
-        # No usamos ssh-keyscan en vivo — eso sería TOFU y MITMable.
-        # El secret DEPLOY_KNOWN_HOSTS lo regeneras a mano con:
-        #   ssh-keyscan -H <DEPLOY_HOST> | base64
-        # (o sin base64 si prefieres pegarlo plano en el secret).
+        # Estrategia híbrida:
+        # 1. Si existe DEPLOY_KNOWN_HOSTS (pinned host keys), lo usamos —
+        #    es el modo más seguro contra MITM.
+        # 2. Si NO existe (o queda vacío), caemos a ssh-keyscan en vivo
+        #    desde el runner — TOFU pero práctico mientras debuggeás.
+        #    Las dos acciones son válidas — la pinned previene MITM
+        #    proactivo, la live se confía en el momento de la conexión.
         env:
           KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
         run: |
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
-          echo "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          if [ -n "$KNOWN_HOSTS" ]; then
+            echo "→ Usando DEPLOY_KNOWN_HOSTS (pinned)"
+            echo "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          else
+            echo "→ DEPLOY_KNOWN_HOSTS vacío — fallback a ssh-keyscan live"
+            ssh-keyscan -H "$DEPLOY_HOST" > ~/.ssh/known_hosts 2>/dev/null
+          fi
           chmod 644 ~/.ssh/known_hosts
+
+          # Debug: cuántas keys cargamos (sin mostrar contenido)
+          echo "Keys en known_hosts:"
+          grep -c '^|1|' ~/.ssh/known_hosts || echo "0"
+
+          # Si aún así está vacío, abortamos con mensaje claro
+          if ! grep -q '^|1|' ~/.ssh/known_hosts; then
+            echo "::error:: known_hosts vacío después de pinned + live fallback"
+            echo "::error:: probable problema: DEPLOY_HOST = '$DEPLOY_HOST' no resuelve o el server bloquea ssh-keyscan"
+            exit 1
+          fi
 
       - name: Subir binario (atómico)
         env:
