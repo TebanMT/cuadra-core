@@ -4,8 +4,8 @@ package db
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
+	"io/fs"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,12 +13,16 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-// ApplySQLiteMigrations runs every .sql file under db_migrations/sqlite/.
+// ApplySQLiteMigrations runs every .sql file under `dir` inside `fsys`.
 // Like the Postgres runner, files whose numeric prefix is already recorded
 // in `_migrations` are skipped — necessary because SQLite's ALTER TABLE has
 // no IF NOT EXISTS clause.
-func ApplySQLiteMigrations(db *sqlx.DB, dir string) error {
-	entries, err := os.ReadDir(dir)
+//
+// `fsys` is an fs.FS so the sidecar can pass an embed.FS (the migrations
+// are baked into the binary in production) while tests can pass an
+// os.DirFS pointing at the repo's db_migrations/ directory.
+func ApplySQLiteMigrations(db *sqlx.DB, fsys fs.FS, dir string) error {
+	entries, err := fs.ReadDir(fsys, dir)
 	if err != nil {
 		return fmt.Errorf("read migrations dir %q: %w", dir, err)
 	}
@@ -27,7 +31,9 @@ func ApplySQLiteMigrations(db *sqlx.DB, dir string) error {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
 			continue
 		}
-		files = append(files, filepath.Join(dir, e.Name()))
+		// path.Join (not filepath.Join): fs.FS uses forward-slash paths
+		// regardless of OS. Mixing in filepath.Join breaks on Windows.
+		files = append(files, path.Join(dir, e.Name()))
 	}
 	sort.Strings(files)
 
@@ -37,13 +43,13 @@ func ApplySQLiteMigrations(db *sqlx.DB, dir string) error {
 	}
 
 	for _, f := range files {
-		v, ok := sqliteVersionFromFilename(filepath.Base(f))
+		v, ok := sqliteVersionFromFilename(path.Base(f))
 		if ok {
 			if _, done := applied[v]; done {
 				continue
 			}
 		}
-		raw, err := os.ReadFile(f)
+		raw, err := fs.ReadFile(fsys, f)
 		if err != nil {
 			return fmt.Errorf("read %q: %w", f, err)
 		}

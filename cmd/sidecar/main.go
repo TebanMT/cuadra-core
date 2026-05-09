@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 
+	migrations "github.com/cuadra/cuadra-core/db_migrations"
 	infraDB "github.com/cuadra/cuadra-core/infraestructure/db"
 
 	gymApp "github.com/cuadra/cuadra-core/src/modules/gyms/app"
@@ -73,7 +74,11 @@ func main() {
 	db := infraDB.InitSQLite(dbPath)
 	defer infraDB.CloseSQLite()
 
-	if err := infraDB.ApplySQLiteMigrations(db, envOrDefault("MIGRATIONS_DIR", "db_migrations/sqlite")); err != nil {
+	// Migrations are embedded into the binary at build time (see
+	// db_migrations/embed.go) so the sidecar runs from any cwd —
+	// including inside a macOS .app bundle, where the working
+	// directory is "/" and relative paths break.
+	if err := infraDB.ApplySQLiteMigrations(db, migrations.SQLite, "sqlite"); err != nil {
 		log.Fatalf("apply sqlite migrations: %v", err)
 	}
 
