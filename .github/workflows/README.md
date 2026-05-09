@@ -129,7 +129,7 @@ ssh tinta@$DEPLOY_HOST '
   mv /tmp/ak ~/.ssh/authorized_keys
   chmod 600 ~/.ssh/authorized_keys
 '
-# (Re-agregá la pub nueva si el grep la borró.)
+# (Re-agrega la pub nueva si el grep la borró.)
 
 # 4. Update secret DEPLOY_SSH_KEY en GitHub con la nueva privada.
 # 5. Borrá la key vieja localmente.

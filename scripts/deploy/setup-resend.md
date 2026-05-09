@@ -17,20 +17,20 @@ Email tradicionalmente vive bajo el dominio "principal" / marketing del producto
 - `noreply@entinta.mx` para envío transaccional
 - `soporte@entinta.mx`, `legal@entinta.mx`, `privacidad@entinta.mx` para inbound
 
-Resend solo necesita verificar `entinta.mx` (domain-level), después podés mandar desde cualquier alias `@entinta.mx`.
+Resend solo necesita verificar `entinta.mx` (domain-level), después puedes mandar desde cualquier alias `@entinta.mx`.
 
 ## Paso 1 — Crear cuenta
 
 ```
-1. Andá a https://resend.com → Sign up
-2. Confirmás email, te aterriza al dashboard
+1. Ve a https://resend.com → Sign up
+2. Confirmas email, te aterriza al dashboard
 3. Sidebar → Domains → Add Domain
    Domain: entinta.mx
    Region: us-east-1 (más barato y suficiente latencia)
    → Add
 ```
 
-Resend te muestra una pantalla con **3 records DNS** que tenés que agregar:
+Resend te muestra una pantalla con **3 records DNS** que tienes que agregar:
 
 ```
 Type   Name                  Content
@@ -58,17 +58,17 @@ Para cada record que Resend te dio:
 | Proxy | **OFF (gris)** — los records de email NO se proxean |
 | TTL | Auto |
 
-> **Importante**: para records TXT donde el `Content` empieza con `v=spf1`, **no es** un nuevo SPF — es un include para Resend. Si ya tenés un SPF para `entinta.mx`, hay que combinarlos en un solo record. Si no había, agregá el de Resend tal cual.
+> **Importante**: para records TXT donde el `Content` empieza con `v=spf1`, **no es** un nuevo SPF — es un include para Resend. Si ya tienes un SPF para `entinta.mx`, hay que combinarlos en un solo record. Si no había, agrega el de Resend tal cual.
 
 ## Paso 3 — Verificar en Resend
 
-Volvé al panel de Resend → Domains → `entinta.mx` → click **Verify DNS records**.
+Vuelve al panel de Resend → Domains → `entinta.mx` → click **Verify DNS records**.
 
 Tiempos:
 - DNS propagación: **~30 seg** desde CF
 - Resend verifica: **~1 min** después de eso
 
-Cuando los 3 records aparecen como `Verified`, el dominio queda activo y podés mandar mails desde cualquier `*@entinta.mx`.
+Cuando los 3 records aparecen como `Verified`, el dominio queda activo y puedes mandar mails desde cualquier `*@entinta.mx`.
 
 ## Paso 4 — Crear API key
 
@@ -80,7 +80,7 @@ Resend Dashboard → API Keys → Create API Key
    → Create
 ```
 
-**Te muestra el secret una sola vez**. Copialo. Empieza con `re_`.
+**Te muestra el secret una sola vez**. Cópialo. Empieza con `re_`.
 
 ## Paso 5 — Subir el secret al server
 
@@ -89,7 +89,7 @@ En tu laptop:
 ```bash
 # Edit .env.prod local — agregar/actualizar la línea:
 echo "RESEND_API_KEY=re_xxxxxxxxxxxxxxxxxxxx" >> ~/Documents/Personal/Cuadra/cuadra-core/.env.prod
-# (Mejor: editá el archivo a mano y reemplazá la línea existente que estaba vacía.)
+# (Mejor: edita el archivo a mano y reemplaza la línea existente que estaba vacía.)
 
 # Subir + reiniciar service
 cd ~/Documents/Personal/Cuadra/cuadra-core
@@ -106,7 +106,7 @@ curl -X POST https://api.entinta.app/api/v1/auth/forgot-password \
   -H "Content-Type: application/json" \
   -d '{"email":"tu-correo-personal@gmail.com"}'
 
-# Esperá ~10 segundos y revisá tu inbox.
+# Espera ~10 segundos y revisa tu inbox.
 # Si llega: Resend OK.
 # Si NO llega:
 ssh tinta@204.168.214.238 'sudo journalctl -u tinta-server -n 50 | grep -i resend'
