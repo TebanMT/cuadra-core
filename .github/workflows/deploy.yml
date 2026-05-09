@@ -62,6 +62,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
+    # Permissions del GITHUB_TOKEN. CRÍTICO para `workflow_run` triggers:
+    # `actions: read` permite que actions/download-artifact baje artifacts
+    # del run que disparó este workflow (el job `build` del ci.yml). Sin
+    # esto, GITHUB_TOKEN no tiene scope para leer artifacts cross-workflow
+    # y falla con "Resource not accessible by integration".
+    permissions:
+      actions: read     # download-artifact desde el run de CI
+      contents: read    # checkout del repo
+      deployments: write # marcar el deploy en GitHub Environments
+
     environment:
       # Marca el deploy como "production" en GitHub Environments —
       # útil para protected deploys + manual approval si decides
@@ -101,7 +111,12 @@ jobs:
             -o bin/tinta-server-linux-amd64 ./cmd/server
 
       - name: Verificar binario
+        # GitHub Actions artifacts usan ZIP, que NO preserva el executable
+        # bit Unix. El binario baja con perms 644, así que restauramos +x
+        # antes de probarlo. (En el server el chmod se rehace después del
+        # scp, así que esto solo afecta la verificación local del runner.)
         run: |
+          chmod +x bin/tinta-server-linux-amd64
           test -x bin/tinta-server-linux-amd64
           ls -lh bin/tinta-server-linux-amd64
           file bin/tinta-server-linux-amd64
