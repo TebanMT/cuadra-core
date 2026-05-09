@@ -127,36 +127,48 @@ jobs:
           ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
 
       - name: Configurar known_hosts
-        # Estrategia híbrida:
-        # 1. Si existe DEPLOY_KNOWN_HOSTS (pinned host keys), lo usamos —
-        #    es el modo más seguro contra MITM.
-        # 2. Si NO existe (o queda vacío), caemos a ssh-keyscan en vivo
-        #    desde el runner — TOFU pero práctico mientras debuggeás.
-        #    Las dos acciones son válidas — la pinned previene MITM
-        #    proactivo, la live se confía en el momento de la conexión.
+        # Estrategia robusta:
+        # 1. Cargar DEPLOY_KNOWN_HOSTS (pinned) si tiene formato válido.
+        # 2. SIEMPRE complementar con ssh-keyscan live — apenda al archivo.
+        #    Las dos acciones son válidas — duplicados no rompen nada y
+        #    nos protegen contra estos casos:
+        #      - secret vacío
+        #      - secret con formato corrupto / sin keys parseables
+        #      - server con keys nuevas (post-reinstall) que el secret no tiene
         env:
           KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
         run: |
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
+
+          # Capa 1: lo que venga del secret (puede estar mal formateado, no
+          # importa — si no parsea, ssh ignora esas líneas).
           if [ -n "$KNOWN_HOSTS" ]; then
-            echo "→ Usando DEPLOY_KNOWN_HOSTS (pinned)"
+            echo "→ Cargando DEPLOY_KNOWN_HOSTS (pinned)"
             echo "$KNOWN_HOSTS" > ~/.ssh/known_hosts
           else
-            echo "→ DEPLOY_KNOWN_HOSTS vacío — fallback a ssh-keyscan live"
-            ssh-keyscan -H "$DEPLOY_HOST" > ~/.ssh/known_hosts 2>/dev/null
+            : > ~/.ssh/known_hosts
           fi
+
+          # Capa 2: live scan, append. Esto cubre el caso donde el secret
+          # está vacío o tiene keys distintas a las que el server tiene HOY.
+          echo "→ Complementando con ssh-keyscan live de $DEPLOY_HOST"
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
           chmod 644 ~/.ssh/known_hosts
 
-          # Debug: cuántas keys cargamos (sin mostrar contenido)
-          echo "Keys en known_hosts:"
-          grep -c '^|1|' ~/.ssh/known_hosts || echo "0"
+          # Debug: cuántas líneas de keys reales hay en total
+          # (cualquier línea no-comment con un algoritmo SSH conocido cuenta)
+          KEY_LINES=$(grep -cE 'ssh-(rsa|ed25519|dss)|ecdsa-sha2' ~/.ssh/known_hosts || true)
+          echo "Total host key entries: $KEY_LINES"
+          echo "Total bytes en archivo: $(wc -c < ~/.ssh/known_hosts)"
 
           # Si aún así está vacío, abortamos con mensaje claro
-          if ! grep -q '^|1|' ~/.ssh/known_hosts; then
-            echo "::error:: known_hosts vacío después de pinned + live fallback"
-            echo "::error:: probable problema: DEPLOY_HOST = '$DEPLOY_HOST' no resuelve o el server bloquea ssh-keyscan"
+          if [ "$KEY_LINES" -eq 0 ]; then
+            echo "::error:: known_hosts no tiene entries válidas después de pinned + live"
+            echo "::error:: DEPLOY_HOST='$DEPLOY_HOST' — ¿resuelve correctamente desde GitHub runners?"
+            echo "::error:: Probá local: ssh-keyscan -H '$DEPLOY_HOST'"
             exit 1
           fi
 
