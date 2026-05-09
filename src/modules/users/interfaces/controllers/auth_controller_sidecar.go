@@ -100,6 +100,14 @@ func (p *SidecarAuthProxy) RegisterRoutes(r *gin.Engine) {
 	// returned sidecar_token + cached login locally, and resigns the JWTs
 	// with the sidecar's secret so subsequent local requests validate.
 	g.POST("/redeem-installer", p.handleRedeemInstaller)
+	// Pairing status: tells the desktop whether this machine already has
+	// a cached_login row, i.e. has been paired with a gym (regardless of
+	// whether the operator currently has a session). The desktop uses
+	// this on cold-start to decide between Welcome (fresh laptop) and
+	// Login (paired but logged out). No auth required — the only thing
+	// it leaks is the email/gym_name of an already-paired account, which
+	// the operator would see on the login screen anyway.
+	g.GET("/pairing-status", p.handlePairingStatus)
 }
 
 // ── Handlers ─────────────────────────────────────────────────────────────
@@ -615,6 +623,35 @@ func nonEmpty(primary, fallback string) string {
 		return primary
 	}
 	return fallback
+}
+
+// handlePairingStatus returns whether this sidecar has a cached_login row,
+// which is the canonical "is this laptop paired with a gym?" signal. Used
+// by the desktop's Welcome screen to skip the install-code flow when the
+// laptop is already paired but the operator just logged out.
+//
+// Returns (always 200):
+//   { paired: bool, email?: string, gym_name?: string }
+//
+// Email + gym_name are included so the login screen can show a friendly
+// "Continúa como X en Y" hint without an extra round-trip.
+func (p *SidecarAuthProxy) handlePairingStatus(c *gin.Context) {
+	cached, ok := p.loadCachedLogin(c.Request.Context())
+	if !ok {
+		c.JSON(http.StatusOK, gin.H{
+			"status_code": http.StatusOK,
+			"data":        gin.H{"paired": false},
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"status_code": http.StatusOK,
+		"data": gin.H{
+			"paired":   true,
+			"email":    cached.Email,
+			"gym_name": cached.GymName,
+		},
+	})
 }
 
 func (p *SidecarAuthProxy) loadCachedLogin(ctx context.Context) (cachedLoginRow, bool) {
