@@ -113,7 +113,7 @@ func main() {
 	recorder := audit.NewPostgresRecorder()
 	emailSender := email.NewStdoutSender()
 	trialDays := envInt("TRIAL_DURATION_DAYS", 30)
-	baseURL := envOrDefault("PUBLIC_BASE_URL", "https://cuadra.app")
+	baseURL := envOrDefault("PUBLIC_BASE_URL", "https://api.entinta.app")
 
 	// ── Notifications providers (Sesión 7 / ADR-007) ─────────────────────
 	whatsappProvider := buildWhatsAppProvider(baseURL)
@@ -435,7 +435,7 @@ func buildEmailProvider() notiDomain.EmailProvider {
 	provider := strings.ToLower(envOrDefault("EMAIL_PROVIDER", "stdout"))
 	if provider == "resend" {
 		key := os.Getenv("RESEND_API_KEY")
-		from := envOrDefault("EMAIL_FROM", "noreply@cuadra.app")
+		from := envOrDefault("EMAIL_FROM", "noreply@entinta.mx")
 		if key == "" {
 			log.Printf("[notifications] RESEND_API_KEY missing — falling back to stdout email provider")
 			return notiEmail.NewStdoutProvider()

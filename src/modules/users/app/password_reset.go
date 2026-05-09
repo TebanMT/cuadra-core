@@ -30,7 +30,7 @@ type RequestPasswordReset struct {
 	Email   email.Sender
 	Audit   audit.Recorder
 	NowFunc func() time.Time
-	BaseURL string // e.g. https://cuadra.app — used to build the reset link
+	BaseURL string // e.g. https://entinta.mx — used to build the reset link
 }
 
 func NewRequestPasswordReset(users userRepo.UserRepository, resets userRepo.PasswordResetRepository,

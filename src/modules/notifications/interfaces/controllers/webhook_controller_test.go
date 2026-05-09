@@ -34,7 +34,7 @@ import (
 
 const (
 	testAuthToken  = "AUTH_TOKEN_FOR_TEST"
-	testWebhookURL = "https://api.cuadra.app/api/v1/webhooks/twilio"
+	testWebhookURL = "https://api.entinta.app/api/v1/webhooks/twilio"
 )
 
 // computeTwilioSignature mirrors RequestValidator.getValidationSignature for

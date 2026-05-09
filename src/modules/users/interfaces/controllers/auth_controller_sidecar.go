@@ -391,7 +391,7 @@ func (p *SidecarAuthProxy) bootstrapHeaders() http.Header {
 // the caller relays it verbatim.
 func (p *SidecarAuthProxy) forward(ctx context.Context, method, path string, body []byte, extraHeaders http.Header) ([]byte, int, error) {
 	if p.CloudURL == "" {
-		return nil, 0, errors.New("CUADRA_CLOUD_URL not configured")
+		return nil, 0, errors.New("TINTA_CLOUD_URL not configured")
 	}
 	url := strings.TrimRight(p.CloudURL, "/") + path
 	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))

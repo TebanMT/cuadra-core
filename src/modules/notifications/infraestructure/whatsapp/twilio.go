@@ -32,7 +32,7 @@ type TwilioProvider struct {
 
 // TwilioOptions wires the provider. AccountSID / AuthToken are normally
 // loaded from env in main.go; StatusCallbackURL is the public URL Twilio
-// posts back to (e.g. https://api.cuadra.app/api/v1/webhooks/twilio).
+// posts back to (e.g. https://api.entinta.app/api/v1/webhooks/twilio).
 //
 // TemplateContentSIDs maps Cuadra template keys (`expiry_reminder_3d`, etc)
 // to the matching Twilio Content SID approved in the dashboard. Only keys

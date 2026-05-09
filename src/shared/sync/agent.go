@@ -27,7 +27,7 @@ import (
 // AgentConfig — knobs for the sidecar sync loop. ADR-001 §3.3/§3.4 fixes
 // most of these; tests override Interval to drive the loop synchronously.
 type AgentConfig struct {
-	BaseURL          string        // e.g. "https://cloud.cuadra.app"
+	BaseURL          string        // e.g. "https://api.entinta.app"
 	Interval         time.Duration // default 30s (DA-42.1)
 	BatchSize        int           // default 100 (ADR §3.3)
 	MaxBatchBytes    int           // default 1 MiB

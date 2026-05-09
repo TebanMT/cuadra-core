@@ -287,7 +287,7 @@ func main() {
 	// proxy stores in sync_state; the agent picks it up automatically and
 	// stops depending on the operator's JWT.
 	clientID, deviceLabel := mustEnsureSidecarClientID(uow)
-	cloudURL := envOrDefault("CUADRA_CLOUD_URL", "https://api.cuadra.app")
+	cloudURL := envOrDefault("TINTA_CLOUD_URL", "https://api.entinta.app")
 	authProxy := usersCtrl.NewSidecarAuthProxy(usersCtrl.SidecarAuthProxy{
 		CloudURL:    cloudURL,
 		UoW:         uow,

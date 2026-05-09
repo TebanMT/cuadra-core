@@ -17,7 +17,7 @@ import (
 // in MVP (no upload UX yet) and render gym name + city + WhatsApp + RFC.
 func pdfHeader(pdf *gofpdf.Fpdf, gym *gymDomain.Gym, title string, from, to time.Time) {
 	pdf.SetFont("Helvetica", "B", 16)
-	pdf.CellFormat(0, 8, deref(gym.Name, "Cuadra"), "", 1, "L", false, 0, "")
+	pdf.CellFormat(0, 8, deref(gym.Name, "Tinta"), "", 1, "L", false, 0, "")
 	pdf.SetFont("Helvetica", "", 9)
 	if gym.City != nil {
 		pdf.CellFormat(0, 5, *gym.City, "", 1, "L", false, 0, "")
