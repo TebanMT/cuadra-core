@@ -181,6 +181,20 @@ func (p *SidecarAuthProxy) handleLogin(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "auth.login.errors.invalid_credentials"})
 		return
 	}
+	// Re-mirror the local gym/user rows from cached_login on every
+	// offline login. The mirror upserts with COALESCE on
+	// setup_completed_at — fills nulls without overwriting a real
+	// timestamp. Costs ~2 SQL upserts per offline login but pays back
+	// in two cases:
+	//   - First login after fixing this code path on a desktop where
+	//     the gym row was inserted with NULL setup_completed_at.
+	//   - User completed setup on web after the desktop's last sync;
+	//     cached_login eventually catches up and the next login pulls
+	//     the bool into the local row.
+	_ = p.UoW.Command(c.Request.Context(), func(tx sharedDomain.Transaction) error {
+		return mirrorCloudIdentity(c.Request.Context(), tx, cached, []byte(cached.PasswordHash))
+	})
+
 	userID, _ := uuid.Parse(cached.UserID)
 	gymID, _ := uuid.Parse(cached.GymID)
 	access, err := p.LocalTokens.GenerateAccessToken(userID, gymID, cached.Role)
@@ -581,12 +595,41 @@ func mirrorCloudIdentity(ctx context.Context, tx sharedDomain.Transaction, cache
 	}
 	now := time.Now().UTC().UnixMilli()
 
+	// setup_completed_at: cached_login carries a boolean from the cloud
+	// (`setup_completed: bool`). The local schema stores a timestamp —
+	// nil means "not setup", any value means "setup". We don't have the
+	// real completion timestamp here, so we use `now` as a placeholder
+	// when the cloud says setup is complete. The next sync pull replaces
+	// this with the canonical timestamp from cloud, but the placeholder
+	// is enough to make `IsSetupComplete()` return true immediately so
+	// the operator doesn't get bounced to /auth/setup-required after
+	// logging in to a gym that's already configured.
+	var setupCompletedAt any
+	if cached.SetupCompleted {
+		setupCompletedAt = now
+	}
+
 	// Gym row first (users.gym_id has FK).
+	//
+	// ON CONFLICT: previous version was DO NOTHING, but that left
+	// setup_completed_at = NULL forever on installs where the user
+	// redeemed BEFORE finishing the wizard on web — even after they
+	// later completed setup, the desktop kept seeing
+	// IsSetupComplete()=false on every login until the sync agent
+	// pulled an updated row.
+	//
+	// Now: COALESCE preserves whatever the local row already has and
+	// only fills in nulls from the cloud-derived data. We never
+	// overwrite a non-null setup_completed_at — sync is the only path
+	// that can roll back setup status, on purpose.
 	if _, err := stx.Exec(ctx, `
-		INSERT INTO gyms (id, gym_id, version, created_at, updated_at, name, synced_at)
-		VALUES (?, ?, 1, ?, ?, ?, ?)
-		ON CONFLICT(id) DO NOTHING`,
-		cached.GymID, cached.GymID, now, now, nilIfEmpty(cached.GymName), now,
+		INSERT INTO gyms (id, gym_id, version, created_at, updated_at, name, setup_completed_at, synced_at)
+		VALUES (?, ?, 1, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			name = COALESCE(gyms.name, excluded.name),
+			setup_completed_at = COALESCE(gyms.setup_completed_at, excluded.setup_completed_at),
+			synced_at = excluded.synced_at`,
+		cached.GymID, cached.GymID, now, now, nilIfEmpty(cached.GymName), setupCompletedAt, now,
 	); err != nil {
 		return fmt.Errorf("mirror gym: %w", err)
 	}
