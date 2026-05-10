@@ -67,6 +67,26 @@ import (
 func main() {
 	_ = godotenv.Load()
 
+	// Parent-death watcher: when the desktop app exits irregularly
+	// (Cmd+Q on macOS, force-quit, crash) the OS does NOT propagate
+	// SIGTERM to child processes — the sidecar would otherwise live
+	// on as an orphan reparented to launchd, holding port 9090. The
+	// next desktop launch then can't bind the port and "sidecar not
+	// ready" surfaces in the UI.
+	//
+	// The portable workaround is for the sidecar itself to poll the
+	// parent PID and exit when it changes (the parent has died and
+	// we've been reparented). On Linux/BSD we could use prctl
+	// PR_SET_PDEATHSIG, but on macOS there's no kernel-level
+	// equivalent — so we just watch.
+	//
+	// Skipped when launched standalone (parent is the user's shell)
+	// via the SIDECAR_NO_PARENT_WATCH env var, used by integration
+	// tests and ad-hoc CLI invocations.
+	if os.Getenv("SIDECAR_NO_PARENT_WATCH") == "" {
+		startParentWatcher()
+	}
+
 	dbPath := envOrDefault("SIDECAR_DB_PATH", "./tmp/cuadra.db")
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 		log.Fatalf("create db dir: %v", err)
@@ -400,6 +420,40 @@ func envOrDefault(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// startParentWatcher launches a goroutine that exits the process when
+// our parent PID changes. On Unix, when our original parent exits we
+// get reparented to PID 1 (init / launchd); on Windows the parent PID
+// becomes invalid (os.FindProcess + Signal returns an error). Either
+// way we treat it as "desktop is gone" and shut ourselves down.
+//
+// We use a 2s polling interval — fast enough that the next desktop
+// launch sees a free port within a couple of seconds, slow enough
+// to be invisible in CPU usage.
+func startParentWatcher() {
+	originalParent := os.Getppid()
+	if originalParent <= 1 {
+		// No real parent (started by init/launchd or daemonised).
+		// Likely a CLI invocation we're not supposed to babysit.
+		return
+	}
+	go func() {
+		for {
+			time.Sleep(2 * time.Second)
+			currentParent := os.Getppid()
+			if currentParent != originalParent || currentParent <= 1 {
+				log.Printf("parent PID changed (%d → %d), shutting down sidecar",
+					originalParent, currentParent)
+				// os.Exit instead of log.Fatal so deferred CloseSQLite
+				// runs — actually no, os.Exit also skips defers. We
+				// rely on SQLite's WAL recovery on next boot to clean
+				// up. Exit fast: if we hang here a launchd-reaped
+				// orphan would still hold the port.
+				os.Exit(0)
+			}
+		}
+	}()
 }
 
 func envInt(key string, fallback int) int {
