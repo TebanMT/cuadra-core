@@ -111,10 +111,11 @@ func (uc *OverrideCheckin) Execute(ctx context.Context, in OverrideCheckinInput)
 			Override:     true,
 		}
 		if statusOut.CurrentMembership != nil {
-			exp := statusOut.CurrentMembership.ExpiryDate
-			v.ExpiryDate = &exp
-			d := statusOut.CurrentMembership.DaysUntilExpiry(today)
-			v.DaysToExpiry = &d
+			v.ExpiryDate = statusOut.CurrentMembership.ExpiryDate
+			if statusOut.CurrentMembership.ExpiryDate != nil {
+				d := statusOut.CurrentMembership.DaysUntilExpiry(today)
+				v.DaysToExpiry = &d
+			}
 		}
 		view = v
 		return nil

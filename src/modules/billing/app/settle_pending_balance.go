@@ -64,6 +64,14 @@ func (uc *SettlePendingBalance) Execute(ctx context.Context, in SettlePendingBal
 			return sharedDomain.NewUnexpectedError(err)
 		}
 
+		// Construimos el settlement primero (validación contra parent
+		// PRE-decremento) pero NO lo persistimos todavía — necesitamos
+		// que el upsert del parent aterrice antes en sync_queue. El
+		// proyector del cloud aplica items por rowid; si por alguna
+		// razón el parent no existe en postgres (sync fallido previo,
+		// orden inverso del batch tras una recuperación parcial, etc.),
+		// el upsert del parent lo crea ahora y el INSERT del settlement
+		// satisface el FK parent_payment_id.
 		settlement, err := paymentDomain.NewBalanceSettlementPayment(
 			uuid.New(), in.GymID, in.ActorUserID,
 			parent, folio, in.Amount, in.Method, in.PaymentDate, now, in.Notes,
@@ -77,14 +85,17 @@ func (uc *SettlePendingBalance) Execute(ctx context.Context, in SettlePendingBal
 			return sharedDomain.NewValidationError(err)
 		}
 
-		if _, err := uc.Payments.Create(tx, settlement); err != nil {
-			return sharedDomain.NewUnexpectedError(err)
-		}
+		// 1) Decremento + persistencia del parent (enqueue UPSERT a rowid M).
 		newBalance, err := parent.DecrementBalance(in.Amount, now)
 		if err != nil {
 			return sharedDomain.NewBusinessError(err, "")
 		}
 		if _, err := uc.Payments.Update(tx, parent); err != nil {
+			return sharedDomain.NewUnexpectedError(err)
+		}
+
+		// 2) Persistencia del settlement (enqueue INSERT a rowid M+1).
+		if _, err := uc.Payments.Create(tx, settlement); err != nil {
 			return sharedDomain.NewUnexpectedError(err)
 		}
 

@@ -1,4 +1,6 @@
-//go:build server
+// detachedContext is referenced by sidecar_auth.go which is built for
+// both server and sidecar (cf. comment in sidecar_auth.go). Sin tag
+// para que el binario del sidecar compile aunque no use el middleware.
 
 package middleware
 

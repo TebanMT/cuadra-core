@@ -220,17 +220,19 @@ CREATE TABLE IF NOT EXISTS memberships (
     duration_days_snapshot  INTEGER NOT NULL,
 
     start_date      DATE NOT NULL,
-    expiry_date     DATE NOT NULL,
+    -- expiry_date NULL cuando status = 'pending_payment'.
+    expiry_date     DATE,
     status          TEXT NOT NULL DEFAULT 'active',
     replaced_by     UUID REFERENCES memberships(id),
 
-    CONSTRAINT chk_memberships_status CHECK (status IN ('active','expired','replaced','cancelled')),
-    CONSTRAINT chk_memberships_dates CHECK (expiry_date >= start_date)
+    CONSTRAINT chk_memberships_status CHECK (status IN ('active','expired','replaced','cancelled','pending_payment')),
+    CONSTRAINT chk_memberships_dates CHECK (expiry_date IS NULL OR expiry_date >= start_date)
 );
 CREATE INDEX IF NOT EXISTS idx_memberships_member ON memberships(member_id, status) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_memberships_gym_expiry ON memberships(gym_id, expiry_date) WHERE status = 'active' AND deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_memberships_sync ON memberships(gym_id, updated_at);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_memberships_member_active ON memberships(member_id) WHERE status = 'active' AND deleted_at IS NULL;
+-- Un socio sólo puede tener una "slot" vigente o pendiente a la vez.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_memberships_member_active ON memberships(member_id) WHERE status IN ('active','pending_payment') AND deleted_at IS NULL;
 
 -- ---------------------------------------------------------------------------
 -- membership_adjustments
@@ -422,7 +424,7 @@ CREATE TABLE IF NOT EXISTS checkins (
     CONSTRAINT chk_checkins_method CHECK (method IN ('fingerprint','manual','pin')),
     CONSTRAINT chk_checkins_result CHECK (result IN (
         'allowed_active','allowed_expiring_soon','allowed_override',
-        'denied_expired','denied_inactive','denied_no_membership'
+        'denied_expired','denied_inactive','denied_no_membership','denied_unpaid_enrollment'
     ))
 );
 CREATE INDEX IF NOT EXISTS idx_checkins_member_date ON checkins(member_id, checkin_at DESC) WHERE deleted_at IS NULL;

@@ -50,6 +50,9 @@ func (f *fakeStore) Insert(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, []b
 }
 func (f *fakeStore) RevokeActive(context.Context, uuid.UUID, uuid.UUID) error { return nil }
 func (f *fakeStore) RevokeIdle(context.Context, time.Time) (int64, error)     { return 0, nil }
+func (f *fakeStore) ListActiveByGym(context.Context, uuid.UUID) ([]sidecartoken.Credential, error) {
+	return nil, nil
+}
 
 func makeRouter(t *testing.T) (*gin.Engine, auth.TokenService, *fakeStore) {
 	t.Helper()

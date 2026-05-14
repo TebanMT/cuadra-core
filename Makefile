@@ -1,8 +1,20 @@
-.PHONY: help tidy build build-server build-sidecar run-server run-sidecar dev-server dev-sidecar test test-unit test-integration vet fmt fmt-check docker-up docker-down migrate-postgres migrate-sqlite migrate-reset-postgres seed import-gym clean
+.PHONY: help tidy build build-server build-sidecar run-server run-sidecar dev-server dev-sidecar test test-unit test-integration vet fmt fmt-check docker-up docker-down migrate-postgres migrate-sqlite migrate-reset-postgres migrate-reset-sqlite migrate-reset seed import-gym clean
 
 # --- Defaults ---
 DB_URL ?= postgresql://tinta:tinta_dev@localhost:5432/tinta?sslmode=disable
 SIDECAR_DB ?= ./tmp/tinta.db
+
+# Rutas alternas donde el sidecar SQLite puede vivir en dev:
+#   - ./tmp/tinta.db                       — cuando lo corres con
+#                                             `make run-sidecar` (Makefile-relativo)
+#   - ../tmp/cuadra.db                     — historical / repo-root cwd
+#   - ../cuadra-desktop/tmp/cuadra.db      — cuando Tauri (pnpm tauri dev)
+#                                             spawnea al sidecar; su cwd queda
+#                                             en cuadra-desktop, y el sidecar
+#                                             defaultea a ./tmp/cuadra.db
+# Las tres se limpian en `migrate-reset-sqlite`. La principal (la que
+# se vuelve a poblar con migraciones) sigue siendo $(SIDECAR_DB).
+EXTRA_SIDECAR_DBS := ../tmp/tinta.db ../cuadra-desktop/tmp/tinta.db
 
 help:
 	@echo "Targets:"
@@ -21,9 +33,12 @@ help:
 	@echo "  fmt-check          gofmt -l ."
 	@echo "  docker-up          Start Postgres via docker compose"
 	@echo "  docker-down        Stop docker services"
-	@echo "  migrate-postgres   Apply all postgres migrations"
-	@echo "  migrate-sqlite     Apply all sqlite migrations to local file"
-	@echo "  import-gym         Migrate legacy phpMyAdmin gym dump (see cmd/import-gym)"
+	@echo "  migrate-postgres        Apply all postgres migrations"
+	@echo "  migrate-sqlite          Apply all sqlite migrations to local file"
+	@echo "  migrate-reset-postgres  Drop public schema and re-apply postgres migrations"
+	@echo "  migrate-reset-sqlite    Remove sidecar SQLite file and re-apply migrations"
+	@echo "  migrate-reset           Reset both databases (postgres + sqlite) — for tests"
+	@echo "  import-gym              Migrate legacy phpMyAdmin gym dump (see cmd/import-gym)"
 	@echo "  clean              Remove tmp/ and bin/"
 
 tidy:
@@ -105,8 +120,43 @@ migrate-sqlite:
 		sqlite3 $(SIDECAR_DB) < $$f; \
 	done
 
+# `migrate-reset-*` — destructivo. Pensado para volver a una BD vacía
+# durante pruebas (tests de integración + smoke E2E de retos, etc.).
+# Nunca correr contra producción.
 migrate-reset-postgres:
-	psql "$(DB_URL)" -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
+	@echo "→ dropping schema public on $(DB_URL)"
+	psql "$(DB_URL)" -v ON_ERROR_STOP=1 -c "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;"
+	@$(MAKE) --no-print-directory migrate-postgres
+
+migrate-reset-sqlite:
+	@# Hay que matar al sidecar antes del rm. Por defecto, en Unix el
+	@# rm borra el dirent pero el inode persiste mientras el proceso
+	@# tenga el archivo abierto — el sidecar sigue escribiendo a un
+	@# inode huérfano (a veces incluso aparece en .Trash) y el `make
+	@# migrate-sqlite` posterior recrea un archivo nuevo que NADIE está
+	@# usando. Resultado: el dueño cree que reseteó y el sidecar sigue
+	@# viendo el estado viejo. Esto es exactamente el bug que perdimos
+	@# horas debuggeando — automatizo el cleanup para que no recurra.
+	@# Si `air` watchea la BD, va a respawnear; si no, hay que rearrancar
+	@# `make dev-sidecar` manualmente.
+	@pids=$$(pgrep -f "(cuadra|tinta)-sidecar" 2>/dev/null || true); \
+	if [ -n "$$pids" ]; then \
+		echo "→ killing sidecar process(es) holding DB open: $$pids"; \
+		kill $$pids 2>/dev/null || true; \
+		sleep 1; \
+	fi
+	@echo "→ removing sidecar db $(SIDECAR_DB)"
+	rm -f $(SIDECAR_DB) $(SIDECAR_DB)-shm $(SIDECAR_DB)-wal
+	@for extra in $(EXTRA_SIDECAR_DBS); do \
+		if [ -e "$$extra" ] || [ -e "$$extra-wal" ] || [ -e "$$extra-shm" ]; then \
+			echo "→ also removing $$extra (alt sidecar location)"; \
+			rm -f "$$extra" "$$extra-wal" "$$extra-shm"; \
+		fi; \
+	done
+	@$(MAKE) --no-print-directory migrate-sqlite
+	@echo "→ sqlite reseteado. Si tenías 'make dev-sidecar' corriendo, rearráncalo."
+
+migrate-reset: migrate-reset-postgres migrate-reset-sqlite
 
 # `make seed` — populate a clean Postgres with one demo gym + members in
 # every dashboard category. Reuses the existing migrations runner.

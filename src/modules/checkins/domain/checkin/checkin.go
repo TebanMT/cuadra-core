@@ -27,12 +27,13 @@ const (
 // 1:1; AllowedOverride is unique to checkins (the operator forced entry on a
 // denied result — DA-29.2).
 const (
-	ResultAllowedActive       = "allowed_active"
-	ResultAllowedExpiringSoon = "allowed_expiring_soon"
-	ResultAllowedOverride     = "allowed_override"
-	ResultDeniedExpired       = "denied_expired"
-	ResultDeniedInactive      = "denied_inactive"
-	ResultDeniedNoMembership  = "denied_no_membership"
+	ResultAllowedActive          = "allowed_active"
+	ResultAllowedExpiringSoon    = "allowed_expiring_soon"
+	ResultAllowedOverride        = "allowed_override"
+	ResultDeniedExpired          = "denied_expired"
+	ResultDeniedInactive         = "denied_inactive"
+	ResultDeniedNoMembership     = "denied_no_membership"
+	ResultDeniedUnpaidEnrollment = "denied_unpaid_enrollment"
 )
 
 // Checkin is the aggregate. Construction is via the four New* factories below
@@ -160,6 +161,8 @@ func resultFromStatus(s access.AccessStatus, override bool) (string, error) {
 		return ResultDeniedInactive, nil
 	case access.DeniedNoMembership:
 		return ResultDeniedNoMembership, nil
+	case access.DeniedUnpaidEnrollment:
+		return ResultDeniedUnpaidEnrollment, nil
 	default:
 		return "", chkErrors.ErrUnknownAccessStatus
 	}

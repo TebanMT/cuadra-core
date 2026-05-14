@@ -83,6 +83,34 @@ func (s *PostgresStore) FindActive(ctx context.Context, gymID, clientID uuid.UUI
 	}, nil
 }
 
+func (s *PostgresStore) ListActiveByGym(ctx context.Context, gymID uuid.UUID) ([]Credential, error) {
+	var rows []struct {
+		ID          uuid.UUID
+		GymID       uuid.UUID `gorm:"column:gym_id"`
+		ClientID    uuid.UUID `gorm:"column:client_id"`
+		UserID      uuid.UUID `gorm:"column:user_id"`
+		DeviceLabel *string   `gorm:"column:device_label"`
+		CreatedAt   time.Time `gorm:"column:created_at"`
+		LastSeenAt  time.Time `gorm:"column:last_seen_at"`
+	}
+	if err := s.db.WithContext(ctx).Raw(`
+		SELECT id, gym_id, client_id, user_id, device_label, created_at, last_seen_at
+		FROM sidecar_credentials
+		WHERE gym_id = ? AND revoked_at IS NULL
+		ORDER BY last_seen_at DESC`, gymID).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]Credential, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, Credential{
+			ID: r.ID, GymID: r.GymID, ClientID: r.ClientID, UserID: r.UserID,
+			DeviceLabel: derefString(r.DeviceLabel),
+			CreatedAt:   r.CreatedAt, LastSeenAt: r.LastSeenAt,
+		})
+	}
+	return out, nil
+}
+
 func (s *PostgresStore) Insert(ctx context.Context, gymID, clientID, userID uuid.UUID, hash []byte, deviceLabel string) (Credential, error) {
 	id := uuid.New()
 	now := time.Now().UTC()

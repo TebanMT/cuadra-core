@@ -58,6 +58,18 @@ type Gym struct {
 	WhatsAppBusinessTokenEnc []byte
 	WhatsAppConnectedAt      *time.Time
 	KioskSettings            map[string]any
+	// ChargeSettings — config a nivel gym de cuotas extra que se le
+	// cobran al socio (inscripción y mantenimiento). Persistido como
+	// JSONB para no tener que migrar el schema cada vez que cambie la
+	// forma. Llaves usadas hoy:
+	//   charges_enrollment      (bool)
+	//   charges_maintenance     (bool)
+	//   enrollment_amount       (number, MXN)
+	//   maintenance_amount      (number, MXN)
+	//   maintenance_frequency   (string: monthly|bimonthly|quarterly|semiannual|annual)
+	// Reemplaza el storage previo en localStorage del desktop — volátil
+	// y per-device, inconsistente cuando un gym tiene varios equipos.
+	ChargeSettings           map[string]any
 	CreatedAt                time.Time
 	UpdatedAt                time.Time
 	DeletedAt                *time.Time
@@ -80,7 +92,8 @@ func NewTrialGym(id uuid.UUID, trialDays int, now time.Time) *Gym {
 			"audio_volume":       80,
 			"auto_close_seconds": 5,
 		},
-		CreatedAt: now,
+		ChargeSettings: map[string]any{},
+		CreatedAt:      now,
 		UpdatedAt: now,
 	}
 }
@@ -472,6 +485,71 @@ func (g *Gym) ApplyProfileUpdate(u ProfileUpdate) error {
 	return nil
 }
 
+// ChargeSettingsInput es la forma con la que la app capa pasa el set
+// completo de configuraciones de cobros a nivel gym. Todos los campos
+// son punteros para que cada llamada decida explícitamente qué tocar:
+// un nil significa "no cambiar"; un valor (incluido false o 0) significa
+// "fijar a este valor".
+type ChargeSettingsInput struct {
+	ChargesEnrollment    *bool
+	ChargesMaintenance   *bool
+	EnrollmentAmount     *float64
+	MaintenanceAmount    *float64
+	MaintenanceFrequency *string
+}
+
+var allowedMaintenanceFreqs = map[string]bool{
+	"monthly":    true,
+	"bimonthly":  true,
+	"quarterly":  true,
+	"semiannual": true,
+	"annual":     true,
+}
+
+// UpdateChargeSettings reemplaza/parchea los campos de cobro del gym.
+// Validaciones: montos deben ser >= 0, la frecuencia debe ser uno de
+// los valores soportados. Vacío en frecuencia limpia el setting.
+func (g *Gym) UpdateChargeSettings(in ChargeSettingsInput, now time.Time) error {
+	if in.EnrollmentAmount != nil && *in.EnrollmentAmount < 0 {
+		return gymErrors.ErrInvalidChargeAmount
+	}
+	if in.MaintenanceAmount != nil && *in.MaintenanceAmount < 0 {
+		return gymErrors.ErrInvalidChargeAmount
+	}
+	if in.MaintenanceFrequency != nil {
+		v := strings.TrimSpace(*in.MaintenanceFrequency)
+		if v != "" && !allowedMaintenanceFreqs[v] {
+			return gymErrors.ErrInvalidMaintenanceFrequency
+		}
+	}
+	if g.ChargeSettings == nil {
+		g.ChargeSettings = map[string]any{}
+	}
+	if in.ChargesEnrollment != nil {
+		g.ChargeSettings["charges_enrollment"] = *in.ChargesEnrollment
+	}
+	if in.ChargesMaintenance != nil {
+		g.ChargeSettings["charges_maintenance"] = *in.ChargesMaintenance
+	}
+	if in.EnrollmentAmount != nil {
+		g.ChargeSettings["enrollment_amount"] = *in.EnrollmentAmount
+	}
+	if in.MaintenanceAmount != nil {
+		g.ChargeSettings["maintenance_amount"] = *in.MaintenanceAmount
+	}
+	if in.MaintenanceFrequency != nil {
+		v := strings.TrimSpace(*in.MaintenanceFrequency)
+		if v == "" {
+			delete(g.ChargeSettings, "maintenance_frequency")
+		} else {
+			g.ChargeSettings["maintenance_frequency"] = v
+		}
+	}
+	g.Version++
+	g.UpdatedAt = now
+	return nil
+}
+
 // ConnectWhatsApp records the gym's WhatsApp Business number + the optional
 // provider-side token (Twilio sub-account auth or Meta access token). Used
 // by UC-037 after the verification ceremony succeeds. `now` is the
@@ -495,6 +573,24 @@ func (g *Gym) ConnectWhatsApp(phone string, tokenEnc []byte, now time.Time) erro
 // IsWhatsAppConnected reports whether the gym has finished UC-037.
 func (g *Gym) IsWhatsAppConnected() bool {
 	return g.WhatsAppConnectedAt != nil && g.WhatsAppBusinessPhone != nil && *g.WhatsAppBusinessPhone != ""
+}
+
+// NotifyMemberPinEnabled reports whether the welcome-PIN WhatsApp message
+// should fire when a socio is enrolled or has their PIN regenerated.
+// Stored under KioskSettings["notify_member_pin"]; default true (a missing
+// key counts as enabled — auto-send is the default product behavior).
+func (g *Gym) NotifyMemberPinEnabled() bool {
+	if g.KioskSettings == nil {
+		return true
+	}
+	v, ok := g.KioskSettings["notify_member_pin"]
+	if !ok {
+		return true
+	}
+	if b, ok := v.(bool); ok {
+		return b
+	}
+	return true
 }
 
 func assignColor(target **string, raw string) error {

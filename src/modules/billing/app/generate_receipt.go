@@ -157,25 +157,55 @@ func buildReceiptLines(gymName, city, whatsapp, rfc, razon *string,
 	lines = append(lines, "Comprobante de pago")
 	lines = append(lines, "Folio: "+p.Folio)
 	lines = append(lines, "Fecha: "+p.PaymentDate.Format("2006-01-02"))
-	lines = append(lines, "Concepto: "+conceptLabel(p.Concept))
-	lines = append(lines, fmt.Sprintf("Monto: $%.2f", p.Amount))
-	if p.DiscountAmount > 0 {
-		lines = append(lines, fmt.Sprintf("Descuento: $%.2f", p.DiscountAmount))
-		if p.DiscountReason != nil {
-			lines = append(lines, "Motivo descuento: "+*p.DiscountReason)
-		}
-	}
-	if p.BalancePending > 0 {
-		lines = append(lines, fmt.Sprintf("Saldo pendiente: $%.2f", p.BalancePending))
-	}
-	lines = append(lines, "Método: "+methodLabel(p.PaymentMethod))
 	if memberName != "" {
 		lines = append(lines, "Socio: "+memberName+" ("+memberFolio+")")
 	}
 	lines = append(lines, "")
+
+	// Sección de conceptos. Si el pago tiene `breakdown` desglosado
+	// (UC-018 membership, UC-025 product sale, primer pago) imprimimos
+	// línea por línea. Si no (settlements, refunds, pagos pre-migración)
+	// caemos al label tradicional de una sola línea con concepto + monto.
+	if len(p.Breakdown) > 0 {
+		lines = append(lines, "Detalle:")
+		for _, l := range p.Breakdown {
+			lines = append(lines, fmt.Sprintf("  %-30s $%.2f", truncateLabel(l.Label, 30), l.Amount))
+		}
+	} else {
+		lines = append(lines, "Concepto: "+conceptLabel(p.Concept))
+	}
+
+	subtotal := p.Amount + p.DiscountAmount
+	if p.DiscountAmount > 0 {
+		lines = append(lines, fmt.Sprintf("Subtotal: $%.2f", subtotal))
+		lines = append(lines, fmt.Sprintf("Descuento: -$%.2f", p.DiscountAmount))
+		if p.DiscountReason != nil {
+			lines = append(lines, "Motivo descuento: "+*p.DiscountReason)
+		}
+	}
+	lines = append(lines, fmt.Sprintf("Total: $%.2f", p.Amount))
+	if p.BalancePending > 0 {
+		lines = append(lines, fmt.Sprintf("Saldo pendiente: $%.2f", p.BalancePending))
+	}
+	lines = append(lines, "Método: "+methodLabel(p.PaymentMethod))
+
+	lines = append(lines, "")
 	lines = append(lines, "Este NO es un comprobante fiscal.")
 	lines = append(lines, "Para factura, comuníquese con el gimnasio.")
 	return lines
+}
+
+// truncateLabel mantiene el ancho fijo del PDF razonable (Helvetica 12pt
+// no es monoespacio pero para texto breve queda alineado a ojo). Si una
+// etiqueta excede `max`, recortamos con elipsis.
+func truncateLabel(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	if max <= 3 {
+		return s[:max]
+	}
+	return s[:max-3] + "..."
 }
 
 func conceptLabel(c string) string {

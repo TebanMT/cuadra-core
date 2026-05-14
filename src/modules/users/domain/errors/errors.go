@@ -33,4 +33,8 @@ var (
 	ErrAlreadyOwner          = errors.New("ese usuario ya es dueño")
 	ErrTransferToSelf        = errors.New("no puedes transferir a ti mismo")
 	ErrInvalidToken          = errors.New("token inválido")
+	ErrInvalidPhone          = errors.New("ese teléfono no se ve bien")
+	ErrInvalidPIN            = errors.New("el PIN debe ser de 4 dígitos")
+	ErrPINNotSet             = errors.New("este usuario no tiene PIN configurado")
+	ErrInvalidPINLogin       = errors.New("PIN incorrecto")
 )

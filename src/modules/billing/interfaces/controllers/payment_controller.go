@@ -85,12 +85,18 @@ func (ctrl *PaymentController) RegisterRoutes(r *gin.Engine) {
 type registerPaymentReq struct {
 	MemberID         string  `json:"member_id" validate:"required,uuid"`
 	MembershipTypeID string  `json:"membership_type_id" validate:"required,uuid"`
-	Method           string  `json:"method" validate:"required,oneof=cash transfer card"`
+	Method           string  `json:"payment_method" validate:"required,oneof=cash transfer card"`
 	PaymentDate      string  `json:"payment_date,omitempty"` // YYYY-MM-DD
 	Notes            *string `json:"notes,omitempty"`
-	Discount         float64 `json:"discount,omitempty"`
+	Discount         float64 `json:"discount_amount,omitempty"`
 	DiscountReason   *string `json:"discount_reason,omitempty"`
-	PaidNow          float64 `json:"paid_now,omitempty"`
+	PaidNow          float64 `json:"partial_amount,omitempty"`
+	// Operator overrides — nil/cero = auto-decisión basada en el plan
+	// y el estado del socio.
+	ChargeEnrollment  *bool   `json:"charge_enrollment,omitempty"`
+	ChargeMaintenance *bool   `json:"charge_maintenance,omitempty"`
+	EnrollmentAmount  float64 `json:"enrollment_amount,omitempty"`
+	MaintenanceAmount float64 `json:"maintenance_amount,omitempty"`
 }
 
 type registerPaymentResp struct {
@@ -109,7 +115,7 @@ type registerPaymentResp struct {
 
 type settleReq struct {
 	Amount      float64 `json:"amount" validate:"required,gt=0"`
-	Method      string  `json:"method" validate:"required,oneof=cash transfer card"`
+	Method      string  `json:"payment_method" validate:"required,oneof=cash transfer card"`
 	PaymentDate string  `json:"payment_date,omitempty"`
 	Notes       *string `json:"notes,omitempty"`
 }
@@ -127,7 +133,7 @@ type sendReceiptReq struct {
 
 type refundReq struct {
 	Reason           string  `json:"reason" validate:"required,min=3,max=500"`
-	Method           string  `json:"method" validate:"required,oneof=cash transfer card"`
+	Method           string  `json:"payment_method" validate:"required,oneof=cash transfer card"`
 	Amount           float64 `json:"amount,omitempty"`
 	PaymentDate      string  `json:"payment_date,omitempty"`
 	RevertMembership bool    `json:"revert_membership,omitempty"`
@@ -216,16 +222,20 @@ func (ctrl *PaymentController) handleRegister(c *gin.Context) {
 		paymentDate = t
 	}
 	out, err := ctrl.Register.Execute(c.Request.Context(), billingApp.RegisterMembershipPaymentInput{
-		GymID:            gymID,
-		ActorUserID:      userID,
-		MemberID:         memberID,
-		MembershipTypeID: typeID,
-		Method:           req.Method,
-		PaymentDate:      paymentDate,
-		Notes:            req.Notes,
-		Discount:         req.Discount,
-		DiscountReason:   req.DiscountReason,
-		PaidNow:          req.PaidNow,
+		GymID:             gymID,
+		ActorUserID:       userID,
+		MemberID:          memberID,
+		MembershipTypeID:  typeID,
+		Method:            req.Method,
+		PaymentDate:       paymentDate,
+		Notes:             req.Notes,
+		Discount:          req.Discount,
+		DiscountReason:    req.DiscountReason,
+		PaidNow:           req.PaidNow,
+		ChargeEnrollment:  req.ChargeEnrollment,
+		ChargeMaintenance: req.ChargeMaintenance,
+		EnrollmentAmount:  req.EnrollmentAmount,
+		MaintenanceAmount: req.MaintenanceAmount,
 	})
 	if err != nil {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)

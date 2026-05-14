@@ -33,12 +33,18 @@ func TestSignupOwner_SQLite(t *testing.T) {
 	defer db.Close()
 	db.SetMaxOpenConns(1)
 
-	schema, err := os.ReadFile("../../../../db_migrations/sqlite/001_init_schema.sql")
-	if err != nil {
-		t.Fatalf("read migration: %v", err)
-	}
-	if _, err := db.Exec(string(schema)); err != nil {
-		t.Fatalf("apply migration: %v", err)
+	for _, m := range []string{
+		"../../../../db_migrations/sqlite/001_init_schema.sql",
+		"../../../../db_migrations/sqlite/005_users_pin.sql",
+		"../../../../db_migrations/sqlite/008_gym_charge_settings.sql",
+	} {
+		schema, err := os.ReadFile(m)
+		if err != nil {
+			t.Fatalf("read %s: %v", m, err)
+		}
+		if _, err := db.Exec(string(schema)); err != nil {
+			t.Fatalf("apply %s: %v", m, err)
+		}
 	}
 
 	uow := sharedDomain.NewSQLiteUnitOfWork(db, syncpkg.NewSqliteQueue())
@@ -99,5 +105,76 @@ func TestSignupOwner_SQLite(t *testing.T) {
 	})
 	if err == nil {
 		t.Errorf("expected duplicate-email error")
+	}
+}
+
+// TestSignupOwner_WithPhone — phone is optional, but when supplied it must
+// land in the users row exactly as the user typed it (post-trim). The
+// scenario that justifies separate test coverage is a future WhatsApp
+// recovery flow that needs the stored phone to match the number the owner
+// will key in to receive the OTP — silent normalization would break that.
+func TestSignupOwner_WithPhone(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	dsn := dbPath + "?_foreign_keys=on"
+	db, err := sqlx.Open("sqlite3", dsn)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+
+	for _, m := range []string{
+		"../../../../db_migrations/sqlite/001_init_schema.sql",
+		"../../../../db_migrations/sqlite/005_users_pin.sql",
+		"../../../../db_migrations/sqlite/008_gym_charge_settings.sql",
+	} {
+		schema, err := os.ReadFile(m)
+		if err != nil {
+			t.Fatalf("read %s: %v", m, err)
+		}
+		if _, err := db.Exec(string(schema)); err != nil {
+			t.Fatalf("apply %s: %v", m, err)
+		}
+	}
+
+	uow := sharedDomain.NewSQLiteUnitOfWork(db, syncpkg.NewSqliteQueue())
+	uc := usersApp.NewSignupOwner(
+		usersRepoLite.NewUserSQLiteRepository(),
+		gymRepoLite.NewGymSQLiteRepository(),
+		uow,
+		auth.NewJWTService("test-secret"),
+		audit.NewSQLiteRecorder(),
+		30,
+	)
+	const wantPhone = "55 1234 5678"
+	if _, err := uc.Execute(context.Background(), usersApp.SignupOwnerInput{
+		FullName:        "Esteban Mares",
+		Email:           "esteban@gym.com",
+		Phone:           wantPhone,
+		Password:        "supersecret123",
+		PasswordConfirm: "supersecret123",
+	}); err != nil {
+		t.Fatalf("signup with phone: %v", err)
+	}
+	var got string
+	if err := db.Get(&got, "SELECT phone FROM users WHERE email = 'esteban@gym.com'"); err != nil {
+		t.Fatalf("read phone: %v", err)
+	}
+	if got != wantPhone {
+		t.Errorf("phone = %q, want %q", got, wantPhone)
+	}
+
+	// Invalid phone (letters) must reject the whole signup — we cannot
+	// silently strip "abc" because it changes user intent.
+	_, err = uc.Execute(context.Background(), usersApp.SignupOwnerInput{
+		FullName:        "Otro Owner",
+		Email:           "otro@gym.com",
+		Phone:           "abc-letters",
+		Password:        "anotherone1",
+		PasswordConfirm: "anotherone1",
+	})
+	if err == nil {
+		t.Errorf("expected validation error for letters in phone")
 	}
 }

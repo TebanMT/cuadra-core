@@ -27,6 +27,7 @@ type LoginOutput struct {
 	GymID              uuid.UUID
 	FullName           string
 	Email              string
+	Phone              string
 	Role               string
 	GymName            *string
 	AccessToken        string
@@ -65,6 +66,7 @@ func (uc *Login) Execute(ctx context.Context, in LoginInput) (LoginOutput, error
 		gymID      uuid.UUID
 		fullName   string
 		email      string
+		phone      string
 		role       string
 		gymName    *string
 		setupDone  bool
@@ -107,6 +109,9 @@ func (uc *Login) Execute(ctx context.Context, in LoginInput) (LoginOutput, error
 		gymID = user.GymID
 		fullName = user.FullName
 		email = user.Email
+		if user.Phone != nil {
+			phone = *user.Phone
+		}
 		role = user.Role
 		gymName = gym.Name
 		setupDone = gym.IsSetupComplete()
@@ -133,6 +138,7 @@ func (uc *Login) Execute(ctx context.Context, in LoginInput) (LoginOutput, error
 		GymID:              gymID,
 		FullName:           fullName,
 		Email:              email,
+		Phone:              phone,
 		Role:               role,
 		GymName:            gymName,
 		AccessToken:        access,

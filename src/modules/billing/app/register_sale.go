@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -199,6 +200,27 @@ func (uc *RegisterSale) Execute(ctx context.Context, in RegisterSaleInput) (*Reg
 		if err != nil {
 			return sharedDomain.NewValidationError(err)
 		}
+		// Desglose por producto vendido. Cuando hay cantidad > 1 lo
+		// reflejamos en el label ("Proteína 1kg ×2"); el amount es el
+		// line total (qty × unit_price), que ya viene calculado en el
+		// SaleItem. Si hay descuento global se anota como línea negativa
+		// al final para que el subtotal cuadre con p.Amount.
+		breakdown := make([]paymentDomain.BreakdownLine, 0, len(s.Items)+1)
+		for _, si := range s.Items {
+			label := si.ProductNameSnapshot
+			if si.Quantity > 1 {
+				label = fmt.Sprintf("%s ×%d", label, si.Quantity)
+			}
+			breakdown = append(breakdown, paymentDomain.BreakdownLine{
+				Label: label, Amount: si.LineTotal,
+			})
+		}
+		if s.Discount > 0 {
+			breakdown = append(breakdown, paymentDomain.BreakdownLine{
+				Label: "Descuento", Amount: -s.Discount,
+			})
+		}
+		p.SetBreakdown(breakdown)
 		if _, err := uc.Payments.Create(tx, p); err != nil {
 			return sharedDomain.NewUnexpectedError(err)
 		}

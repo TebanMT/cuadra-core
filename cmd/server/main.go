@@ -40,6 +40,11 @@ import (
 	usersRepoPg "github.com/cuadra/cuadra-core/src/modules/users/infraestructure/db/repositories"
 	usersCtrl "github.com/cuadra/cuadra-core/src/modules/users/interfaces/controllers"
 
+	challengesApp "github.com/cuadra/cuadra-core/src/modules/challenges/app"
+	challengesInfra "github.com/cuadra/cuadra-core/src/modules/challenges/infraestructure"
+	challengesRepoPG "github.com/cuadra/cuadra-core/src/modules/challenges/infraestructure/db/repositories"
+	challengesCtrl "github.com/cuadra/cuadra-core/src/modules/challenges/interfaces/controllers"
+
 	notiApp "github.com/cuadra/cuadra-core/src/modules/notifications/app"
 	notiDomain "github.com/cuadra/cuadra-core/src/modules/notifications/domain"
 	notiRepoPg "github.com/cuadra/cuadra-core/src/modules/notifications/infraestructure/db/repositories"
@@ -61,8 +66,10 @@ import (
 	bcrypto "github.com/cuadra/cuadra-core/src/shared/biometric/crypto"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 	"github.com/cuadra/cuadra-core/src/shared/email"
+	"github.com/cuadra/cuadra-core/src/shared/recovery"
 	"github.com/cuadra/cuadra-core/src/shared/installerbootstrap"
 	"github.com/cuadra/cuadra-core/src/shared/middleware"
+	"github.com/cuadra/cuadra-core/src/shared/r2"
 	"github.com/cuadra/cuadra-core/src/shared/sidecartoken"
 	syncShared "github.com/cuadra/cuadra-core/src/shared/sync"
 )
@@ -112,6 +119,10 @@ func main() {
 	tokens := auth.NewJWTService(mustEnv("JWT_SECRET"))
 	recorder := audit.NewPostgresRecorder()
 	emailSender := email.NewStdoutSender()
+	// Recovery registry (ADR-014 pending). MVP routes all recoveries through
+	// email; fase 2 swaps this for recovery.TieredRegistry to enable
+	// WhatsApp recovery on Plus gyms without touching the use case.
+	recoveryChannels := recovery.NewEmailOnlyRegistry(recovery.NewEmailChannel(emailSender))
 	trialDays := envInt("TRIAL_DURATION_DAYS", 30)
 	baseURL := envOrDefault("PUBLIC_BASE_URL", "https://api.entinta.app")
 
@@ -126,15 +137,36 @@ func main() {
 	issueInstaller := usersApp.NewIssueInstallerBootstrap(installerStore)
 	redeemInstaller := usersApp.NewRedeemInstallerBootstrap(installerStore, userRepo, gymRepo, uow, tokens, sidecarBootstrap)
 
+	// R2 (Cloudflare object storage). Si las env vars están vacías
+	// el cliente queda nil y el endpoint /uploads/presign devuelve
+	// 501 — el sidecar lo detecta y reintenta en el próximo tick.
+	r2Cfg := r2.Config{
+		AccountID: envOrDefault("R2_ACCOUNT_ID", ""),
+		AccessKey: envOrDefault("R2_ACCESS_KEY", ""),
+		SecretKey: envOrDefault("R2_SECRET_KEY", ""),
+		Bucket:    envOrDefault("R2_BUCKET", ""),
+	}
+	var r2Client *r2.Client
+	if r2Cfg.IsConfigured() {
+		c, err := r2.NewClient(r2Cfg)
+		if err != nil {
+			log.Fatalf("init R2: %v", err)
+		}
+		r2Client = c
+	} else {
+		log.Printf("R2 not configured (R2_ACCOUNT_ID / R2_ACCESS_KEY / R2_SECRET_KEY / R2_BUCKET) — member photo uploads will queue locally until env vars are set")
+	}
+
 	signup := usersApp.NewSignupOwner(userRepo, gymRepo, uow, tokens, recorder, trialDays)
 	login := usersApp.NewLogin(userRepo, gymRepo, uow, tokens, recorder)
 	logout := usersApp.NewLogout(blRepo, uow, tokens, recorder)
-	requestReset := usersApp.NewRequestPasswordReset(userRepo, resetRepo, uow, emailSender, recorder, baseURL)
+	requestReset := usersApp.NewRequestPasswordReset(userRepo, resetRepo, uow, recoveryChannels, recorder, baseURL)
 	confirmReset := usersApp.NewConfirmPasswordReset(userRepo, resetRepo, blRepo, uow, recorder)
 	updateBasic := gymApp.NewUpdateBasicInfo(gymRepo, uow, recorder)
 	updatePay := gymApp.NewUpdatePaymentMethods(gymRepo, uow, recorder)
 	completeSetup := gymApp.NewCompleteSetup(gymRepo, uow, recorder)
 	updateProfile := gymApp.NewUpdateProfile(gymRepo, uow, recorder)
+	updateChargeSettings := gymApp.NewUpdateChargeSettings(gymRepo, uow, recorder)
 	createOp := usersApp.NewCreateOperator(userRepo, uow, recorder)
 	updateOp := usersApp.NewUpdateOperator(userRepo, uow, recorder)
 	toggleOp := usersApp.NewToggleOperatorActive(userRepo, blRepo, uow, recorder)
@@ -145,7 +177,10 @@ func main() {
 	updateMT := memApp.NewUpdateMembershipType(mtRepo, uow, recorder)
 	deactivateMT := memApp.NewDeactivateMembershipType(mtRepo, uow, recorder)
 	listMT := memApp.NewListMembershipTypes(mtRepo, uow)
-	createMember := memApp.NewCreateMember(memberRepo, membershipRepo, mtRepo, uow, recorder)
+	// Folios: el mismo generator que usa billing abajo, anticipado para
+	// que CreateMember pueda cobrar el primer pago en la misma tx.
+	folios := folioSvc.NewGenerator(paymentRepo)
+	createMember := memApp.NewCreateMemberWithBilling(memberRepo, membershipRepo, mtRepo, paymentRepo, folios, uow, recorder)
 	updateMember := memApp.NewUpdateMember(memberRepo, uow, recorder)
 	listMembers := memApp.NewListMembers(memberRepo, uow)
 	memberDetail := memApp.NewGetMemberDetail(memberRepo, uow)
@@ -167,6 +202,12 @@ func main() {
 
 	// ── Notifications (Sesión 7) ──────────────────────────────────────────
 	enqueueReceipt := notiApp.NewEnqueueReceipt(notificationRepo, gymRepo, memberRepo, uow)
+	enqueueWelcomePin := notiApp.NewEnqueueWelcomePin(notificationRepo, gymRepo, memberRepo)
+	// Wire la seam de welcome-PIN en los use cases de members que asignan
+	// PIN. La notifications BC implementa el contrato; members lo usa sin
+	// importar el paquete de notificaciones.
+	createMember.WithWelcomePinNotifier(enqueueWelcomePin)
+	assignPin.WithWelcomePinNotifier(enqueueWelcomePin)
 	enqueueExpiry := notiApp.NewEnqueueExpiryReminder(notificationRepo, expiryReader, uow)
 	enqueueOwnerAlert := notiApp.NewEnqueueOwnerAlert(notificationRepo, gymRepo, userRepo, alertConfigRepo, uow)
 	dispatchNoti := notiApp.NewDispatchNotification(notificationRepo, templateRepo, gymRepo, whatsappProvider, notiEmailProvider, uow)
@@ -182,7 +223,7 @@ func main() {
 	billingSubscriber := notiApp.NewBillingEventSubscriber(enqueueReceipt)
 
 	// ── Billing (Sesión 3) ────────────────────────────────────────────────
-	folios := folioSvc.NewGenerator(paymentRepo)
+	// `folios` se construyó arriba (lo reusa createMember). Mismo generator.
 	registerPayment := billingApp.NewRegisterMembershipPayment(paymentRepo, folios, memberSvc, memberRepo, uow, recorder, billingSubscriber)
 	settlePayment := billingApp.NewSettlePendingBalance(paymentRepo, folios, uow, recorder)
 	receiptPayment := billingApp.NewGenerateReceipt(paymentRepo, gymRepo, memberRepo, uow)
@@ -210,6 +251,11 @@ func main() {
 	exportReport := reportsApp.NewExportReport(reportsReader, gymRepo, uow, attentionRequired)
 	markContacted := memApp.NewMarkContacted(memberRepo, contactAttemptRepo, uow, recorder)
 	markLost := memApp.NewMarkLost(memberRepo, uow, recorder)
+	// PIN use cases for cloud-side POST/DELETE /auth/me/pin. The dashboard
+	// uses these when the owner sets their reception PIN before installing
+	// the desktop; the value then projects down to every paired sidecar.
+	assignSelfPIN := usersApp.NewAssignSelfPIN(userRepo, uow, recorder)
+	clearSelfPIN := usersApp.NewClearSelfPIN(userRepo, uow, recorder)
 
 	// ── Controllers ────────────────────────────────────────────────────────
 	authCtrl := usersCtrl.NewAuthController(usersCtrl.AuthController{
@@ -222,12 +268,15 @@ func main() {
 		UpdatePayMethods:   updatePay,
 		CompleteSetup:      completeSetup,
 		UpdateProfile:      updateProfile,
+		UpdateChargeSet:    updateChargeSettings,
 		CreateOperator:     createOp,
 		UpdateOperator:     updateOp,
 		ToggleActive:       toggleOp,
 		ResetOpPassword:    resetOp,
 		RequestTransfer:    requestTransfer,
 		ConfirmTransfer:    confirmTransfer,
+		AssignSelfPIN:      assignSelfPIN,
+		ClearSelfPIN:       clearSelfPIN,
 		Tokens:             tokens,
 		Gyms:               gymRepo,
 		Users:              userRepo,
@@ -237,6 +286,8 @@ func main() {
 		SidecarBootstrap:   sidecarBootstrap,
 		InstallerBootstrap: issueInstaller,
 		RedeemInstaller:    redeemInstaller,
+		SidecarTokens:      sidecarStore,
+		R2:                 r2Client,
 	})
 	mtCtrl := memCtrl.NewMembershipTypeController(createMT, updateMT, deactivateMT, listMT, tokens)
 	memberCtrl := memCtrl.NewMemberController(createMember, updateMember, listMembers, memberDetail, toggleMember, lockExpiry, assignPin, tokens)
@@ -247,6 +298,54 @@ func main() {
 	checkinCtrl := chkCtrl.NewCheckinController(checkinManual, checkinPin, checkinOverride, checkinRepo, uow, nil, tokens)
 	reportsController := reportsCtrl.NewReportsController(dashboard, attentionRequired, rangeReport, exportReport, markContacted, markLost, tokens)
 	notificationsCtrl := notiCtrl.NewController(connectWhatsApp, whatsappStatus, listTemplates, updateTemplate, broadcast, listNotifications, listOwnerAlerts, updateOwnerAlert, whatsappProvider, tokens)
+
+	// ── Challenges (retos) ────────────────────────────────────────────────
+	// Full vertical slice: list/detail/config, categories, participants,
+	// measurement capture (with supersession), ranking, attendance + DQ.
+	challengeRepo := challengesRepoPG.NewChallengePostgresRepository()
+	categoryRepo := challengesRepoPG.NewCategoryPostgresRepository()
+	participantRepo := challengesRepoPG.NewParticipantPostgresRepository()
+	measurementRepo := challengesRepoPG.NewMeasurementPostgresRepository()
+	attendanceCounter := challengesInfra.NewCheckinsAttendanceAdapter()
+	createChallenge := challengesApp.NewCreateChallenge(challengeRepo, uow, recorder)
+	listChallenges := challengesApp.NewListChallenges(challengeRepo, uow)
+	detailChallenge := challengesApp.NewGetChallengeDetail(challengeRepo, categoryRepo, participantRepo, measurementRepo, uow)
+	updateChallengeConfig := challengesApp.NewUpdateChallengeConfig(challengeRepo, measurementRepo, uow, recorder)
+	transitionChallenge := challengesApp.NewTransitionChallengeStatus(challengeRepo, categoryRepo, uow, recorder)
+	addCategory := challengesApp.NewAddCategory(challengeRepo, categoryRepo, uow, recorder)
+	updateCategory := challengesApp.NewUpdateCategory(categoryRepo, uow, recorder)
+	deleteCategory := challengesApp.NewDeleteCategory(categoryRepo, uow, recorder)
+	listCategories := challengesApp.NewListCategories(challengeRepo, categoryRepo, uow)
+	addParticipant := challengesApp.NewAddParticipant(challengeRepo, categoryRepo, participantRepo, uow, recorder)
+	updateParticipant := challengesApp.NewUpdateParticipant(participantRepo, uow, recorder)
+	removeParticipant := challengesApp.NewRemoveParticipant(participantRepo, uow, recorder)
+	listParticipants := challengesApp.NewListParticipants(challengeRepo, participantRepo, uow)
+	captureMeasurement := challengesApp.NewCaptureMeasurement(challengeRepo, participantRepo, measurementRepo, uow, recorder)
+	listMeasurements := challengesApp.NewListMeasurements(challengeRepo, participantRepo, measurementRepo, uow)
+	ranking := challengesApp.NewGetChallengeRanking(challengeRepo, participantRepo, measurementRepo, attendanceCounter, uow)
+	attendanceReport := challengesApp.NewGetAttendanceReport(challengeRepo, participantRepo, attendanceCounter, uow)
+	checkDQ := challengesApp.NewCheckDisqualifications(challengeRepo, participantRepo, attendanceCounter, uow, recorder)
+	challengeCtrl := challengesCtrl.NewChallengeController(challengesCtrl.ChallengeController{
+		CreateChallenge:        createChallenge,
+		ListChallenges:         listChallenges,
+		GetChallengeDetail:     detailChallenge,
+		UpdateChallengeConfig:  updateChallengeConfig,
+		TransitionStatus:       transitionChallenge,
+		AddCategory:            addCategory,
+		UpdateCategory:         updateCategory,
+		DeleteCategory:         deleteCategory,
+		ListCategories:         listCategories,
+		AddParticipant:         addParticipant,
+		UpdateParticipant:      updateParticipant,
+		RemoveParticipant:      removeParticipant,
+		ListParticipants:       listParticipants,
+		CaptureMeasurement:     captureMeasurement,
+		ListMeasurements:       listMeasurements,
+		GetChallengeRanking:    ranking,
+		GetAttendanceReport:    attendanceReport,
+		CheckDisqualifications: checkDQ,
+		Tokens:                 tokens,
+	})
 
 	// ── Subscriptions (Fase 1: cobranza al dueño) ─────────────────────────
 	subEventRepo := subDB.NewEventPostgresRepository()
@@ -288,6 +387,7 @@ func main() {
 	notificationsCtrl.RegisterRoutes(r)
 	notiWebhookCtrl.RegisterRoutes(r)
 	subscriptionsCtrl.RegisterRoutes(r)
+	challengeCtrl.RegisterRoutes(r)
 
 	// Sync protocol (Sesión 8 / ADR-001) — push/pull/full + Prometheus
 	// metrics at /_internal/metrics. The handler depends only on the UoW

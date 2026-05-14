@@ -28,7 +28,10 @@ type PaymentModel struct {
 	BalancePending  float64    `gorm:"type:numeric(12,2);not null;default:0;column:balance_pending"`
 	PaymentDate     time.Time  `gorm:"type:date;not null;column:payment_date"`
 	Notes           *string    `gorm:"column:notes"`
-	OperatorID      uuid.UUID  `gorm:"type:uuid;not null;column:operator_id"`
+	// Breakdown is stored as JSONB on Postgres. Held as a raw string at
+	// the model layer; mapper en repositories/ marshala/desmarshala.
+	Breakdown  *string   `gorm:"type:jsonb;column:breakdown"`
+	OperatorID uuid.UUID `gorm:"type:uuid;not null;column:operator_id"`
 }
 
 func (PaymentModel) TableName() string { return "payments" }

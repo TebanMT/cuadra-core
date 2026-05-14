@@ -156,6 +156,7 @@ CREATE TABLE IF NOT EXISTS members (
     last_maintenance_paid   TEXT,
 
     pin_hash                TEXT,
+    pin_plain               TEXT,
     pin_assigned_at         INTEGER,
 
     last_contact_attempt_at INTEGER,
@@ -190,17 +191,24 @@ CREATE TABLE IF NOT EXISTS memberships (
     duration_days_snapshot  INTEGER NOT NULL,
 
     start_date      TEXT NOT NULL,
-    expiry_date     TEXT NOT NULL,
-    status          TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','expired','replaced','cancelled')),
+    -- expiry_date null cuando status = 'pending_payment' (socio inscrito
+    -- pero sin pago todavía — la vigencia se calcula al recibir el
+    -- primer abono, parcial o completo).
+    expiry_date     TEXT,
+    status          TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','expired','replaced','cancelled','pending_payment')),
     replaced_by     TEXT REFERENCES memberships(id),
 
-    CHECK (expiry_date >= start_date)
+    CHECK (expiry_date IS NULL OR expiry_date >= start_date)
 );
 CREATE INDEX IF NOT EXISTS idx_memberships_member ON memberships(member_id, status) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_memberships_gym_expiry ON memberships(gym_id, expiry_date) WHERE status = 'active' AND deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_memberships_sync ON memberships(gym_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_memberships_sync_pending ON memberships(synced_at) WHERE synced_at IS NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS uq_memberships_member_active ON memberships(member_id) WHERE status = 'active' AND deleted_at IS NULL;
+-- Un socio sólo puede tener UNA membresía vigente o pendiente a la vez.
+-- Antes era sólo 'active'; ahora incluimos 'pending_payment' porque
+-- semánticamente es la misma "slot" — un socio no puede estar inscrito
+-- en dos planes simultáneamente, esté pagado o no.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_memberships_member_active ON memberships(member_id) WHERE status IN ('active','pending_payment') AND deleted_at IS NULL;
 
 -- ---------------------------------------------------------------------------
 -- membership_adjustments
@@ -314,6 +322,7 @@ CREATE TABLE IF NOT EXISTS payments (
     balance_pending         INTEGER NOT NULL DEFAULT 0,
     payment_date            TEXT NOT NULL,
     notes                   TEXT,
+    breakdown               TEXT,
     operator_id             TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_payments_gym_folio ON payments(gym_id, folio) WHERE deleted_at IS NULL;
@@ -377,7 +386,7 @@ CREATE TABLE IF NOT EXISTS checkins (
     member_id           TEXT NOT NULL REFERENCES members(id) ON DELETE RESTRICT,
     checkin_at          INTEGER NOT NULL,
     method              TEXT NOT NULL CHECK (method IN ('fingerprint','manual','pin')),
-    result              TEXT NOT NULL CHECK (result IN ('allowed_active','allowed_expiring_soon','allowed_override','denied_expired','denied_inactive','denied_no_membership')),
+    result              TEXT NOT NULL CHECK (result IN ('allowed_active','allowed_expiring_soon','allowed_override','denied_expired','denied_inactive','denied_no_membership','denied_unpaid_enrollment')),
     operator_id         TEXT REFERENCES users(id) ON DELETE RESTRICT,
     manual_override     INTEGER NOT NULL DEFAULT 0,
     override_reason     TEXT

@@ -101,7 +101,18 @@ func buildStatusResponse(snap AgentSnapshot, now time.Time) StatusResponse {
 		return r
 	}
 	if snap.LastSyncedAt.IsZero() {
-		r.State = StateOfflineCritical
+		// Caso típico: el sidecar acaba de canjear el código de instalación
+		// y todavía no completa su primera tanda de sync. Antes mapeábamos
+		// esto a `offline_critical`, que en la UI sale como "Hay un
+		// problema sincronizando" con tono rojo — alarmante para un dueño
+		// recién instalado que no tiene NADA roto. Si hubo un intento y
+		// falló, `LastError` lo refleja → ahí sí escalar a critical. Sin
+		// error registrado, lo correcto es `initial_syncing` (spinner).
+		if snap.LastError != "" {
+			r.State = StateOfflineCritical
+		} else {
+			r.State = StateInitialSyncing
+		}
 		return r
 	}
 	gap := now.Sub(snap.LastSyncedAt)

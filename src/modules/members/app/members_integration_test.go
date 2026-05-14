@@ -13,6 +13,8 @@ import (
 	"github.com/jmoiron/sqlx"
 	_ "github.com/mattn/go-sqlite3"
 
+	billingRepoLite "github.com/cuadra/cuadra-core/src/modules/billing/infraestructure/db/repositories"
+	folioSvc "github.com/cuadra/cuadra-core/src/modules/billing/domain/folio"
 	gymRepoLite "github.com/cuadra/cuadra-core/src/modules/gyms/infraestructure/db/repositories"
 	memApp "github.com/cuadra/cuadra-core/src/modules/members/app"
 	memRepoLite "github.com/cuadra/cuadra-core/src/modules/members/infraestructure/db/repositories"
@@ -39,6 +41,8 @@ type membersFixture struct {
 	memberRepo  *memRepoLite.MemberSQLiteRepository
 	membershipR *memRepoLite.MembershipSQLiteRepository
 	adjustmentR *memRepoLite.MembershipAdjustmentSQLiteRepository
+	paymentRepo *billingRepoLite.PaymentSQLiteRepository
+	folios      *folioSvc.Generator
 }
 
 func setupMembersFixture(t *testing.T) *membersFixture {
@@ -53,12 +57,18 @@ func setupMembersFixture(t *testing.T) *membersFixture {
 	t.Cleanup(func() { db.Close() })
 	db.SetMaxOpenConns(1)
 
-	schema, err := os.ReadFile("../../../../db_migrations/sqlite/001_init_schema.sql")
-	if err != nil {
-		t.Fatalf("read migration: %v", err)
-	}
-	if _, err := db.Exec(string(schema)); err != nil {
-		t.Fatalf("apply migration: %v", err)
+	for _, m := range []string{
+		"../../../../db_migrations/sqlite/001_init_schema.sql",
+		"../../../../db_migrations/sqlite/005_users_pin.sql",
+		"../../../../db_migrations/sqlite/008_gym_charge_settings.sql",
+	} {
+		schema, err := os.ReadFile(m)
+		if err != nil {
+			t.Fatalf("read %s: %v", m, err)
+		}
+		if _, err := db.Exec(string(schema)); err != nil {
+			t.Fatalf("apply %s: %v", m, err)
+		}
 	}
 	uow := sharedDomain.NewSQLiteUnitOfWork(db, syncpkg.NewSqliteQueue())
 	recorder := audit.NewSQLiteRecorder()
@@ -80,6 +90,8 @@ func setupMembersFixture(t *testing.T) *membersFixture {
 	if err != nil {
 		t.Fatalf("signup: %v", err)
 	}
+	paymentRepo := billingRepoLite.NewPaymentSQLiteRepository()
+	folios := folioSvc.NewGenerator(paymentRepo)
 	return &membersFixture{
 		t:           t,
 		db:          db,
@@ -91,6 +103,8 @@ func setupMembersFixture(t *testing.T) *membersFixture {
 		memberRepo:  memRepoLite.NewMemberSQLiteRepository(),
 		membershipR: memRepoLite.NewMembershipSQLiteRepository(),
 		adjustmentR: memRepoLite.NewMembershipAdjustmentSQLiteRepository(),
+		paymentRepo: paymentRepo,
+		folios:      folios,
 	}
 }
 
@@ -173,7 +187,12 @@ func TestUC012_CreateMember_HappyPath(t *testing.T) {
 	f := setupMembersFixture(t)
 	typeID := f.createMembershipType(t, "Mensual")
 
-	uc := memApp.NewCreateMember(f.memberRepo, f.membershipR, f.mtRepo, f.uow, f.recorder)
+	// Happy path con ChargeFirstPayment=true requiere billing wirado;
+	// inline acá para no contaminar la fixture común con deps que el
+	// resto de tests no necesita.
+	paymentRepo := billingRepoLite.NewPaymentSQLiteRepository()
+	folios := folioSvc.NewGenerator(paymentRepo)
+	uc := memApp.NewCreateMemberWithBilling(f.memberRepo, f.membershipR, f.mtRepo, paymentRepo, folios, f.uow, f.recorder)
 	out, err := uc.Execute(context.Background(), memApp.CreateMemberInput{
 		GymID: f.gymID, ActorUserID: f.ownerID,
 		FullName:           "Juan Pérez García",
@@ -181,6 +200,7 @@ func TestUC012_CreateMember_HappyPath(t *testing.T) {
 		MembershipTypeID:   typeID,
 		StartDate:          time.Now().UTC(),
 		ChargeFirstPayment: true,
+		PaymentMethod:      "cash",
 	})
 	if err != nil {
 		t.Fatalf("create member: %v", err)
@@ -190,6 +210,19 @@ func TestUC012_CreateMember_HappyPath(t *testing.T) {
 	}
 	if !out.PendingFirstPayment {
 		t.Errorf("PendingFirstPayment should be true")
+	}
+	if out.PaymentID == nil {
+		t.Errorf("PaymentID nil — primer pago no se registró")
+	}
+	if out.PaymentFolio == "" {
+		t.Errorf("PaymentFolio vacío")
+	}
+	var paymentCount int
+	if err := f.db.Get(&paymentCount, "SELECT COUNT(*) FROM payments"); err != nil {
+		t.Fatalf("count payments: %v", err)
+	}
+	if paymentCount != 1 {
+		t.Errorf("payments count = %d, want 1", paymentCount)
 	}
 
 	var n int
@@ -392,12 +425,19 @@ func TestUC016_ToggleStatus(t *testing.T) {
 func TestUC017_LockExpiry_AtomicAdjustment(t *testing.T) {
 	f := setupMembersFixture(t)
 	typeID := f.createMembershipType(t, "Mensual")
-	create := memApp.NewCreateMember(f.memberRepo, f.membershipR, f.mtRepo, f.uow, f.recorder)
-	created, _ := create.Execute(context.Background(), memApp.CreateMemberInput{
+	// ChargeFirstPayment ⇒ la membresía nace activa (con expiry); el
+	// lock sólo aplica sobre memberships activas, no sobre pending.
+	create := memApp.NewCreateMemberWithBilling(f.memberRepo, f.membershipR, f.mtRepo, f.paymentRepo, f.folios, f.uow, f.recorder)
+	created, err := create.Execute(context.Background(), memApp.CreateMemberInput{
 		GymID: f.gymID, ActorUserID: f.ownerID,
 		FullName: "Juan", Phone: "+524421234567",
 		MembershipTypeID: typeID, StartDate: time.Now().UTC(),
+		ChargeFirstPayment: true,
+		PaymentMethod:      "cash",
 	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
 	uc := memApp.NewLockMembershipExpiry(f.membershipR, f.adjustmentR, f.uow, f.recorder)
 	out, err := uc.Execute(context.Background(), memApp.LockMembershipExpiryInput{
 		GymID: f.gymID, ActorUserID: f.ownerID, MembershipID: created.MembershipID,

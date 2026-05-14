@@ -28,6 +28,7 @@ type MemberModel struct {
 	EnrollmentPaid       bool       `gorm:"not null;default:false;column:enrollment_paid"`
 	LastMaintenancePaid  *time.Time `gorm:"type:date;column:last_maintenance_paid"`
 	PinHash              *string    `gorm:"column:pin_hash"`
+	PinPlain             *string    `gorm:"column:pin_plain"`
 	PinAssignedAt        *time.Time `gorm:"column:pin_assigned_at"`
 	LastContactAttemptAt *time.Time `gorm:"column:last_contact_attempt_at"`
 	CreatedBy            uuid.UUID  `gorm:"type:uuid;not null;column:created_by"`

@@ -29,18 +29,31 @@ type AssignPinInput struct {
 }
 
 type AssignPinOutput struct {
-	MemberID uuid.UUID
-	Pin      string // returned ONCE so the operator can write it on the membership card
+	MemberID    uuid.UUID
+	Pin         string // returned ONCE so the operator can write it on the membership card
+	PinDispatch WelcomePinDispatchResult
 }
 
 type AssignPin struct {
 	Members memRepo.MemberRepository
-	UoW     sharedDomain.UnitOfWork
-	Audit   audit.Recorder
+	// WelcomePin — misma seam que CreateMember. Reasignar/cambiar el PIN
+	// dispara una nueva notificación (idempotencia incluye el pin nuevo
+	// como sufijo), así el socio recibe el código actualizado vía
+	// WhatsApp sin que el operador tenga que copiarlo a mano.
+	WelcomePin WelcomePinNotifier
+	UoW        sharedDomain.UnitOfWork
+	Audit      audit.Recorder
 }
 
 func NewAssignPin(members memRepo.MemberRepository, uow sharedDomain.UnitOfWork, recorder audit.Recorder) *AssignPin {
 	return &AssignPin{Members: members, UoW: uow, Audit: recorder}
+}
+
+// WithWelcomePinNotifier wires the WhatsApp seam used to re-send the PIN
+// when the operator regenerates it.
+func (uc *AssignPin) WithWelcomePinNotifier(n WelcomePinNotifier) *AssignPin {
+	uc.WelcomePin = n
+	return uc
 }
 
 // errPinExhausted is returned by the auto-generator when 50 attempts at a
@@ -87,10 +100,25 @@ func (uc *AssignPin) Execute(ctx context.Context, in AssignPinInput) (*AssignPin
 		if err != nil {
 			return sharedDomain.NewUnexpectedError(err)
 		}
-		m.SetPin(hash, now)
+		m.SetPin(hash, pin, now)
 		if _, err := uc.Members.Update(tx, m); err != nil {
 			return sharedDomain.NewUnexpectedError(err)
 		}
+
+		// Encolar (re)envío del PIN al socio por WhatsApp. Mismo seam que
+		// CreateMember; la idempotencia incluye el pin como sufijo así un
+		// PIN nuevo siempre se reenvía.
+		notifier := uc.WelcomePin
+		if notifier == nil {
+			notifier = noopWelcomePinNotifier{}
+		}
+		res, nerr := notifier.Notify(ctx, tx, WelcomePinNotifyInput{
+			GymID: in.GymID, MemberID: m.ID, Pin: pin,
+		}, now)
+		if nerr != nil {
+			return nerr
+		}
+		out.PinDispatch = res
 		_ = uc.Audit.Record(ctx, tx, audit.Entry{
 			GymID:       in.GymID,
 			EntityType:  "members",

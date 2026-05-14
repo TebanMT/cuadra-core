@@ -75,6 +75,37 @@ func (s *MemberService) RenewMembershipForPayment(ctx context.Context, tx shared
 	if current.GymID != mt.GymID {
 		return nil, sharedDomain.NewBusinessError(memErrors.ErrCrossGym, "")
 	}
+
+	// Caso A — Activación de pending_payment. El socio fue inscrito sin
+	// primer pago; este abono (parcial o total) activa la membresía en
+	// el mismo row, sin renovar ni crear una fila nueva. La idea es: el
+	// plan elegido al inscribir es el que paga; si el operador cambió
+	// de plan, respetamos el cambio actualizando los snapshots antes
+	// de activar.
+	if current.Status == membershipDomain.StatusPendingPayment {
+		if current.MembershipTypeID != mt.ID {
+			// Operador cambió de plan al cobrar — refrescamos snapshots.
+			current.MembershipTypeID = mt.ID
+			current.TypeNameSnapshot = mt.Name
+			current.PriceSnapshot = mt.Price
+			current.DurationDaysSnapshot = mt.DurationDays
+		}
+		if err := current.Activate(in.PaymentDate, now); err != nil {
+			return nil, sharedDomain.NewBusinessError(err, "")
+		}
+		if _, err := s.Memberships.Update(tx, current); err != nil {
+			return nil, sharedDomain.NewUnexpectedError(err)
+		}
+		return &RenewMembershipForPaymentOutput{
+			OldMembership: nil, // no hubo "vieja" — la misma fila se activó.
+			NewMembership: current,
+			NextType:      mt,
+		}, nil
+	}
+
+	// Caso B — Renovación clásica: socio con membresía activa paga el
+	// siguiente ciclo. Creamos una nueva fila y marcamos la actual
+	// como replaced (3-step dance descrito abajo).
 	newID := uuid.New()
 	next := current.Renew(newID, mt, in.PaymentDate, now)
 	// Three-step dance to satisfy *both* constraints simultaneously:

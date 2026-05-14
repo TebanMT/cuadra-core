@@ -24,6 +24,8 @@ type UserModel struct {
 	MustChangePassword bool       `gorm:"not null;default:false;column:must_change_password"`
 	LastLoginAt        *time.Time `gorm:"column:last_login_at"`
 	CreatedBy          *uuid.UUID `gorm:"type:uuid;column:created_by"`
+	PinHash            *string    `gorm:"column:pin_hash"`
+	PinAssignedAt      *time.Time `gorm:"column:pin_assigned_at"`
 }
 
 func (UserModel) TableName() string { return "users" }

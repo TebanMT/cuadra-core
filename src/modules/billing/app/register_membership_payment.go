@@ -30,8 +30,9 @@ import (
 
 // RegisterMembershipPaymentInput carries everything UC-018 needs. The use case
 // resolves the MembershipType inside its tx and decides whether to charge the
-// enrollment / maintenance fees automatically. `Discount` and the partial
-// payment fields are optional — pass zero values to skip.
+// enrollment / maintenance fees — by default automáticamente (basado en
+// member.EnrollmentPaid y frequency-aware last_maintenance), pero el operador
+// puede sobreescribir via ChargeEnrollment / ChargeMaintenance.
 type RegisterMembershipPaymentInput struct {
 	GymID            uuid.UUID
 	ActorUserID      uuid.UUID
@@ -44,6 +45,24 @@ type RegisterMembershipPaymentInput struct {
 	// Discount > 0 requires DiscountReason.
 	Discount       float64
 	DiscountReason *string
+
+	// ChargeEnrollment / ChargeMaintenance permiten al operador forzar
+	// (true) o saltar (false) el cobro de cada cuota extra. Nil deja
+	// que el use case decida automáticamente:
+	//   * Enrollment: cobrar si !member.EnrollmentPaid && fee>0.
+	//   * Maintenance: cobrar según shouldChargeMaintenance (frecuencia
+	//     + last_maintenance_paid).
+	// Cuando el operador pasa true para una cuota que el plan no
+	// define (fee=0), se ignora silenciosamente — no inventamos cobros.
+	ChargeEnrollment  *bool
+	ChargeMaintenance *bool
+
+	// EnrollmentAmount / MaintenanceAmount sobreescriben el snapshot del
+	// plan cuando son > 0 (caso: el plan nació con fee=0 antes de que el
+	// gym prendiera el toggle a nivel ChargeSettings; el FE resuelve el
+	// monto efectivo desde gym.charge_settings y lo pasa explícitamente).
+	EnrollmentAmount  float64
+	MaintenanceAmount float64
 
 	// Partial payment: when PaidNow > 0 and < total, BalancePending = total - paid.
 	// When PaidNow == 0 the use case treats it as full payment (paid = total).
@@ -134,15 +153,39 @@ func (uc *RegisterMembershipPayment) Execute(ctx context.Context, in RegisterMem
 		}
 
 		// 3. Compute the base amount using the (now-loaded) MembershipType.
+		//    Las cuotas extra siguen estas reglas:
+		//      * Monto efectivo = override (>0) ?? snapshot del plan.
+		//      * Cobrar = override del operador (no-nil) ?? auto-decisión.
+		//      * Si el monto efectivo es 0, NO se cobra aunque el flag
+		//        diga true — no inventamos cobros.
 		mt := renewed.NextType
-		subtotal := mt.Price
-		chargeEnrollment := !member.EnrollmentPaid && mt.EnrollmentFee > 0
-		if chargeEnrollment {
-			subtotal += mt.EnrollmentFee
+
+		enrollmentAmt := mt.EnrollmentFee
+		if in.EnrollmentAmount > 0 {
+			enrollmentAmt = in.EnrollmentAmount
 		}
-		chargeMaintenance := shouldChargeMaintenance(member, mt, in.PaymentDate)
+		autoEnrollment := !member.EnrollmentPaid && enrollmentAmt > 0
+		chargeEnrollment := autoEnrollment
+		if in.ChargeEnrollment != nil {
+			chargeEnrollment = *in.ChargeEnrollment && enrollmentAmt > 0
+		}
+
+		maintenanceAmt := mt.MaintenanceFee
+		if in.MaintenanceAmount > 0 {
+			maintenanceAmt = in.MaintenanceAmount
+		}
+		autoMaintenance := shouldChargeMaintenance(member, mt, in.PaymentDate) && maintenanceAmt > 0
+		chargeMaintenance := autoMaintenance
+		if in.ChargeMaintenance != nil {
+			chargeMaintenance = *in.ChargeMaintenance && maintenanceAmt > 0
+		}
+
+		subtotal := mt.Price
+		if chargeEnrollment {
+			subtotal += enrollmentAmt
+		}
 		if chargeMaintenance {
-			subtotal += mt.MaintenanceFee
+			subtotal += maintenanceAmt
 		}
 
 		// 4. Resolve paid / balance.
@@ -173,6 +216,25 @@ func (uc *RegisterMembershipPayment) Execute(ctx context.Context, in RegisterMem
 		if err != nil {
 			return sharedDomain.NewValidationError(err)
 		}
+		// Adjuntar el desglose por concepto para que el recibo PDF lo
+		// pueda imprimir línea por línea. El plan siempre va; las cuotas
+		// de inscripción / mantenimiento sólo cuando efectivamente se
+		// cobraron. Usa los montos *resueltos* (override del operador o
+		// snapshot del plan), no los del plan crudo.
+		breakdown := []paymentDomain.BreakdownLine{
+			{Label: mt.Name, Amount: mt.Price},
+		}
+		if chargeEnrollment {
+			breakdown = append(breakdown, paymentDomain.BreakdownLine{
+				Label: "Inscripción", Amount: enrollmentAmt,
+			})
+		}
+		if chargeMaintenance {
+			breakdown = append(breakdown, paymentDomain.BreakdownLine{
+				Label: "Mantenimiento", Amount: maintenanceAmt,
+			})
+		}
+		p.SetBreakdown(breakdown)
 		if _, err := uc.Payments.Create(tx, p); err != nil {
 			return sharedDomain.NewUnexpectedError(err)
 		}
@@ -239,7 +301,7 @@ func (uc *RegisterMembershipPayment) Execute(ctx context.Context, in RegisterMem
 			Paid:            paid,
 			BalancePending:  balancePending,
 			NewMembershipID: renewed.NewMembership.ID,
-			NewExpiry:       renewed.NewMembership.ExpiryDate,
+			NewExpiry:       derefTimeOrZero(renewed.NewMembership.ExpiryDate),
 			EnrollmentChrg:  chargeEnrollment,
 			MaintenanceChrg: chargeMaintenance,
 		}
@@ -252,23 +314,62 @@ func (uc *RegisterMembershipPayment) Execute(ctx context.Context, in RegisterMem
 	return &out, nil
 }
 
+// derefTimeOrZero unwraps *time.Time to time.Time, returning zero when nil.
+// Used at the response boundary; ExpiryDate is never nil for an activated
+// membership but defensive code keeps the controller code simple.
+func derefTimeOrZero(t *time.Time) time.Time {
+	if t == nil {
+		return time.Time{}
+	}
+	return *t
+}
+
 // shouldChargeMaintenance encodes the UC-018 rule:
 //
-//	frequency=monthly -> always charge
-//	frequency=annual  -> charge when last_maintenance is null OR ≥365 days ago
-//	no frequency      -> never charge
+//	frequency=monthly    -> always charge
+//	frequency=bimonthly  -> charge when last_maintenance is null OR ≥60 days ago
+//	frequency=quarterly  -> charge when last_maintenance is null OR ≥90 days ago
+//	frequency=semiannual -> charge when last_maintenance is null OR ≥180 days ago
+//	frequency=annual     -> charge when last_maintenance is null OR ≥365 days ago
+//	no frequency         -> never charge
+//
+// "Monthly" se trata como "siempre cobrar" porque la frecuencia es la
+// misma del cobro principal del plan (mensualidad); el operador no
+// quiere que el sistema "salte" el cobro de mantenimiento de un mes.
+// Las frecuencias largas usan ventanas en días sin month-arithmetic
+// para evitar bugs de fin-de-mes ("último día de febrero").
 func shouldChargeMaintenance(member *memberDomain.Member, mt *mtDomain.MembershipType, paymentDate time.Time) bool {
 	if mt.MaintenanceFee <= 0 || mt.MaintenanceFrequency == nil {
 		return false
 	}
-	switch *mt.MaintenanceFrequency {
-	case mtDomain.FrequencyMonthly:
-		return true
-	case mtDomain.FrequencyAnnual:
-		if member.LastMaintenancePaid == nil {
-			return true
-		}
-		return paymentDate.Sub(*member.LastMaintenancePaid) >= 365*24*time.Hour
+	threshold := maintenanceThresholdDays(*mt.MaintenanceFrequency)
+	if threshold < 0 {
+		return false
 	}
-	return false
+	if threshold == 0 {
+		return true // monthly
+	}
+	if member.LastMaintenancePaid == nil {
+		return true
+	}
+	return paymentDate.Sub(*member.LastMaintenancePaid) >= time.Duration(threshold)*24*time.Hour
+}
+
+// maintenanceThresholdDays returns the minimum days between maintenance
+// charges for the given frequency. 0 = always charge (monthly); -1 =
+// unknown frequency, never charge.
+func maintenanceThresholdDays(freq string) int {
+	switch freq {
+	case mtDomain.FrequencyMonthly:
+		return 0
+	case mtDomain.FrequencyBimonthly:
+		return 60
+	case mtDomain.FrequencyQuarterly:
+		return 90
+	case mtDomain.FrequencySemiannual:
+		return 180
+	case mtDomain.FrequencyAnnual:
+		return 365
+	}
+	return -1
 }

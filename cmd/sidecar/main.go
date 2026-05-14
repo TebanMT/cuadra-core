@@ -4,6 +4,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -30,6 +32,11 @@ import (
 	chkApp "github.com/cuadra/cuadra-core/src/modules/checkins/app"
 	chkRepoLite "github.com/cuadra/cuadra-core/src/modules/checkins/infraestructure/db/repositories"
 	chkCtrl "github.com/cuadra/cuadra-core/src/modules/checkins/interfaces/controllers"
+
+	challengesApp "github.com/cuadra/cuadra-core/src/modules/challenges/app"
+	challengesInfra "github.com/cuadra/cuadra-core/src/modules/challenges/infraestructure"
+	challengesRepoLite "github.com/cuadra/cuadra-core/src/modules/challenges/infraestructure/db/repositories"
+	challengesCtrl "github.com/cuadra/cuadra-core/src/modules/challenges/interfaces/controllers"
 
 	billingApp "github.com/cuadra/cuadra-core/src/modules/billing/app"
 	folioSvc "github.com/cuadra/cuadra-core/src/modules/billing/domain/folio"
@@ -165,17 +172,30 @@ func main() {
 	updatePay := gymApp.NewUpdatePaymentMethods(gymRepo, uow, recorder)
 	completeSetup := gymApp.NewCompleteSetup(gymRepo, uow, recorder)
 	updateProfile := gymApp.NewUpdateProfile(gymRepo, uow, recorder)
+	updateChargeSettings := gymApp.NewUpdateChargeSettings(gymRepo, uow, recorder)
 	createOp := usersApp.NewCreateOperator(userRepo, uow, recorder)
 	updateOp := usersApp.NewUpdateOperator(userRepo, uow, recorder)
 	toggleOp := usersApp.NewToggleOperatorActive(userRepo, nil, uow, recorder)
 	resetOp := usersApp.NewResetOperatorPassword(userRepo, nil, uow, recorder)
 	requestTransfer := usersApp.NewRequestTransferOwnership(userRepo, otpRepo, uow, recorder, emailSender)
 	confirmTransfer := usersApp.NewConfirmTransferOwnership(userRepo, otpRepo, transferRepo, nil, uow, recorder, emailSender)
+	// PIN use cases (auth-refactor v0.7). assignSelfPIN + clearSelfPIN power
+	// POST/DELETE /auth/me/pin and write locally + sync-queue (same posture
+	// as CreateOperator); the sync agent pushes the row to cloud where the
+	// projector applies it back to other sidecars in the same gym.
+	assignSelfPIN := usersApp.NewAssignSelfPIN(userRepo, uow, recorder)
+	clearSelfPIN := usersApp.NewClearSelfPIN(userRepo, uow, recorder)
+	loginPIN := usersApp.NewLoginPIN(userRepo, gymRepo, uow, tokens, recorder)
+	listOperatorsForLogin := usersApp.NewListOperatorsForLogin(userRepo, uow)
 	createMT := memApp.NewCreateMembershipType(mtRepo, uow, recorder)
 	updateMT := memApp.NewUpdateMembershipType(mtRepo, uow, recorder)
 	deactivateMT := memApp.NewDeactivateMembershipType(mtRepo, uow, recorder)
 	listMT := memApp.NewListMembershipTypes(mtRepo, uow)
-	createMember := memApp.NewCreateMember(memberRepo, membershipRepo, mtRepo, uow, recorder)
+	// Folios para que CreateMember pueda registrar el primer pago en su
+	// propia tx (sin pasar por UC-018, que renovaría la membresía recién
+	// creada). Mismo generator que usa billing más abajo.
+	folios := folioSvc.NewGenerator(paymentRepo)
+	createMember := memApp.NewCreateMemberWithBilling(memberRepo, membershipRepo, mtRepo, paymentRepo, folios, uow, recorder)
 	updateMember := memApp.NewUpdateMember(memberRepo, uow, recorder)
 	listMembers := memApp.NewListMembers(memberRepo, uow)
 	memberDetail := memApp.NewGetMemberDetail(memberRepo, uow)
@@ -185,7 +205,9 @@ func main() {
 	memberSvc := memApp.NewMemberService(memberRepo, membershipRepo, mtRepo).WithFingerprints(fingerprintRepo)
 
 	// ── Biometric + Checkins (Sesión 5) ───────────────────────────────────
-	registerFingerprint := memApp.NewRegisterFingerprint(memberRepo, fingerprintRepo, gmkProvider, uow, recorder)
+	// Sidecar wires the real Reader so UC-028's pre-enrollment collision
+	// check runs (production enrollment lives here, not in cloud).
+	registerFingerprint := memApp.NewRegisterFingerprint(memberRepo, fingerprintRepo, gmkProvider, uow, recorder).WithReader(bioReader)
 	checkinManual := chkApp.NewCheckinManual(memberSvc, checkinRepo, uow, recorder)
 	checkinPin := chkApp.NewCheckinByPin(memberSvc, memberRepo, checkinRepo, uow, recorder, nil)
 	checkinOverride := chkApp.NewOverrideCheckin(memberSvc, checkinRepo, uow, recorder)
@@ -203,6 +225,9 @@ func main() {
 	whatsappMock := notiWhatsApp.NewStdoutProvider()
 	emailMock := notiEmail.NewStdoutProvider()
 	enqueueReceipt := notiApp.NewEnqueueReceipt(notificationRepo, gymRepo, memberRepo, uow)
+	enqueueWelcomePin := notiApp.NewEnqueueWelcomePin(notificationRepo, gymRepo, memberRepo)
+	createMember.WithWelcomePinNotifier(enqueueWelcomePin)
+	assignPin.WithWelcomePinNotifier(enqueueWelcomePin)
 	enqueueOwnerAlert := notiApp.NewEnqueueOwnerAlert(notificationRepo, gymRepo, userRepo, alertConfigRepo, uow)
 	connectWhatsApp := notiApp.NewConnectWhatsApp(gymRepo, whatsappMock, uow, recorder)
 	whatsappStatus := notiApp.NewGetWhatsAppStatus(gymRepo, uow)
@@ -216,7 +241,7 @@ func main() {
 	_ = emailMock
 
 	// ── Billing (Sesión 3) ────────────────────────────────────────────────
-	folios := folioSvc.NewGenerator(paymentRepo)
+	// `folios` se construyó arriba (lo reusa createMember). Mismo generator.
 	registerPayment := billingApp.NewRegisterMembershipPayment(paymentRepo, folios, memberSvc, memberRepo, uow, recorder, billingSubscriber)
 	settlePayment := billingApp.NewSettlePendingBalance(paymentRepo, folios, uow, recorder)
 	receiptPayment := billingApp.NewGenerateReceipt(paymentRepo, gymRepo, memberRepo, uow)
@@ -247,6 +272,34 @@ func main() {
 	markContacted := memApp.NewMarkContacted(memberRepo, contactAttemptRepo, uow, recorder)
 	markLost := memApp.NewMarkLost(memberRepo, uow, recorder)
 
+	// ── Challenges (retos) — Sesión 2 ─────────────────────────────────────
+	// Full vertical slice running locally on the gym laptop. AttendanceCounter
+	// reads from the same SQLite checkins table; the sync agent flushes new
+	// rows cloud-side without changing the in-gym UX.
+	challengeRepo := challengesRepoLite.NewChallengeSQLiteRepository()
+	categoryRepo := challengesRepoLite.NewCategorySQLiteRepository()
+	participantRepo := challengesRepoLite.NewParticipantSQLiteRepository()
+	measurementRepo := challengesRepoLite.NewMeasurementSQLiteRepository()
+	attendanceCounter := challengesInfra.NewCheckinsAttendanceAdapter()
+	createChallenge := challengesApp.NewCreateChallenge(challengeRepo, uow, recorder)
+	listChallenges := challengesApp.NewListChallenges(challengeRepo, uow)
+	detailChallenge := challengesApp.NewGetChallengeDetail(challengeRepo, categoryRepo, participantRepo, measurementRepo, uow)
+	updateChallengeConfig := challengesApp.NewUpdateChallengeConfig(challengeRepo, measurementRepo, uow, recorder)
+	transitionChallenge := challengesApp.NewTransitionChallengeStatus(challengeRepo, categoryRepo, uow, recorder)
+	addCategory := challengesApp.NewAddCategory(challengeRepo, categoryRepo, uow, recorder)
+	updateCategoryUC := challengesApp.NewUpdateCategory(categoryRepo, uow, recorder)
+	deleteCategory := challengesApp.NewDeleteCategory(categoryRepo, uow, recorder)
+	listCategories := challengesApp.NewListCategories(challengeRepo, categoryRepo, uow)
+	addParticipant := challengesApp.NewAddParticipant(challengeRepo, categoryRepo, participantRepo, uow, recorder)
+	updateParticipant := challengesApp.NewUpdateParticipant(participantRepo, uow, recorder)
+	removeParticipant := challengesApp.NewRemoveParticipant(participantRepo, uow, recorder)
+	listParticipants := challengesApp.NewListParticipants(challengeRepo, participantRepo, uow)
+	captureMeasurement := challengesApp.NewCaptureMeasurement(challengeRepo, participantRepo, measurementRepo, uow, recorder)
+	listMeasurementsUC := challengesApp.NewListMeasurements(challengeRepo, participantRepo, measurementRepo, uow)
+	rankingUC := challengesApp.NewGetChallengeRanking(challengeRepo, participantRepo, measurementRepo, attendanceCounter, uow)
+	attendanceReport := challengesApp.NewGetAttendanceReport(challengeRepo, participantRepo, attendanceCounter, uow)
+	checkDQ := challengesApp.NewCheckDisqualifications(challengeRepo, participantRepo, attendanceCounter, uow, recorder)
+
 	authCtrl := usersCtrl.NewAuthController(usersCtrl.AuthController{
 		Signup:           signup,
 		Login:            login,
@@ -255,12 +308,15 @@ func main() {
 		UpdatePayMethods: updatePay,
 		CompleteSetup:    completeSetup,
 		UpdateProfile:    updateProfile,
+		UpdateChargeSet:  updateChargeSettings,
 		CreateOperator:   createOp,
 		UpdateOperator:   updateOp,
 		ToggleActive:     toggleOp,
 		ResetOpPassword:  resetOp,
 		RequestTransfer:  requestTransfer,
 		ConfirmTransfer:  confirmTransfer,
+		AssignSelfPIN:    assignSelfPIN,
+		ClearSelfPIN:     clearSelfPIN,
 		Tokens:           tokens,
 		Gyms:             gymRepo,
 		Users:            userRepo,
@@ -269,7 +325,11 @@ func main() {
 		UploadsDir:       envOrDefault("UPLOADS_DIR", "./tmp/uploads"),
 	})
 	mtCtrl := memCtrl.NewMembershipTypeController(createMT, updateMT, deactivateMT, listMT, tokens)
-	memberCtrl := memCtrl.NewMemberController(createMember, updateMember, listMembers, memberDetail, toggleMember, lockExpiry, assignPin, tokens)
+	memberCtrl := memCtrl.NewMemberController(createMember, updateMember, listMembers, memberDetail, toggleMember, lockExpiry, assignPin, tokens).
+		WithUploadsDir(envOrDefault("UPLOADS_DIR", "./tmp/uploads"))
+	// SyncTrigger se setea más abajo cuando el agente está construido
+	// (orden temporal: el agente necesita el cloudURL y la config, que
+	// llegan después de los controllers).
 	fingerprintCtrl := memCtrl.NewFingerprintController(registerFingerprint, tokens)
 	paymentCtrl := billingCtrl.NewPaymentController(registerPayment, settlePayment, receiptPayment, sendReceipt, listMemberPayments, listGymPayments, refundPayment, registerSale, refundSale, cashClose, tokens)
 	productCtrl := prodCtrl.NewProductController(createProduct, updateProduct, deactivateProduct, listProducts, adjustStock, tokens)
@@ -284,6 +344,27 @@ func main() {
 		WithSibling(checkinCtrl)
 	notificationsCtrl := notiCtrl.NewController(connectWhatsApp, whatsappStatus, listTemplates, updateTemplate, broadcast, listNotifications, listOwnerAlerts, updateOwnerAlert, whatsappMock, tokens)
 	reportsController := reportsCtrl.NewReportsController(dashboard, attentionRequired, rangeReport, exportReport, markContacted, markLost, tokens)
+	challengeCtrl := challengesCtrl.NewChallengeController(challengesCtrl.ChallengeController{
+		CreateChallenge:        createChallenge,
+		ListChallenges:         listChallenges,
+		GetChallengeDetail:     detailChallenge,
+		UpdateChallengeConfig:  updateChallengeConfig,
+		TransitionStatus:       transitionChallenge,
+		AddCategory:            addCategory,
+		UpdateCategory:         updateCategoryUC,
+		DeleteCategory:         deleteCategory,
+		ListCategories:         listCategories,
+		AddParticipant:         addParticipant,
+		UpdateParticipant:      updateParticipant,
+		RemoveParticipant:      removeParticipant,
+		ListParticipants:       listParticipants,
+		CaptureMeasurement:     captureMeasurement,
+		ListMeasurements:       listMeasurementsUC,
+		GetChallengeRanking:    rankingUC,
+		GetAttendanceReport:    attendanceReport,
+		CheckDisqualifications: checkDQ,
+		Tokens:                 tokens,
+	})
 
 	if os.Getenv("ENVIRONMENT") == "production" {
 		gin.SetMode(gin.ReleaseMode)
@@ -314,17 +395,27 @@ func main() {
 	clientID, deviceLabel := mustEnsureSidecarClientID(uow)
 	cloudURL := envOrDefault("TINTA_CLOUD_URL", "https://api.entinta.app")
 	authProxy := usersCtrl.NewSidecarAuthProxy(usersCtrl.SidecarAuthProxy{
-		CloudURL:    cloudURL,
-		UoW:         uow,
-		LocalTokens: tokens,
-		ClientID:    clientID,
-		DeviceLabel: deviceLabel,
+		CloudURL:      cloudURL,
+		UoW:           uow,
+		LocalTokens:   tokens,
+		ClientID:      clientID,
+		DeviceLabel:   deviceLabel,
+		LoginPIN:      loginPIN,
+		ListOperators: listOperatorsForLogin,
+		// LoginGymID reads the cached_login row each call so the operators
+		// grid follows whatever gym this sidecar is currently paired to.
+		// Returns uuid.Nil when the sidecar hasn't been redeemed yet —
+		// the handler treats that as "no operators".
+		LoginGymID: func() uuid.UUID {
+			return loginGymIDFromCache(uow)
+		},
 	})
 	authProxy.RegisterRoutes(r)
 	authCtrl.RegisterMeRoute(r)
 	authCtrl.RegisterAccountRoutes(r)
 	authCtrl.RegisterOperatorRoutes(r)
 	authCtrl.RegisterUploadsRoute(r)
+	authCtrl.RegisterLocalPhotoRoute(r)
 	mtCtrl.RegisterRoutes(r)
 	memberCtrl.RegisterRoutes(r)
 	fingerprintCtrl.RegisterRoutes(r)
@@ -334,6 +425,7 @@ func main() {
 	kioskCtrl.RegisterRoutes(r)
 	notificationsCtrl.RegisterRoutes(r)
 	reportsController.RegisterRoutes(r)
+	challengeCtrl.RegisterRoutes(r)
 
 	// ── Sync agent (Sesión 8 / ADR-001) ──────────────────────────────────
 	// The agent reads its sk_live_* sidecar credential from sync_state on
@@ -341,13 +433,18 @@ func main() {
 	// online login (ADR-008 §3.3). The agent never sees an operator JWT.
 	syncInterval := time.Duration(envInt("SYNC_INTERVAL_S", 30)) * time.Second
 	agent := syncShared.NewAgent(syncShared.AgentConfig{
-		BaseURL:  cloudURL,
-		Interval: syncInterval,
-		Logger:   log.New(os.Stderr, "[sync] ", log.LstdFlags),
+		BaseURL:    cloudURL,
+		Interval:   syncInterval,
+		Logger:     log.New(os.Stderr, "[sync] ", log.LstdFlags),
+		UploadsDir: envOrDefault("UPLOADS_DIR", "./tmp/uploads"),
 	}, db, uow)
 	// Wire the proxy's reload callback so a fresh login bumps the agent
 	// without waiting for the next tick.
 	authProxy.AgentReload = agent.TriggerNow
+	// Member create/update con foto: empuja al agent inmediatamente
+	// para que el upload a R2 ocurra en segundos en lugar de esperar
+	// el siguiente tick (hasta 30s).
+	memberCtrl.WithSyncTrigger(agent.TriggerNow)
 	syncStatusCtrl := syncShared.NewStatusController(agent)
 	syncStatusCtrl.RegisterRoutes(r)
 
@@ -362,6 +459,37 @@ func main() {
 	if err := r.Run("127.0.0.1:" + port); err != nil {
 		log.Fatalf("gin: %v", err)
 	}
+}
+
+// loginGymIDFromCache reads gym_id out of the sync_state.cached_login row
+// without depending on auth_controller_sidecar's private cachedLoginRow
+// shape — we only need the gym_id field. Returns uuid.Nil when the row is
+// missing (fresh laptop, redeem not done yet) so callers can render an
+// empty-state response instead of erroring out.
+func loginGymIDFromCache(uow sharedDomain.UnitOfWork) uuid.UUID {
+	var raw string
+	err := uow.Command(context.Background(), func(tx sharedDomain.Transaction) error {
+		stx, ok := tx.(*sharedDomain.SqlxTransaction)
+		if !ok {
+			return errors.New("expected sqlx transaction")
+		}
+		return stx.Get(context.Background(), &raw,
+			`SELECT value FROM sync_state WHERE key = 'cached_login'`)
+	})
+	if err != nil || raw == "" {
+		return uuid.Nil
+	}
+	var payload struct {
+		GymID string `json:"gym_id"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return uuid.Nil
+	}
+	id, err := uuid.Parse(payload.GymID)
+	if err != nil {
+		return uuid.Nil
+	}
+	return id
 }
 
 // mustEnsureSidecarClientID materialises the per-installation UUID from

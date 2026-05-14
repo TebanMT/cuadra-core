@@ -17,4 +17,7 @@ var (
 	ErrPaymentMethodsEmpty  = errors.New("debes aceptar al menos un método de pago")
 	ErrInvalidKioskVolume   = errors.New("volumen del kiosko fuera de rango (0..100)")
 	ErrInvalidKioskFeedback = errors.New("duración del feedback fuera de rango (500..30000 ms)")
+
+	ErrInvalidChargeAmount         = errors.New("monto de cobro inválido (debe ser ≥ 0)")
+	ErrInvalidMaintenanceFrequency = errors.New("frecuencia de mantenimiento no soportada")
 )

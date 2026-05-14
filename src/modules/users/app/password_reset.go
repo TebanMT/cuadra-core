@@ -14,7 +14,7 @@ import (
 	"github.com/cuadra/cuadra-core/src/shared/audit"
 	"github.com/cuadra/cuadra-core/src/shared/auth"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
-	"github.com/cuadra/cuadra-core/src/shared/email"
+	"github.com/cuadra/cuadra-core/src/shared/recovery"
 )
 
 // ResetTokenTTL = 1 hour (UC-004 datos persistidos).
@@ -23,21 +23,26 @@ const ResetTokenTTL = time.Hour
 // RequestPasswordReset is UC-004 step 1 (POST /api/v1/auth/forgot-password).
 // Always returns nil — the response shape is identical regardless of whether
 // the email exists, so callers can't enumerate accounts.
+//
+// Channels is a pluggable recovery registry (ADR-014 pending). In MVP the
+// registry is EmailOnlyRegistry so the behavior is identical to the
+// previous code. Fase 2 swaps it for TieredRegistry to route Plus-tier
+// gyms through WhatsApp.
 type RequestPasswordReset struct {
-	Users   userRepo.UserRepository
-	Resets  userRepo.PasswordResetRepository
-	UoW     sharedDomain.UnitOfWork
-	Email   email.Sender
-	Audit   audit.Recorder
-	NowFunc func() time.Time
-	BaseURL string // e.g. https://entinta.mx — used to build the reset link
+	Users    userRepo.UserRepository
+	Resets   userRepo.PasswordResetRepository
+	UoW      sharedDomain.UnitOfWork
+	Channels recovery.Registry
+	Audit    audit.Recorder
+	NowFunc  func() time.Time
+	BaseURL  string // e.g. https://entinta.mx — used to build the reset link
 }
 
 func NewRequestPasswordReset(users userRepo.UserRepository, resets userRepo.PasswordResetRepository,
-	uow sharedDomain.UnitOfWork, sender email.Sender, recorder audit.Recorder, baseURL string) *RequestPasswordReset {
+	uow sharedDomain.UnitOfWork, channels recovery.Registry, recorder audit.Recorder, baseURL string) *RequestPasswordReset {
 	return &RequestPasswordReset{
 		Users: users, Resets: resets, UoW: uow,
-		Email: sender, Audit: recorder, BaseURL: baseURL,
+		Channels: channels, Audit: recorder, BaseURL: baseURL,
 		NowFunc: func() time.Time { return time.Now().UTC() },
 	}
 }
@@ -52,7 +57,11 @@ func (uc *RequestPasswordReset) Execute(ctx context.Context, emailAddr string) e
 		return sharedDomain.NewUnexpectedError(err)
 	}
 
-	var sendTo string
+	var (
+		sendTo string
+		userID string
+		gymID  string
+	)
 	err = uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
 		u, err := uc.Users.GetByEmail(tx, emailAddr)
 		if err != nil {
@@ -79,18 +88,25 @@ func (uc *RequestPasswordReset) Execute(ctx context.Context, emailAddr string) e
 			At:          now,
 		})
 		sendTo = u.Email
+		userID = u.ID.String()
+		gymID = u.GymID.String()
 		return nil
 	})
 	if err != nil {
 		return err
 	}
-	if sendTo != "" {
-		_ = uc.Email.Send(ctx, email.Message{
-			To:      sendTo,
-			Subject: "Recupera tu contraseña de Cuadra",
-			Body:    uc.BaseURL + "/reset-password?token=" + plain,
-			Tag:     "password_reset",
-		})
+	if sendTo != "" && uc.Channels != nil {
+		channel, err := uc.Channels.Pick(ctx, gymID, userID, "password_reset")
+		if err == nil && channel != nil {
+			_, _ = channel.Send(ctx, recovery.Payload{
+				UserID:      userID,
+				GymID:       gymID,
+				Token:       plain,
+				Reason:      "password_reset",
+				Recipient:   sendTo,
+				LinkBaseURL: uc.BaseURL,
+			})
+		}
 	}
 	return nil
 }

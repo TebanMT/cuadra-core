@@ -23,9 +23,14 @@ type Projector func(g *gorm.DB, gymID, entityID uuid.UUID, payload []byte) error
 // payload carries them as JSON values (objects/arrays) that round-trip via
 // re-marshal.
 var jsonbColumns = map[string]map[string]bool{
-	"gyms":               {"payment_methods": true, "kiosk_settings": true},
+	"gyms":               {"payment_methods": true, "kiosk_settings": true, "charge_settings": true},
 	"notification_queue": {"payload": true},
 	"audit_log":          {"changes": true},
+	// payments.breakdown carries the per-concept line items as a JSON
+	// array (BreakdownLine[]). Without this entry pgx serialises the
+	// Go slice as a Postgres record/tuple and the upsert fails with
+	// "expression is of type record" (SQLSTATE 42804).
+	"payments": {"breakdown": true},
 }
 
 // byteaColumns lists BYTEA columns that arrive in the payload base64-encoded.

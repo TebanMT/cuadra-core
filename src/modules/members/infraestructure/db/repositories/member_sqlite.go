@@ -46,6 +46,7 @@ type sqliteMemberRow struct {
 	EnrollmentPaid       int            `db:"enrollment_paid"`
 	LastMaintenancePaid  sql.NullString `db:"last_maintenance_paid"`
 	PinHash              sql.NullString `db:"pin_hash"`
+	PinPlain             sql.NullString `db:"pin_plain"`
 	PinAssignedAt        sql.NullInt64  `db:"pin_assigned_at"`
 	LastContactAttemptAt sql.NullInt64  `db:"last_contact_attempt_at"`
 	CreatedBy            string         `db:"created_by"`
@@ -80,12 +81,12 @@ func (r *MemberSQLiteRepository) Create(tx sharedDomain.Transaction, m *memberDo
 		    id, gym_id, version, created_at, updated_at, deleted_at,
 		    folio, full_name, phone, email, birthdate, photo_url, notes, status,
 		    enrollment_paid, last_maintenance_paid,
-		    pin_hash, pin_assigned_at, last_contact_attempt_at, created_by
+		    pin_hash, pin_plain, pin_assigned_at, last_contact_attempt_at, created_by
 		) VALUES (
 		    :id, :gym_id, :version, :created_at, :updated_at, :deleted_at,
 		    :folio, :full_name, :phone, :email, :birthdate, :photo_url, :notes, :status,
 		    :enrollment_paid, :last_maintenance_paid,
-		    :pin_hash, :pin_assigned_at, :last_contact_attempt_at, :created_by
+		    :pin_hash, :pin_plain, :pin_assigned_at, :last_contact_attempt_at, :created_by
 		)`
 	if _, err := stx.NamedExec(context.Background(), stmt, row); err != nil {
 		return nil, err
@@ -106,7 +107,7 @@ func (r *MemberSQLiteRepository) Update(tx sharedDomain.Transaction, m *memberDo
 		    full_name = :full_name, phone = :phone, email = :email, birthdate = :birthdate,
 		    photo_url = :photo_url, notes = :notes, status = :status,
 		    enrollment_paid = :enrollment_paid, last_maintenance_paid = :last_maintenance_paid,
-		    pin_hash = :pin_hash, pin_assigned_at = :pin_assigned_at,
+		    pin_hash = :pin_hash, pin_plain = :pin_plain, pin_assigned_at = :pin_assigned_at,
 		    last_contact_attempt_at = :last_contact_attempt_at
 		WHERE id = :id`
 	if _, err := stx.NamedExec(context.Background(), stmt, row); err != nil {
@@ -237,13 +238,18 @@ func (r *MemberSQLiteRepository) List(tx sharedDomain.Transaction, q memRepo.Lis
 	}
 	switch q.StatusFilter {
 	case "active":
-		where = append(where, `m.status = 'active' AND ms.id IS NOT NULL AND CAST(julianday(ms.expiry_date) - julianday(?) AS INTEGER) > 7`)
+		// Vigente: socio activo + membership activa + expiry > today+7.
+		// Excluye pending_payment (sin expiry) por la condición de
+		// status='active' Y expiry_date NOT NULL.
+		where = append(where, `m.status = 'active' AND ms.status = 'active' AND ms.expiry_date IS NOT NULL AND CAST(julianday(ms.expiry_date) - julianday(?) AS INTEGER) > 7`)
 		args = append(args, today)
 	case "expiring_soon":
-		where = append(where, `m.status = 'active' AND ms.id IS NOT NULL AND CAST(julianday(ms.expiry_date) - julianday(?) AS INTEGER) BETWEEN 0 AND 7`)
+		where = append(where, `m.status = 'active' AND ms.status = 'active' AND ms.expiry_date IS NOT NULL AND CAST(julianday(ms.expiry_date) - julianday(?) AS INTEGER) BETWEEN 0 AND 7`)
 		args = append(args, today)
 	case "expired":
-		where = append(where, `m.status = 'active' AND (ms.id IS NULL OR ms.expiry_date < ?)`)
+		// "Por cobrar" en la UI: vencidos clásicos + pending_payment
+		// + socios sin membership. Misma acción del operador (cobrar).
+		where = append(where, `m.status = 'active' AND (ms.id IS NULL OR ms.status = 'pending_payment' OR (ms.status = 'active' AND ms.expiry_date < ?))`)
 		args = append(args, today)
 	case "inactive":
 		where = append(where, `m.status <> 'active'`)
@@ -254,8 +260,11 @@ func (r *MemberSQLiteRepository) List(tx sharedDomain.Transaction, q memRepo.Lis
 	}
 
 	whereClause := strings.Join(where, " AND ")
+	// JOIN incluye pending_payment para que aparezca el plan elegido
+	// aunque el socio no haya pagado todavía. uq_memberships_member_active
+	// garantiza una sola fila ('active' o 'pending_payment') por socio.
 	join := `LEFT JOIN memberships AS ms
-		ON ms.member_id = m.id AND ms.status = 'active' AND ms.deleted_at IS NULL`
+		ON ms.member_id = m.id AND ms.status IN ('active','pending_payment') AND ms.deleted_at IS NULL`
 
 	countQ := fmt.Sprintf(`SELECT COUNT(DISTINCT m.id) FROM members AS m %s WHERE %s`, join, whereClause)
 	var total int
@@ -333,7 +342,9 @@ func (r *MemberSQLiteRepository) GetWithCurrentMembership(tx sharedDomain.Transa
 	out := &memRepo.MemberWithMembership{Member: memberFromRow(&row)}
 	var msRow sqliteMembershipRow
 	err = stx.Get(context.Background(), &msRow,
-		`SELECT * FROM memberships WHERE member_id = ? AND status = 'active' AND deleted_at IS NULL`,
+		// Trae la slot vigente del socio: activa o pending_payment.
+		// uq_memberships_member_active garantiza una sola.
+		`SELECT * FROM memberships WHERE member_id = ? AND status IN ('active','pending_payment') AND deleted_at IS NULL`,
 		memberID.String())
 	if err == nil {
 		ms := membershipFromRow(&msRow)
@@ -409,6 +420,9 @@ func memberToRow(m *memberDomain.Member) sqliteMemberRow {
 	if m.PinHash != nil {
 		row.PinHash = sql.NullString{String: *m.PinHash, Valid: true}
 	}
+	if m.PinPlain != nil {
+		row.PinPlain = sql.NullString{String: *m.PinPlain, Valid: true}
+	}
 	if m.PinAssignedAt != nil {
 		row.PinAssignedAt = sql.NullInt64{Int64: m.PinAssignedAt.UnixMilli(), Valid: true}
 	}
@@ -460,6 +474,10 @@ func memberFromRow(r *sqliteMemberRow) *memberDomain.Member {
 	if r.PinHash.Valid {
 		v := r.PinHash.String
 		m.PinHash = &v
+	}
+	if r.PinPlain.Valid {
+		v := r.PinPlain.String
+		m.PinPlain = &v
 	}
 	if r.PinAssignedAt.Valid {
 		t := time.UnixMilli(r.PinAssignedAt.Int64).UTC()
@@ -518,7 +536,6 @@ func membershipFromJoined(j *joinedMemberRow) *membershipDomain.Membership {
 	memberID, _ := uuid.Parse(j.MS_MemberID.String)
 	typeID, _ := uuid.Parse(j.MS_MembershipTypeID.String)
 	startDate, _ := time.Parse(dateLayout, j.MS_StartDate.String)
-	expiryDate, _ := time.Parse(dateLayout, j.MS_ExpiryDate.String)
 	ms := &membershipDomain.Membership{
 		ID:                   id,
 		GymID:                gymID,
@@ -529,10 +546,14 @@ func membershipFromJoined(j *joinedMemberRow) *membershipDomain.Membership {
 		PriceSnapshot:        fromCents(j.MS_PriceSnap.Int64),
 		DurationDaysSnapshot: int(j.MS_DurationSnap.Int64),
 		StartDate:            startDate,
-		ExpiryDate:           expiryDate,
 		Status:               j.MS_Status.String,
 		CreatedAt:            time.UnixMilli(j.MS_CreatedAt.Int64).UTC(),
 		UpdatedAt:            time.UnixMilli(j.MS_UpdatedAt.Int64).UTC(),
+	}
+	if j.MS_ExpiryDate.Valid && j.MS_ExpiryDate.String != "" {
+		if t, err := time.Parse(dateLayout, j.MS_ExpiryDate.String); err == nil {
+			ms.ExpiryDate = &t
+		}
 	}
 	if j.MS_DeletedAt.Valid {
 		t := time.UnixMilli(j.MS_DeletedAt.Int64).UTC()

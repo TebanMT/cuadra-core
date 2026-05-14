@@ -3,7 +3,9 @@
 package repositories
 
 import (
+	"encoding/json"
 	"errors"
+	"math"
 	"strings"
 	"time"
 
@@ -28,6 +30,9 @@ func (r *MembershipTypePostgresRepository) Create(tx sharedDomain.Transaction, m
 	if err := gormTx.Create(&m).Error; err != nil {
 		return nil, err
 	}
+	if err := emitMembershipTypeToSync(gormTx, mt); err != nil {
+		return nil, err
+	}
 	return mtFromModel(&m), nil
 }
 
@@ -38,7 +43,79 @@ func (r *MembershipTypePostgresRepository) Update(tx sharedDomain.Transaction, m
 	if err := gormTx.Where("id = ?", mt.ID).Omit("id", "created_at", "gym_id").Save(&m).Error; err != nil {
 		return nil, err
 	}
+	if err := emitMembershipTypeToSync(gormTx, mt); err != nil {
+		return nil, err
+	}
 	return mtFromModel(&m), nil
+}
+
+// emitMembershipTypeToSync escribe la fila correspondiente en
+// `sync_entities` para que los sidecars descubran este registro en su
+// próximo /sync/pull. Necesario para entidades cuyo origen canónico es
+// la nube (membership_types creadas en el wizard de signup desde el
+// dashboard) — el push pipeline de sidecar→cloud se encarga del lado
+// inverso, pero cloud-direct writes deben emitir manualmente.
+//
+// Convenciones del payload (cloud→sidecar):
+//   - Timestamps en UnixMilli (int64) — el SQLite local los guarda como
+//     INTEGER sin cast.
+//   - Money fields en CENTS (int64) — el SQLite local tiene `price`,
+//     `enrollment_fee` y `maintenance_fee` como INTEGER cents. La
+//     dirección sidecar→cloud (enqueueMT en membership_type_sqlite.go)
+//     históricamente envía pesos porque el cloud Postgres usa NUMERIC
+//     pesos; ese path funciona porque el sidecar nunca re-aplica su
+//     propia escritura (LWW lo skipea). Nuestra dirección sí se aplica
+//     en el destino, así que escribimos en las unidades del destino.
+//   - created_at obligatorio (NOT NULL en SQLite, sin DEFAULT).
+//
+// Se llama dentro de la misma transacción del Create/Update, así si
+// algo falla post-domain-write, el rollback cubre ambos.
+func emitMembershipTypeToSync(g *gorm.DB, mt *mtDomain.MembershipType) error {
+	// maintenance_frequency: NIL (no fee) o "monthly"/"annual". El
+	// CHECK constraint del schema rechaza cualquier otro string,
+	// INCLUYENDO "". Si emitimos "" cuando no hay fee, SQLite revienta
+	// con CHECK violation. Usamos un puntero para que JSON serialice a
+	// `null` en ese caso.
+	var freq *string
+	if mt.MaintenanceFrequency != nil && *mt.MaintenanceFrequency != "" {
+		freq = mt.MaintenanceFrequency
+	}
+	// math.Round porque float64 pesos puede tener residuos de precisión
+	// (450.99 * 100 = 45098.99999…). Sin redondear se pierde 1 centavo
+	// por la conversión a int64.
+	toCents := func(pesos float64) int64 { return int64(math.Round(pesos * 100)) }
+	payload, err := json.Marshal(map[string]any{
+		"id":                    mt.ID.String(),
+		"gym_id":                mt.GymID.String(),
+		"version":               mt.Version,
+		"name":                  mt.Name,
+		"price":                 toCents(mt.Price),
+		"duration_days":         mt.DurationDays,
+		"enrollment_fee":        toCents(mt.EnrollmentFee),
+		"maintenance_fee":       toCents(mt.MaintenanceFee),
+		"maintenance_frequency": freq,
+		"active":                mt.Active,
+		"created_at":            mt.CreatedAt.UnixMilli(),
+		"updated_at":            mt.UpdatedAt.UnixMilli(),
+	})
+	if err != nil {
+		return err
+	}
+	var deletedAt any
+	if mt.DeletedAt != nil {
+		deletedAt = *mt.DeletedAt
+	}
+	return g.Exec(`
+		INSERT INTO sync_entities
+		    (gym_id, entity_type, entity_id, version, payload, server_updated_at, deleted_at)
+		VALUES (?, 'membership_types', ?, ?, ?::jsonb, NOW(), ?)
+		ON CONFLICT (gym_id, entity_type, entity_id) DO UPDATE SET
+			version = EXCLUDED.version,
+			payload = EXCLUDED.payload,
+			server_updated_at = NOW(),
+			deleted_at = EXCLUDED.deleted_at`,
+		mt.GymID, mt.ID, mt.Version, string(payload), deletedAt,
+	).Error
 }
 
 func (r *MembershipTypePostgresRepository) GetByID(tx sharedDomain.Transaction, id uuid.UUID) (*mtDomain.MembershipType, error) {

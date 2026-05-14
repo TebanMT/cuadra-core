@@ -36,6 +36,12 @@ type AgentConfig struct {
 	HTTPClient       *http.Client
 	TokenProvider    func() string // returns a Bearer token; called on every request so refresh isn't our concern
 	Logger           *log.Logger
+	// UploadsDir es la raíz local en disco donde el agent cachea blobs
+	// que la nube es canónica sobre (fotos de socios, futuro logo del
+	// gym). El FE renderea imágenes vía la ruta local-serve del sidecar
+	// que lee de aquí — nunca abre socket directo a R2. Vacío deshabilita
+	// el cacheo local (uploads pendientes se quedan como data URLs).
+	UploadsDir string
 }
 
 func defaultConfig() AgentConfig {
@@ -134,6 +140,7 @@ func NewAgent(cfg AgentConfig, db *sqlx.DB, uow sharedDomain.UnitOfWork) *Agent 
 	if cfg.HTTPClient != nil {
 		full.HTTPClient = cfg.HTTPClient
 	}
+	full.UploadsDir = cfg.UploadsDir
 	full.TokenProvider = cfg.TokenProvider
 	full.Logger = cfg.Logger
 	if full.Logger == nil {
@@ -214,6 +221,14 @@ func (a *Agent) RunOnce(ctx context.Context) {
 		}
 	}
 
+	// Sube fotos pendientes a R2 ANTES del push: cualquier upload
+	// exitoso bumpea version + encola el row, así el push siguiente
+	// propaga la URL pública en lugar del data: URL local. Errores
+	// de upload no detienen sync — se loggean y reintenta el siguiente
+	// tick. Sidecar-only (la función vive en agent_uploads.go con tag
+	// //go:build sidecar).
+	a.uploadPendingMemberPhotos(ctx)
+
 	if err := a.Push(ctx); err != nil {
 		a.recordFailure(ctx, "push", err)
 		return
@@ -222,6 +237,12 @@ func (a *Agent) RunOnce(ctx context.Context) {
 		a.recordFailure(ctx, "pull", err)
 		return
 	}
+	// Baja a disco las fotos cuyas filas locales tienen una URL R2 pero
+	// el archivo aún no existe en cache. Cubre el caso multi-device
+	// (gym con dos desktops) y rehidratación post full-sync. Errores
+	// no detienen el ciclo — el archivo se reintentará en el próximo
+	// tick. Sidecar-only (definido con //go:build sidecar).
+	a.downloadPendingMemberPhotos(ctx)
 	a.recordSuccess(ctx)
 }
 
@@ -320,11 +341,23 @@ func (a *Agent) takeBatch(ctx context.Context) ([]PushItem, error) {
 		return nil, err
 	}
 	stx := tx.(*sharedDomain.SqlxTransaction)
+	// ORDER BY rowid — respeta el orden de inserción de cada Enqueue
+	// call. Esto es load-bearing: dos rows enqueued en la misma
+	// transacción (ej. CreateMember encola member + membership)
+	// comparten enqueued_at hasta el milisegundo, así que ese campo
+	// no rompe el empate. El secundario era `id ASC` (UUID aleatorio)
+	// y a veces ponía el child antes del parent → FK violation en
+	// cloud (memberships.member_id_fkey).
+	//
+	// El rowid implícito de SQLite es monotónico, asignado en orden
+	// de INSERT, y el coalescing UPDATE no lo muta — por eso es
+	// estable frente a re-enqueues (ej. el sync agent re-encolando
+	// member con photo_url tras subir a R2).
 	const q = `
 		SELECT id, entity_type, entity_id, operation, payload, client_version, enqueued_at
 		FROM sync_queue
 		WHERE synced_at IS NULL
-		ORDER BY enqueued_at ASC, id ASC
+		ORDER BY rowid ASC
 		LIMIT ?`
 	rows, err := stx.Ext().QueryxContext(ctx, q, a.cfg.BatchSize)
 	if err != nil {

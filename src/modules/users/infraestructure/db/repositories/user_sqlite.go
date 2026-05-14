@@ -38,6 +38,8 @@ type sqliteUserRow struct {
 	MustChangePassword int            `db:"must_change_password"`
 	LastLoginAt        sql.NullInt64  `db:"last_login_at"`
 	CreatedBy          sql.NullString `db:"created_by"`
+	PinHash            sql.NullString `db:"pin_hash"`
+	PinAssignedAt      sql.NullInt64  `db:"pin_assigned_at"`
 }
 
 func userToRow(u *userDomain.User) sqliteUserRow {
@@ -65,6 +67,12 @@ func userToRow(u *userDomain.User) sqliteUserRow {
 	}
 	if u.LastLoginAt != nil {
 		r.LastLoginAt = sql.NullInt64{Int64: u.LastLoginAt.UnixMilli(), Valid: true}
+	}
+	if u.PinHash != nil {
+		r.PinHash = sql.NullString{String: *u.PinHash, Valid: true}
+	}
+	if u.PinAssignedAt != nil {
+		r.PinAssignedAt = sql.NullInt64{Int64: u.PinAssignedAt.UnixMilli(), Valid: true}
 	}
 	return r
 }
@@ -101,6 +109,14 @@ func userFromRow(r *sqliteUserRow) *userDomain.User {
 		t := time.UnixMilli(r.DeletedAt.Int64).UTC()
 		u.DeletedAt = &t
 	}
+	if r.PinHash.Valid {
+		v := r.PinHash.String
+		u.PinHash = &v
+	}
+	if r.PinAssignedAt.Valid {
+		t := time.UnixMilli(r.PinAssignedAt.Int64).UTC()
+		u.PinAssignedAt = &t
+	}
 	return u
 }
 
@@ -110,10 +126,12 @@ func (r *UserSQLiteRepository) Create(tx sharedDomain.Transaction, u *userDomain
 	const stmt = `
 		INSERT INTO users (
 		    id, gym_id, version, created_at, updated_at, deleted_at,
-		    email, password_hash, full_name, phone, role, active, must_change_password, last_login_at, created_by
+		    email, password_hash, full_name, phone, role, active, must_change_password, last_login_at, created_by,
+		    pin_hash, pin_assigned_at
 		) VALUES (
 		    :id, :gym_id, :version, :created_at, :updated_at, :deleted_at,
-		    :email, :password_hash, :full_name, :phone, :role, :active, :must_change_password, :last_login_at, :created_by
+		    :email, :password_hash, :full_name, :phone, :role, :active, :must_change_password, :last_login_at, :created_by,
+		    :pin_hash, :pin_assigned_at
 		)`
 	if _, err := stx.NamedExec(context.Background(), stmt, row); err != nil {
 		return nil, err
@@ -173,7 +191,8 @@ func (r *UserSQLiteRepository) Update(tx sharedDomain.Transaction, u *userDomain
 		    version = :version, updated_at = :updated_at, deleted_at = :deleted_at,
 		    email = :email, password_hash = :password_hash, full_name = :full_name,
 		    phone = :phone, role = :role, active = :active,
-		    must_change_password = :must_change_password, last_login_at = :last_login_at
+		    must_change_password = :must_change_password, last_login_at = :last_login_at,
+		    pin_hash = :pin_hash, pin_assigned_at = :pin_assigned_at
 		WHERE id = :id`
 	if _, err := stx.NamedExec(context.Background(), stmt, row); err != nil {
 		return nil, err
@@ -209,6 +228,17 @@ func (r *UserSQLiteRepository) CountOperatorsByGym(tx sharedDomain.Transaction, 
 	return n, err
 }
 
+// pinAssignedAtMs serializes the optional timestamp as a unix-ms number for
+// the JSON sync payload, mirroring how the rest of this repo encodes nullable
+// timestamps. nil -> nil, matched on the cloud-side projector.
+func pinAssignedAtMs(t *time.Time) *int64 {
+	if t == nil {
+		return nil
+	}
+	v := t.UnixMilli()
+	return &v
+}
+
 func boolToInt(b bool) int {
 	if b {
 		return 1
@@ -227,9 +257,12 @@ func enqueueUser(stx *sharedDomain.SqlxTransaction, u *userDomain.User) error {
 		"email":                u.Email,
 		"password_hash":        u.PasswordHash, // template-only; cloud trusts payload
 		"full_name":            u.FullName,
+		"phone":                u.Phone,
 		"role":                 u.Role,
 		"active":               u.Active,
 		"must_change_password": u.MustChangePassword,
+		"pin_hash":             u.PinHash,
+		"pin_assigned_at":      pinAssignedAtMs(u.PinAssignedAt),
 		"updated_at":           u.UpdatedAt.UnixMilli(),
 	})
 	if err != nil {

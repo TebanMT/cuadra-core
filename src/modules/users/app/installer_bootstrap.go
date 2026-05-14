@@ -43,11 +43,18 @@ func (uc *IssueInstallerBootstrap) Execute(ctx context.Context, in IssueInstalle
 	if in.GymID == uuid.Nil || in.UserID == uuid.Nil {
 		return IssueInstallerBootstrapOutput{}, errors.New("installer bootstrap: missing ids")
 	}
+	now := time.Now().UTC()
+	// Invalida cualquier código previo aún sin canjear para este
+	// (gym, user). Antes podían coexistir N códigos válidos en paralelo;
+	// el dueño esperaba que "Regenerar" reemplace, no que acumule. Si
+	// alguien pasó por SupabRedeem antes del Insert, fail silencioso —
+	// el peor caso es seguir con la semántica vieja, no romper.
+	_, _ = uc.Store.ExpirePriorActive(ctx, in.GymID, in.UserID, now)
 	plain, hash, err := installerbootstrap.Generate()
 	if err != nil {
 		return IssueInstallerBootstrapOutput{}, err
 	}
-	exp := time.Now().UTC().Add(installerbootstrap.DefaultTTL)
+	exp := now.Add(installerbootstrap.DefaultTTL)
 	if _, err := uc.Store.Insert(ctx, in.GymID, in.UserID, hash, exp); err != nil {
 		return IssueInstallerBootstrapOutput{}, err
 	}
@@ -94,6 +101,7 @@ type RedeemInstallerBootstrapOutput struct {
 	GymID            uuid.UUID
 	FullName         string
 	Email            string
+	Phone            string
 	Role             string
 	GymName          *string
 	AccessToken      string
@@ -119,10 +127,10 @@ func (uc *RedeemInstallerBootstrap) Execute(ctx context.Context, in RedeemInstal
 	}
 
 	var (
-		fullName, email, role, plan string
-		setupDone                   bool
-		trialEnd                    *time.Time
-		gymName                     *string
+		fullName, email, phone, role, plan string
+		setupDone                          bool
+		trialEnd                           *time.Time
+		gymName                            *string
 	)
 	err = uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
 		user, err := uc.Users.GetByID(tx, bs.UserID)
@@ -135,6 +143,9 @@ func (uc *RedeemInstallerBootstrap) Execute(ctx context.Context, in RedeemInstal
 		}
 		fullName = user.FullName
 		email = user.Email
+		if user.Phone != nil {
+			phone = *user.Phone
+		}
 		role = user.Role
 		setupDone = gym.IsSetupComplete()
 		trialEnd = gym.TrialEndsAt
@@ -162,6 +173,7 @@ func (uc *RedeemInstallerBootstrap) Execute(ctx context.Context, in RedeemInstal
 		GymID:            bs.GymID,
 		FullName:         fullName,
 		Email:            email,
+		Phone:            phone,
 		Role:             role,
 		GymName:          gymName,
 		AccessToken:      access,

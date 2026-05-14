@@ -41,6 +41,8 @@ func setupSidecarTestDB(t *testing.T) (*sqlx.DB, sharedDomain.UnitOfWork) {
 		"../../../../../db_migrations/sqlite/001_init_schema.sql",
 		"../../../../../db_migrations/sqlite/002_notifications.sql",
 		"../../../../../db_migrations/sqlite/003_sync_local.sql",
+		"../../../../../db_migrations/sqlite/005_users_pin.sql",
+		"../../../../../db_migrations/sqlite/008_gym_charge_settings.sql",
 	} {
 		b, err := os.ReadFile(m)
 		if err != nil {

@@ -61,12 +61,18 @@ func setupCheckinsFixture(t *testing.T) *checkinsFixture {
 	t.Cleanup(func() { db.Close() })
 	db.SetMaxOpenConns(1)
 
-	schema, err := os.ReadFile("../../../../db_migrations/sqlite/001_init_schema.sql")
-	if err != nil {
-		t.Fatalf("read migration: %v", err)
-	}
-	if _, err := db.Exec(string(schema)); err != nil {
-		t.Fatalf("apply migration: %v", err)
+	for _, m := range []string{
+		"../../../../db_migrations/sqlite/001_init_schema.sql",
+		"../../../../db_migrations/sqlite/005_users_pin.sql",
+		"../../../../db_migrations/sqlite/008_gym_charge_settings.sql",
+	} {
+		schema, err := os.ReadFile(m)
+		if err != nil {
+			t.Fatalf("read %s: %v", m, err)
+		}
+		if _, err := db.Exec(string(schema)); err != nil {
+			t.Fatalf("apply %s: %v", m, err)
+		}
 	}
 	uow := sharedDomain.NewSQLiteUnitOfWork(db, syncpkg.NewSqliteQueue())
 	recorder := audit.NewSQLiteRecorder()
@@ -114,6 +120,18 @@ func setupCheckinsFixture(t *testing.T) *checkinsFixture {
 	})
 	if err != nil {
 		t.Fatalf("createMember: %v", err)
+	}
+	// El socio nace en pending_payment (sin ChargeFirstPayment). Para
+	// estos tests necesitamos la membresía activa — la activamos vía
+	// el seam de members.RenewMembershipForPayment, que detecta el
+	// estado pending y llama Membership.Activate() en lugar de renovar.
+	if err := uow.Command(context.Background(), func(tx sharedDomain.Transaction) error {
+		_, err := memberSvc.RenewMembershipForPayment(context.Background(), tx, memApp.RenewMembershipForPaymentInput{
+			MemberID: mOut.MemberID, MembershipTypeID: mtOut.ID, PaymentDate: time.Now().UTC(),
+		}, time.Now().UTC())
+		return err
+	}); err != nil {
+		t.Fatalf("activate membership: %v", err)
 	}
 
 	gmkProvider := bcrypto.NewInMemoryGMKProvider()

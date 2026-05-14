@@ -65,6 +65,13 @@ type Bootstrap struct {
 type Store interface {
 	Insert(ctx context.Context, gymID, userID uuid.UUID, hash []byte, expiresAt time.Time) (Bootstrap, error)
 	Redeem(ctx context.Context, hash []byte, now time.Time) (Bootstrap, error)
+	// ExpirePriorActive forces every unredeemed, not-yet-expired token
+	// for (gym, user) into "expired" state. Lo invoca el use case de
+	// emisión antes de insertar un nuevo código, de modo que generar uno
+	// nuevo invalide al anterior — el dueño espera que "Regenerar"
+	// signifique "el anterior ya no sirve", no "ahora tengo dos válidos".
+	// Devuelve el número de filas afectadas (útil para logging/tests).
+	ExpirePriorActive(ctx context.Context, gymID, userID uuid.UUID, now time.Time) (int64, error)
 }
 
 var (

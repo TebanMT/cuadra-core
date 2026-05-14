@@ -83,7 +83,14 @@ func (uc *LockMembershipExpiry) Execute(ctx context.Context, in LockMembershipEx
 			if err != nil {
 				return sharedDomain.NewValidationError(err)
 			}
-			prev, next, daysAdded = p, ms.ExpiryDate, d
+			// SetExpiry deja ms.ExpiryDate apuntando a la fecha nueva;
+			// la deserferenciamos aquí. Si el caller intentó setearle
+			// expiry a un pending_payment, ms.SetExpiry ya devolvió
+			// error arriba.
+			if ms.ExpiryDate == nil {
+				return sharedDomain.NewValidationError(memErrors.ErrAdjustmentInvalidDays)
+			}
+			prev, next, daysAdded = p, *ms.ExpiryDate, d
 		default:
 			return sharedDomain.NewValidationError(memErrors.ErrAdjustmentInvalidDays)
 		}

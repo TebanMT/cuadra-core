@@ -111,10 +111,14 @@ func recordCheckin(
 		Timestamp:    c.CheckinAt,
 	}
 	if statusOut.CurrentMembership != nil {
-		exp := statusOut.CurrentMembership.ExpiryDate
-		view.ExpiryDate = &exp
-		days := statusOut.CurrentMembership.DaysUntilExpiry(today)
-		view.DaysToExpiry = &days
+		// ExpiryDate puede ser nil cuando la membership está en
+		// pending_payment — el view ya tiene el tipo *time.Time, sólo
+		// propagamos el puntero.
+		view.ExpiryDate = statusOut.CurrentMembership.ExpiryDate
+		if statusOut.CurrentMembership.ExpiryDate != nil {
+			days := statusOut.CurrentMembership.DaysUntilExpiry(today)
+			view.DaysToExpiry = &days
+		}
 	}
 	return view, nil
 }

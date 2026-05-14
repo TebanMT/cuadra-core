@@ -170,3 +170,20 @@ func HashPassword(plaintext string) (string, error) {
 func VerifyPassword(hash, plaintext string) error {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(plaintext))
 }
+
+// HashPIN hashes a 4-digit reception PIN with bcrypt. Same cost as passwords:
+// the keyspace is tiny (10⁴) so the hash exists primarily to slow down an
+// attacker who exfiltrated the SQLite file, not to make the hash itself
+// "strong". The /auth/login-pin endpoint enforces a lockout to handle the
+// online side.
+func HashPIN(plaintext string) (string, error) {
+	b, err := bcrypt.GenerateFromPassword([]byte(plaintext), 12)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+func VerifyPIN(hash, plaintext string) error {
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(plaintext))
+}

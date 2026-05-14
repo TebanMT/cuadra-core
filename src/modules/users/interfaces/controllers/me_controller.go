@@ -59,7 +59,9 @@ type meUserWire struct {
 	UserID   uuid.UUID `json:"user_id"`
 	FullName string    `json:"full_name"`
 	Email    string    `json:"email"`
+	Phone    *string   `json:"phone"`
 	Role     string    `json:"role"`
+	HasPIN   bool      `json:"has_pin"`
 }
 
 type meGymWire struct {
@@ -190,7 +192,9 @@ func (ctrl *AuthController) handleGetMe(c *gin.Context) {
 			UserID:   user.ID,
 			FullName: user.FullName,
 			Email:    user.Email,
+			Phone:    user.Phone,
 			Role:     user.Role,
+			HasPIN:   user.HasPIN(),
 		},
 		Gym: meGymWire{
 			GymID:              gym.ID,
@@ -244,7 +248,9 @@ func (ctrl *AuthController) handleUpdateMe(c *gin.Context) {
 		UserID:   updated.ID,
 		FullName: updated.FullName,
 		Email:    updated.Email,
+		Phone:    updated.Phone,
 		Role:     updated.Role,
+		HasPIN:   updated.HasPIN(),
 	})
 }
 
@@ -309,6 +315,99 @@ func (ctrl *AuthController) handleUpdateProfileWire(c *gin.Context) {
 		return
 	}
 	utils.JsonResponse(c, http.StatusOK, toGymProfileWire(out))
+}
+
+// chargeSettingsWire es la representación FE de gym.charge_settings. Todos
+// los campos son opcionales en el response porque un gym recién creado tiene
+// `charge_settings = {}` — la ausencia significa "no configurado todavía".
+type chargeSettingsWire struct {
+	ChargesEnrollment    *bool    `json:"charges_enrollment,omitempty"`
+	ChargesMaintenance   *bool    `json:"charges_maintenance,omitempty"`
+	EnrollmentAmount     *float64 `json:"enrollment_amount,omitempty"`
+	MaintenanceAmount    *float64 `json:"maintenance_amount,omitempty"`
+	MaintenanceFrequency *string  `json:"maintenance_frequency,omitempty"`
+}
+
+// updateChargeSettingsReq es el PATCH /gyms/me/charge-settings. Cada
+// campo nil = "no tocar". El FE manda sólo lo que cambia (parche), no
+// el set completo.
+type updateChargeSettingsReq struct {
+	ChargesEnrollment    *bool    `json:"charges_enrollment,omitempty"`
+	ChargesMaintenance   *bool    `json:"charges_maintenance,omitempty"`
+	EnrollmentAmount     *float64 `json:"enrollment_amount,omitempty"`
+	MaintenanceAmount    *float64 `json:"maintenance_amount,omitempty"`
+	MaintenanceFrequency *string  `json:"maintenance_frequency,omitempty"`
+}
+
+func toChargeSettingsWire(m map[string]any) chargeSettingsWire {
+	out := chargeSettingsWire{}
+	if v, ok := m["charges_enrollment"].(bool); ok {
+		out.ChargesEnrollment = &v
+	}
+	if v, ok := m["charges_maintenance"].(bool); ok {
+		out.ChargesMaintenance = &v
+	}
+	if v, ok := m["enrollment_amount"].(float64); ok {
+		out.EnrollmentAmount = &v
+	}
+	if v, ok := m["maintenance_amount"].(float64); ok {
+		out.MaintenanceAmount = &v
+	}
+	if v, ok := m["maintenance_frequency"].(string); ok && v != "" {
+		out.MaintenanceFrequency = &v
+	}
+	return out
+}
+
+func (ctrl *AuthController) handleGetChargeSettings(c *gin.Context) {
+	gymID, ok := middleware.GetGymID(c)
+	if !ok || gymID == uuid.Nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, errBadAuth)
+		return
+	}
+	if ctrl.Gyms == nil || ctrl.UoW == nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, errBadAuth)
+		return
+	}
+	tx, err := ctrl.UoW.Query(c.Request.Context())
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, err)
+		return
+	}
+	gym, err := ctrl.Gyms.GetByID(tx, gymID)
+	if err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	utils.JsonResponse(c, http.StatusOK, toChargeSettingsWire(gym.ChargeSettings))
+}
+
+func (ctrl *AuthController) handleUpdateChargeSettings(c *gin.Context) {
+	gymID, _ := middleware.GetGymID(c)
+	userID, _ := middleware.GetUserID(c)
+	if ctrl.UpdateChargeSet == nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, errBadAuth)
+		return
+	}
+	var req updateChargeSettingsReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err)
+		return
+	}
+	gym, err := ctrl.UpdateChargeSet.Execute(c.Request.Context(), gymApp.UpdateChargeSettingsInput{
+		GymID:                gymID,
+		ActorUserID:          userID,
+		ChargesEnrollment:    req.ChargesEnrollment,
+		ChargesMaintenance:   req.ChargesMaintenance,
+		EnrollmentAmount:     req.EnrollmentAmount,
+		MaintenanceAmount:    req.MaintenanceAmount,
+		MaintenanceFrequency: req.MaintenanceFrequency,
+	})
+	if err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	utils.JsonResponse(c, http.StatusOK, toChargeSettingsWire(gym.ChargeSettings))
 }
 
 func (ctrl *AuthController) handleSetupStatus(c *gin.Context) {

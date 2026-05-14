@@ -51,6 +51,7 @@ type sqlitePaymentRow struct {
 	BalancePending  int64          `db:"balance_pending"`
 	PaymentDate     string         `db:"payment_date"`
 	Notes           sql.NullString `db:"notes"`
+	Breakdown       sql.NullString `db:"breakdown"`
 	OperatorID      string         `db:"operator_id"`
 }
 
@@ -62,12 +63,12 @@ func (r *PaymentSQLiteRepository) Create(tx sharedDomain.Transaction, p *payment
 		    id, gym_id, version, created_at, updated_at, deleted_at,
 		    folio, member_id, amount, payment_method, concept, parent_payment_id,
 		    discount_amount, discount_reason, balance_pending,
-		    payment_date, notes, operator_id
+		    payment_date, notes, breakdown, operator_id
 		) VALUES (
 		    :id, :gym_id, :version, :created_at, :updated_at, :deleted_at,
 		    :folio, :member_id, :amount, :payment_method, :concept, :parent_payment_id,
 		    :discount_amount, :discount_reason, :balance_pending,
-		    :payment_date, :notes, :operator_id
+		    :payment_date, :notes, :breakdown, :operator_id
 		)`
 	if _, err := stx.NamedExec(context.Background(), stmt, row); err != nil {
 		return nil, err
@@ -236,6 +237,11 @@ func paymentToRow(p *paymentDomain.Payment) sqlitePaymentRow {
 	if p.Notes != nil {
 		row.Notes = sql.NullString{String: *p.Notes, Valid: true}
 	}
+	if len(p.Breakdown) > 0 {
+		if b, err := json.Marshal(p.Breakdown); err == nil {
+			row.Breakdown = sql.NullString{String: string(b), Valid: true}
+		}
+	}
 	return row
 }
 
@@ -279,6 +285,12 @@ func paymentFromRow(r *sqlitePaymentRow) *paymentDomain.Payment {
 		v := r.Notes.String
 		p.Notes = &v
 	}
+	if r.Breakdown.Valid && r.Breakdown.String != "" {
+		var lines []paymentDomain.BreakdownLine
+		if err := json.Unmarshal([]byte(r.Breakdown.String), &lines); err == nil {
+			p.Breakdown = lines
+		}
+	}
 	return p
 }
 
@@ -289,6 +301,10 @@ func enqueuePayment(stx *sharedDomain.SqlxTransaction, p *paymentDomain.Payment)
 	// All NOT NULL columns must be in the payload — the cloud projector's
 	// UPSERT only emits columns present in the map, and a missing required
 	// column on first-sight INSERT triggers a 23502 NOT NULL violation.
+	var breakdownPayload any
+	if len(p.Breakdown) > 0 {
+		breakdownPayload = p.Breakdown
+	}
 	payload, err := json.Marshal(map[string]any{
 		"id":                p.ID.String(),
 		"gym_id":            p.GymID.String(),
@@ -306,6 +322,7 @@ func enqueuePayment(stx *sharedDomain.SqlxTransaction, p *paymentDomain.Payment)
 		"balance_pending":   p.BalancePending,
 		"payment_date":      p.PaymentDate.UTC().Format(dateLayout),
 		"notes":             strPtrOrNil(p.Notes),
+		"breakdown":         breakdownPayload,
 		"operator_id":       p.OperatorID.String(),
 	})
 	if err != nil {

@@ -122,6 +122,8 @@ func userToModel(u *userDomain.User) models.UserModel {
 		MustChangePassword: u.MustChangePassword,
 		LastLoginAt:        u.LastLoginAt,
 		CreatedBy:          u.CreatedBy,
+		PinHash:            u.PinHash,
+		PinAssignedAt:      u.PinAssignedAt,
 	}
 }
 
@@ -142,5 +144,7 @@ func userToDomain(m *models.UserModel) *userDomain.User {
 		CreatedAt:          m.CreatedAt,
 		UpdatedAt:          m.UpdatedAt,
 		DeletedAt:          m.DeletedAt,
+		PinHash:            m.PinHash,
+		PinAssignedAt:      m.PinAssignedAt,
 	}
 }

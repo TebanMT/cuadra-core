@@ -16,15 +16,20 @@ import (
 
 // Status mirrors chk_memberships_status.
 const (
-	StatusActive    = "active"
-	StatusExpired   = "expired"
-	StatusReplaced  = "replaced"
-	StatusCancelled = "cancelled"
+	StatusActive         = "active"
+	StatusExpired        = "expired"
+	StatusReplaced       = "replaced"
+	StatusCancelled      = "cancelled"
+	StatusPendingPayment = "pending_payment"
 )
 
 // Membership is the active subscription. Snapshot fields are FROZEN at
 // creation — see DA-11.1 / ADR-002 §3.6: a MembershipType price/duration
 // change does NOT propagate to existing Memberships.
+//
+// ExpiryDate is nil when Status == pending_payment (socio inscrito pero sin
+// pago todavía). El primer pago — completo o parcial — activa la membresía
+// y setea ExpiryDate. Para cualquier otro status, ExpiryDate es no-nil.
 type Membership struct {
 	ID                   uuid.UUID
 	GymID                uuid.UUID
@@ -34,8 +39,8 @@ type Membership struct {
 	TypeNameSnapshot     string
 	PriceSnapshot        float64
 	DurationDaysSnapshot int
-	StartDate            time.Time // dates only; we keep them as time.Time for ergonomics
-	ExpiryDate           time.Time
+	StartDate            time.Time
+	ExpiryDate           *time.Time
 	Status               string
 	ReplacedBy           *uuid.UUID
 	CreatedAt            time.Time
@@ -43,9 +48,10 @@ type Membership struct {
 	DeletedAt            *time.Time
 }
 
-// New constructs a Membership with expiry = start + duration. The caller is
-// responsible for ensuring there's no other active membership for this
-// member (the DB unique index will also enforce this).
+// New constructs an ACTIVE Membership with expiry = start + duration. Use
+// NewPendingPayment for the "inscrito sin pago" case. The caller is
+// responsible for ensuring there's no other active/pending membership for
+// this member (the DB unique index will also enforce this).
 func New(id uuid.UUID, gymID, memberID uuid.UUID, mt *mtDomain.MembershipType, startDate time.Time, now time.Time) *Membership {
 	start := truncateDate(startDate)
 	expiry := start.AddDate(0, 0, mt.DurationDays)
@@ -59,11 +65,67 @@ func New(id uuid.UUID, gymID, memberID uuid.UUID, mt *mtDomain.MembershipType, s
 		PriceSnapshot:        mt.Price,
 		DurationDaysSnapshot: mt.DurationDays,
 		StartDate:            start,
-		ExpiryDate:           expiry,
+		ExpiryDate:           &expiry,
 		Status:               StatusActive,
 		CreatedAt:            now,
 		UpdatedAt:            now,
 	}
+}
+
+// NewPendingPayment constructs a Membership inscribed but unpaid. ExpiryDate
+// stays nil until the first payment (parcial o completo) activates it via
+// Activate(). The snapshot fields are still frozen — el plan elegido al
+// inscribir es el que el socio terminará pagando.
+func NewPendingPayment(id uuid.UUID, gymID, memberID uuid.UUID, mt *mtDomain.MembershipType, startDate time.Time, now time.Time) *Membership {
+	start := truncateDate(startDate)
+	return &Membership{
+		ID:                   id,
+		GymID:                gymID,
+		Version:              1,
+		MemberID:             memberID,
+		MembershipTypeID:     mt.ID,
+		TypeNameSnapshot:     mt.Name,
+		PriceSnapshot:        mt.Price,
+		DurationDaysSnapshot: mt.DurationDays,
+		StartDate:            start,
+		ExpiryDate:           nil,
+		Status:               StatusPendingPayment,
+		CreatedAt:            now,
+		UpdatedAt:            now,
+	}
+}
+
+// Activate transitions a pending_payment Membership to active in-place. Llamado
+// por RegisterMembershipPayment / CreateMember-con-pago cuando llega el primer
+// abono (parcial o completo — un abono parcial ya cuenta para activar).
+//
+// Regla de start_date: si el StartDate original quedó en el pasado (operador
+// inscribió hace días, socio finalmente paga hoy), shifteamos a paymentDate
+// para que el socio no pierda días de vigencia. Si el StartDate original es
+// futuro (caso raro: operador programó "empieza el lunes"), lo respetamos.
+//
+// No-op si la membership ya está activa — devuelve el StartDate / ExpiryDate
+// actuales sin error para que llamadas idempotentes (un segundo abono al
+// mismo pending_payment, ya activado en la primera) no fallen.
+func (m *Membership) Activate(paymentDate, now time.Time) error {
+	if m.Status == StatusActive {
+		return nil
+	}
+	if m.Status != StatusPendingPayment {
+		return memErrors.ErrAdjustmentInvalidDays
+	}
+	pay := truncateDate(paymentDate)
+	start := m.StartDate
+	if start.Before(pay) {
+		start = pay
+	}
+	expiry := start.AddDate(0, 0, m.DurationDaysSnapshot)
+	m.StartDate = start
+	m.ExpiryDate = &expiry
+	m.Status = StatusActive
+	m.Version++
+	m.UpdatedAt = now
+	return nil
 }
 
 // Renew computes the next Membership instance from `m` according to UC-018:
@@ -75,12 +137,17 @@ func New(id uuid.UUID, gymID, memberID uuid.UUID, mt *mtDomain.MembershipType, s
 // one to the caller (which transitions `m.Status -> replaced` + sets
 // ReplacedBy). The new Membership uses `nextType` snapshots — that's normally
 // the same plan but the operator may have switched plans at renewal.
+//
+// Caller MUST NOT invoke Renew on a pending_payment Membership — esa
+// transición es Activate(), no crear una nueva fila.
 func (m *Membership) Renew(newID uuid.UUID, nextType *mtDomain.MembershipType, paymentDate time.Time, now time.Time) *Membership {
 	pay := truncateDate(paymentDate)
 	var newStart time.Time
-	if !m.ExpiryDate.Before(pay) {
+	// Defensive: si por alguna razón ExpiryDate es nil cuando llega acá,
+	// caemos al comportamiento "vencido" (start = payment date).
+	if m.ExpiryDate != nil && !m.ExpiryDate.Before(pay) {
 		// Not expired — accumulate from current expiry.
-		newStart = m.ExpiryDate
+		newStart = *m.ExpiryDate
 	} else {
 		newStart = pay
 	}
@@ -95,7 +162,7 @@ func (m *Membership) Renew(newID uuid.UUID, nextType *mtDomain.MembershipType, p
 		PriceSnapshot:        nextType.Price,
 		DurationDaysSnapshot: nextType.DurationDays,
 		StartDate:            newStart,
-		ExpiryDate:           newExpiry,
+		ExpiryDate:           &newExpiry,
 		Status:               StatusActive,
 		CreatedAt:            now,
 		UpdatedAt:            now,
@@ -125,13 +192,19 @@ func (m *Membership) Cancel(now time.Time) {
 //
 // daysAdded may be negative (a future "remove courtesy" flow). The result
 // must respect chk_memberships_dates: expiry >= start.
+//
+// Devuelve ErrAdjustmentInvalidDays si la membership está en pending_payment
+// (no tiene expiry para ajustar todavía).
 func (m *Membership) AdjustExpiry(daysAdded int, now time.Time) (previousExpiry time.Time, newExpiry time.Time, err error) {
-	prev := m.ExpiryDate
+	if m.ExpiryDate == nil {
+		return time.Time{}, time.Time{}, memErrors.ErrAdjustmentInvalidDays
+	}
+	prev := *m.ExpiryDate
 	next := prev.AddDate(0, 0, daysAdded)
 	if next.Before(m.StartDate) {
 		return prev, prev, memErrors.ErrAdjustmentInvalidDays
 	}
-	m.ExpiryDate = next
+	m.ExpiryDate = &next
 	m.Version++
 	m.UpdatedAt = now
 	return prev, next, nil
@@ -140,13 +213,16 @@ func (m *Membership) AdjustExpiry(daysAdded int, now time.Time) (previousExpiry 
 // SetExpiry sets the expiry to a specific date (UC-017 — "Establecer fecha").
 // The caller passes a date already validated by the use case.
 func (m *Membership) SetExpiry(target time.Time, now time.Time) (previousExpiry time.Time, daysAdded int, err error) {
+	if m.ExpiryDate == nil {
+		return time.Time{}, 0, memErrors.ErrAdjustmentInvalidDays
+	}
 	target = truncateDate(target)
-	prev := m.ExpiryDate
+	prev := *m.ExpiryDate
 	if target.Before(m.StartDate) {
 		return prev, 0, memErrors.ErrAdjustmentInvalidDays
 	}
 	delta := int(target.Sub(prev).Hours() / 24)
-	m.ExpiryDate = target
+	m.ExpiryDate = &target
 	m.Version++
 	m.UpdatedAt = now
 	return prev, delta, nil
@@ -154,16 +230,22 @@ func (m *Membership) SetExpiry(target time.Time, now time.Time) (previousExpiry 
 
 // IsActive is a domain convenience.
 func (m *Membership) IsActive(today time.Time) bool {
-	if m.Status != StatusActive {
+	if m.Status != StatusActive || m.ExpiryDate == nil {
 		return false
 	}
 	t := truncateDate(today)
 	return !m.ExpiryDate.Before(t)
 }
 
+// IsPendingPayment reports whether the socio is inscribed but hasn't paid yet.
+func (m *Membership) IsPendingPayment() bool { return m.Status == StatusPendingPayment }
+
 // DaysUntilExpiry returns positive when expiry is in the future, negative
-// when expired.
+// when expired. Returns 0 for pending_payment (no expiry yet).
 func (m *Membership) DaysUntilExpiry(today time.Time) int {
+	if m.ExpiryDate == nil {
+		return 0
+	}
 	t := truncateDate(today)
 	return int(m.ExpiryDate.Sub(t).Hours() / 24)
 }

@@ -16,8 +16,12 @@ func TestStatusThresholds(t *testing.T) {
 		snap      AgentSnapshot
 		wantState string
 	}{
-		{"never synced → critical",
+		{"never synced, no error → initial_syncing (recién pareado)",
 			AgentSnapshot{},
+			StateInitialSyncing,
+		},
+		{"never synced + error → critical (intento fallido)",
+			AgentSnapshot{LastError: "push: 401 unauthorized"},
 			StateOfflineCritical,
 		},
 		{"30s ago → online",

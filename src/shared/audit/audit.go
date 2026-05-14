@@ -26,6 +26,9 @@ const (
 	ActionTransferOwnership  = "transfer_ownership"
 	ActionToggleActive       = "toggle_active"
 	ActionAdminPasswordReset = "admin_password_reset"
+	ActionLoginPIN           = "login_pin"
+	ActionAssignPIN          = "assign_pin"
+	ActionClearPIN           = "clear_pin"
 )
 
 // Entry is the value the use case hands to Recorder.Record. Changes is an

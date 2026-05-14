@@ -16,6 +16,7 @@ import (
 func toModel(g *gymDomain.Gym) models.GymModel {
 	pm, _ := json.Marshal(g.PaymentMethods)
 	ks, _ := json.Marshal(g.KioskSettings)
+	cs, _ := json.Marshal(orEmptyMap(g.ChargeSettings))
 	return models.GymModel{
 		ID:                       g.ID,
 		GymID:                    g.ID,
@@ -47,7 +48,18 @@ func toModel(g *gymDomain.Gym) models.GymModel {
 		WhatsAppBusinessTokenEnc: g.WhatsAppBusinessTokenEnc,
 		WhatsAppConnectedAt:      g.WhatsAppConnectedAt,
 		KioskSettings:            string(ks),
+		ChargeSettings:           string(cs),
 	}
+}
+
+// orEmptyMap garantiza que un map nil se serialice como "{}" en lugar
+// de "null". JSONB/TEXT con CHECK(json_valid(...)) en SQLite rechaza
+// null literal en algunas migrations.
+func orEmptyMap(m map[string]any) map[string]any {
+	if m == nil {
+		return map[string]any{}
+	}
+	return m
 }
 
 func toDomain(m *models.GymModel) *gymDomain.Gym {
@@ -61,6 +73,13 @@ func toDomain(m *models.GymModel) *gymDomain.Gym {
 	var kiosk map[string]any
 	if m.KioskSettings != "" {
 		_ = json.Unmarshal([]byte(m.KioskSettings), &kiosk)
+	}
+	var charge map[string]any
+	if m.ChargeSettings != "" {
+		_ = json.Unmarshal([]byte(m.ChargeSettings), &charge)
+	}
+	if charge == nil {
+		charge = map[string]any{}
 	}
 	return &gymDomain.Gym{
 		ID:                       m.ID,
@@ -89,6 +108,7 @@ func toDomain(m *models.GymModel) *gymDomain.Gym {
 		WhatsAppBusinessTokenEnc: m.WhatsAppBusinessTokenEnc,
 		WhatsAppConnectedAt:      m.WhatsAppConnectedAt,
 		KioskSettings:            kiosk,
+		ChargeSettings:           charge,
 		CreatedAt:                m.CreatedAt,
 		UpdatedAt:                m.UpdatedAt,
 		DeletedAt:                m.DeletedAt,

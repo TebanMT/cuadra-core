@@ -56,7 +56,9 @@ func (r *MembershipPostgresRepository) GetByID(tx sharedDomain.Transaction, id u
 func (r *MembershipPostgresRepository) GetCurrentByMember(tx sharedDomain.Transaction, memberID uuid.UUID) (*membershipDomain.Membership, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	var row models.MembershipModel
-	err := gormTx.Where("member_id = ? AND status = ? AND deleted_at IS NULL", memberID, membershipDomain.StatusActive).First(&row).Error
+	// "Current" trae la slot vigente: activa o pending_payment.
+	err := gormTx.Where("member_id = ? AND status IN (?, ?) AND deleted_at IS NULL",
+		memberID, membershipDomain.StatusActive, membershipDomain.StatusPendingPayment).First(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, sharedDomain.NewBusinessError(memErrors.ErrNoActiveMembership, "")
 	}

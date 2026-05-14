@@ -51,12 +51,18 @@ func setupProducts(t *testing.T) *productsFixture {
 	t.Cleanup(func() { db.Close() })
 	db.SetMaxOpenConns(1)
 
-	schema, err := os.ReadFile("../../../../db_migrations/sqlite/001_init_schema.sql")
-	if err != nil {
-		t.Fatalf("read migration: %v", err)
-	}
-	if _, err := db.Exec(string(schema)); err != nil {
-		t.Fatalf("apply migration: %v", err)
+	for _, m := range []string{
+		"../../../../db_migrations/sqlite/001_init_schema.sql",
+		"../../../../db_migrations/sqlite/005_users_pin.sql",
+		"../../../../db_migrations/sqlite/008_gym_charge_settings.sql",
+	} {
+		schema, err := os.ReadFile(m)
+		if err != nil {
+			t.Fatalf("read %s: %v", m, err)
+		}
+		if _, err := db.Exec(string(schema)); err != nil {
+			t.Fatalf("apply %s: %v", m, err)
+		}
 	}
 	uow := sharedDomain.NewSQLiteUnitOfWork(db, syncpkg.NewSqliteQueue())
 	recorder := audit.NewSQLiteRecorder()

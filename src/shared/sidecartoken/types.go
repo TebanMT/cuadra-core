@@ -43,6 +43,12 @@ type Store interface {
 	// whether to mint a fresh token or skip emission.
 	FindActive(ctx context.Context, gymID, clientID uuid.UUID) (Credential, error)
 
+	// ListActiveByGym returns every non-revoked credential for a gym, sorted
+	// by last_seen_at desc (most-recently-used first). Drives the dashboard
+	// "dispositivos vinculados" surface. Returns an empty slice (not error)
+	// when the gym has zero pairings.
+	ListActiveByGym(ctx context.Context, gymID uuid.UUID) ([]Credential, error)
+
 	// Insert persists a freshly minted credential. Caller is responsible
 	// for revoking any prior active row for (gym_id, client_id) first; the
 	// unique partial index will reject duplicates otherwise.

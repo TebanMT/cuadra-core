@@ -52,11 +52,17 @@ type sqliteGymRow struct {
 	WhatsAppBusinessTokenEnc []byte         `db:"whatsapp_business_token_enc"`
 	WhatsAppConnectedAt      sql.NullInt64  `db:"whatsapp_connected_at"`
 	KioskSettings            string         `db:"kiosk_settings"`
+	ChargeSettings           string         `db:"charge_settings"`
 }
 
 func gymToRow(g *gymDomain.Gym) sqliteGymRow {
 	pm, _ := json.Marshal(g.PaymentMethods)
 	ks, _ := json.Marshal(g.KioskSettings)
+	chargeMap := g.ChargeSettings
+	if chargeMap == nil {
+		chargeMap = map[string]any{}
+	}
+	cs, _ := json.Marshal(chargeMap)
 	return sqliteGymRow{
 		ID:                       g.ID.String(),
 		GymID:                    g.ID.String(),
@@ -88,6 +94,7 @@ func gymToRow(g *gymDomain.Gym) sqliteGymRow {
 		WhatsAppBusinessTokenEnc: g.WhatsAppBusinessTokenEnc,
 		WhatsAppConnectedAt:      nullableMs(g.WhatsAppConnectedAt),
 		KioskSettings:            string(ks),
+		ChargeSettings:           string(cs),
 	}
 }
 
@@ -100,6 +107,13 @@ func gymFromRow(r *sqliteGymRow) *gymDomain.Gym {
 	}
 	var ks map[string]any
 	_ = json.Unmarshal([]byte(r.KioskSettings), &ks)
+	var cs map[string]any
+	if r.ChargeSettings != "" {
+		_ = json.Unmarshal([]byte(r.ChargeSettings), &cs)
+	}
+	if cs == nil {
+		cs = map[string]any{}
+	}
 	g := &gymDomain.Gym{
 		ID:                       id,
 		Version:                  r.Version,
@@ -110,6 +124,7 @@ func gymFromRow(r *sqliteGymRow) *gymDomain.Gym {
 		SubscriptionStatus:       r.SubscriptionStatus,
 		WhatsAppBusinessTokenEnc: r.WhatsAppBusinessTokenEnc,
 		KioskSettings:            ks,
+		ChargeSettings:           cs,
 		CreatedAt:                time.UnixMilli(r.CreatedAt).UTC(),
 		UpdatedAt:                time.UnixMilli(r.UpdatedAt).UTC(),
 	}
@@ -146,7 +161,7 @@ func (r *GymSQLiteRepository) Create(tx sharedDomain.Transaction, g *gymDomain.G
 		    payment_methods, open_time, close_time,
 		    subscription_plan, trial_ends_at, subscription_ends_at, subscription_status, setup_completed_at,
 		    whatsapp_business_phone, whatsapp_business_token_enc, whatsapp_connected_at,
-		    kiosk_settings
+		    kiosk_settings, charge_settings
 		) VALUES (
 		    :id, :gym_id, :version, :created_at, :updated_at, :deleted_at,
 		    :name, :city, :whatsapp, :country, :timezone,
@@ -155,7 +170,7 @@ func (r *GymSQLiteRepository) Create(tx sharedDomain.Transaction, g *gymDomain.G
 		    :payment_methods, :open_time, :close_time,
 		    :subscription_plan, :trial_ends_at, :subscription_ends_at, :subscription_status, :setup_completed_at,
 		    :whatsapp_business_phone, :whatsapp_business_token_enc, :whatsapp_connected_at,
-		    :kiosk_settings
+		    :kiosk_settings, :charge_settings
 		)`
 	if _, err := stx.NamedExec(context.Background(), stmt, row); err != nil {
 		return nil, err
@@ -197,7 +212,8 @@ func (r *GymSQLiteRepository) Update(tx sharedDomain.Transaction, g *gymDomain.G
 		    whatsapp_business_phone = :whatsapp_business_phone,
 		    whatsapp_business_token_enc = :whatsapp_business_token_enc,
 		    whatsapp_connected_at = :whatsapp_connected_at,
-		    kiosk_settings = :kiosk_settings
+		    kiosk_settings = :kiosk_settings,
+		    charge_settings = :charge_settings
 		WHERE id = :id`
 	if _, err := stx.NamedExec(context.Background(), stmt, row); err != nil {
 		return nil, err
@@ -223,6 +239,10 @@ func enqueueGym(stx *sharedDomain.SqlxTransaction, g *gymDomain.Gym) error {
 	if stx.Queue == nil {
 		return nil
 	}
+	chargeSettings := g.ChargeSettings
+	if chargeSettings == nil {
+		chargeSettings = map[string]any{}
+	}
 	payload, err := json.Marshal(map[string]any{
 		"id":                  g.ID.String(),
 		"gym_id":              g.ID.String(),
@@ -237,6 +257,7 @@ func enqueueGym(stx *sharedDomain.SqlxTransaction, g *gymDomain.Gym) error {
 		"subscription_status": g.SubscriptionStatus,
 		"trial_ends_at":       g.TrialEndsAt,
 		"setup_completed_at":  g.SetupCompletedAt,
+		"charge_settings":     chargeSettings,
 		"updated_at":          g.UpdatedAt.UnixMilli(),
 	})
 	if err != nil {

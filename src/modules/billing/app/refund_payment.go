@@ -103,6 +103,16 @@ func (uc *RefundPayment) Execute(ctx context.Context, in RefundPaymentInput) (*R
 			}
 			return sharedDomain.NewValidationError(err)
 		}
+
+		// Toque al parent para forzar un upsert que aterrice ANTES que
+		// el INSERT del refund en sync_queue. Defensivo: si el parent
+		// nunca llegó a postgres (sync previo fallido), su upsert lo
+		// crea y el FK parent_payment_id del refund satisface.
+		parent.Touch(now)
+		if _, err := uc.Payments.Update(tx, parent); err != nil {
+			return sharedDomain.NewUnexpectedError(err)
+		}
+
 		if _, err := uc.Payments.Create(tx, refund); err != nil {
 			return sharedDomain.NewUnexpectedError(err)
 		}

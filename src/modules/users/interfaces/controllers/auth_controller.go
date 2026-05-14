@@ -5,7 +5,10 @@ package controllers
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -20,6 +23,8 @@ import (
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 	"github.com/cuadra/cuadra-core/src/shared/installerbootstrap"
 	"github.com/cuadra/cuadra-core/src/shared/middleware"
+	"github.com/cuadra/cuadra-core/src/shared/r2"
+	"github.com/cuadra/cuadra-core/src/shared/sidecartoken"
 	"github.com/cuadra/cuadra-core/src/shared/utils"
 )
 
@@ -35,6 +40,7 @@ type AuthController struct {
 	UpdatePayMethods *gymApp.UpdatePaymentMethods
 	CompleteSetup    *gymApp.CompleteSetup
 	UpdateProfile    *gymApp.UpdateProfile
+	UpdateChargeSet  *gymApp.UpdateChargeSettings
 	CreateOperator   *usersApp.CreateOperator
 	UpdateOperator   *usersApp.UpdateOperator
 	ToggleActive     *usersApp.ToggleOperatorActive
@@ -58,6 +64,11 @@ type AuthController struct {
 	// (identified by X-Cuadra-Client-ID). Optional — when nil, login/signup
 	// responses simply omit the sidecar_token field.
 	SidecarBootstrap *usersApp.BootstrapSidecarToken
+	// AssignSelfPIN + ClearSelfPIN power POST/DELETE /api/v1/auth/me/pin.
+	// Optional — when nil the routes 501 so older binaries built before the
+	// auth-refactor stay compilable.
+	AssignSelfPIN *usersApp.AssignSelfPIN
+	ClearSelfPIN  *usersApp.ClearSelfPIN
 	// InstallerBootstrap mints single-use codes the dashboard hands the
 	// owner after web signup. Optional — when nil the endpoint 501s.
 	InstallerBootstrap *usersApp.IssueInstallerBootstrap
@@ -65,6 +76,18 @@ type AuthController struct {
 	// (operator JWTs + sidecar credential). Optional — when nil the
 	// endpoint 501s.
 	RedeemInstaller *usersApp.RedeemInstallerBootstrap
+	// SidecarTokens reads the sidecar_credentials table for the
+	// "dispositivos vinculados" listing surfaced by GET /auth/devices. The
+	// model already supports N desktops per gym (unique idx is on
+	// (gym_id, client_id) WHERE revoked_at IS NULL); this just exposes the
+	// list to the dashboard. Optional — endpoint 501s when nil.
+	SidecarTokens sidecartoken.Store
+	// R2 backs the /uploads/presign endpoint for member photos
+	// (offline-first: sidecar agent presigns + uploads on each sync
+	// tick). Optional — when nil (env vars no seteadas) el endpoint
+	// 501s y el sidecar deja la foto como data URL local hasta que
+	// las credenciales aparezcan.
+	R2 *r2.Client
 }
 
 // membershipTypeReader is the slim subset of MembershipTypeRepository the
@@ -113,9 +136,36 @@ func (ctrl *AuthController) RegisterRoutes(r *gin.Engine) {
 
 	authedAuth := api.Group("/auth")
 	authedAuth.Use(middleware.AuthMiddleware(ctrl.Tokens))
-	authedAuth.GET("/me", ctrl.handleGetMe)
 	authedAuth.PATCH("/me", ctrl.handleUpdateMe)
+	authedAuth.POST("/me/pin", ctrl.handleAssignSelfPIN)
+	authedAuth.DELETE("/me/pin", ctrl.handleClearSelfPIN)
 	authedAuth.POST("/installer-token", ctrl.handleIssueInstaller)
+	authedAuth.GET("/devices", middleware.RequireOwner(), ctrl.handleListDevices)
+
+	// /uploads/presign — acepta JWT (dashboard, futuro) y sk_live_*
+	// (sidecar agent en cada tick). El handler delega el scoping de
+	// gym_id al middleware (lo extrae del token).
+	if ctrl.SidecarTokens != nil {
+		uploads := api.Group("/uploads")
+		uploads.Use(middleware.SidecarOrJWTMiddleware(ctrl.Tokens, ctrl.SidecarTokens))
+		uploads.POST("/presign", ctrl.handleUploadPresign)
+		uploads.POST("/presign-get", ctrl.handleUploadPresignGet)
+	}
+
+	// GET /auth/me — aceptamos JWT (dashboard) Y sk_live_* (sidecar
+	// pidiendo refresh de identidad desde su Settings page). El handler
+	// no cambia; ambos middlewares dejan user_id + gym_id en el context.
+	// El resto de /me/* (PATCH, /pin, etc.) sigue requiriendo JWT porque
+	// son acciones del operador actual, no del bootstrap user del
+	// sidecar.
+	if ctrl.SidecarTokens != nil {
+		meAuth := api.Group("/auth")
+		meAuth.Use(middleware.SidecarOrJWTMiddleware(ctrl.Tokens, ctrl.SidecarTokens))
+		meAuth.GET("/me", ctrl.handleGetMe)
+	} else {
+		// Fallback para builds/test donde SidecarTokens no está cableado.
+		authedAuth.GET("/me", ctrl.handleGetMe)
+	}
 
 	ctrl.RegisterAccountRoutes(r)
 	ctrl.RegisterOperatorRoutes(r)
@@ -130,6 +180,8 @@ func (ctrl *AuthController) RegisterMeRoute(r *gin.Engine) {
 	authed.Use(middleware.AuthMiddleware(ctrl.Tokens))
 	authed.GET("/me", ctrl.handleGetMe)
 	authed.PATCH("/me", ctrl.handleUpdateMe)
+	authed.POST("/me/pin", ctrl.handleAssignSelfPIN)
+	authed.DELETE("/me/pin", ctrl.handleClearSelfPIN)
 }
 
 // RegisterOperatorRoutes registers the operator-management subset
@@ -167,6 +219,10 @@ func (ctrl *AuthController) RegisterAccountRoutes(r *gin.Engine) {
 		gyms.PATCH("/me", middleware.RequireOwner(), ctrl.handleUpdateProfileWire)
 		gyms.POST("/me/logo", middleware.RequireOwner(), ctrl.handleUploadLogo)
 		gyms.POST("/me/transfer-ownership", middleware.RequireOwner(), ctrl.handleTransferOwnership)
+		// Charge settings (cobros a nivel gym: inscripción + mantenimiento).
+		// Antes vivía en localStorage del desktop — frágil y per-device.
+		gyms.GET("/me/charge-settings", ctrl.handleGetChargeSettings)
+		gyms.PATCH("/me/charge-settings", middleware.RequireOwner(), ctrl.handleUpdateChargeSettings)
 	}
 }
 
@@ -181,6 +237,20 @@ func (ctrl *AuthController) RegisterUploadsRoute(r *gin.Engine) {
 	r.Static("/uploads", ctrl.UploadsDir)
 }
 
+// RegisterLocalPhotoRoute expone GET /api/v1/uploads/local/members/:id
+// para que el desktop renderee fotos de socios desde el cache local
+// del sidecar (UploadsDir/members/<id>.<ext>). Existe específicamente
+// para que el FE NUNCA abra socket directo a R2: el sync agent baja
+// las imágenes a disco (upload propio O download tras pull) y este
+// handler las sirve. Sólo se monta en el binario sidecar — el cloud
+// no tiene cache local.
+func (ctrl *AuthController) RegisterLocalPhotoRoute(r *gin.Engine) {
+	if ctrl.UploadsDir == "" {
+		return
+	}
+	r.GET("/api/v1/uploads/local/members/:id", ctrl.handleServeLocalMemberPhoto)
+}
+
 // ---------------------------------------------------------------------------
 // DTOs
 // ---------------------------------------------------------------------------
@@ -188,6 +258,7 @@ func (ctrl *AuthController) RegisterUploadsRoute(r *gin.Engine) {
 type signupReq struct {
 	FullName        string `json:"full_name" validate:"required,min=3,max=100"`
 	Email           string `json:"email" validate:"required,email"`
+	Phone           string `json:"phone,omitempty"`
 	Password        string `json:"password" validate:"required,min=8"`
 	PasswordConfirm string `json:"password_confirm" validate:"required"`
 }
@@ -211,6 +282,7 @@ type loginResp struct {
 	GymID              uuid.UUID  `json:"gym_id"`
 	FullName           string     `json:"full_name"`
 	Email              string     `json:"email"`
+	Phone              string     `json:"phone,omitempty"`
 	Role               string     `json:"role"`
 	GymName            *string    `json:"gym_name"`
 	AccessToken        string     `json:"access_token"`
@@ -293,8 +365,32 @@ type installerTokenResp struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
+type deviceResp struct {
+	ID          uuid.UUID `json:"id"`
+	ClientID    uuid.UUID `json:"client_id"`
+	DeviceLabel string    `json:"device_label"`
+	CreatedAt   time.Time `json:"created_at"`
+	LastSeenAt  time.Time `json:"last_seen_at"`
+}
+
+type listDevicesResp struct {
+	Items []deviceResp `json:"items"`
+	Count int          `json:"count"`
+}
+
 type redeemInstallerReq struct {
 	Token string `json:"token" validate:"required"`
+}
+
+type assignPinReq struct {
+	PIN string `json:"pin" validate:"required"`
+}
+
+// pinResp is the wire shape the sidecar projects: the desktop reads
+// `has_pin` straight off so it can update the grid badge after a
+// successful assign without re-fetching /auth/operators.
+type pinResp struct {
+	HasPIN bool `json:"has_pin"`
 }
 
 type redeemInstallerResp struct {
@@ -302,6 +398,7 @@ type redeemInstallerResp struct {
 	GymID            uuid.UUID  `json:"gym_id"`
 	FullName         string     `json:"full_name"`
 	Email            string     `json:"email"`
+	Phone            string     `json:"phone,omitempty"`
 	Role             string     `json:"role"`
 	GymName          *string    `json:"gym_name"`
 	AccessToken      string     `json:"access_token"`
@@ -322,7 +419,7 @@ func (ctrl *AuthController) handleSignup(c *gin.Context) {
 		return
 	}
 	out, err := ctrl.Signup.Execute(c.Request.Context(), usersApp.SignupOwnerInput{
-		FullName: req.FullName, Email: req.Email,
+		FullName: req.FullName, Email: req.Email, Phone: req.Phone,
 		Password: req.Password, PasswordConfirm: req.PasswordConfirm,
 	})
 	if err != nil {
@@ -354,6 +451,7 @@ func (ctrl *AuthController) handleLogin(c *gin.Context) {
 		GymID:              out.GymID,
 		FullName:           out.FullName,
 		Email:              out.Email,
+		Phone:              out.Phone,
 		Role:               out.Role,
 		GymName:            out.GymName,
 		AccessToken:        out.AccessToken,
@@ -493,6 +591,7 @@ func (ctrl *AuthController) handleRedeemInstaller(c *gin.Context) {
 		GymID:            out.GymID,
 		FullName:         out.FullName,
 		Email:            out.Email,
+		Phone:            out.Phone,
 		Role:             out.Role,
 		GymName:          out.GymName,
 		AccessToken:      out.AccessToken,
@@ -507,7 +606,299 @@ func (ctrl *AuthController) handleRedeemInstaller(c *gin.Context) {
 var (
 	errInstallerBootstrapDisabled = errors.New("installer bootstrap not configured on this server")
 	errInstallerBootstrapNoAuth   = errors.New("autenticación requerida")
+	errPINNotConfigured           = errors.New("pin assignment not configured on this server")
+	errDevicesNotConfigured       = errors.New("devices listing not configured on this server")
+	errR2NotConfigured            = errors.New("R2 storage not configured on this server")
 )
+
+// uploadPresignReq — body que el sidecar manda al cloud. `kind` es para
+// scoping del key path; `member_id` y `ext` componen el nombre final
+// del objeto. `content_type` se bindea al signature del PUT.
+type uploadPresignReq struct {
+	Kind        string `json:"kind" validate:"required"`
+	MemberID    string `json:"member_id"`
+	Ext         string `json:"ext" validate:"required"`
+	ContentType string `json:"content_type" validate:"required"`
+}
+
+type uploadPresignResp struct {
+	UploadURL string    `json:"upload_url"`
+	ObjectKey string    `json:"object_key"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// uploadPresignGetReq — body para POST /api/v1/uploads/presign-get.
+// El sidecar pasa el object_key que tiene guardado en su SQLite local
+// (rellenado al momento del upload o al pull desde cloud). El cloud
+// verifica que el key cae bajo gyms/<gym_id del token>/... antes de
+// firmar — sin esa guarda cualquier sidecar podría leer fotos de
+// otro gym.
+type uploadPresignGetReq struct {
+	ObjectKey string `json:"object_key" validate:"required"`
+}
+
+type uploadPresignGetResp struct {
+	DownloadURL string    `json:"download_url"`
+	ExpiresAt   time.Time `json:"expires_at"`
+}
+
+// handleUploadPresign — POST /api/v1/uploads/presign.
+// Mintea una URL presignada para que el sidecar (o el dashboard) suba
+// un blob directo a R2. El gym_id sale del middleware (token sidecar
+// scoped al gym, o JWT del dueño). Per-kind validamos campos:
+//
+//   - member_photo: requiere member_id + ext (jpg|jpeg|png|webp).
+//
+// Key naming: gyms/<gym_id>/members/<member_id>.<ext>. Determinístico
+// para que un re-upload sobreescriba al anterior (no acumulamos
+// huérfanos).
+func (ctrl *AuthController) handleUploadPresign(c *gin.Context) {
+	if ctrl.R2 == nil {
+		utils.ErrorResponse(c, http.StatusNotImplemented, errR2NotConfigured)
+		return
+	}
+	gymID, ok := middleware.GetGymID(c)
+	if !ok || gymID == uuid.Nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, errInstallerBootstrapNoAuth)
+		return
+	}
+	var req uploadPresignReq
+	if !bind(c, &req) {
+		return
+	}
+	ext := strings.ToLower(strings.TrimPrefix(req.Ext, "."))
+	switch req.Kind {
+	case "member_photo":
+		if req.MemberID == "" {
+			utils.ErrorResponse(c, http.StatusBadRequest, errors.New("member_id required for member_photo"))
+			return
+		}
+		if _, err := uuid.Parse(req.MemberID); err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, errors.New("member_id must be a uuid"))
+			return
+		}
+		if !isAllowedImageExt(ext) {
+			utils.ErrorResponse(c, http.StatusBadRequest, errors.New("ext must be jpg|jpeg|png|webp"))
+			return
+		}
+	default:
+		utils.ErrorResponse(c, http.StatusBadRequest, errors.New("unknown kind"))
+		return
+	}
+
+	objectKey := fmt.Sprintf("gyms/%s/members/%s.%s",
+		gymID, req.MemberID, ext,
+	)
+	ttl := 5 * time.Minute
+	uploadURL, err := ctrl.R2.PresignUpload(
+		c.Request.Context(), objectKey, req.ContentType, ttl,
+	)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, err)
+		return
+	}
+	utils.JsonResponse(c, http.StatusOK, uploadPresignResp{
+		UploadURL: uploadURL,
+		ObjectKey: objectKey,
+		ExpiresAt: time.Now().UTC().Add(ttl),
+	})
+}
+
+// handleUploadPresignGet — POST /api/v1/uploads/presign-get.
+// Mintea una GET firmada (TTL corto) para que el sidecar baje una foto
+// de R2 desde el cache local. El bucket es privado: sin esta firma el
+// GET regresaría 403.
+//
+// Scoping: el object_key DEBE empezar con `gyms/<gym_id del token>/`.
+// Sin esa verificación, un sidecar comprometido podría leer fotos de
+// CUALQUIER gym pasando un key arbitrario. La firma del token sidecar
+// ya está validada por el middleware; aquí amarramos lo que pide al
+// scope del gym al que pertenece.
+func (ctrl *AuthController) handleUploadPresignGet(c *gin.Context) {
+	if ctrl.R2 == nil {
+		utils.ErrorResponse(c, http.StatusNotImplemented, errR2NotConfigured)
+		return
+	}
+	gymID, ok := middleware.GetGymID(c)
+	if !ok || gymID == uuid.Nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, errInstallerBootstrapNoAuth)
+		return
+	}
+	var req uploadPresignGetReq
+	if !bind(c, &req) {
+		return
+	}
+	expectedPrefix := fmt.Sprintf("gyms/%s/", gymID)
+	if !strings.HasPrefix(req.ObjectKey, expectedPrefix) {
+		utils.ErrorResponse(c, http.StatusForbidden, errors.New("object_key fuera del scope del gym"))
+		return
+	}
+	// Defensa contra path traversal — el key debe ser simple (sin ..).
+	if strings.Contains(req.ObjectKey, "..") {
+		utils.ErrorResponse(c, http.StatusBadRequest, errors.New("invalid object_key"))
+		return
+	}
+	ttl := 5 * time.Minute
+	downloadURL, err := ctrl.R2.PresignDownload(c.Request.Context(), req.ObjectKey, ttl)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, err)
+		return
+	}
+	utils.JsonResponse(c, http.StatusOK, uploadPresignGetResp{
+		DownloadURL: downloadURL,
+		ExpiresAt:   time.Now().UTC().Add(ttl),
+	})
+}
+
+func isAllowedImageExt(ext string) bool {
+	switch ext {
+	case "jpg", "jpeg", "png", "webp":
+		return true
+	}
+	return false
+}
+
+// handleServeLocalMemberPhoto — GET /api/v1/uploads/local/members/:id.
+// Sirve el archivo cacheado en UploadsDir/members/<id>.<ext> al FE
+// del desktop. Esta es la ÚNICA forma legítima que el FE tiene de
+// renderear fotos de socios — nunca abre un <img src> contra R2.
+//
+// Estrategia: glob para encontrar <id>.* (no sabemos la extensión
+// a priori porque el sidecar la deriva del content-type). En el caso
+// raro de dos archivos con el mismo id (no debería pasar tras el
+// cleanup en writeMemberPhotoToDisk), tomamos el primero
+// determinísticamente (orden lex).
+//
+// 404 cuando:
+//   - el id no es un UUID válido,
+//   - no existe ningún archivo en cache (la foto aún no fue
+//     descargada por el download task, o el socio no tiene foto).
+//
+// El FE muestra placeholder en 404, así que un miss aquí no
+// rompe nada — el download task la traerá en el próximo tick si
+// existe cloud-side.
+func (ctrl *AuthController) handleServeLocalMemberPhoto(c *gin.Context) {
+	if ctrl.UploadsDir == "" {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	id := c.Param("id")
+	if _, err := uuid.Parse(id); err != nil {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	dir := filepath.Join(ctrl.UploadsDir, "members")
+	matches, err := filepath.Glob(filepath.Join(dir, id+".*"))
+	if err != nil || len(matches) == 0 {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	// Confinamiento: filepath.Glob no resuelve ".." pero igual rechazamos
+	// rutas que se escapen del dir esperado (defensa en profundidad si
+	// algún día el id viene de una fuente menos confiable).
+	path := matches[0]
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	if !strings.HasPrefix(abs, absDir+string(filepath.Separator)) {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	// Cache headers: el archivo es inmutable mientras el socio no
+	// reemplace la foto. Pero como el id no incluye un hash de
+	// contenido, una rotación de foto invalidaría el cache. 30s es
+	// suficiente para evitar requests redundantes en una vista y lo
+	// bastante corto para que un cambio se vea casi inmediatamente.
+	c.Header("Cache-Control", "private, max-age=30")
+	c.File(path)
+}
+
+// handleListDevices — GET /api/v1/auth/devices (owner-only).
+// Lista los desktops vinculados al gym del owner autenticado. El modelo
+// (sidecar_credentials con idx único partial en (gym_id, client_id)
+// WHERE revoked_at IS NULL) ya soporta N pareos por gym; este endpoint
+// solamente expone la lista al dashboard para que decida si mostrar el
+// CTA de descarga o el guard "ya tienes una, ¿quieres otra?".
+func (ctrl *AuthController) handleListDevices(c *gin.Context) {
+	if ctrl.SidecarTokens == nil {
+		utils.ErrorResponse(c, http.StatusNotImplemented, errDevicesNotConfigured)
+		return
+	}
+	gymID, ok := middleware.GetGymID(c)
+	if !ok {
+		utils.ErrorResponse(c, http.StatusUnauthorized, errInstallerBootstrapNoAuth)
+		return
+	}
+	creds, err := ctrl.SidecarTokens.ListActiveByGym(c.Request.Context(), gymID)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, err)
+		return
+	}
+	items := make([]deviceResp, len(creds))
+	for i, cr := range creds {
+		items[i] = deviceResp{
+			ID:          cr.ID,
+			ClientID:    cr.ClientID,
+			DeviceLabel: cr.DeviceLabel,
+			CreatedAt:   cr.CreatedAt,
+			LastSeenAt:  cr.LastSeenAt,
+		}
+	}
+	utils.JsonResponse(c, http.StatusOK, listDevicesResp{
+		Items: items,
+		Count: len(items),
+	})
+}
+
+// handleAssignSelfPIN — POST /api/v1/auth/me/pin (authed).
+// Sets or replaces the authenticated user's reception PIN. The PIN comes in
+// plaintext; the use case hashes with bcrypt. Returns the post-state has_pin
+// flag so the desktop can reflect it without re-querying.
+func (ctrl *AuthController) handleAssignSelfPIN(c *gin.Context) {
+	if ctrl.AssignSelfPIN == nil {
+		utils.ErrorResponse(c, http.StatusNotImplemented, errPINNotConfigured)
+		return
+	}
+	gymID, _ := middleware.GetGymID(c)
+	userID, _ := middleware.GetUserID(c)
+	var req assignPinReq
+	if !bind(c, &req) {
+		return
+	}
+	if _, err := ctrl.AssignSelfPIN.Execute(c.Request.Context(), usersApp.AssignSelfPINInput{
+		GymID:  gymID,
+		UserID: userID,
+		PIN:    req.PIN,
+	}); err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	utils.JsonResponse(c, http.StatusOK, pinResp{HasPIN: true})
+}
+
+// handleClearSelfPIN — DELETE /api/v1/auth/me/pin (authed). Idempotent.
+func (ctrl *AuthController) handleClearSelfPIN(c *gin.Context) {
+	if ctrl.ClearSelfPIN == nil {
+		utils.ErrorResponse(c, http.StatusNotImplemented, errPINNotConfigured)
+		return
+	}
+	gymID, _ := middleware.GetGymID(c)
+	userID, _ := middleware.GetUserID(c)
+	if err := ctrl.ClearSelfPIN.Execute(c.Request.Context(), usersApp.ClearSelfPINInput{
+		GymID: gymID, UserID: userID,
+	}); err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	utils.JsonResponse(c, http.StatusOK, pinResp{HasPIN: false})
+}
 
 func (ctrl *AuthController) handleUpdateSetup(c *gin.Context) {
 	gymID, ok := middleware.GetGymID(c)

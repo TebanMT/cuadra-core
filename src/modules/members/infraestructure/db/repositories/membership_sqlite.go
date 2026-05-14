@@ -36,7 +36,7 @@ type sqliteMembershipRow struct {
 	PriceSnapshot        int64          `db:"price_snapshot"`
 	DurationDaysSnapshot int            `db:"duration_days_snapshot"`
 	StartDate            string         `db:"start_date"`
-	ExpiryDate           string         `db:"expiry_date"`
+	ExpiryDate           sql.NullString `db:"expiry_date"`
 	Status               string         `db:"status"`
 	ReplacedBy           sql.NullString `db:"replaced_by"`
 }
@@ -105,7 +105,9 @@ func (r *MembershipSQLiteRepository) GetCurrentByMember(tx sharedDomain.Transact
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	var row sqliteMembershipRow
 	err := stx.Get(context.Background(), &row,
-		`SELECT * FROM memberships WHERE member_id = ? AND status = 'active' AND deleted_at IS NULL`,
+		// "Current" para el socio: la slot vigente, que puede estar
+		// pagada (active) o sin pagar todavía (pending_payment).
+		`SELECT * FROM memberships WHERE member_id = ? AND status IN ('active','pending_payment') AND deleted_at IS NULL`,
 		memberID.String())
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, sharedDomain.NewBusinessError(memErrors.ErrNoActiveMembership, "")
@@ -210,8 +212,10 @@ func membershipToRow(m *membershipDomain.Membership) sqliteMembershipRow {
 		PriceSnapshot:        toCents(m.PriceSnapshot),
 		DurationDaysSnapshot: m.DurationDaysSnapshot,
 		StartDate:            m.StartDate.UTC().Format(dateLayout),
-		ExpiryDate:           m.ExpiryDate.UTC().Format(dateLayout),
 		Status:               m.Status,
+	}
+	if m.ExpiryDate != nil {
+		row.ExpiryDate = sql.NullString{String: m.ExpiryDate.UTC().Format(dateLayout), Valid: true}
 	}
 	if m.DeletedAt != nil {
 		row.DeletedAt = sql.NullInt64{Int64: m.DeletedAt.UnixMilli(), Valid: true}
@@ -228,7 +232,6 @@ func membershipFromRow(r *sqliteMembershipRow) *membershipDomain.Membership {
 	memberID, _ := uuid.Parse(r.MemberID)
 	typeID, _ := uuid.Parse(r.MembershipTypeID)
 	startDate, _ := time.Parse(dateLayout, r.StartDate)
-	expiryDate, _ := time.Parse(dateLayout, r.ExpiryDate)
 	ms := &membershipDomain.Membership{
 		ID:                   id,
 		GymID:                gymID,
@@ -239,10 +242,14 @@ func membershipFromRow(r *sqliteMembershipRow) *membershipDomain.Membership {
 		PriceSnapshot:        fromCents(r.PriceSnapshot),
 		DurationDaysSnapshot: r.DurationDaysSnapshot,
 		StartDate:            startDate,
-		ExpiryDate:           expiryDate,
 		Status:               r.Status,
 		CreatedAt:            time.UnixMilli(r.CreatedAt).UTC(),
 		UpdatedAt:            time.UnixMilli(r.UpdatedAt).UTC(),
+	}
+	if r.ExpiryDate.Valid && r.ExpiryDate.String != "" {
+		if t, err := time.Parse(dateLayout, r.ExpiryDate.String); err == nil {
+			ms.ExpiryDate = &t
+		}
 	}
 	if r.DeletedAt.Valid {
 		t := time.UnixMilli(r.DeletedAt.Int64).UTC()
@@ -313,6 +320,10 @@ func enqueueMembership(stx *sharedDomain.SqlxTransaction, m *membershipDomain.Me
 	if m.ReplacedBy != nil {
 		replacedBy = m.ReplacedBy.String()
 	}
+	var expiryDate any
+	if m.ExpiryDate != nil {
+		expiryDate = m.ExpiryDate.UTC().Format(dateLayout)
+	}
 	payload, err := json.Marshal(map[string]any{
 		"id":                     m.ID.String(),
 		"gym_id":                 m.GymID.String(),
@@ -325,7 +336,7 @@ func enqueueMembership(stx *sharedDomain.SqlxTransaction, m *membershipDomain.Me
 		"price_snapshot":         m.PriceSnapshot,
 		"duration_days_snapshot": m.DurationDaysSnapshot,
 		"start_date":             m.StartDate.UTC().Format(dateLayout),
-		"expiry_date":            m.ExpiryDate.UTC().Format(dateLayout),
+		"expiry_date":            expiryDate,
 		"status":                 m.Status,
 		"replaced_by":            replacedBy,
 	})

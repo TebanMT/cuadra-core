@@ -156,7 +156,7 @@ func (r *MemberPostgresRepository) List(tx sharedDomain.Transaction, q memRepo.L
 	base := gormTx.Table("members AS m").
 		Joins(`LEFT JOIN memberships AS ms
 			ON ms.member_id = m.id
-			AND ms.status = 'active'
+			AND ms.status IN ('active','pending_payment')
 			AND ms.deleted_at IS NULL`).
 		Where("m.gym_id = ? AND m.deleted_at IS NULL", q.GymID)
 
@@ -167,11 +167,12 @@ func (r *MemberPostgresRepository) List(tx sharedDomain.Transaction, q memRepo.L
 	}
 	switch q.StatusFilter {
 	case "active":
-		base = base.Where("m.status = ? AND ms.id IS NOT NULL AND ms.expiry_date - ?::date > 7", memberDomain.StatusActive, today)
+		base = base.Where("m.status = ? AND ms.status = 'active' AND ms.expiry_date IS NOT NULL AND ms.expiry_date - ?::date > 7", memberDomain.StatusActive, today)
 	case "expiring_soon":
-		base = base.Where("m.status = ? AND ms.id IS NOT NULL AND ms.expiry_date - ?::date BETWEEN 0 AND 7", memberDomain.StatusActive, today)
+		base = base.Where("m.status = ? AND ms.status = 'active' AND ms.expiry_date IS NOT NULL AND ms.expiry_date - ?::date BETWEEN 0 AND 7", memberDomain.StatusActive, today)
 	case "expired":
-		base = base.Where("m.status = ? AND (ms.id IS NULL OR ms.expiry_date < ?::date)", memberDomain.StatusActive, today)
+		// "Por cobrar": vencidos clásicos + pending_payment + sin membership.
+		base = base.Where("m.status = ? AND (ms.id IS NULL OR ms.status = 'pending_payment' OR (ms.status = 'active' AND ms.expiry_date < ?::date))", memberDomain.StatusActive, today)
 	case "inactive":
 		base = base.Where("m.status <> ?", memberDomain.StatusActive)
 	}
@@ -259,7 +260,7 @@ func (r *MemberPostgresRepository) List(tx sharedDomain.Transaction, q memRepo.L
 				PriceSnapshot:        derefFloat(rows[i].MS_PriceSnap),
 				DurationDaysSnapshot: derefInt(rows[i].MS_DurationSnap),
 				StartDate:            derefTime(rows[i].MS_StartDate),
-				ExpiryDate:           derefTime(rows[i].MS_ExpiryDate),
+				ExpiryDate:           rows[i].MS_ExpiryDate,
 				Status:               derefString(rows[i].MS_Status),
 				ReplacedBy:           rows[i].MS_ReplacedBy,
 			}
@@ -282,7 +283,8 @@ func (r *MemberPostgresRepository) GetWithCurrentMembership(tx sharedDomain.Tran
 	}
 	out := &memRepo.MemberWithMembership{Member: memberFromModel(&mm)}
 	var ms models.MembershipModel
-	err = gormTx.Where("member_id = ? AND status = ? AND deleted_at IS NULL", memberID, membershipDomain.StatusActive).First(&ms).Error
+	err = gormTx.Where("member_id = ? AND status IN (?, ?) AND deleted_at IS NULL",
+		memberID, membershipDomain.StatusActive, membershipDomain.StatusPendingPayment).First(&ms).Error
 	if err == nil {
 		out.CurrentMembership = membershipFromModel(&ms)
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -338,6 +340,7 @@ func memberToModel(m *memberDomain.Member) models.MemberModel {
 		EnrollmentPaid:       m.EnrollmentPaid,
 		LastMaintenancePaid:  m.LastMaintenancePaid,
 		PinHash:              m.PinHash,
+		PinPlain:             m.PinPlain,
 		PinAssignedAt:        m.PinAssignedAt,
 		LastContactAttemptAt: m.LastContactAttemptAt,
 		CreatedBy:            m.CreatedBy,
@@ -360,6 +363,7 @@ func memberFromModel(r *models.MemberModel) *memberDomain.Member {
 		EnrollmentPaid:       r.EnrollmentPaid,
 		LastMaintenancePaid:  r.LastMaintenancePaid,
 		PinHash:              r.PinHash,
+		PinPlain:             r.PinPlain,
 		PinAssignedAt:        r.PinAssignedAt,
 		LastContactAttemptAt: r.LastContactAttemptAt,
 		CreatedBy:            r.CreatedBy,

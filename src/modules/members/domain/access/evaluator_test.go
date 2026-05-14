@@ -28,8 +28,32 @@ func makeMemberAndMembership(t *testing.T, status string, expiryOffset int) (*me
 	start := today.AddDate(0, 0, expiryOffset-30)
 	ms := membership.New(uuid.New(), gymID, m.ID, mt, start, now)
 	// Ensure expiry == today + offset.
-	ms.ExpiryDate = today.AddDate(0, 0, expiryOffset)
+	exp := today.AddDate(0, 0, expiryOffset)
+	ms.ExpiryDate = &exp
 	return m, ms, today
+}
+
+// makePendingMember builds a member + pending_payment membership pair —
+// se inscribió pero no ha pagado todavía.
+func makePendingMember(t *testing.T) (*memberDomain.Member, *membership.Membership, time.Time) {
+	t.Helper()
+	now := time.Now().UTC()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	gymID := uuid.New()
+	m, err := memberDomain.NewMember(uuid.New(), gymID, "MEM-2", "Pedro Soto", "+524429876543", uuid.New(), now)
+	if err != nil {
+		t.Fatalf("member: %v", err)
+	}
+	mt, _ := mtDomain.New(uuid.New(), gymID, "Mensual", 500, 30, 0, 0, "", now)
+	ms := membership.NewPendingPayment(uuid.New(), gymID, m.ID, mt, today, now)
+	return m, ms, today
+}
+
+func TestEvaluator_PendingPayment(t *testing.T) {
+	m, ms, today := makePendingMember(t)
+	if got := access.New().Evaluate(m, ms, today); got != access.DeniedUnpaidEnrollment {
+		t.Errorf("pending_payment should be denied_unpaid_enrollment, got %s", got)
+	}
 }
 
 func TestEvaluator_NilMember(t *testing.T) {

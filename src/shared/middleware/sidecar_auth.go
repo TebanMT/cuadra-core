@@ -1,4 +1,9 @@
-//go:build server
+// SidecarOrJWTMiddleware is referenced by auth_controller.go (no build
+// tag) at the route registration site, so the symbol must exist in both
+// builds. The implementation only uses interfaces (auth.TokenService,
+// sidecartoken.Store) that are available without a build tag; the
+// sidecar binary just never wires this middleware (it has its own
+// SidecarAuthProxy).
 
 package middleware
 

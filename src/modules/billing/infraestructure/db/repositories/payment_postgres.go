@@ -3,7 +3,9 @@
 package repositories
 
 import (
+	"encoding/json"
 	"errors"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -155,7 +157,7 @@ func (r *PaymentPostgresRepository) MaxFolioForConcept(tx sharedDomain.Transacti
 // ---------------------------------------------------------------------------
 
 func paymentToModel(p *paymentDomain.Payment) models.PaymentModel {
-	return models.PaymentModel{
+	m := models.PaymentModel{
 		ID:              p.ID,
 		GymID:           p.GymID,
 		Version:         p.Version,
@@ -175,10 +177,19 @@ func paymentToModel(p *paymentDomain.Payment) models.PaymentModel {
 		Notes:           p.Notes,
 		OperatorID:      p.OperatorID,
 	}
+	if len(p.Breakdown) > 0 {
+		if b, err := json.Marshal(p.Breakdown); err == nil {
+			s := string(b)
+			m.Breakdown = &s
+		} else {
+			log.Printf("[payment] breakdown marshal failed (payment=%s): %v", p.ID, err)
+		}
+	}
+	return m
 }
 
 func paymentFromModel(r *models.PaymentModel) *paymentDomain.Payment {
-	return &paymentDomain.Payment{
+	p := &paymentDomain.Payment{
 		ID:              r.ID,
 		GymID:           r.GymID,
 		Version:         r.Version,
@@ -198,4 +209,13 @@ func paymentFromModel(r *models.PaymentModel) *paymentDomain.Payment {
 		UpdatedAt:       r.UpdatedAt,
 		DeletedAt:       r.DeletedAt,
 	}
+	if r.Breakdown != nil && *r.Breakdown != "" {
+		var lines []paymentDomain.BreakdownLine
+		if err := json.Unmarshal([]byte(*r.Breakdown), &lines); err == nil {
+			p.Breakdown = lines
+		} else {
+			log.Printf("[payment] breakdown unmarshal failed (payment=%s): %v", r.ID, err)
+		}
+	}
+	return p
 }

@@ -38,6 +38,7 @@ type cachedLoginRow struct {
 	GymID           string     `json:"gym_id"`
 	Role            string     `json:"role"`
 	FullName        string     `json:"full_name,omitempty"`
+	Phone           string     `json:"phone,omitempty"`
 	GymName         string     `json:"gym_name,omitempty"`
 	SetupCompleted  bool       `json:"setup_completed"`
 	TrialEndsAt     *time.Time `json:"trial_ends_at,omitempty"`
@@ -72,6 +73,21 @@ type SidecarAuthProxy struct {
 	// DeviceLabel is what the cloud stores in sidecar_credentials.device_label
 	// for support. Hostname-shaped string set by the caller.
 	DeviceLabel string
+
+	// LoginPIN backs POST /api/v1/auth/login-pin. Offline by construction:
+	// validates against local SQLite users.pin_hash. Optional — when nil,
+	// the route 501s (older builds of the sidecar before the auth refactor).
+	LoginPIN *usersApp.LoginPIN
+
+	// ListOperators backs GET /api/v1/auth/operators. Reads local SQLite.
+	// Optional — when nil the route 501s.
+	ListOperators *usersApp.ListOperatorsForLogin
+
+	// LoginGymID is the gym this sidecar is paired to. The operators-list
+	// endpoint scopes by this id so the public route can't be coerced to
+	// dump arbitrary gyms. Set at boot from the cached_login row (mirrored
+	// from cloud on installer redemption); zero until first online login.
+	LoginGymID func() uuid.UUID
 }
 
 func NewSidecarAuthProxy(cfg SidecarAuthProxy) *SidecarAuthProxy {
@@ -108,6 +124,21 @@ func (p *SidecarAuthProxy) RegisterRoutes(r *gin.Engine) {
 	// it leaks is the email/gym_name of an already-paired account, which
 	// the operator would see on the login screen anyway.
 	g.GET("/pairing-status", p.handlePairingStatus)
+	// PIN-based auth surface. Both routes need to live with the rest of
+	// /auth/* on the sidecar because:
+	//   - login-pin is the primary credential at the reception kiosk and
+	//     must work offline (validates against local SQLite, no cloud
+	//     round-trip).
+	//   - operators is the unauthenticated read the login grid renders to
+	//     decide which avatars to show; also offline.
+	g.POST("/login-pin", p.handleLoginPIN)
+	g.GET("/operators", p.handleListOperators)
+	// Refresh de identidad — el dueño aprieta "Volver a leer datos del
+	// gym" desde Configuración. Va al cloud (saltándose el GET /auth/me
+	// local que lee SQLite), re-mirrorea los datos en local, y devuelve
+	// la respuesta fresca. Útil cuando el mirror inicial quedó con datos
+	// viejos (bug histórico de absorb, o sync que aún no completa).
+	g.POST("/me/refresh", p.handleRefreshIdentity)
 }
 
 // ── Handlers ─────────────────────────────────────────────────────────────
@@ -297,6 +328,120 @@ func (p *SidecarAuthProxy) handleLogout(c *gin.Context) {
 	relayResponse(c, status, resp)
 }
 
+// handleRefreshIdentity — POST /api/v1/auth/me/refresh (sidecar).
+// El dueño aprieta "Volver a leer datos del gym" desde Configuración
+// porque ve datos viejos en el desktop (ej. nombre del gym vacío
+// porque el mirror inicial tuvo un bug, o el primer pull del sync
+// agent todavía no completa). Vamos al cloud con el sk_live_* del
+// sidecar — los JWTs del operador son sidecar-firmados, así que el
+// cloud no los acepta. El sk_live_* identifica al "bootstrap user"
+// del pareo, que en fase 1 = el dueño (único role con acceso a esta
+// UI). El handler trae el shape estándar de /me, re-mirrorea local,
+// y devuelve la respuesta fresca.
+func (p *SidecarAuthProxy) handleRefreshIdentity(c *gin.Context) {
+	// Cargamos el sk_live_* del sync_state. Si no existe, el sidecar
+	// nunca terminó su pareo — bounce con 412 para que la UI mande al
+	// dueño al wizard de instalación.
+	var sidecarToken string
+	if tx, err := p.UoW.Query(c.Request.Context()); err == nil {
+		if st, err := syncShared.ReadState(c.Request.Context(), tx); err == nil {
+			sidecarToken = st.SidecarToken
+		}
+	}
+	if sidecarToken == "" {
+		c.AbortWithStatusJSON(http.StatusPreconditionFailed, gin.H{
+			"error": "auth.refresh_identity.errors.not_paired",
+			"hint":  "Esta laptop no está vinculada con la nube — re-pareo necesario.",
+		})
+		return
+	}
+	hdr := http.Header{}
+	hdr.Set("Authorization", "Bearer "+sidecarToken)
+	resp, status, err := p.forward(c.Request.Context(), "GET", "/api/v1/auth/me", nil, hdr)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
+			"error": "auth.refresh_identity.errors.offline",
+			"hint":  "Necesitas internet para volver a leer los datos del gym.",
+		})
+		return
+	}
+	if status != http.StatusOK {
+		relayResponse(c, status, resp)
+		return
+	}
+
+	// Parseamos el shape de /auth/me (meResponse) — user + gym anidados.
+	var env struct {
+		Data struct {
+			User struct {
+				UserID   string  `json:"user_id"`
+				FullName string  `json:"full_name"`
+				Email    string  `json:"email"`
+				Phone    *string `json:"phone"`
+				Role     string  `json:"role"`
+			} `json:"user"`
+			Gym struct {
+				GymID            string     `json:"gym_id"`
+				Name             string     `json:"name"`
+				SetupCompleted   bool       `json:"setup_completed"`
+				TrialEndsAt      *time.Time `json:"trial_ends_at"`
+				SubscriptionPlan string     `json:"subscription_plan"`
+			} `json:"gym"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "cloud response unparseable"})
+		return
+	}
+
+	// Cargamos el cached_login para preservar el password_hash (cloud
+	// no lo devuelve; queda intacto para que el verify-password offline
+	// siga funcionando).
+	prior, ok := p.loadCachedLogin(c.Request.Context())
+	if !ok {
+		// Edge case: sidecar tiene sk_live_* pero no cached_login. Raro
+		// (signup-direct sin redeem-installer) — armamos un cached row
+		// nuevo sin password_hash. El mirror lo deja como string vacío;
+		// el offline-login no va a poder validar contraseña, pero el
+		// resto sigue.
+		prior = cachedLoginRow{}
+	}
+	updated := prior
+	updated.UserID = env.Data.User.UserID
+	updated.GymID = env.Data.Gym.GymID
+	updated.Email = env.Data.User.Email
+	updated.FullName = env.Data.User.FullName
+	if env.Data.User.Phone != nil {
+		updated.Phone = *env.Data.User.Phone
+	} else {
+		updated.Phone = ""
+	}
+	updated.Role = env.Data.User.Role
+	updated.GymName = env.Data.Gym.Name
+	updated.SetupCompleted = env.Data.Gym.SetupCompleted
+	updated.TrialEndsAt = env.Data.Gym.TrialEndsAt
+	updated.SubscriptionPln = env.Data.Gym.SubscriptionPlan
+	updated.UpdatedAtMs = time.Now().UTC().UnixMilli()
+
+	// Persist + re-mirror.
+	payload, err := json.Marshal(updated)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "marshal cached"})
+		return
+	}
+	_ = p.UoW.Command(c.Request.Context(), func(tx sharedDomain.Transaction) error {
+		if err := setCachedLogin(c.Request.Context(), tx, string(payload)); err != nil {
+			return err
+		}
+		return mirrorCloudIdentity(c.Request.Context(), tx, updated, []byte(updated.PasswordHash))
+	})
+
+	// Devolvemos la respuesta del cloud tal cual — el FE espera la
+	// misma shape que GET /auth/me. El front actualiza su auth store
+	// con esos datos.
+	relayResponse(c, status, resp)
+}
+
 func (p *SidecarAuthProxy) handleRedeemInstaller(c *gin.Context) {
 	body, err := c.GetRawData()
 	if err != nil {
@@ -316,11 +461,15 @@ func (p *SidecarAuthProxy) handleRedeemInstaller(c *gin.Context) {
 		// identity + sidecar_token), so we can absorb + cache the same way.
 		// Email/password aren't part of the redeem flow — the operator will
 		// have to log in once with credentials to seed the offline cache.
+		// Email + full_name vienen en el envelope.data; los desempacamos
+		// como hint, pero absorbAuthResponse igual relee del data map por
+		// si el shape evoluciona.
 		var data struct {
-			Email string `json:"email"`
+			Email    string `json:"email"`
+			FullName string `json:"full_name"`
 		}
 		_ = json.Unmarshal(extractEnvelopeData(resp), &data)
-		p.absorbAuthResponse(c.Request.Context(), data.Email, "", "", resp)
+		p.absorbAuthResponse(c.Request.Context(), data.Email, "", data.FullName, resp)
 	}
 	p.relayAndResign(c, status, resp)
 }
@@ -338,6 +487,19 @@ func extractEnvelopeData(resp []byte) []byte {
 	return env.Data
 }
 
+// handleForgotPassword forwards to cloud. The recovery channel selection
+// (email vs. WhatsApp once fase 2 lights it up) happens cloud-side via
+// the recovery.Registry — see src/shared/recovery and pending ADR-014.
+// The sidecar doesn't need a local registry because:
+//   - Recovery requires internet by definition (the cloud is authoritative
+//     for users and is the only place that can mint the reset token /
+//     enqueue WhatsApp messages via Twilio).
+//   - Routing the selection through cloud means the same user gets the
+//     same channel regardless of which desktop they hit forgot-password
+//     from. Sidecar-local channel selection would risk drift.
+//
+// Wiring WhatsApp in fase 2 means swapping the cloud-side
+// EmailOnlyRegistry for TieredRegistry — no sidecar change needed.
 func (p *SidecarAuthProxy) handleForgotPassword(c *gin.Context) {
 	body, _ := c.GetRawData()
 	resp, status, err := p.forward(c.Request.Context(), "POST", "/api/v1/auth/forgot-password", body, nil)
@@ -557,12 +719,20 @@ func (p *SidecarAuthProxy) absorbAuthResponse(ctx context.Context, email, passwo
 			cached.TrialEndsAt = &t
 		}
 	}
-	if gyms, ok := d["gyms"].([]any); ok && len(gyms) > 0 {
-		if g0, ok := gyms[0].(map[string]any); ok {
-			if v, ok := g0["name"].(string); ok {
-				cached.GymName = v
-			}
-		}
+	// Cloud responses (loginResp / redeemInstallerResp) put `full_name`,
+	// `phone`, y `gym_name` en el top-level del envelope.data. Antes
+	// buscábamos gym_name dentro de un `gyms[]` array que no existe en la
+	// shape actual → la fila local quedaba con name="" y full_name=email
+	// (fallback). Leemos del top-level y caemos al arg de la función sólo
+	// si la respuesta omitió el campo.
+	if v, ok := d["full_name"].(string); ok && v != "" {
+		cached.FullName = v
+	}
+	if v, ok := d["phone"].(string); ok {
+		cached.Phone = v
+	}
+	if v, ok := d["gym_name"].(string); ok {
+		cached.GymName = v
 	}
 	payload, err := json.Marshal(cached)
 	if err != nil {
@@ -622,14 +792,33 @@ func mirrorCloudIdentity(ctx context.Context, tx sharedDomain.Transaction, cache
 	// only fills in nulls from the cloud-derived data. We never
 	// overwrite a non-null setup_completed_at — sync is the only path
 	// that can roll back setup status, on purpose.
+	// trial_ends_at: el cloud lo manda como time.Time; SQLite lo guarda
+	// como INTEGER UnixMilli. Convertimos sólo si está presente.
+	var trialEndsAtMs any
+	if cached.TrialEndsAt != nil {
+		trialEndsAtMs = cached.TrialEndsAt.UnixMilli()
+	}
+	// subscription_plan tiene un CHECK constraint que rechaza ''. Si no
+	// vino del cloud, dejamos el default del esquema (trial).
+	var subPlan any
+	if cached.SubscriptionPln != "" {
+		subPlan = cached.SubscriptionPln
+	} else {
+		subPlan = "trial"
+	}
 	if _, err := stx.Exec(ctx, `
-		INSERT INTO gyms (id, gym_id, version, created_at, updated_at, name, setup_completed_at, synced_at)
-		VALUES (?, ?, 1, ?, ?, ?, ?, ?)
+		INSERT INTO gyms (id, gym_id, version, created_at, updated_at,
+		                   name, setup_completed_at, subscription_plan,
+		                   trial_ends_at, synced_at)
+		VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name = COALESCE(gyms.name, excluded.name),
 			setup_completed_at = COALESCE(gyms.setup_completed_at, excluded.setup_completed_at),
+			subscription_plan = excluded.subscription_plan,
+			trial_ends_at = COALESCE(excluded.trial_ends_at, gyms.trial_ends_at),
 			synced_at = excluded.synced_at`,
-		cached.GymID, cached.GymID, now, now, nilIfEmpty(cached.GymName), setupCompletedAt, now,
+		cached.GymID, cached.GymID, now, now, nilIfEmpty(cached.GymName),
+		setupCompletedAt, subPlan, trialEndsAtMs, now,
 	); err != nil {
 		return fmt.Errorf("mirror gym: %w", err)
 	}
@@ -642,12 +831,15 @@ func mirrorCloudIdentity(ctx context.Context, tx sharedDomain.Transaction, cache
 	}
 	if _, err := stx.Exec(ctx, `
 		INSERT INTO users (id, gym_id, version, created_at, updated_at,
-		                    email, password_hash, full_name, role, active, synced_at)
-		VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, 1, ?)
-		ON CONFLICT(id) DO NOTHING`,
+		                    email, password_hash, full_name, phone, role, active, synced_at)
+		VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			full_name = excluded.full_name,
+			phone = COALESCE(excluded.phone, users.phone),
+			synced_at = excluded.synced_at`,
 		cached.UserID, cached.GymID, now, now,
 		cached.Email, string(passwordHash), nonEmpty(cached.FullName, cached.Email),
-		role, now,
+		nilIfEmpty(cached.Phone), role, now,
 	); err != nil {
 		return fmt.Errorf("mirror user: %w", err)
 	}
@@ -730,6 +922,99 @@ func setCachedLogin(ctx context.Context, tx sharedDomain.Transaction, value stri
 		keyCachedLogin, value, time.Now().UTC().UnixMilli(),
 	)
 	return err
+}
+
+// handleLoginPIN — POST /api/v1/auth/login-pin (no auth).
+// Body: { user_id, pin }. Validates against local SQLite users.pin_hash and
+// returns the same envelope shape as /auth/login so the desktop's
+// post-login flow (setSession, redirects to setup-required / dashboard)
+// reuses the existing code path.
+//
+// Online behavior matches offline behavior — the sidecar does not consult
+// the cloud here. Cloud is the source of truth for the PIN itself, but
+// since the projector sync keeps the local users row fresh, "online" PIN
+// login would just be a slower path to the same answer.
+func (p *SidecarAuthProxy) handleLoginPIN(c *gin.Context) {
+	if p.LoginPIN == nil {
+		c.AbortWithStatusJSON(http.StatusNotImplemented, gin.H{
+			"error": "auth.login_pin.errors.not_configured",
+		})
+		return
+	}
+	var req struct {
+		UserID string `json:"user_id"`
+		PIN    string `json:"pin"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	userID, err := uuid.Parse(req.UserID)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid user_id"})
+		return
+	}
+	out, err := p.LoginPIN.Execute(c.Request.Context(), usersApp.LoginPINInput{
+		UserID: userID,
+		PIN:    req.PIN,
+	})
+	if err != nil {
+		// Genericise: PIN-set checks become "invalid PIN" so we never tell
+		// a kiosk-level attacker whether a given user has a PIN configured.
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+			"error": "auth.login_pin.errors.invalid_credentials",
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"status_code": http.StatusOK,
+		"data": gin.H{
+			"user_id":           out.UserID,
+			"gym_id":            out.GymID,
+			"role":              out.Role,
+			"full_name":         out.FullName,
+			"email":             out.Email,
+			"gym_name":          out.GymName,
+			"access_token":      out.AccessToken,
+			"refresh_token":     out.RefreshToken,
+			"setup_completed":   out.SetupCompleted,
+			"trial_ends_at":     out.TrialEndsAt,
+			"subscription_plan": out.SubscriptionPlan,
+		},
+	})
+}
+
+// handleListOperators — GET /api/v1/auth/operators (no auth).
+// Renders the avatars-and-PIN grid on the desktop's /auth/login. Scope is
+// the gym this sidecar is paired to (LoginGymID), so the public surface
+// can't be coerced into dumping other tenants.
+func (p *SidecarAuthProxy) handleListOperators(c *gin.Context) {
+	if p.ListOperators == nil || p.LoginGymID == nil {
+		c.AbortWithStatusJSON(http.StatusNotImplemented, gin.H{
+			"error": "auth.operators.errors.not_configured",
+		})
+		return
+	}
+	gymID := p.LoginGymID()
+	if gymID == uuid.Nil {
+		// No paired gym yet (fresh laptop, redeem not done) — answer with
+		// an empty list so the FE can show its "no operadores" state
+		// without errorring out.
+		c.JSON(http.StatusOK, gin.H{
+			"status_code": http.StatusOK,
+			"data":        gin.H{"operators": []any{}},
+		})
+		return
+	}
+	ops, err := p.ListOperators.Execute(c.Request.Context(), gymID)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"status_code": http.StatusOK,
+		"data":        gin.H{"operators": ops},
+	})
 }
 
 // silence unused import on usersApp when the file compiles standalone.

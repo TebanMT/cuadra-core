@@ -38,6 +38,11 @@ type Member struct {
 	EnrollmentPaid       bool
 	LastMaintenancePaid  *time.Time
 	PinHash              *string
+	// PinPlain mirrors PinHash but stores the 4-digit code as-is so the
+	// operator can read it from the member profile (the gym operator's
+	// recurring workflow is "leer el PIN al socio que lo olvidó"). The
+	// hash is still the source of truth at check-in time.
+	PinPlain             *string
 	PinAssignedAt        *time.Time
 	LastContactAttemptAt *time.Time
 	CreatedBy            uuid.UUID
@@ -184,10 +189,14 @@ func (m *Member) UpdateLastMaintenance(paymentDate time.Time, now time.Time) {
 }
 
 // SetPin is called after the use case has hashed the PIN and verified
-// gym-uniqueness. Domain doesn't hash; it just stores.
-func (m *Member) SetPin(hash string, now time.Time) {
+// gym-uniqueness. Domain doesn't hash; it just stores both the hash (for
+// check-in compare) and the 4-digit plaintext (so the operator can read
+// it from the member profile).
+func (m *Member) SetPin(hash, plain string, now time.Time) {
 	h := hash
 	m.PinHash = &h
+	p := plain
+	m.PinPlain = &p
 	t := now
 	m.PinAssignedAt = &t
 	m.Version++

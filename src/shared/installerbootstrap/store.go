@@ -17,6 +17,24 @@ type PostgresStore struct {
 
 func NewPostgresStore(db *gorm.DB) *PostgresStore { return &PostgresStore{db: db} }
 
+// ExpirePriorActive — UPDATE …expires_at = now WHERE este gym+user
+// tenga códigos sin canjear y aún vigentes. No los borramos: dejarlos
+// en la tabla preserva la auditoría ("¿cuántos códigos pidió este
+// dueño antes de instalar?"). Quedan rechazados en Redeem por el
+// filtro `expires_at > now`.
+func (s *PostgresStore) ExpirePriorActive(ctx context.Context, gymID, userID uuid.UUID, now time.Time) (int64, error) {
+	res := s.db.WithContext(ctx).Exec(`
+		UPDATE installer_bootstraps
+		SET expires_at = ?
+		WHERE gym_id = ?
+		  AND created_by_user_id = ?
+		  AND redeemed_at IS NULL
+		  AND expires_at > ?`,
+		now, gymID, userID, now,
+	)
+	return res.RowsAffected, res.Error
+}
+
 func (s *PostgresStore) Insert(ctx context.Context, gymID, userID uuid.UUID, hash []byte, expiresAt time.Time) (Bootstrap, error) {
 	id := uuid.New()
 	now := time.Now().UTC()

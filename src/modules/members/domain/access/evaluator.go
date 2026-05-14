@@ -16,11 +16,12 @@ import (
 type AccessStatus string
 
 const (
-	AllowedActive       AccessStatus = "allowed_active"
-	AllowedExpiringSoon AccessStatus = "allowed_expiring_soon"
-	DeniedExpired       AccessStatus = "denied_expired"
-	DeniedInactive      AccessStatus = "denied_inactive"
-	DeniedNoMembership  AccessStatus = "denied_no_membership"
+	AllowedActive          AccessStatus = "allowed_active"
+	AllowedExpiringSoon    AccessStatus = "allowed_expiring_soon"
+	DeniedExpired          AccessStatus = "denied_expired"
+	DeniedInactive         AccessStatus = "denied_inactive"
+	DeniedNoMembership     AccessStatus = "denied_no_membership"
+	DeniedUnpaidEnrollment AccessStatus = "denied_unpaid_enrollment"
 )
 
 // ExpiringSoonThresholdDays — UC-014 / UC-034 use 7 días as "por vencer".
@@ -44,7 +45,16 @@ func (e *AccessStatusEvaluator) Evaluate(m *memberDomain.Member, current *member
 	if m.Status != memberDomain.StatusActive {
 		return DeniedInactive
 	}
-	if current == nil || current.Status != membershipDomain.StatusActive {
+	if current == nil {
+		return DeniedNoMembership
+	}
+	// Pending_payment es un estado distinto a "no membership" — el socio
+	// SÍ tiene un plan elegido, sólo le falta el primer abono. El kiosko
+	// muestra "Falta primer pago" en lugar de "Sin membresía registrada".
+	if current.Status == membershipDomain.StatusPendingPayment {
+		return DeniedUnpaidEnrollment
+	}
+	if current.Status != membershipDomain.StatusActive || current.ExpiryDate == nil {
 		return DeniedNoMembership
 	}
 	days := current.DaysUntilExpiry(today)

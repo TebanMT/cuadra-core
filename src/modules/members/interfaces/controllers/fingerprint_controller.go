@@ -9,8 +9,10 @@ import (
 	"github.com/google/uuid"
 
 	memApp "github.com/cuadra/cuadra-core/src/modules/members/app"
+	fpDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/fingerprint"
 	"github.com/cuadra/cuadra-core/src/shared/auth"
 	"github.com/cuadra/cuadra-core/src/shared/biometric"
+	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 	"github.com/cuadra/cuadra-core/src/shared/middleware"
 	"github.com/cuadra/cuadra-core/src/shared/utils"
 )
@@ -81,6 +83,10 @@ func (c *FingerprintController) handleRegister(ctx *gin.Context) {
 		ConsentAccepted: req.ConsentAccepted,
 	})
 	if err != nil {
+		if errors.Is(err, fpDomain.ErrFingerprintCollision) {
+			c.writeCollision(ctx, err)
+			return
+		}
 		utils.ErrorResponse(ctx, utils.DomainErrorToHttpCode(err), err)
 		return
 	}
@@ -91,4 +97,21 @@ func (c *FingerprintController) handleRegister(ctx *gin.Context) {
 		RegisteredAt:  out.RegisteredAt.UTC().Format("2006-01-02T15:04:05Z"),
 		Status:        "success",
 	})
+}
+
+// writeCollision emits the flat 409 body the desktop hook reads. The shape
+// matches the duplicate-phone path on UC-012 so the FE can use one handler.
+func (c *FingerprintController) writeCollision(ctx *gin.Context, err error) {
+	body := gin.H{
+		"status_code": http.StatusConflict,
+		"message":     "CONFLICT",
+		"exception":   "fingerprint_collision",
+	}
+	var ce sharedDomain.CustomError
+	if errors.As(err, &ce) {
+		for k, v := range ce.Data {
+			body[k] = v
+		}
+	}
+	ctx.JSON(http.StatusConflict, body)
 }

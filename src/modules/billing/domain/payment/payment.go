@@ -30,6 +30,18 @@ const (
 	ConceptOther             = "other"
 )
 
+// BreakdownLine is one component of a Payment's subtotal. UC-018 stores
+// (plan, enrollment_fee, maintenance_fee) on a membership renewal; UC-025
+// stores (product_name × qty) per item. The receipt renderer prints these
+// lines verbatim under the total.
+//
+// Labels are caller-formatted (e.g. "Mensualidad", "Inscripción",
+// "Proteína 1kg ×2") so the domain doesn't need a translation table.
+type BreakdownLine struct {
+	Label  string  `json:"label"`
+	Amount float64 `json:"amount"`
+}
+
 // Payment is the central aggregate of the billing BC. Money is kept as
 // float64 here for ergonomics; the SQLite mapper converts to cents at the
 // edge. Negative `amount` is reserved for refunds (DA-22.1).
@@ -48,10 +60,22 @@ type Payment struct {
 	BalancePending  float64
 	PaymentDate     time.Time
 	Notes           *string
-	OperatorID      uuid.UUID
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
-	DeletedAt       *time.Time
+	// Breakdown desglosa el subtotal en líneas individuales. Vacío =
+	// pago "atómico" (settlements, refunds, casos donde la línea única
+	// es suficiente); el renderizador del PDF cae al label tradicional.
+	Breakdown  []BreakdownLine
+	OperatorID uuid.UUID
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+	DeletedAt  *time.Time
+}
+
+// SetBreakdown attaches the per-concept lines. Returns the payment for
+// chaining at construction time; callers (UC-018, UC-025, CreateMember
+// first-pay) populate this after NewMembershipPayment / NewProductSalePayment.
+func (p *Payment) SetBreakdown(lines []BreakdownLine) *Payment {
+	p.Breakdown = lines
+	return p
 }
 
 // NewMembershipPayment builds a new Payment row for UC-018. Caller passes the
@@ -341,6 +365,15 @@ func (p *Payment) SetNotes(notes *string, now time.Time) error {
 	p.Version++
 	p.UpdatedAt = now
 	return nil
+}
+
+// Touch bumps version + UpdatedAt without changing any data. Used by the
+// refund / settlement flows to force a re-enqueue of the parent payment in
+// the sync queue right before persisting the dependent row — garantiza que
+// el upsert del parent llegue al cloud antes que el FK del dependiente.
+func (p *Payment) Touch(now time.Time) {
+	p.Version++
+	p.UpdatedAt = now
 }
 
 // HasMember is a convenience for receipts and listings.

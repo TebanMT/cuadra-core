@@ -12,12 +12,28 @@ import (
 	memErrors "github.com/cuadra/cuadra-core/src/modules/members/domain/errors"
 )
 
-// FrequencyMonthly / FrequencyAnnual mirror chk_membership_types_frequency.
-// Empty string means "no maintenance fee" — domain represents that as nil.
+// FrequencyXxx mirror chk_membership_types_frequency. Empty string means
+// "no maintenance fee" — domain represents that as nil. Bimonthly /
+// quarterly / semiannual se agregaron en migration 010 (postgres) /
+// 007 (sqlite) para cubrir gimnasios que cobran mantenimiento cada
+// 2/3/6 meses.
 const (
-	FrequencyMonthly = "monthly"
-	FrequencyAnnual  = "annual"
+	FrequencyMonthly    = "monthly"
+	FrequencyBimonthly  = "bimonthly"
+	FrequencyQuarterly  = "quarterly"
+	FrequencySemiannual = "semiannual"
+	FrequencyAnnual     = "annual"
 )
+
+// allowedFrequencies — set de valores que el CHECK del schema acepta.
+// Si crece, debe sincronizarse con las migrations correspondientes.
+var allowedFrequencies = map[string]struct{}{
+	FrequencyMonthly:    {},
+	FrequencyBimonthly:  {},
+	FrequencyQuarterly:  {},
+	FrequencySemiannual: {},
+	FrequencyAnnual:     {},
+}
 
 // MembershipType is a plan offered by the gym. Price is stored as float64 here
 // for simplicity; cents-only is enforced at the SQLite mapper boundary.
@@ -108,11 +124,12 @@ func (mt *MembershipType) applyFields(name string, price float64, durationDays i
 	switch {
 	case maintenanceFee == 0:
 		// Frequency must be NULL when there's no fee (chk constraint).
-	case maintenanceFee > 0 && (freq == FrequencyMonthly || freq == FrequencyAnnual):
+	case maintenanceFee > 0:
+		if _, ok := allowedFrequencies[freq]; !ok {
+			return memErrors.ErrInvalidMaintenanceFreq
+		}
 		f := freq
 		freqPtr = &f
-	default:
-		return memErrors.ErrInvalidMaintenanceFreq
 	}
 	mt.Name = name
 	mt.Price = price

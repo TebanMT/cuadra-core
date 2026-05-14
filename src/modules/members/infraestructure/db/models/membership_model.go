@@ -23,7 +23,8 @@ type MembershipModel struct {
 	PriceSnapshot        float64    `gorm:"type:numeric(12,2);not null;column:price_snapshot"`
 	DurationDaysSnapshot int        `gorm:"not null;column:duration_days_snapshot"`
 	StartDate            time.Time  `gorm:"type:date;not null;column:start_date"`
-	ExpiryDate           time.Time  `gorm:"type:date;not null;column:expiry_date"`
+	// ExpiryDate es nullable: nil cuando status = pending_payment.
+	ExpiryDate           *time.Time `gorm:"type:date;column:expiry_date"`
 	Status               string     `gorm:"not null;default:active;column:status"`
 	ReplacedBy           *uuid.UUID `gorm:"type:uuid;column:replaced_by"`
 }

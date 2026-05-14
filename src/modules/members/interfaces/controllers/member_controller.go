@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -27,6 +28,34 @@ type MemberController struct {
 	LockExpiry *memApp.LockMembershipExpiry
 	AssignPin  *memApp.AssignPin
 	Tokens     auth.TokenService
+	// UploadsDir es la raíz del cache local de blobs (igual variable
+	// que la AgentConfig). Cuando está seteada, los handlers de create
+	// y update extraen sincronámente data URLs a disco para que el FE
+	// pueda renderizar la foto inmediatamente después de guardar, sin
+	// esperar al próximo tick del sync agent. Vacío deshabilita el
+	// cache (build cloud / dev sin UPLOADS_DIR).
+	UploadsDir string
+	// SyncTrigger nudgea al sync agent para que corra ya (sin esperar
+	// el próximo tick de 30s). Usado tras crear/editar un socio con
+	// foto, así el upload a R2 arranca inmediatamente y el operador
+	// ve la foto en el bucket en segundos en lugar de medio minuto.
+	// Opcional — cuando nil, el upload sale en el siguiente tick.
+	SyncTrigger func()
+}
+
+// WithUploadsDir setea el cache local de fotos. Devuelve el mismo
+// controller para encadenar al construir. Llamado desde cmd/sidecar
+// con el mismo UPLOADS_DIR que usa el sync agent.
+func (ctrl *MemberController) WithUploadsDir(dir string) *MemberController {
+	ctrl.UploadsDir = dir
+	return ctrl
+}
+
+// WithSyncTrigger setea el callback de trigger. Llamado desde
+// cmd/sidecar con agent.TriggerNow.
+func (ctrl *MemberController) WithSyncTrigger(fn func()) *MemberController {
+	ctrl.SyncTrigger = fn
+	return ctrl
 }
 
 func NewMemberController(
@@ -77,14 +106,54 @@ type createMemberReq struct {
 	StartDate           string  `json:"start_date,omitempty"` // YYYY-MM-DD; defaults to today
 	AllowDuplicatePhone bool    `json:"allow_duplicate_phone,omitempty"`
 	ChargeFirstPayment  bool    `json:"charge_first_payment,omitempty"`
+	ChargeEnrollment    bool    `json:"charge_enrollment,omitempty"`
+	ChargeMaintenance   bool    `json:"charge_maintenance,omitempty"`
+	EnrollmentAmount    float64 `json:"enrollment_amount,omitempty"`
+	MaintenanceAmount   float64 `json:"maintenance_amount,omitempty"`
+	PaymentMethod       string  `json:"payment_method,omitempty"`
 }
 
 type createMemberResp struct {
-	MemberID            uuid.UUID `json:"member_id"`
+	MemberID uuid.UUID `json:"member_id"`
 	MembershipID        uuid.UUID `json:"membership_id"`
 	Folio               string    `json:"folio"`
-	ExpiryDate          string    `json:"expiry_date"`
-	PendingFirstPayment bool      `json:"pending_first_payment"`
+	// ExpiryDate vacío cuando la membresía quedó en pending_payment.
+	ExpiryDate          string `json:"expiry_date,omitempty"`
+	MembershipStatus    string `json:"membership_status"`
+	PendingFirstPayment bool   `json:"pending_first_payment"`
+	// Pin del socio recién inscrito (auto-generado 4 dígitos único en el
+	// gym). Siempre se envía para que el operador lo lea / escriba en la
+	// credencial; vacío sólo en el caso muy raro de que el gym esté
+	// saturado de PINs y se haya saltado la auto-asignación.
+	Pin         string       `json:"pin,omitempty"`
+	PinDispatch *pinDispatch `json:"pin_dispatch,omitempty"`
+	PaymentID   *uuid.UUID   `json:"payment_id,omitempty"`
+	PaymentFolio string      `json:"payment_folio,omitempty"`
+	PaymentTotal float64     `json:"payment_total,omitempty"`
+}
+
+// pinDispatch surfaces whether the welcome-PIN WhatsApp notification was
+// enqueued. The FE renders one of three copies based on the shape:
+//   - dispatched=true, recipient_phone="+52…"   → "PIN enviado a +52…"
+//   - dispatched=false, skipped_reason="whatsapp_not_connected" / "no_member_phone"
+//                                              → "Escríbelo en la credencial"
+//   - dispatched=false, skipped_reason="disabled_by_gym"
+//                                              → "Escríbelo en la credencial" (silencioso)
+type pinDispatch struct {
+	Dispatched     bool   `json:"dispatched"`
+	SkippedReason  string `json:"skipped_reason,omitempty"`
+	RecipientPhone string `json:"recipient_phone,omitempty"`
+}
+
+func toPinDispatch(d memApp.WelcomePinDispatchResult) *pinDispatch {
+	if !d.Dispatched && d.SkippedReason == "" {
+		return nil
+	}
+	return &pinDispatch{
+		Dispatched:     d.Dispatched,
+		SkippedReason:  d.SkippedReason,
+		RecipientPhone: d.RecipientPhone,
+	}
 }
 
 type updateMemberReq struct {
@@ -126,6 +195,11 @@ type memberResp struct {
 	EnrollmentPaid       bool       `json:"enrollment_paid"`
 	LastMaintenancePaid  *string    `json:"last_maintenance_paid,omitempty"`
 	HasPin               bool       `json:"has_pin"`
+	// Pin: el código de 4 dígitos visible para el operador (mismo
+	// rationale que la migración 012 — texto plano, no es un secreto).
+	// Vacío sólo cuando el socio no tiene PIN aún (caso histórico
+	// pre-auto-assign o saturación de PINs en gym).
+	Pin                  string     `json:"pin,omitempty"`
 	LastContactAttemptAt *time.Time `json:"last_contact_attempt_at,omitempty"`
 	CreatedAt            time.Time  `json:"created_at"`
 }
@@ -136,9 +210,10 @@ type membershipResp struct {
 	TypeName             string    `json:"type_name"`
 	Price                float64   `json:"price"`
 	StartDate            string    `json:"start_date"`
-	ExpiryDate           string    `json:"expiry_date"`
-	Status               string    `json:"status"`
-	DurationDaysSnapshot int       `json:"duration_days_snapshot"`
+	// ExpiryDate vacío cuando la membresía está en pending_payment.
+	ExpiryDate           string `json:"expiry_date,omitempty"`
+	Status               string `json:"status"`
+	DurationDaysSnapshot int    `json:"duration_days_snapshot"`
 }
 
 type memberDetailResp struct {
@@ -211,17 +286,41 @@ func (ctrl *MemberController) handleCreate(c *gin.Context) {
 		StartDate:           startDate,
 		AllowDuplicatePhone: req.AllowDuplicatePhone,
 		ChargeFirstPayment:  req.ChargeFirstPayment,
+		ChargeEnrollment:    req.ChargeEnrollment,
+		ChargeMaintenance:   req.ChargeMaintenance,
+		EnrollmentAmount:    req.EnrollmentAmount,
+		MaintenanceAmount:   req.MaintenanceAmount,
+		PaymentMethod:       req.PaymentMethod,
 	})
 	if err != nil {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
 		return
 	}
+	// Cache local sincrónico: si el FE mandó la foto como data URL,
+	// la dejamos en disco ANTES de responder para que la próxima
+	// fetch del FE (vía local-serve) la encuentre. El upload a R2
+	// lo hace el sync agent en background. Errores aquí se loggean
+	// pero no fallan el request — el agent reintentará.
+	if req.PhotoURL != nil {
+		if err := extractDataURLToDisk(ctrl.UploadsDir, out.MemberID.String(), *req.PhotoURL); err != nil {
+			log.Printf("[members] photo disk cache (create %s): %v", out.MemberID, err)
+		}
+		if ctrl.SyncTrigger != nil {
+			ctrl.SyncTrigger()
+		}
+	}
 	utils.JsonResponse(c, http.StatusCreated, createMemberResp{
 		MemberID:            out.MemberID,
 		MembershipID:        out.MembershipID,
 		Folio:               out.Folio,
-		ExpiryDate:          out.ExpiryDate.Format("2006-01-02"),
+		ExpiryDate:          formatOptionalDate(out.ExpiryDate),
+		MembershipStatus:    out.MembershipStatus,
 		PendingFirstPayment: out.PendingFirstPayment,
+		Pin:                 out.Pin,
+		PinDispatch:         toPinDispatch(out.PinDispatch),
+		PaymentID:           out.PaymentID,
+		PaymentFolio:        out.PaymentFolio,
+		PaymentTotal:        out.PaymentTotal,
 	})
 }
 
@@ -259,6 +358,17 @@ func (ctrl *MemberController) handleUpdate(c *gin.Context) {
 	if err != nil {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
 		return
+	}
+	// Mismo cache local sincrónico que en handleCreate. Si el campo
+	// no vino (req.PhotoURL == nil) o vino vacío (foto removida) no
+	// hacemos nada — extractDataURLToDisk es no-op para no-data-URLs.
+	if req.PhotoURL != nil {
+		if err := extractDataURLToDisk(ctrl.UploadsDir, id.String(), *req.PhotoURL); err != nil {
+			log.Printf("[members] photo disk cache (update %s): %v", id, err)
+		}
+		if ctrl.SyncTrigger != nil {
+			ctrl.SyncTrigger()
+		}
 	}
 	utils.JsonResponse(c, http.StatusOK, toMemberResp(out))
 }
@@ -394,7 +504,11 @@ func (ctrl *MemberController) handleAssignPin(c *gin.Context) {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
 		return
 	}
-	utils.JsonResponse(c, http.StatusOK, gin.H{"member_id": out.MemberID, "pin": out.Pin})
+	resp := gin.H{"member_id": out.MemberID, "pin": out.Pin}
+	if d := toPinDispatch(out.PinDispatch); d != nil {
+		resp["pin_dispatch"] = d
+	}
+	utils.JsonResponse(c, http.StatusOK, resp)
 }
 
 // ---------------------------------------------------------------------------
@@ -420,6 +534,9 @@ func toMemberResp(m *memberDomain.Member) memberResp {
 		LastContactAttemptAt: m.LastContactAttemptAt,
 		CreatedAt:            m.CreatedAt,
 	}
+	if m.PinPlain != nil {
+		r.Pin = *m.PinPlain
+	}
 	if m.Birthdate != nil {
 		s := m.Birthdate.Format("2006-01-02")
 		r.Birthdate = &s
@@ -441,10 +558,20 @@ func toMembershipResp(ms *membershipDomain.Membership) *membershipResp {
 		TypeName:             ms.TypeNameSnapshot,
 		Price:                ms.PriceSnapshot,
 		StartDate:            ms.StartDate.Format("2006-01-02"),
-		ExpiryDate:           ms.ExpiryDate.Format("2006-01-02"),
+		ExpiryDate:           formatOptionalDate(ms.ExpiryDate),
 		Status:               ms.Status,
 		DurationDaysSnapshot: ms.DurationDaysSnapshot,
 	}
+}
+
+// formatOptionalDate renders a nullable date as YYYY-MM-DD, empty when nil.
+// Used at the wire boundary for membership fields that may be unset while a
+// membership is in pending_payment.
+func formatOptionalDate(t *time.Time) string {
+	if t == nil {
+		return ""
+	}
+	return t.Format("2006-01-02")
 }
 
 // access enum re-export so callers compiling outside this package don't import members/domain/access.

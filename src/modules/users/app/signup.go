@@ -3,6 +3,7 @@ package app
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,9 +19,17 @@ import (
 )
 
 // SignupOwnerInput is the wizard step 1 payload (UC-001 step 1).
+//
+// Phone is optional: empty / whitespace means "skip". When non-empty it
+// must pass ValidatePhone (lax: digits + length, see user.go). Phone is
+// the future hook for WhatsApp-based recovery — collecting it at signup
+// avoids a follow-up "we need your phone" prompt later, but we never
+// hard-fail signup on phone alone since most barrio gym owners may want
+// to skip it the first time.
 type SignupOwnerInput struct {
 	FullName        string
 	Email           string
+	Phone           string
 	Password        string
 	PasswordConfirm string
 }
@@ -74,6 +83,12 @@ func (uc *SignupOwner) Execute(ctx context.Context, in SignupOwnerInput) (Signup
 	if in.Password != in.PasswordConfirm {
 		return SignupOwnerOutput{}, sharedDomain.NewValidationError(userErrors.ErrPasswordMismatch)
 	}
+	trimmedPhone := strings.TrimSpace(in.Phone)
+	if trimmedPhone != "" {
+		if err := userDomain.ValidatePhone(trimmedPhone); err != nil {
+			return SignupOwnerOutput{}, sharedDomain.NewValidationError(err)
+		}
+	}
 
 	hash, err := auth.HashPassword(in.Password)
 	if err != nil {
@@ -86,6 +101,7 @@ func (uc *SignupOwner) Execute(ctx context.Context, in SignupOwnerInput) (Signup
 
 	gym := gymDomain.NewTrialGym(gymID, uc.TrialDays, now)
 	user := userDomain.NewUser(userID, gymID, in.Email, hash, in.FullName, userDomain.RoleOwner, false, nil, now)
+	user.SetInitialPhone(trimmedPhone)
 
 	err = uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
 		exists, err := uc.Users.ExistsByEmail(tx, in.Email)

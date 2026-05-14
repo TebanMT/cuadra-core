@@ -4,6 +4,7 @@ package controllers
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"sync"
 	"time"
@@ -12,7 +13,9 @@ import (
 	"github.com/google/uuid"
 
 	memApp "github.com/cuadra/cuadra-core/src/modules/members/app"
+	fpDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/fingerprint"
 	"github.com/cuadra/cuadra-core/src/shared/biometric"
+	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 	"github.com/cuadra/cuadra-core/src/shared/middleware"
 	"github.com/cuadra/cuadra-core/src/shared/utils"
 )
@@ -48,7 +51,11 @@ type fingerprintSession struct {
 	CapturesTotal int
 	LastQuality   *int
 	ErrorCode     string
-	StartedAt     time.Time
+	// Collision payload — populated only when ErrorCode == "collision". Carries
+	// the existing member's identity so the FE can offer "Ver perfil de X".
+	CollisionMemberID   string
+	CollisionMemberName string
+	StartedAt           time.Time
 }
 
 func NewFingerprintSessionController(reader biometric.Reader, register *memApp.RegisterFingerprint) *FingerprintSessionController {
@@ -118,6 +125,10 @@ func (c *FingerprintSessionController) handleProgress(ctx *gin.Context) {
 	if sess.ErrorCode != "" {
 		resp["error"] = sess.ErrorCode
 	}
+	if sess.CollisionMemberID != "" {
+		resp["existing_member_id"] = sess.CollisionMemberID
+		resp["existing_member_name"] = sess.CollisionMemberName
+	}
 	utils.JsonResponse(ctx, http.StatusOK, resp)
 }
 
@@ -163,6 +174,14 @@ func (c *FingerprintSessionController) driveCapture(sessionID string, gymID, act
 		Capture:         cap,
 		ConsentAccepted: true,
 	}); err != nil {
+		if errors.Is(err, fpDomain.ErrFingerprintCollision) {
+			id, name := collisionData(err)
+			c.update(sessionID, func(s *fingerprintSession) {
+				s.Status, s.ErrorCode = "failed", "collision"
+				s.CollisionMemberID, s.CollisionMemberName = id, name
+			})
+			return
+		}
 		c.update(sessionID, func(s *fingerprintSession) {
 			s.Status, s.ErrorCode = "failed", classifyRegisterErr(err)
 		})
@@ -182,6 +201,23 @@ func (c *FingerprintSessionController) update(sessionID string, mut func(*finger
 		return
 	}
 	mut(s)
+}
+
+// collisionData pulls the existing-member payload out of a CustomError wrapping
+// ErrFingerprintCollision. Returns empty strings when the error lacks data —
+// the FE can still surface a generic "huella duplicada" hint.
+func collisionData(err error) (id, name string) {
+	var ce sharedDomain.CustomError
+	if !errors.As(err, &ce) {
+		return "", ""
+	}
+	if v, ok := ce.Data["existing_member_id"].(string); ok {
+		id = v
+	}
+	if v, ok := ce.Data["existing_member_name"].(string); ok {
+		name = v
+	}
+	return id, name
 }
 
 // classifyRegisterErr maps the use case error to the codes the FE recognises

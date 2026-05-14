@@ -47,7 +47,7 @@ var SyncedTables = []EntityTable{
 			"subscription_plan", "trial_ends_at", "subscription_ends_at",
 			"subscription_status", "setup_completed_at",
 			"whatsapp_business_phone", "whatsapp_business_token_enc", "whatsapp_connected_at",
-			"kiosk_settings",
+			"kiosk_settings", "charge_settings",
 		},
 	},
 	{
@@ -57,6 +57,12 @@ var SyncedTables = []EntityTable{
 			"id", "gym_id", "version", "created_at", "updated_at", "deleted_at",
 			"email", "password_hash", "full_name", "phone", "role",
 			"active", "must_change_password", "last_login_at", "created_by",
+			// pin_hash + pin_assigned_at: the desktop's /auth/login-pin
+			// validates offline against the local bcrypt hash, so both
+			// columns must round-trip via the projector. The hash is
+			// already opaque so we don't add a separate encryption
+			// layer here (same posture as password_hash above).
+			"pin_hash", "pin_assigned_at",
 		},
 	},
 	{
@@ -84,7 +90,10 @@ var SyncedTables = []EntityTable{
 			"folio", "full_name", "phone", "email", "birthdate",
 			"photo_url", "notes", "status",
 			"enrollment_paid", "last_maintenance_paid",
-			"pin_hash", "pin_assigned_at",
+			// pin_plain travels alongside pin_hash because the operator
+			// surfaces it in the member detail page (4-digit convenience
+			// code, not a secret — see migration 012 rationale).
+			"pin_hash", "pin_plain", "pin_assigned_at",
 			"last_contact_attempt_at", "created_by",
 		},
 	},
@@ -123,7 +132,7 @@ var SyncedTables = []EntityTable{
 			"id", "gym_id", "version", "created_at", "updated_at", "deleted_at",
 			"folio", "member_id", "amount", "payment_method", "concept",
 			"parent_payment_id", "discount_amount", "discount_reason",
-			"balance_pending", "payment_date", "notes", "operator_id",
+			"balance_pending", "payment_date", "notes", "breakdown", "operator_id",
 		},
 	},
 	{
@@ -218,6 +227,62 @@ var SyncedTables = []EntityTable{
 			"gym_id", "alert_key", "enabled", "version", "updated_at", "deleted_at",
 		},
 		CompositeKey: []string{"gym_id", "alert_key"},
+	},
+	// ─── challenges (retos) ─────────────────────────────────────────────────
+	// All four tables flow through the generic projector. The
+	// scoring/IR is computed at query time from these rows; the
+	// projector itself is dumb and just mirrors columns.
+	{
+		Type:  "challenges",
+		Table: "challenges",
+		Columns: []string{
+			"id", "gym_id", "version", "created_at", "updated_at", "deleted_at",
+			"name", "description",
+			"starts_at", "measurement_t0_deadline", "measurement_t1_start", "ends_at",
+			"status",
+			"inscription_fee_cents", "inscription_refundable",
+			"min_weekly_attendance", "attendance_grace_weeks",
+			"strength_cap_pct", "tie_margin_ir",
+			"bf_floor_male_pct", "bf_floor_female_pct",
+		},
+	},
+	{
+		Type:  "challenge_categories",
+		Table: "challenge_categories",
+		Columns: []string{
+			"id", "gym_id", "version", "created_at", "updated_at", "deleted_at",
+			"challenge_id", "name", "sort_order",
+		},
+	},
+	{
+		Type:  "challenge_participants",
+		Table: "challenge_participants",
+		Columns: []string{
+			"id", "gym_id", "version", "created_at", "updated_at", "deleted_at",
+			"challenge_id", "member_id", "category_id",
+			"exercise_legs", "exercise_push", "exercise_pull",
+			"inscription_fee_paid", "inscription_paid_at", "inscription_refunded_at",
+			"status", "disqualification_reason", "disqualified_at",
+		},
+	},
+	{
+		// Immutable rows in semantics: corrections are written as a new
+		// row with the prior's id stored on superseded_by_id. The
+		// projector still treats this as an upsert because creating the
+		// successor row also updates the predecessor (sets superseded_at +
+		// superseded_by_id). Both upserts go through this projector entry.
+		Type:  "challenge_measurements",
+		Table: "challenge_measurements",
+		Columns: []string{
+			"id", "gym_id", "version", "created_at", "updated_at", "deleted_at",
+			"participant_id", "moment", "measured_at",
+			"body_weight_kg", "body_fat_pct",
+			"legs_weight_kg", "legs_reps",
+			"push_weight_kg", "push_reps",
+			"pull_weight_kg", "pull_reps",
+			"notes", "created_by_user_id",
+			"superseded_at", "superseded_by_id",
+		},
 	},
 }
 

@@ -57,12 +57,18 @@ func setup(t *testing.T) *billingFixture {
 	t.Cleanup(func() { db.Close() })
 	db.SetMaxOpenConns(1)
 
-	schema, err := os.ReadFile("../../../../db_migrations/sqlite/001_init_schema.sql")
-	if err != nil {
-		t.Fatalf("read migration: %v", err)
-	}
-	if _, err := db.Exec(string(schema)); err != nil {
-		t.Fatalf("apply migration: %v", err)
+	for _, m := range []string{
+		"../../../../db_migrations/sqlite/001_init_schema.sql",
+		"../../../../db_migrations/sqlite/005_users_pin.sql",
+		"../../../../db_migrations/sqlite/008_gym_charge_settings.sql",
+	} {
+		schema, err := os.ReadFile(m)
+		if err != nil {
+			t.Fatalf("read %s: %v", m, err)
+		}
+		if _, err := db.Exec(string(schema)); err != nil {
+			t.Fatalf("apply %s: %v", m, err)
+		}
 	}
 	uow := sharedDomain.NewSQLiteUnitOfWork(db, syncpkg.NewSqliteQueue())
 	recorder := audit.NewSQLiteRecorder()
@@ -111,6 +117,19 @@ func setup(t *testing.T) *billingFixture {
 	})
 	if err != nil {
 		t.Fatalf("create member: %v", err)
+	}
+	// Las pruebas de UC-018/UC-019/UC-022 asumen una membresía activa
+	// como punto de partida; CreateMember sin pago la deja en
+	// pending_payment, así que la activamos vía el seam de members
+	// (esto equivale al "primer abono" sin tener que crear un Payment
+	// extra que distorsione los tests).
+	if err := uow.Command(context.Background(), func(tx sharedDomain.Transaction) error {
+		_, err := memberSvc.RenewMembershipForPayment(context.Background(), tx, memApp.RenewMembershipForPaymentInput{
+			MemberID: mem.MemberID, MembershipTypeID: mt.ID, PaymentDate: time.Now().UTC(),
+		}, time.Now().UTC())
+		return err
+	}); err != nil {
+		t.Fatalf("activate membership: %v", err)
 	}
 
 	return &billingFixture{

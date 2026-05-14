@@ -39,10 +39,17 @@ type User struct {
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
 	DeletedAt          *time.Time
+	// PinHash is bcrypt of the 4-digit reception PIN. Nil = no PIN. Distinct
+	// from PasswordHash because PIN login is a separate, weaker channel
+	// (offline-validatable on the sidecar) that we want to be able to add
+	// or revoke independently of the operator's web password.
+	PinHash       *string
+	PinAssignedAt *time.Time
 }
 
 // NewUser constructs a User with role + canonicalised email. Caller is
-// responsible for hashing the password (shared/auth.HashPassword).
+// responsible for hashing the password (shared/auth.HashPassword) and for
+// validating phone via ValidatePhone before calling SetInitialPhone.
 func NewUser(id, gymID uuid.UUID, email, passwordHash, fullName, role string, mustChange bool, createdBy *uuid.UUID, now time.Time) *User {
 	return &User{
 		ID:                 id,
@@ -58,6 +65,41 @@ func NewUser(id, gymID uuid.UUID, email, passwordHash, fullName, role string, mu
 		CreatedAt:          now,
 		UpdatedAt:          now,
 	}
+}
+
+// SetInitialPhone stores phone at create time without bumping Version (the
+// user is still v1). Empty / whitespace-only resets to nil.
+func (u *User) SetInitialPhone(phone string) {
+	v := strings.TrimSpace(phone)
+	if v == "" {
+		u.Phone = nil
+		return
+	}
+	u.Phone = &v
+}
+
+// HasPIN reports whether the user currently has a reception PIN set. Used by
+// the operators-list endpoint so the desktop's login grid can decide which
+// avatars get a "tap to enter" CTA vs. a "configura tu PIN" badge.
+func (u *User) HasPIN() bool { return u.PinHash != nil && *u.PinHash != "" }
+
+// AssignPIN hashes + stores the given 4-digit PIN. Caller passes the bcrypt
+// hash (shared/auth.HashPIN owns the hashing) so this method is purely the
+// domain bookkeeping: version bump, timestamp, mutated state. Pass empty
+// hash + ValidatePIN failure handled at the use-case layer.
+func (u *User) AssignPIN(hash string, now time.Time) {
+	u.PinHash = &hash
+	u.PinAssignedAt = &now
+	u.Version++
+	u.UpdatedAt = now
+}
+
+// ClearPIN revokes the PIN. Same audit posture as AssignPIN.
+func (u *User) ClearPIN(now time.Time) {
+	u.PinHash = nil
+	u.PinAssignedAt = nil
+	u.Version++
+	u.UpdatedAt = now
 }
 
 func (u *User) IsOwner() bool    { return u.Role == RoleOwner }
@@ -133,6 +175,9 @@ func (u *User) UpdateProfile(name *string, email *string, phone *string, now tim
 		if v == "" {
 			u.Phone = nil
 		} else {
+			if err := ValidatePhone(v); err != nil {
+				return err
+			}
 			u.Phone = &v
 		}
 	}
@@ -177,6 +222,58 @@ func ValidateFullName(name string) error {
 	}
 	if strings.ContainsRune(v, '@') {
 		return userErrors.ErrNameLooksLikeEmail
+	}
+	return nil
+}
+
+// ValidatePIN enforces the wire shape of a reception PIN. Exactly 4 ASCII
+// digits — the PinPad component on the desktop is locked to that length so
+// we mirror it on the server. We deliberately don't reject "1234"-style
+// weak PINs at the domain edge: the desktop is a kiosk in a small gym, the
+// owner already controls who's near the keypad, and forbidding obvious
+// PINs would just push owners to write the PIN on a Post-it.
+func ValidatePIN(pin string) error {
+	if len(pin) != 4 {
+		return userErrors.ErrInvalidPIN
+	}
+	for _, r := range pin {
+		if r < '0' || r > '9' {
+			return userErrors.ErrInvalidPIN
+		}
+	}
+	return nil
+}
+
+// ValidatePhone is intentionally lax — the segment (gym owners in MX) types
+// "55 1234 5678", "+52 442 123 4567", "4421234567", whatever feels natural.
+// We don't reach for E.164: signup must not fail because the field rejected
+// a perfectly fine local number. Rules are minimal:
+//   - 7..20 chars total after trimming (covers shortest fixed-line up to
+//     longest international with separators)
+//   - At least 7 digits when separators are stripped (rejects "abc-def" /
+//     pure-symbols garbage)
+//   - Only digits, spaces, '+', '-', '(', ')', '.' allowed
+//
+// Phone is optional everywhere, so callers should only invoke this when the
+// trimmed value is non-empty.
+func ValidatePhone(phone string) error {
+	v := strings.TrimSpace(phone)
+	if len(v) < 7 || len(v) > 20 {
+		return userErrors.ErrInvalidPhone
+	}
+	digits := 0
+	for _, r := range v {
+		switch {
+		case r >= '0' && r <= '9':
+			digits++
+		case r == ' ' || r == '+' || r == '-' || r == '(' || r == ')' || r == '.':
+			// allowed separator
+		default:
+			return userErrors.ErrInvalidPhone
+		}
+	}
+	if digits < 7 {
+		return userErrors.ErrInvalidPhone
 	}
 	return nil
 }

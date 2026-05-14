@@ -133,6 +133,18 @@ func DefaultLibrary() []Definition {
 			Body:      "Hola {full_name}, {gym_name} te creó una cuenta en Cuadra. Tu contraseña temporal: {temp_password}",
 		},
 		{
+			// member_welcome_pin: se envía al socio al inscribirse y cuando
+			// el operador regenera su PIN. El PIN es de 4 dígitos y se usa
+			// en el kiosko para registrar la entrada. Categoría: utility
+			// (no marketing — es información transaccional ligada a la
+			// inscripción que el socio acaba de hacer).
+			Key:       "member_welcome_pin",
+			Channel:   ChannelWhatsApp,
+			Category:  CategoryUtility,
+			Variables: []string{"member_first_name", "gym_name", "pin"},
+			Body:      "Hola {member_first_name} 👋 Soy {gym_name}. Tu PIN de acceso es *{pin}*. Lo usas en el kiosko del gym para registrar tu entrada. ¡Bienvenido!",
+		},
+		{
 			// UC-037 connect-step OTP. Sent from Cuadra's master WhatsApp
 			// business number to the gym owner's number; once verified,
 			// the gym's own number takes over outbound traffic.

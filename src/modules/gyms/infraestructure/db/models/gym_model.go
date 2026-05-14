@@ -47,7 +47,8 @@ type GymModel struct {
 	WhatsAppBusinessTokenEnc []byte     `gorm:"column:whatsapp_business_token_enc"`
 	WhatsAppConnectedAt      *time.Time `gorm:"column:whatsapp_connected_at"`
 
-	KioskSettings string `gorm:"type:jsonb;not null;column:kiosk_settings"`
+	KioskSettings  string `gorm:"type:jsonb;not null;column:kiosk_settings"`
+	ChargeSettings string `gorm:"type:jsonb;not null;default:'{}';column:charge_settings"`
 }
 
 func (GymModel) TableName() string { return "gyms" }
