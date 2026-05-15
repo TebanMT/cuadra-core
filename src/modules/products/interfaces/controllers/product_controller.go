@@ -103,10 +103,20 @@ type productResp struct {
 }
 
 type listProductsResp struct {
-	Items    []productResp `json:"items"`
-	Total    int           `json:"total"`
-	Page     int           `json:"page"`
-	PageSize int           `json:"page_size"`
+	Items    []productResp     `json:"items"`
+	Total    int               `json:"total"`
+	Page     int               `json:"page"`
+	PageSize int               `json:"page_size"`
+	Totals   listProductTotals `json:"totals"`
+}
+
+// listProductTotals — stats globales sobre el filtro completo (no la
+// página). El FE alimenta las StatCards con esto en lugar de calcular
+// localmente sobre `items` (que solo trae la página visible).
+type listProductTotals struct {
+	TotalValue float64 `json:"total_value"`
+	LowCount   int     `json:"low_count"`
+	OutCount   int     `json:"out_count"`
 }
 
 type adjustStockResp struct {
@@ -204,14 +214,20 @@ func (ctrl *ProductController) handleList(c *gin.Context) {
 	gymID, _ := middleware.GetGymID(c)
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
+	// FE manda `q` para búsqueda y `status` para el filtro Activos /
+	// Inactivos / Todos (ver useProducts.ts). Antes leíamos "search"
+	// e "include_inactive" — ambos parámetros viajaban con nombres
+	// distintos y el backend los ignoraba silenciosamente.
 	out, err := ctrl.List.Execute(c.Request.Context(), prodApp.ListProductsInput{
-		GymID:           gymID,
-		Search:          c.Query("search"),
-		Category:        c.Query("category"),
-		IncludeInactive: c.Query("include_inactive") == "true",
-		LowStockOnly:    c.Query("low_stock") == "true",
-		Page:            page,
-		PageSize:        pageSize,
+		GymID:        gymID,
+		Search:       c.Query("q"),
+		Category:     c.Query("category"),
+		ActiveFilter: c.Query("status"),
+		LowStockOnly: c.Query("low_stock") == "true",
+		Sort:         c.Query("sort"),
+		Direction:    c.Query("dir"),
+		Page:         page,
+		PageSize:     pageSize,
 	})
 	if err != nil {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
@@ -223,6 +239,11 @@ func (ctrl *ProductController) handleList(c *gin.Context) {
 	}
 	utils.JsonResponse(c, http.StatusOK, listProductsResp{
 		Items: items, Total: out.Total, Page: out.Page, PageSize: out.PageSize,
+		Totals: listProductTotals{
+			TotalValue: out.Aggregates.TotalValue,
+			LowCount:   out.Aggregates.LowCount,
+			OutCount:   out.Aggregates.OutCount,
+		},
 	})
 }
 

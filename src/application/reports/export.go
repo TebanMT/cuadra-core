@@ -26,6 +26,11 @@ const (
 	ReportTypeSales             = "sales"
 	ReportTypeCashClose         = "cash_close"
 	ReportTypeAttentionRequired = "attention_required"
+	// ReportTypePeriodSummary — UC-036 export del range report completo
+	// (KPIs con deltas, ingresos vs egresos diarios, gastos por
+	// categoría, top productos, stock crítico, gastos del período,
+	// compras de inventario). Filename + header reflejan el rango real.
+	ReportTypePeriodSummary = "period_summary"
 )
 
 // Format mirrors `format` query param.
@@ -47,6 +52,9 @@ type ExportInput struct {
 	Format string
 	From   *time.Time // optional — date-bounded reports use it
 	To     *time.Time
+	// Period is consumed by ReportTypePeriodSummary so the export matches
+	// the exact window the FE was rendering (incluyendo "custom").
+	Period string
 }
 
 type ExportOutput struct {
@@ -60,11 +68,16 @@ type ExportReport struct {
 	Gyms              gymRepo.GymRepository
 	UoW               sharedDomain.UnitOfWork
 	AttentionRequired *AttentionRequired
+	// Range — usado por ReportTypePeriodSummary para reusar la misma
+	// agregación que alimenta la página de reportes (KPIs con deltas,
+	// breakdowns, series diarias). Cuando es nil el export se rechaza
+	// con ErrUnsupportedReport.
+	Range *RangeReport
 }
 
 func NewExportReport(reader Reader, gyms gymRepo.GymRepository, uow sharedDomain.UnitOfWork,
-	attention *AttentionRequired) *ExportReport {
-	return &ExportReport{Reader: reader, Gyms: gyms, UoW: uow, AttentionRequired: attention}
+	attention *AttentionRequired, rangeReport *RangeReport) *ExportReport {
+	return &ExportReport{Reader: reader, Gyms: gyms, UoW: uow, AttentionRequired: attention, Range: rangeReport}
 }
 
 func (uc *ExportReport) Execute(ctx context.Context, in ExportInput) (*ExportOutput, error) {
@@ -130,6 +143,31 @@ func (uc *ExportReport) Execute(ctx context.Context, in ExportInput) (*ExportOut
 		return finalize(in, gym, "Corte de caja", from, to,
 			func() []byte { return renderPaymentsPDF(gym, rows, from, to) },
 			func() ([]byte, error) { return renderPaymentsXLSX(rows) })
+
+	case ReportTypePeriodSummary:
+		if uc.Range == nil {
+			return nil, sharedDomain.NewValidationError(ErrUnsupportedReport)
+		}
+		// Period summary: reuse the same use case the FE consumes so the
+		// numbers/tables match exactly. When period == "custom" the
+		// controller forwards in.From / in.To; otherwise PeriodWindow
+		// computes the right range. We then re-derive from/to from the
+		// output's strings so the filename + header reflect that window.
+		period := in.Period
+		if period == "" {
+			period = PeriodMonth
+		}
+		rangeOut, err := uc.Range.Execute(ctx, RangeReportInput{
+			GymID: in.GymID, Period: period, From: in.From, To: in.To,
+		})
+		if err != nil {
+			return nil, err
+		}
+		realFrom, _ := time.Parse("2006-01-02", rangeOut.From)
+		realTo, _ := time.Parse("2006-01-02", rangeOut.To)
+		return finalize(in, gym, "Resumen del período", realFrom, realTo,
+			func() []byte { return renderPeriodSummaryPDF(gym, rangeOut, realFrom, realTo) },
+			func() ([]byte, error) { return renderPeriodSummaryXLSX(rangeOut, realFrom, realTo) })
 	}
 	return nil, sharedDomain.NewValidationError(ErrUnsupportedReport)
 }

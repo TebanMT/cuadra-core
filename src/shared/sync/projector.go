@@ -56,14 +56,129 @@ var payloadKeyAliases = map[string]map[string]string{
 // without touching the rest.
 var projectors = func() map[string]Projector {
 	m := make(map[string]Projector, len(SyncedTables))
+	var membershipsTable EntityTable
 	for i := range SyncedTables {
 		t := SyncedTables[i]
+		if t.Type == "memberships" {
+			membershipsTable = t
+		}
 		m[t.Type] = func(g *gorm.DB, gymID, entityID uuid.UUID, payload []byte) error {
 			return projectGeneric(g, t, gymID, entityID, payload)
 		}
 	}
+	// memberships necesita un pre-step: el índice parcial único
+	// `uq_memberships_member_active` permite UNA sola fila por (gym,member)
+	// con status active|pending_payment. El sidecar lo respeta con el
+	// 3-step dance (services.go RenewMembershipForPayment), pero al cruzar
+	// la frontera de sync cada item se proyecta en su propia transacción.
+	// Si el cloud quedó con dos rows activas para el mismo socio (renewal
+	// que se aplicó parcial, push fuera de orden por reintentos, o ids
+	// generados por dos fuentes), la inserción del nuevo activo choca con
+	// 23505. La resolución consistente con el dominio es "last write
+	// wins el slot": demote el otro a 'replaced' antes de proyectar.
+	m["memberships"] = func(g *gorm.DB, gymID, entityID uuid.UUID, payload []byte) error {
+		return projectMembership(g, membershipsTable, gymID, entityID, payload)
+	}
 	return m
 }()
+
+// projectMembership envuelve projectGeneric con un pre-step que libera el
+// slot del partial unique index `uq_memberships_member_active` cuando la
+// fila entrante reclama el slot (status active|pending_payment, no
+// soft-deleted). Cualquier otra fila vigente del mismo socio se baja a
+// 'replaced' — misma semántica que la renovación del dominio.
+func projectMembership(
+	g *gorm.DB,
+	table EntityTable,
+	gymID, entityID uuid.UUID,
+	payload []byte,
+) error {
+	var raw map[string]any
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return fmt.Errorf("projector memberships: payload not a JSON object: %w", err)
+	}
+	status, _ := raw["status"].(string)
+	claimsSlot := status == "active" || status == "pending_payment"
+	// deleted_at nil/ausente significa "fila viva". Si viene set, la
+	// proyección la marca borrada — no toca el slot de nadie más.
+	deleted := false
+	if v, ok := raw["deleted_at"]; ok && v != nil {
+		// Cualquier valor no-nulo (string ISO, número epoch) indica delete.
+		if s, isStr := v.(string); !isStr || s != "" {
+			deleted = true
+		}
+	}
+	memberIDStr, _ := raw["member_id"].(string)
+	if claimsSlot && !deleted && memberIDStr != "" {
+		memberID, err := uuid.Parse(memberIDStr)
+		if err == nil {
+			if err := vacateActiveMembershipSlot(g, gymID, memberID, entityID); err != nil {
+				return fmt.Errorf("memberships pre-vacate active slot: %w", err)
+			}
+		}
+	}
+	return projectGeneric(g, table, gymID, entityID, payload)
+}
+
+// vacateActiveMembershipSlot baja a 'replaced' cualquier fila de memberships
+// que esté actualmente ocupando el slot del partial unique index para
+// (gymID, memberID) — excepto la que está por ser proyectada (skipID).
+// Espeja la operación en sync_entities (payload + version + server_updated_at)
+// para que el próximo pull del sidecar refleje el demote y mantenga
+// coherente el server reloj (ADR-001 §3.1). Si no había conflicto, los
+// UPDATE no afectan filas y el upsert principal sigue sin cambio.
+func vacateActiveMembershipSlot(
+	g *gorm.DB,
+	gymID, memberID, skipID uuid.UUID,
+) error {
+	type demoted struct {
+		ID      uuid.UUID
+		Version int
+	}
+	var rows []demoted
+	// Demote + RETURNING para conocer las filas afectadas y su nueva
+	// version (la usamos para sync_entities). updated_at se reformulea
+	// con NOW() de cloud — server reloj manda.
+	const demoteSQL = `
+		UPDATE memberships
+		   SET status = 'replaced',
+		       updated_at = NOW(),
+		       version = version + 1
+		 WHERE gym_id = ?
+		   AND member_id = ?
+		   AND id <> ?
+		   AND status IN ('active','pending_payment')
+		   AND deleted_at IS NULL
+		RETURNING id, version`
+	if err := g.Raw(demoteSQL, gymID, memberID, skipID).Scan(&rows).Error; err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	// Para cada fila demote, sincronizar sync_entities: status, version,
+	// updated_at en payload + version + server_updated_at en la columna.
+	// El payload usa epoch_ms (mismo formato que el sidecar emite) para
+	// que ApplyPullChange en el sidecar no se confunda con el tipo.
+	const syncSQL = `
+		UPDATE sync_entities
+		   SET payload = payload || jsonb_build_object(
+		                     'status', 'replaced',
+		                     'version', ?::int,
+		                     'updated_at', (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint
+		                 ),
+		       version = ?,
+		       server_updated_at = NOW()
+		 WHERE gym_id = ?
+		   AND entity_type = 'memberships'
+		   AND entity_id = ?`
+	for _, r := range rows {
+		if err := g.Exec(syncSQL, r.Version, r.Version, gymID, r.ID).Error; err != nil {
+			return fmt.Errorf("sync_entities demote mirror for %s: %w", r.ID, err)
+		}
+	}
+	return nil
+}
 
 // project dispatches to the registered projector for entityType. Returns a
 // distinguished error when no projector is wired so the push handler can

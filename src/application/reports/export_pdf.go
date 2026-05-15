@@ -5,9 +5,11 @@ package reports
 import (
 	"bytes"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jung-kurt/gofpdf"
+	"golang.org/x/text/encoding/charmap"
 
 	gymDomain "github.com/cuadra/cuadra-core/src/modules/gyms/domain/gym"
 )
@@ -17,25 +19,25 @@ import (
 // in MVP (no upload UX yet) and render gym name + city + WhatsApp + RFC.
 func pdfHeader(pdf *gofpdf.Fpdf, gym *gymDomain.Gym, title string, from, to time.Time) {
 	pdf.SetFont("Helvetica", "B", 16)
-	pdf.CellFormat(0, 8, deref(gym.Name, "Tinta"), "", 1, "L", false, 0, "")
+	pdf.CellFormat(0, 8, asciiSafe(deref(gym.Name, "Tinta")), "", 1, "L", false, 0, "")
 	pdf.SetFont("Helvetica", "", 9)
 	if gym.City != nil {
-		pdf.CellFormat(0, 5, *gym.City, "", 1, "L", false, 0, "")
+		pdf.CellFormat(0, 5, asciiSafe(*gym.City), "", 1, "L", false, 0, "")
 	}
 	if gym.WhatsApp != nil {
-		pdf.CellFormat(0, 5, "WhatsApp: "+*gym.WhatsApp, "", 1, "L", false, 0, "")
+		pdf.CellFormat(0, 5, asciiSafe("WhatsApp: "+*gym.WhatsApp), "", 1, "L", false, 0, "")
 	}
 	if gym.RFC != nil {
-		pdf.CellFormat(0, 5, "RFC: "+*gym.RFC, "", 1, "L", false, 0, "")
+		pdf.CellFormat(0, 5, asciiSafe("RFC: "+*gym.RFC), "", 1, "L", false, 0, "")
 	}
 	pdf.Ln(2)
 	pdf.SetFont("Helvetica", "B", 13)
-	pdf.CellFormat(0, 8, title, "", 1, "L", false, 0, "")
+	pdf.CellFormat(0, 8, asciiSafe(title), "", 1, "L", false, 0, "")
 	pdf.SetFont("Helvetica", "", 9)
 	pdf.CellFormat(0, 5,
-		fmt.Sprintf("Periodo: %s a %s", from.Format("2006-01-02"), to.Format("2006-01-02")),
+		asciiSafe(fmt.Sprintf("Periodo: %s a %s", from.Format("2006-01-02"), to.Format("2006-01-02"))),
 		"", 1, "L", false, 0, "")
-	pdf.CellFormat(0, 5, "Generado: "+time.Now().UTC().Format("2006-01-02 15:04 UTC"),
+	pdf.CellFormat(0, 5, asciiSafe("Generado: "+time.Now().UTC().Format("2006-01-02 15:04 UTC")),
 		"", 1, "L", false, 0, "")
 	pdf.Ln(3)
 }
@@ -69,7 +71,7 @@ func renderMembersPDF(gym *gymDomain.Gym, rows []MemberExportRow) []byte {
 	headers := []string{"Folio", "Nombre", "Tel.", "Plan", "Vence", "Estado"}
 	widths := []float64{20, 55, 25, 35, 22, 23}
 	for i, h := range headers {
-		pdf.CellFormat(widths[i], 6, h, "1", 0, "C", false, 0, "")
+		pdf.CellFormat(widths[i], 6, asciiSafe(h), "1", 0, "C", false, 0, "")
 	}
 	pdf.Ln(-1)
 	pdf.SetFont("Helvetica", "", 8)
@@ -84,7 +86,7 @@ func renderMembersPDF(gym *gymDomain.Gym, rows []MemberExportRow) []byte {
 	}
 	pdf.Ln(3)
 	pdf.SetFont("Helvetica", "I", 8)
-	pdf.CellFormat(0, 5, fmt.Sprintf("Total: %d socios", len(rows)), "", 1, "L", false, 0, "")
+	pdf.CellFormat(0, 5, asciiSafe(fmt.Sprintf("Total: %d socios", len(rows))), "", 1, "L", false, 0, "")
 	return bytesOf(pdf)
 }
 
@@ -99,7 +101,7 @@ func renderPaymentsPDF(gym *gymDomain.Gym, rows []PaymentExportRow, from, to tim
 	headers := []string{"Folio", "Fecha", "Socio", "Concepto", "Método", "Monto", "Saldo"}
 	widths := []float64{22, 22, 50, 28, 22, 20, 20}
 	for i, h := range headers {
-		pdf.CellFormat(widths[i], 6, h, "1", 0, "C", false, 0, "")
+		pdf.CellFormat(widths[i], 6, asciiSafe(h), "1", 0, "C", false, 0, "")
 	}
 	pdf.Ln(-1)
 	pdf.SetFont("Helvetica", "", 8)
@@ -121,7 +123,7 @@ func renderPaymentsPDF(gym *gymDomain.Gym, rows []PaymentExportRow, from, to tim
 	}
 	pdf.Ln(3)
 	pdf.SetFont("Helvetica", "B", 10)
-	pdf.CellFormat(0, 6, fmt.Sprintf("Total neto: $%.2f", total), "", 1, "R", false, 0, "")
+	pdf.CellFormat(0, 6, asciiSafe(fmt.Sprintf("Total neto: $%.2f", total)), "", 1, "R", false, 0, "")
 	return bytesOf(pdf)
 }
 
@@ -136,7 +138,7 @@ func renderSalesPDF(gym *gymDomain.Gym, rows []SaleExportRow, from, to time.Time
 	headers := []string{"Folio pago", "Fecha", "Socio", "Subtotal", "Descuento", "Total", "Método"}
 	widths := []float64{25, 25, 50, 22, 22, 22, 18}
 	for i, h := range headers {
-		pdf.CellFormat(widths[i], 6, h, "1", 0, "C", false, 0, "")
+		pdf.CellFormat(widths[i], 6, asciiSafe(h), "1", 0, "C", false, 0, "")
 	}
 	pdf.Ln(-1)
 	pdf.SetFont("Helvetica", "", 8)
@@ -154,7 +156,7 @@ func renderSalesPDF(gym *gymDomain.Gym, rows []SaleExportRow, from, to time.Time
 	}
 	pdf.Ln(3)
 	pdf.SetFont("Helvetica", "B", 10)
-	pdf.CellFormat(0, 6, fmt.Sprintf("Total: $%.2f", total), "", 1, "R", false, 0, "")
+	pdf.CellFormat(0, 6, asciiSafe(fmt.Sprintf("Total: $%.2f", total)), "", 1, "R", false, 0, "")
 	return bytesOf(pdf)
 }
 
@@ -167,16 +169,16 @@ func renderAttentionRequiredPDF(gym *gymDomain.Gym, out *AttentionRequiredOutput
 	pdfHeader(pdf, gym, "Atención inmediata", time.Time{}, time.Time{})
 	section := func(title string, rows int, lines [][]string, headers []string, widths []float64) {
 		pdf.SetFont("Helvetica", "B", 11)
-		pdf.CellFormat(0, 6, fmt.Sprintf("%s (%d)", title, rows), "", 1, "L", false, 0, "")
+		pdf.CellFormat(0, 6, asciiSafe(fmt.Sprintf("%s (%d)", title, rows)), "", 1, "L", false, 0, "")
 		if rows == 0 {
 			pdf.SetFont("Helvetica", "I", 9)
-			pdf.CellFormat(0, 5, "—", "", 1, "L", false, 0, "")
+			pdf.CellFormat(0, 5, asciiSafe("—"), "", 1, "L", false, 0, "")
 			pdf.Ln(2)
 			return
 		}
 		pdf.SetFont("Helvetica", "B", 9)
 		for i, h := range headers {
-			pdf.CellFormat(widths[i], 6, h, "1", 0, "C", false, 0, "")
+			pdf.CellFormat(widths[i], 6, asciiSafe(h), "1", 0, "C", false, 0, "")
 		}
 		pdf.Ln(-1)
 		pdf.SetFont("Helvetica", "", 8)
@@ -242,19 +244,28 @@ func renderAttentionRequiredPDF(gym *gymDomain.Gym, out *AttentionRequiredOutput
 // helpers
 // ---------------------------------------------------------------------------
 
-// asciiSafe drops non-WinAnsi codepoints. gofpdf's default WinAnsi encoding
-// silently corrupts emoji / CJK; we strip them so the output stays clean.
-// Common es-MX accents (á, é, í, ñ, ¿) are valid WinAnsi and pass through.
+// asciiSafe converts a UTF-8 string into the cp1252 (WinAnsi) byte sequence
+// that gofpdf's standard Helvetica font expects.
+//
+// gofpdf doesn't auto-translate UTF-8 → WinAnsi: pasarle la "á" directo
+// emite los dos bytes UTF-8 (0xC3 0xA1) que el reader interpreta como
+// "Ã¡". El fix canónico es codificar cada rune a su byte cp1252 (charmap
+// .Windows1252.EncodeRune). Runes fuera del codepage (CJK, emoji) caen
+// a "?" para no romper el layout.
+//
+// Common es-MX glyphs round-trip cleanly: á/é/í/ó/ú/ñ/¿/¡/Á/É/Í/Ó/Ú/Ñ
+// (Latin-1 range) y el em-dash "—" (U+2014 → byte 0x97).
 func asciiSafe(s string) string {
-	out := make([]rune, 0, len(s))
+	var buf strings.Builder
+	buf.Grow(len(s))
 	for _, r := range s {
-		if r > 0xFF {
-			out = append(out, '?')
+		if b, ok := charmap.Windows1252.EncodeRune(r); ok {
+			buf.WriteByte(b)
 			continue
 		}
-		out = append(out, r)
+		buf.WriteByte('?')
 	}
-	return string(out)
+	return buf.String()
 }
 
 func deref(p *string, fallback string) string {
@@ -266,7 +277,10 @@ func deref(p *string, fallback string) string {
 
 func optDate(t *time.Time) string {
 	if t == nil {
-		return "—"
+		// Pre-encoded em-dash so callers can drop the result into
+		// CellFormat without an extra asciiSafe (some sites do, some
+		// don't — keeping this self-contained avoids the mismatch).
+		return asciiSafe("—")
 	}
 	return t.Format("2006-01-02")
 }

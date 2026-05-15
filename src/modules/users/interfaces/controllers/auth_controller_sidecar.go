@@ -65,6 +65,15 @@ type SidecarAuthProxy struct {
 	// without waiting for the next tick.
 	AgentReload func()
 
+	// OnSidecarTokenChanged (optional) hands the freshly-minted plaintext
+	// sidecar_token directly to the agent so its in-memory cache hot-swaps.
+	// Necessary when a mid-day re-login mints a new credential because the
+	// previous one was revoked: persisting to sync_state alone is not
+	// enough — the agent only re-reads on bootstrap. Without this hook the
+	// agent keeps presenting the old (rejected-by-cloud) token until the
+	// sidecar restarts.
+	OnSidecarTokenChanged func(token string)
+
 	// ClientID is the persistent UUID this sidecar advertises to the
 	// cloud bootstrap (X-Cuadra-Client-ID). The sync agent sets it on
 	// boot via EnsureClientID; the proxy reads the same value.
@@ -675,11 +684,17 @@ func (p *SidecarAuthProxy) absorbAuthResponse(ctx context.Context, email, passwo
 	}
 	d := env.Data
 
-	// Persist sidecar_token if the cloud minted one.
+	// Persist sidecar_token if the cloud minted one. Two hooks fire in
+	// order: (1) hand the token to the agent's in-memory cache so the very
+	// next sync attempt uses it (no need to wait for a restart), (2) nudge
+	// the agent loop to run immediately.
 	if tok, ok := d["sidecar_token"].(string); ok && tok != "" {
 		_ = p.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
 			return syncShared.SetSidecarToken(ctx, tx, tok)
 		})
+		if p.OnSidecarTokenChanged != nil {
+			p.OnSidecarTokenChanged(tok)
+		}
 		if p.AgentReload != nil {
 			p.AgentReload()
 		}

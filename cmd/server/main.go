@@ -36,6 +36,10 @@ import (
 	prodRepoPg "github.com/cuadra/cuadra-core/src/modules/products/infraestructure/db/repositories"
 	prodCtrl "github.com/cuadra/cuadra-core/src/modules/products/interfaces/controllers"
 
+	expApp "github.com/cuadra/cuadra-core/src/modules/expenses/app"
+	expRepoPg "github.com/cuadra/cuadra-core/src/modules/expenses/infraestructure/db/repositories"
+	expCtrl "github.com/cuadra/cuadra-core/src/modules/expenses/interfaces/controllers"
+
 	usersApp "github.com/cuadra/cuadra-core/src/modules/users/app"
 	usersRepoPg "github.com/cuadra/cuadra-core/src/modules/users/infraestructure/db/repositories"
 	usersCtrl "github.com/cuadra/cuadra-core/src/modules/users/interfaces/controllers"
@@ -105,6 +109,7 @@ func main() {
 	cashCloseEventRepo := billingRepoPg.NewCashCloseEventPostgresRepository()
 	productRepo := prodRepoPg.NewProductPostgresRepository()
 	stockMovementRepo := prodRepoPg.NewStockMovementPostgresRepository()
+	expenseRepo := expRepoPg.NewExpensePostgresRepository()
 	fingerprintRepo := memRepoPg.NewFingerprintPostgresRepository()
 	checkinRepo := chkRepoPg.NewCheckinPostgresRepository()
 	contactAttemptRepo := memRepoPg.NewContactAttemptPostgresRepository()
@@ -239,16 +244,23 @@ func main() {
 	deactivateProduct := prodApp.NewDeactivateProduct(productRepo, uow, recorder)
 	listProducts := prodApp.NewListProducts(productRepo, uow)
 	adjustStock := prodApp.NewAdjustStock(productRepo, stockMovementRepo, uow, recorder)
+	// Expenses (gastos generales del gym) — CRUD + listado con filtros.
+	createExpense := expApp.NewCreateExpense(expenseRepo, uow, recorder)
+	updateExpense := expApp.NewUpdateExpense(expenseRepo, uow, recorder)
+	deleteExpense := expApp.NewDeleteExpense(expenseRepo, uow, recorder)
+	listExpenses := expApp.NewListExpenses(expenseRepo, uow)
 	registerSale := billingApp.NewRegisterSale(paymentRepo, saleRepo, saleItemRepo, folios, productSvc, memberRepo, uow, recorder, billingSubscriber)
 	refundSale := billingApp.NewRefundSale(saleRepo, refundPayment, uow)
 	cashClose := reportsApp.NewCashClose(cashCloseReader, cashCloseEventRepo, uow, recorder).
+		WithExpenses(expenseRepo).
+		WithUsers(userRepo).
 		WithSubscriber(notiApp.NewCashCloseAlertSubscriber(enqueueOwnerAlert))
 
 	// ── Reports application layer (Sesión 6) ─────────────────────────────
 	dashboard := reportsApp.NewDashboard(reportsReader, uow, 60*time.Second)
 	attentionRequired := reportsApp.NewAttentionRequired(reportsReader, uow)
 	rangeReport := reportsApp.NewRangeReport(reportsReader, uow)
-	exportReport := reportsApp.NewExportReport(reportsReader, gymRepo, uow, attentionRequired)
+	exportReport := reportsApp.NewExportReport(reportsReader, gymRepo, uow, attentionRequired, rangeReport)
 	markContacted := memApp.NewMarkContacted(memberRepo, contactAttemptRepo, uow, recorder)
 	markLost := memApp.NewMarkLost(memberRepo, uow, recorder)
 	// PIN use cases for cloud-side POST/DELETE /auth/me/pin. The dashboard
@@ -294,6 +306,7 @@ func main() {
 	fingerprintCtrl := memCtrl.NewFingerprintController(registerFingerprint, tokens)
 	paymentCtrl := billingCtrl.NewPaymentController(registerPayment, settlePayment, receiptPayment, sendReceipt, listMemberPayments, listGymPayments, refundPayment, registerSale, refundSale, cashClose, tokens)
 	productCtrl := prodCtrl.NewProductController(createProduct, updateProduct, deactivateProduct, listProducts, adjustStock, tokens)
+	expenseController := expCtrl.NewExpenseController(createExpense, updateExpense, deleteExpense, listExpenses, tokens)
 	// Cloud has no biometric reader — fingerprint flows live on the sidecar.
 	checkinCtrl := chkCtrl.NewCheckinController(checkinManual, checkinPin, checkinOverride, checkinRepo, uow, nil, tokens)
 	reportsController := reportsCtrl.NewReportsController(dashboard, attentionRequired, rangeReport, exportReport, markContacted, markLost, tokens)
@@ -382,6 +395,7 @@ func main() {
 	fingerprintCtrl.RegisterRoutes(r)
 	paymentCtrl.RegisterRoutes(r)
 	productCtrl.RegisterRoutes(r)
+	expenseController.RegisterRoutes(r)
 	checkinCtrl.RegisterRoutes(r)
 	reportsController.RegisterRoutes(r)
 	notificationsCtrl.RegisterRoutes(r)

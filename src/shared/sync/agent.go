@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -74,15 +75,29 @@ type Agent struct {
 	state    AgentSnapshot
 	clientID uuid.UUID
 	token    string
+	// lastNoTokenLog rate-limits the "skipped — no token" warn so a sidecar
+	// that boots before the desktop logs in doesn't spam stderr every 30s.
+	// Guarded por mu igual que `token` para no requerir un mutex extra.
+	lastNoTokenLog time.Time
 
 	trigger chan struct{}
 }
 
-// SetToken stores the cloud JWT the agent uses for /sync/* requests. Empty
-// token = unauthenticated (loop short-circuits). Called by /sync/auth.
+// SetToken stores the credential the agent uses for /sync/* requests. Empty
+// token = unauthenticated (loop short-circuits). Llamado tanto por el
+// endpoint deprecated /sync/auth como por el hook OnSidecarTokenChanged
+// del proxy de auth tras un login/re-login exitoso.
+//
+// Un token no-vacío también limpia AuthInvalid: una credencial nueva
+// invalida cualquier 401 previo (la credencial vieja se revocó cloud-side
+// y la nueva acaba de mintarse).
 func (a *Agent) SetToken(t string) {
 	a.mu.Lock()
 	a.token = t
+	if t != "" {
+		a.state.AuthInvalid = false
+		a.state.WaitingForAuth = false
+	}
 	a.mu.Unlock()
 	if t != "" {
 		a.TriggerNow()
@@ -115,6 +130,16 @@ type AgentSnapshot struct {
 	NextRetryAt            time.Time
 	InitialSyncCompletedAt time.Time
 	State                  string
+	// AuthInvalid — true cuando el cloud rechazó la credencial del sidecar
+	// con 401. Distingue una falla de auth ("revoca la credencial vieja,
+	// hace falta re-login") de una falla de red/HTTP genérica. Se limpia
+	// al recibir un nuevo token vía SetToken o tras un éxito.
+	AuthInvalid bool
+	// WaitingForAuth — true cuando RunOnce salteó por no tener token aún.
+	// Útil para distinguir "sidecar recién canjeado, esperando login" de
+	// "agente sano sin actividad reciente". Se limpia tan pronto como el
+	// agente recibe credenciales.
+	WaitingForAuth bool
 }
 
 func NewAgent(cfg AgentConfig, db *sqlx.DB, uow sharedDomain.UnitOfWork) *Agent {
@@ -177,6 +202,20 @@ func (a *Agent) Run(ctx context.Context) {
 		a.cfg.Logger.Printf("[sync] agent disabled — BaseURL empty")
 		return
 	}
+	// Log absoluto del UploadsDir al boot. Esto deja un rastro visible
+	// para verificar que las fotos están cayendo en un directorio
+	// persistente (p.ej. ~/Library/Application Support/<APP>/uploads en
+	// macOS) y NO en algo bajo /tmp o relativo al cwd, que se borra al
+	// reiniciar. Si está vacío, las fotos no se cachean en disco — el
+	// FE no podrá renderear via local-serve.
+	if a.cfg.UploadsDir == "" {
+		a.cfg.Logger.Printf("[sync] WARN: UploadsDir vacío — las fotos no se cachearán localmente")
+	} else if abs, err := filepath.Abs(a.cfg.UploadsDir); err == nil {
+		a.cfg.Logger.Printf("[sync] uploads cache dir: %s", abs)
+		if strings.HasPrefix(abs, "/tmp/") || strings.Contains(abs, "/tmp/") {
+			a.cfg.Logger.Printf("[sync] WARN: UploadsDir bajo /tmp — se borrará al reiniciar el OS")
+		}
+	}
 	if err := a.bootstrap(ctx); err != nil {
 		a.cfg.Logger.Printf("[sync] bootstrap: %v", err)
 	}
@@ -201,10 +240,30 @@ func (a *Agent) Run(ctx context.Context) {
 // loop is best-effort.
 func (a *Agent) RunOnce(ctx context.Context) {
 	if a.currentToken() == "" {
-		// Not authenticated yet — sidecar boots empty and only gets a token
-		// after login (or via /sync/auth). Skip silently.
+		// Sin credencial. Antes esto retornaba silencioso, lo que dejaba
+		// al sidecar en un limbo "sano pero parado" imposible de
+		// diagnosticar (sin error, sin sync, sin log). Ahora marcamos
+		// WaitingForAuth para que /sync/status lo distinga, y emitimos
+		// un warn rate-limited cada 5 min para que op-quality alerte
+		// si el sidecar lleva horas sin token.
+		a.mu.Lock()
+		a.state.WaitingForAuth = true
+		shouldLog := time.Since(a.lastNoTokenLog) > 5*time.Minute
+		if shouldLog {
+			a.lastNoTokenLog = time.Now()
+		}
+		a.mu.Unlock()
+		if shouldLog {
+			a.cfg.Logger.Printf("[sync] WARN: skipping run — no credential (waiting for login)")
+		}
 		return
 	}
+	// Si llegamos acá tenemos token: limpiamos la marca de "esperando
+	// login". AuthInvalid lo limpia SetToken explícitamente al hot-swap;
+	// no lo tocamos acá para no enmascarar un 401 todavía sin recambio.
+	a.mu.Lock()
+	a.state.WaitingForAuth = false
+	a.mu.Unlock()
 	// If we're inside a backoff window, skip.
 	a.mu.RLock()
 	wait := a.state.NextRetryAt
@@ -223,11 +282,13 @@ func (a *Agent) RunOnce(ctx context.Context) {
 
 	// Sube fotos pendientes a R2 ANTES del push: cualquier upload
 	// exitoso bumpea version + encola el row, así el push siguiente
-	// propaga la URL pública en lugar del data: URL local. Errores
+	// propaga el object_key en lugar del data: URL local. Errores
 	// de upload no detienen sync — se loggean y reintenta el siguiente
 	// tick. Sidecar-only (la función vive en agent_uploads.go con tag
-	// //go:build sidecar).
+	// //go:build sidecar). Tanto fotos de socios (members.photo_url)
+	// como de productos (products.image_url) siguen el mismo ciclo.
 	a.uploadPendingMemberPhotos(ctx)
+	a.uploadPendingProductPhotos(ctx)
 
 	if err := a.Push(ctx); err != nil {
 		a.recordFailure(ctx, "push", err)
@@ -237,12 +298,13 @@ func (a *Agent) RunOnce(ctx context.Context) {
 		a.recordFailure(ctx, "pull", err)
 		return
 	}
-	// Baja a disco las fotos cuyas filas locales tienen una URL R2 pero
-	// el archivo aún no existe en cache. Cubre el caso multi-device
+	// Baja a disco las fotos cuyas filas locales tienen un object_key R2
+	// pero el archivo aún no existe en cache. Cubre el caso multi-device
 	// (gym con dos desktops) y rehidratación post full-sync. Errores
 	// no detienen el ciclo — el archivo se reintentará en el próximo
 	// tick. Sidecar-only (definido con //go:build sidecar).
 	a.downloadPendingMemberPhotos(ctx)
+	a.downloadPendingProductPhotos(ctx)
 	a.recordSuccess(ctx)
 }
 
@@ -728,6 +790,10 @@ func (a *Agent) recordSuccess(ctx context.Context) {
 	a.state.LastError = ""
 	a.state.ConsecutiveFailures = 0
 	a.state.NextRetryAt = time.Time{}
+	// Un ciclo exitoso invalida cualquier 401 previo — si la credencial
+	// estaba muerta no habría llegado hasta acá.
+	a.state.AuthInvalid = false
+	a.state.WaitingForAuth = false
 	a.mu.Unlock()
 	_ = a.uow.Command(ctx, func(tx sharedDomain.Transaction) error {
 		_ = SetLastSyncedAt(ctx, tx, now)
@@ -740,10 +806,20 @@ func (a *Agent) recordSuccess(ctx context.Context) {
 
 func (a *Agent) recordFailure(ctx context.Context, phase string, err error) {
 	a.cfg.Logger.Printf("[sync] %s failed: %v", phase, err)
+	authInvalid := isAuthError(err)
 	a.mu.Lock()
 	a.state.ConsecutiveFailures++
 	a.state.LastError = phase + ": " + err.Error()
 	wait := backoff(a.state.ConsecutiveFailures)
+	if authInvalid {
+		// La credencial está muerta hasta que el operador re-loguee. Los
+		// retries automáticos no van a recuperar nada — pisamos el backoff
+		// con un cooldown largo (1h) para no martillar al cloud, y marcamos
+		// el estado para que la UI muestre "Vuelve a iniciar sesión" en vez
+		// de "Sin internet".
+		a.state.AuthInvalid = true
+		wait = time.Hour
+	}
 	a.state.NextRetryAt = time.Now().Add(wait)
 	failures := a.state.ConsecutiveFailures
 	nextRetry := a.state.NextRetryAt
@@ -805,5 +881,19 @@ var (
 	ErrUnauthorized          = errors.New("sync auth rejected (token expired?)")
 )
 
-// avoid unused-import warnings in partial builds.
-var _ = strings.Contains
+// isAuthError returns true when err signals "el cloud rechazó nuestras
+// credenciales", de manera que recordFailure pueda transicionar el agente
+// a AuthInvalid en vez de seguir reintentando con el token muerto. Los
+// uploads/downloads a R2 también arman fmt.Errorf con "401" embebido, por
+// eso revisamos también el string.
+func isAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrUnauthorized) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "401") || strings.Contains(msg, "unauthorized")
+}
+

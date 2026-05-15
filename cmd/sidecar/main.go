@@ -47,6 +47,10 @@ import (
 	prodRepoLite "github.com/cuadra/cuadra-core/src/modules/products/infraestructure/db/repositories"
 	prodCtrl "github.com/cuadra/cuadra-core/src/modules/products/interfaces/controllers"
 
+	expApp "github.com/cuadra/cuadra-core/src/modules/expenses/app"
+	expRepoLite "github.com/cuadra/cuadra-core/src/modules/expenses/infraestructure/db/repositories"
+	expCtrl "github.com/cuadra/cuadra-core/src/modules/expenses/interfaces/controllers"
+
 	usersApp "github.com/cuadra/cuadra-core/src/modules/users/app"
 	usersRepoLite "github.com/cuadra/cuadra-core/src/modules/users/infraestructure/db/repositories"
 	usersCtrl "github.com/cuadra/cuadra-core/src/modules/users/interfaces/controllers"
@@ -128,6 +132,7 @@ func main() {
 	cashCloseEventRepo := billingRepoLite.NewCashCloseEventSQLiteRepository()
 	productRepo := prodRepoLite.NewProductSQLiteRepository()
 	stockMovementRepo := prodRepoLite.NewStockMovementSQLiteRepository()
+	expenseRepo := expRepoLite.NewExpenseSQLiteRepository()
 	fingerprintRepo := memRepoLite.NewFingerprintSQLiteRepository()
 	checkinRepo := chkRepoLite.NewCheckinSQLiteRepository()
 	contactAttemptRepo := memRepoLite.NewContactAttemptSQLiteRepository()
@@ -257,9 +262,16 @@ func main() {
 	deactivateProduct := prodApp.NewDeactivateProduct(productRepo, uow, recorder)
 	listProducts := prodApp.NewListProducts(productRepo, uow)
 	adjustStock := prodApp.NewAdjustStock(productRepo, stockMovementRepo, uow, recorder)
+	// Expenses (gastos generales) — CRUD + listado. Mismo wiring que cloud.
+	createExpense := expApp.NewCreateExpense(expenseRepo, uow, recorder)
+	updateExpense := expApp.NewUpdateExpense(expenseRepo, uow, recorder)
+	deleteExpense := expApp.NewDeleteExpense(expenseRepo, uow, recorder)
+	listExpenses := expApp.NewListExpenses(expenseRepo, uow)
 	registerSale := billingApp.NewRegisterSale(paymentRepo, saleRepo, saleItemRepo, folios, productSvc, memberRepo, uow, recorder, billingSubscriber)
 	refundSale := billingApp.NewRefundSale(saleRepo, refundPayment, uow)
 	cashClose := reportsApp.NewCashClose(cashCloseReader, cashCloseEventRepo, uow, recorder).
+		WithExpenses(expenseRepo).
+		WithUsers(userRepo).
 		WithSubscriber(notiApp.NewCashCloseAlertSubscriber(enqueueOwnerAlert))
 
 	// ── Reports application layer (Sesión 6) — same use cases as the cloud,
@@ -268,7 +280,7 @@ func main() {
 	dashboard := reportsApp.NewDashboard(reportsReader, uow, 60*time.Second)
 	attentionRequired := reportsApp.NewAttentionRequired(reportsReader, uow)
 	rangeReport := reportsApp.NewRangeReport(reportsReader, uow)
-	exportReport := reportsApp.NewExportReport(reportsReader, gymRepo, uow, attentionRequired)
+	exportReport := reportsApp.NewExportReport(reportsReader, gymRepo, uow, attentionRequired, rangeReport)
 	markContacted := memApp.NewMarkContacted(memberRepo, contactAttemptRepo, uow, recorder)
 	markLost := memApp.NewMarkLost(memberRepo, uow, recorder)
 
@@ -333,6 +345,7 @@ func main() {
 	fingerprintCtrl := memCtrl.NewFingerprintController(registerFingerprint, tokens)
 	paymentCtrl := billingCtrl.NewPaymentController(registerPayment, settlePayment, receiptPayment, sendReceipt, listMemberPayments, listGymPayments, refundPayment, registerSale, refundSale, cashClose, tokens)
 	productCtrl := prodCtrl.NewProductController(createProduct, updateProduct, deactivateProduct, listProducts, adjustStock, tokens)
+	expenseController := expCtrl.NewExpenseController(createExpense, updateExpense, deleteExpense, listExpenses, tokens)
 	fingerprintAvailable := func() bool { return bioReader.Available(context.Background()) }
 	// Outbound access-granted webhook (Fase 1 differentiator: lets the gym
 	// drive any turnstile / cerradura over HTTP). URL + HMAC secret live in
@@ -421,6 +434,7 @@ func main() {
 	fingerprintCtrl.RegisterRoutes(r)
 	paymentCtrl.RegisterRoutes(r)
 	productCtrl.RegisterRoutes(r)
+	expenseController.RegisterRoutes(r)
 	checkinCtrl.RegisterRoutes(r)
 	kioskCtrl.RegisterRoutes(r)
 	notificationsCtrl.RegisterRoutes(r)
@@ -438,8 +452,14 @@ func main() {
 		Logger:     log.New(os.Stderr, "[sync] ", log.LstdFlags),
 		UploadsDir: envOrDefault("UPLOADS_DIR", "./tmp/uploads"),
 	}, db, uow)
-	// Wire the proxy's reload callback so a fresh login bumps the agent
-	// without waiting for the next tick.
+	// Wire the proxy's hooks so a fresh login (or a re-login after the
+	// previous credential was revoked) takes effect immediately:
+	//   - OnSidecarTokenChanged: hot-swap the agent's in-memory token so
+	//     the very next request uses the fresh sk_live_*. Without this,
+	//     the agent keeps presenting the revoked token until restart.
+	//   - AgentReload: nudge the loop to run RIGHT AWAY rather than waiting
+	//     for the 30s tick. Order matters — swap first, then trigger.
+	authProxy.OnSidecarTokenChanged = agent.SetToken
 	authProxy.AgentReload = agent.TriggerNow
 	// Member create/update con foto: empuja al agent inmediatamente
 	// para que el upload a R2 ocurra en segundos en lugar de esperar

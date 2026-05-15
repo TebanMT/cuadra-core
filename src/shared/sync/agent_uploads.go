@@ -28,12 +28,75 @@ const uploadBatchLimit = 5
 // agresividad.
 const downloadBatchLimit = 5
 
+// photoEntity — descriptor estático por tipo de entidad que tiene foto
+// sincronizable. Define las cuatro coordenadas que difieren entre
+// members y products: tabla, columna, subdir/key path, presign kind.
+// Los closures encapsulan la parte específica del enqueue (members y
+// products tienen columnas NOT NULL distintas) y el clear-on-corrupt.
+//
+// Agregar una entidad nueva = declarar un nuevo var Entity de este tipo
+// + wire en Agent.RunOnce (igual que se hizo para products).
+type photoEntity struct {
+	name             string // "member" / "product" — sólo para logs.
+	table            string // "members" / "products".
+	column           string // "photo_url" / "image_url".
+	subdir           string // "members" / "products" — disk cache + key path.
+	kind             string // "member_photo" / "product_photo" — presign req.
+	buildPresignBody func(id, ext, contentType string) presignReqBody
+	// replacePhotoURL — UPDATE local + version++ + synced_at=NULL,
+	// re-leer NOT NULL cols, marshal + EnqueueSync. Entity-specific
+	// porque los payloads del proyector difieren (members ≠ products).
+	replacePhotoURL func(a *Agent, ctx context.Context, id, objectKey string) error
+	// clearPhoto — zerorea el campo cuando la data URL es corrupta y
+	// reintentar no tiene sentido. Misma motivación que en members.
+	clearPhoto func(a *Agent, ctx context.Context, id string) error
+}
+
+var memberPhotoEntity = photoEntity{
+	name:   "member",
+	table:  "members",
+	column: "photo_url",
+	subdir: "members",
+	kind:   "member_photo",
+	buildPresignBody: func(id, ext, contentType string) presignReqBody {
+		return presignReqBody{
+			Kind:        "member_photo",
+			MemberID:    id,
+			Ext:         ext,
+			ContentType: contentType,
+		}
+	},
+	replacePhotoURL: (*Agent).replaceMemberPhotoURL,
+	clearPhoto:      (*Agent).clearMemberPhoto,
+}
+
+var productPhotoEntity = photoEntity{
+	name:   "product",
+	table:  "products",
+	column: "image_url",
+	subdir: "products",
+	kind:   "product_photo",
+	buildPresignBody: func(id, ext, contentType string) presignReqBody {
+		return presignReqBody{
+			Kind:        "product_photo",
+			ProductID:   id,
+			Ext:         ext,
+			ContentType: contentType,
+		}
+	},
+	replacePhotoURL: (*Agent).replaceProductPhotoURL,
+	clearPhoto:      (*Agent).clearProductPhoto,
+}
+
 // presignReqBody / presignRespBody — espejo de cloud's
 // uploadPresignReq / uploadPresignResp en
-// auth_controller.go. Si cambia ahí, cambiar aquí.
+// auth_controller.go. Si cambia ahí, cambiar aquí. MemberID y ProductID
+// son mutuamente exclusivos según `kind` — omitempty para no mandar
+// campos vacíos que el cloud podría malinterpretar.
 type presignReqBody struct {
 	Kind        string `json:"kind"`
-	MemberID    string `json:"member_id"`
+	MemberID    string `json:"member_id,omitempty"`
+	ProductID   string `json:"product_id,omitempty"`
 	Ext         string `json:"ext"`
 	ContentType string `json:"content_type"`
 }
@@ -45,9 +108,9 @@ type presignRespBody struct {
 
 // presignGetReqBody / presignGetRespBody — espejo del shape del
 // endpoint cloud `POST /api/v1/uploads/presign-get`. El sidecar le
-// pasa el object_key que ya tiene en SQLite (photo_url), recibe una
-// GET firmada y baja los bytes a disco. Sin esto el GET retornaría
-// 403 porque el bucket es privado.
+// pasa el object_key que ya tiene en SQLite (photo_url / image_url),
+// recibe una GET firmada y baja los bytes a disco. Sin esto el GET
+// retornaría 403 porque el bucket es privado.
 type presignGetReqBody struct {
 	ObjectKey string `json:"object_key"`
 }
@@ -56,60 +119,74 @@ type presignGetRespBody struct {
 	DownloadURL string `json:"download_url"`
 }
 
-// uploadPendingMemberPhotos — corre antes de Push en cada tick.
-// Encuentra filas de members donde photo_url es un data: URL (foto
-// recién elegida por el operador, todavía inline), extrae los bytes
-// al cache local en disco, los sube a R2 vía el cloud (presign + PUT
-// directo), y bumpea version + encola un push para que el cloud row
-// guarde la URL pública.
+// uploadPendingMemberPhotos — wrapper preservado por compatibilidad
+// (Agent.RunOnce lo invoca por nombre). Delega a la versión genérica
+// con el descriptor de members.
+func (a *Agent) uploadPendingMemberPhotos(ctx context.Context) {
+	a.uploadPendingPhotos(ctx, memberPhotoEntity)
+}
+
+// uploadPendingProductPhotos — análogo a uploadPendingMemberPhotos pero
+// para products. Mismo ciclo (find data: → write disk → presign → PUT
+// R2 → replace URL) sobre la tabla `products` y la columna `image_url`.
+func (a *Agent) uploadPendingProductPhotos(ctx context.Context) {
+	a.uploadPendingPhotos(ctx, productPhotoEntity)
+}
+
+// uploadPendingPhotos — corre antes de Push en cada tick.
+// Encuentra filas donde la columna foto es un data: URL (foto recién
+// elegida por el operador, todavía inline), extrae los bytes al cache
+// local en disco, los sube a R2 vía el cloud (presign + PUT directo),
+// y bumpea version + encola un push para que el cloud row guarde el
+// object_key.
 //
-// El cache en disco (UploadsDir/members/<id>.<ext>) es lo que el FE
+// El cache en disco (UploadsDir/<subdir>/<id>.<ext>) es lo que el FE
 // renderea vía la ruta local-serve del sidecar — el FE nunca abre
-// socket directo a R2. La función `downloadPendingMemberPhotos`
-// repuebla este cache desde R2 si el archivo falta (multi-device
-// o post full-sync).
+// socket directo a R2. La función `downloadPendingPhotos` repuebla
+// este cache desde R2 si el archivo falta (multi-device o post
+// full-sync).
 //
 // Offline-first: si cualquier paso falla (cloud unreachable, R2 down,
 // presign 501 si las env vars no están), el data: URL local sigue
 // intacto y reintentamos en el próximo tick. Si el extract-a-disco
 // ya sucedió pero el R2 PUT falló, el archivo en disco persiste y
-// la URL data: queda en photo_url — el siguiente tick reintentará
+// la URL data: queda en la fila — el siguiente tick reintentará
 // el upload pero el FE ya ve la foto via local-serve.
 //
 // No registra failures contra el sync state agregado — esos son
 // reservados para errores de push/pull que afectan TODA la sync. Una
 // foto que no sube no debe pintar el indicator en rojo.
-func (a *Agent) uploadPendingMemberPhotos(ctx context.Context) {
+func (a *Agent) uploadPendingPhotos(ctx context.Context, e photoEntity) {
 	token := a.currentToken()
 	if token == "" {
 		a.cfg.Logger.Printf("[upload] skip: no sidecar token (sin login todavía)")
 		return
 	}
-	pending, err := a.findPendingPhotos(ctx)
+	pending, err := a.findPendingPhotos(ctx, e)
 	if err != nil {
-		a.cfg.Logger.Printf("[upload] find pending: %v", err)
+		a.cfg.Logger.Printf("[upload] %s find pending: %v", e.name, err)
 		return
 	}
 	if len(pending) == 0 {
 		return
 	}
-	a.cfg.Logger.Printf("[upload] %d foto(s) pendiente(s) — subiendo a R2", len(pending))
+	a.cfg.Logger.Printf("[upload] %d foto(s) de %s pendiente(s) — subiendo a R2", len(pending), e.name)
 	for _, p := range pending {
-		if err := a.uploadOnePhoto(ctx, token, p); err != nil {
+		if err := a.uploadOnePhoto(ctx, token, e, p); err != nil {
 			// Log only — los reintentos pasan en el próximo tick.
-			a.cfg.Logger.Printf("[upload] member %s: %v", p.MemberID, err)
+			a.cfg.Logger.Printf("[upload] %s %s: %v", e.name, p.EntityID, err)
 			continue
 		}
-		a.cfg.Logger.Printf("[upload] member %s: OK", p.MemberID)
+		a.cfg.Logger.Printf("[upload] %s %s: OK", e.name, p.EntityID)
 	}
 }
 
 type pendingPhoto struct {
-	MemberID string
+	EntityID string
 	DataURL  string
 }
 
-func (a *Agent) findPendingPhotos(ctx context.Context) ([]pendingPhoto, error) {
+func (a *Agent) findPendingPhotos(ctx context.Context, e photoEntity) ([]pendingPhoto, error) {
 	rows := []struct {
 		ID       string `db:"id"`
 		PhotoURL string `db:"photo_url"`
@@ -119,29 +196,33 @@ func (a *Agent) findPendingPhotos(ctx context.Context) ([]pendingPhoto, error) {
 		return nil, err
 	}
 	stx := tx.(*sharedDomain.SqlxTransaction)
+	// SQL building con fmt.Sprintf es seguro acá: table/column vienen
+	// del descriptor estático (no input de usuario). El alias `photo_url`
+	// mantiene fijo el shape sqlx aunque la columna se llame distinto
+	// en cada tabla.
 	// LIMIT acotado: drainamos lentamente para no bloquear el tick.
-	if err := stx.Select(ctx, &rows, `
-		SELECT id, photo_url FROM members
-		WHERE photo_url LIKE 'data:%'
+	q := fmt.Sprintf(`
+		SELECT id, %s AS photo_url FROM %s
+		WHERE %s LIKE 'data:%%'
 		  AND deleted_at IS NULL
-		LIMIT ?`, uploadBatchLimit,
-	); err != nil {
+		LIMIT ?`, e.column, e.table, e.column)
+	if err := stx.Select(ctx, &rows, q, uploadBatchLimit); err != nil {
 		return nil, err
 	}
 	out := make([]pendingPhoto, len(rows))
 	for i, r := range rows {
-		out[i] = pendingPhoto{MemberID: r.ID, DataURL: r.PhotoURL}
+		out[i] = pendingPhoto{EntityID: r.ID, DataURL: r.PhotoURL}
 	}
 	return out, nil
 }
 
-func (a *Agent) uploadOnePhoto(ctx context.Context, token string, p pendingPhoto) error {
+func (a *Agent) uploadOnePhoto(ctx context.Context, token string, e photoEntity, p pendingPhoto) error {
 	contentType, body, err := parseDataURL(p.DataURL)
 	if err != nil {
 		// Data URL corrupta — no vale la pena seguir reintentándola.
 		// Limpiamos el campo para que el dueño pueda re-elegir foto.
-		a.cfg.Logger.Printf("[upload] member %s: corrupt data URL, clearing — %v", p.MemberID, err)
-		return a.clearMemberPhoto(ctx, p.MemberID)
+		a.cfg.Logger.Printf("[upload] %s %s: corrupt data URL, clearing — %v", e.name, p.EntityID, err)
+		return e.clearPhoto(a, ctx, p.EntityID)
 	}
 	ext := extFromContentType(contentType)
 	if ext == "" {
@@ -152,16 +233,11 @@ func (a *Agent) uploadOnePhoto(ctx context.Context, token string, p pendingPhoto
 	// desacopla el cache del éxito del upload: aunque R2 esté caído,
 	// el FE ya puede renderear la foto via local-serve. Idempotente
 	// (re-escribir mismos bytes es seguro).
-	if err := a.writeMemberPhotoToDisk(p.MemberID, ext, body); err != nil {
+	if err := a.writePhotoToDisk(e, p.EntityID, ext, body); err != nil {
 		return fmt.Errorf("write disk: %w", err)
 	}
 
-	pres, err := a.requestPresign(ctx, token, presignReqBody{
-		Kind:        "member_photo",
-		MemberID:    p.MemberID,
-		Ext:         ext,
-		ContentType: contentType,
-	})
+	pres, err := a.requestPresign(ctx, token, e.buildPresignBody(p.EntityID, ext, contentType))
 	if err != nil {
 		return fmt.Errorf("presign: %w", err)
 	}
@@ -173,47 +249,56 @@ func (a *Agent) uploadOnePhoto(ctx context.Context, token string, p pendingPhoto
 	// Guardamos el object_key (NO una URL pública). El bucket es
 	// privado, así que cualquier lectura posterior requiere una GET
 	// firmada que pedimos al cloud — el key es lo único estable.
-	if err := a.replaceMemberPhotoURL(ctx, p.MemberID, pres.ObjectKey); err != nil {
+	if err := e.replacePhotoURL(a, ctx, p.EntityID, pres.ObjectKey); err != nil {
 		return fmt.Errorf("update local: %w", err)
 	}
 	return nil
 }
 
-// writeMemberPhotoToDisk persiste los bytes en UploadsDir/members/<id>.<ext>.
+// writePhotoToDisk persiste los bytes en UploadsDir/<subdir>/<id>.<ext>.
 // El archivo es leído por la ruta local-serve del sidecar para que el FE
 // renderee sin tocar R2. No-op si UploadsDir está vacío (build de tests).
-func (a *Agent) writeMemberPhotoToDisk(memberID, ext string, body []byte) error {
+func (a *Agent) writePhotoToDisk(e photoEntity, entityID, ext string, body []byte) error {
 	if a.cfg.UploadsDir == "" {
 		return fmt.Errorf("uploads dir not configured")
 	}
-	dir := filepath.Join(a.cfg.UploadsDir, "members")
+	dir := filepath.Join(a.cfg.UploadsDir, e.subdir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	// Si existe una foto previa con otra extensión (jpg→png), la
-	// barremos primero para evitar dos archivos para el mismo
-	// member_id. La ruta local-serve escoge por glob de prefijo, así
-	// que dos archivos generarían ambigüedad.
-	if err := removeOtherMemberPhotos(dir, memberID, ext); err != nil {
+	// barremos primero para evitar dos archivos para el mismo id.
+	// La ruta local-serve escoge por glob de prefijo, así que dos
+	// archivos generarían ambigüedad.
+	if err := removeOtherPhotos(dir, entityID, ext); err != nil {
 		// No-fatal: si el cleanup falla seguimos con el write nuevo;
 		// el caller maneja la ambigüedad agarrando el primero.
-		a.cfg.Logger.Printf("[upload] member %s: stale photo cleanup: %v", memberID, err)
+		a.cfg.Logger.Printf("[upload] %s %s: stale photo cleanup: %v", e.name, entityID, err)
 	}
-	path := filepath.Join(dir, memberID+"."+ext)
+	path := filepath.Join(dir, entityID+"."+ext)
 	// WriteFile es atómico-ish vía O_TRUNC; suficiente para 1-2MB de imagen.
-	return os.WriteFile(path, body, 0o644)
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		return err
+	}
+	// Log con path absoluto para que el operador pueda verificar dónde
+	// quedaron los bytes — útil si hay sospecha de que estén yendo a
+	// /tmp o a un cwd no persistente.
+	if abs, err := filepath.Abs(path); err == nil {
+		a.cfg.Logger.Printf("[upload] %s %s: cached → %s (%d bytes)", e.name, entityID, abs, len(body))
+	}
+	return nil
 }
 
-// removeOtherMemberPhotos borra archivos members/<id>.<otra-ext> que
-// hayan quedado de un upload anterior con extensión distinta. Lo
-// hacemos en el camino de escritura porque la ruta local-serve elige
-// por glob y dos archivos generan resultados no determinísticos.
-func removeOtherMemberPhotos(dir, memberID, keepExt string) error {
-	entries, err := filepath.Glob(filepath.Join(dir, memberID+".*"))
+// removeOtherPhotos borra archivos <subdir>/<id>.<otra-ext> que hayan
+// quedado de un upload anterior con extensión distinta. Lo hacemos en
+// el camino de escritura porque la ruta local-serve elige por glob y
+// dos archivos generan resultados no determinísticos.
+func removeOtherPhotos(dir, entityID, keepExt string) error {
+	entries, err := filepath.Glob(filepath.Join(dir, entityID+".*"))
 	if err != nil {
 		return err
 	}
-	keep := memberID + "." + keepExt
+	keep := entityID + "." + keepExt
 	for _, p := range entries {
 		if filepath.Base(p) == keep {
 			continue
@@ -370,6 +455,82 @@ func (a *Agent) replaceMemberPhotoURL(ctx context.Context, memberID, objectKey s
 	})
 }
 
+// replaceProductPhotoURL — paralelo a replaceMemberPhotoURL pero contra
+// la tabla `products` y la columna `image_url`. El payload incluye TODAS
+// las columnas NOT NULL que enqueueProduct espera en
+// modules/products/.../product_sqlite.go — sino el proyector cloud falla
+// con 23502 NOT NULL violation en el primer INSERT del row.
+//
+// La columna conserva el nombre `image_url` por consistencia con el
+// modelo de products preexistente; semánticamente guarda lo mismo que
+// `members.photo_url`: un object_key R2 (gyms/<gym>/products/<id>.<ext>)
+// para filas nuevas, y URLs públicas legacy para filas viejas.
+func (a *Agent) replaceProductPhotoURL(ctx context.Context, productID, objectKey string) error {
+	return a.uow.Command(ctx, func(tx sharedDomain.Transaction) error {
+		stx := tx.(*sharedDomain.SqlxTransaction)
+		now := time.Now().UTC().UnixMilli()
+
+		// 1. Update local row.
+		if _, err := stx.Exec(ctx, `
+			UPDATE products
+			SET image_url = ?,
+			    version = version + 1,
+			    updated_at = ?,
+			    synced_at = NULL
+			WHERE id = ?`,
+			objectKey, now, productID,
+		); err != nil {
+			return err
+		}
+
+		// 2. Re-read. Money se guarda en cents en SQLite (ADR-002 §2);
+		//    el proyector cloud espera la misma representación entera
+		//    en el payload — no convertimos aquí.
+		var row struct {
+			ID           string  `db:"id"`
+			GymID        string  `db:"gym_id"`
+			Version      int     `db:"version"`
+			CreatedAt    int64   `db:"created_at"`
+			UpdatedAt    int64   `db:"updated_at"`
+			Name         string  `db:"name"`
+			Price        int64   `db:"price"`
+			Stock        int     `db:"stock"`
+			StockMinimum int     `db:"stock_minimum"`
+			Category     *string `db:"category"`
+			ImageURL     string  `db:"image_url"`
+			Active       bool    `db:"active"`
+		}
+		if err := stx.Get(ctx, &row, `
+			SELECT id, gym_id, version, created_at, updated_at,
+			       name, price, stock, stock_minimum, category, image_url, active
+			FROM products WHERE id = ?`, productID,
+		); err != nil {
+			return err
+		}
+
+		// 3. Enqueue. Mismo shape que enqueueProduct +
+		//    image_url poblado.
+		payload, err := json.Marshal(map[string]any{
+			"id":            row.ID,
+			"gym_id":        row.GymID,
+			"version":       row.Version,
+			"created_at":    row.CreatedAt,
+			"updated_at":    row.UpdatedAt,
+			"name":          row.Name,
+			"price":         row.Price,
+			"stock":         row.Stock,
+			"stock_minimum": row.StockMinimum,
+			"category":      row.Category,
+			"image_url":     row.ImageURL,
+			"active":        row.Active,
+		})
+		if err != nil {
+			return err
+		}
+		return stx.EnqueueSync(ctx, "products", row.ID, "upsert", payload, row.Version)
+	})
+}
+
 // clearMemberPhoto se llama cuando la data URL local está corrupta y
 // no podemos extraer bytes. Mejor zerorear que reintentar para siempre.
 func (a *Agent) clearMemberPhoto(ctx context.Context, memberID string) error {
@@ -387,20 +548,49 @@ func (a *Agent) clearMemberPhoto(ctx context.Context, memberID string) error {
 	})
 }
 
-// downloadPendingMemberPhotos — corre después del Pull en cada tick.
+// clearProductPhoto — paralelo a clearMemberPhoto. Misma motivación:
+// data URL inválida, drenamos el campo para que el operador pueda
+// re-elegir foto sin loop de reintentos.
+func (a *Agent) clearProductPhoto(ctx context.Context, productID string) error {
+	return a.uow.Command(ctx, func(tx sharedDomain.Transaction) error {
+		stx := tx.(*sharedDomain.SqlxTransaction)
+		_, err := stx.Exec(ctx, `
+			UPDATE products SET image_url = NULL,
+			                    version = version + 1,
+			                    updated_at = ?,
+			                    synced_at = NULL
+			WHERE id = ?`,
+			time.Now().UTC().UnixMilli(), productID,
+		)
+		return err
+	})
+}
+
+// downloadPendingMemberPhotos — wrapper preservado por compatibilidad.
+func (a *Agent) downloadPendingMemberPhotos(ctx context.Context) {
+	a.downloadPendingPhotos(ctx, memberPhotoEntity)
+}
+
+// downloadPendingProductPhotos — análogo a downloadPendingMemberPhotos
+// pero sobre `products`/`image_url`.
+func (a *Agent) downloadPendingProductPhotos(ctx context.Context) {
+	a.downloadPendingPhotos(ctx, productPhotoEntity)
+}
+
+// downloadPendingPhotos — corre después del Pull en cada tick.
 // Cubre el caso multi-device: device A subió una foto, el cloud row
 // guarda el object_key R2, device B pulleó el cambio, ahora device B
-// tiene photo_url=gyms/<gym>/members/<id>.<ext> pero no tiene el
-// archivo en disco. Sin esto, el FE de B mostraría placeholder
-// permanente. La ruta local-serve es la única forma legítima que el
-// FE tiene de pedir la imagen — no abre socket directo a R2.
+// tiene la columna foto poblada pero no tiene el archivo en disco.
+// Sin esto, el FE de B mostraría placeholder permanente. La ruta
+// local-serve es la única forma legítima que el FE tiene de pedir la
+// imagen — no abre socket directo a R2.
 //
 // Bucket privado: el sidecar NO puede hacer GET plano a R2 (devolvería
 // 403). En cada miss pide al cloud `POST /uploads/presign-get` con el
 // object_key, recibe una GET firmada (TTL corto), y baja los bytes.
 //
 // Errores per-row se loggean y se reintenta en el próximo tick.
-func (a *Agent) downloadPendingMemberPhotos(ctx context.Context) {
+func (a *Agent) downloadPendingPhotos(ctx context.Context, e photoEntity) {
 	if a.cfg.UploadsDir == "" {
 		return
 	}
@@ -408,24 +598,24 @@ func (a *Agent) downloadPendingMemberPhotos(ctx context.Context) {
 	if token == "" {
 		return
 	}
-	pending, err := a.findPhotosNeedingDownload(ctx)
+	pending, err := a.findPhotosNeedingDownload(ctx, e)
 	if err != nil {
-		a.cfg.Logger.Printf("[download] find pending: %v", err)
+		a.cfg.Logger.Printf("[download] %s find pending: %v", e.name, err)
 		return
 	}
 	for _, p := range pending {
-		if err := a.downloadOnePhoto(ctx, token, p); err != nil {
-			a.cfg.Logger.Printf("[download] member %s: %v", p.MemberID, err)
+		if err := a.downloadOnePhoto(ctx, token, e, p); err != nil {
+			a.cfg.Logger.Printf("[download] %s %s: %v", e.name, p.EntityID, err)
 		}
 	}
 }
 
 type photoDownload struct {
-	MemberID  string
+	EntityID  string
 	ObjectKey string // siempre key (parseado de URL si la fila es legacy)
 }
 
-func (a *Agent) findPhotosNeedingDownload(ctx context.Context) ([]photoDownload, error) {
+func (a *Agent) findPhotosNeedingDownload(ctx context.Context, e photoEntity) ([]photoDownload, error) {
 	rows := []struct {
 		ID       string `db:"id"`
 		PhotoURL string `db:"photo_url"`
@@ -439,25 +629,27 @@ func (a *Agent) findPhotosNeedingDownload(ctx context.Context) ([]photoDownload,
 	// de filas creadas pre-private-bucket ('http%'). data:% y NULL
 	// quedan fuera. LIMIT generoso porque después filtramos por
 	// existencia en disco; la mayoría de filas ya tendrán el archivo.
-	if err := stx.Select(ctx, &rows, `
-		SELECT id, photo_url FROM members
-		WHERE (photo_url LIKE 'gyms/%' OR photo_url LIKE 'http%')
+	// fmt.Sprintf con identificadores del descriptor estático — sin
+	// input de usuario, sin riesgo de inyección.
+	q := fmt.Sprintf(`
+		SELECT id, %s AS photo_url FROM %s
+		WHERE (%s LIKE 'gyms/%%' OR %s LIKE 'http%%')
 		  AND deleted_at IS NULL
-		LIMIT ?`, downloadBatchLimit*10,
-	); err != nil {
+		LIMIT ?`, e.column, e.table, e.column, e.column)
+	if err := stx.Select(ctx, &rows, q, downloadBatchLimit*10); err != nil {
 		return nil, err
 	}
 	out := make([]photoDownload, 0, len(rows))
-	dir := filepath.Join(a.cfg.UploadsDir, "members")
+	dir := filepath.Join(a.cfg.UploadsDir, e.subdir)
 	for _, r := range rows {
-		if memberPhotoExists(dir, r.ID) {
+		if photoExists(dir, r.ID) {
 			continue
 		}
-		key := normalizeObjectKey(r.PhotoURL)
+		key := normalizeObjectKey(r.PhotoURL, e.subdir)
 		if key == "" {
 			continue
 		}
-		out = append(out, photoDownload{MemberID: r.ID, ObjectKey: key})
+		out = append(out, photoDownload{EntityID: r.ID, ObjectKey: key})
 		if len(out) >= downloadBatchLimit {
 			break
 		}
@@ -465,15 +657,15 @@ func (a *Agent) findPhotosNeedingDownload(ctx context.Context) ([]photoDownload,
 	return out, nil
 }
 
-func memberPhotoExists(dir, memberID string) bool {
-	matches, err := filepath.Glob(filepath.Join(dir, memberID+".*"))
+func photoExists(dir, entityID string) bool {
+	matches, err := filepath.Glob(filepath.Join(dir, entityID+".*"))
 	if err != nil {
 		return false
 	}
 	return len(matches) > 0
 }
 
-func (a *Agent) downloadOnePhoto(ctx context.Context, token string, p photoDownload) error {
+func (a *Agent) downloadOnePhoto(ctx context.Context, token string, e photoEntity, p photoDownload) error {
 	ext := extFromObjectKey(p.ObjectKey)
 	if ext == "" {
 		return fmt.Errorf("can't infer ext from key %q", p.ObjectKey)
@@ -500,7 +692,7 @@ func (a *Agent) downloadOnePhoto(ctx context.Context, token string, p photoDownl
 	if err != nil {
 		return err
 	}
-	return a.writeMemberPhotoToDisk(p.MemberID, ext, body)
+	return a.writePhotoToDisk(e, p.EntityID, ext, body)
 }
 
 // requestPresignGet llama al cloud /api/v1/uploads/presign-get. Mismo
@@ -542,15 +734,21 @@ func (a *Agent) requestPresignGet(ctx context.Context, token, objectKey string) 
 
 // normalizeObjectKey acepta dos shapes y devuelve un key plano:
 //
-//   - "gyms/<gym>/members/<id>.<ext>"           → tal cual
-//   - "https://host/gyms/<gym>/members/<id>.<ext>?qs" → strip
-//     protocol + host + query → "gyms/<gym>/members/<id>.<ext>"
+//   - "gyms/<gym>/<subdir>/<id>.<ext>"           → tal cual
+//   - "https://host/gyms/<gym>/<subdir>/<id>.<ext>?qs" → strip
+//     protocol + host + query → "gyms/<gym>/<subdir>/<id>.<ext>"
 //
 // Las filas legacy guardan el shape URL (cuando el bucket era público);
-// las filas nuevas guardan el key directo. El cloud espera el key.
-func normalizeObjectKey(s string) string {
+// las filas nuevas guardan el key directo. El cloud espera el key. El
+// param `subdir` se usa solamente para defensa adicional: rechazamos
+// keys que no caen bajo el subdir esperado del entity.
+func normalizeObjectKey(s, subdir string) string {
+	expectedMid := "/" + subdir + "/"
 	if strings.HasPrefix(s, "gyms/") {
-		return s
+		if strings.Contains(s, expectedMid) {
+			return s
+		}
+		return ""
 	}
 	if !strings.HasPrefix(s, "http") {
 		return ""
@@ -573,11 +771,14 @@ func normalizeObjectKey(s string) string {
 	if !strings.HasPrefix(path, "gyms/") {
 		return ""
 	}
+	if !strings.Contains(path, expectedMid) {
+		return ""
+	}
 	return path
 }
 
 // extFromObjectKey extrae la extensión del object key. Shape esperado:
-// gyms/<gym>/members/<id>.<ext> con ext ∈ {jpg, png, webp}. Si el shape
+// gyms/<gym>/<subdir>/<id>.<ext> con ext ∈ {jpg, png, webp}. Si el shape
 // cambia, falla seguro devolviendo "".
 func extFromObjectKey(k string) string {
 	dot := strings.LastIndexByte(k, '.')

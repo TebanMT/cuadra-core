@@ -42,6 +42,17 @@ type fakeReader struct {
 	topMembers      []reports.TopMemberRow
 	checkinsByDay   []reports.DailyCount
 
+	inventoryCost     float64
+	inventoryCostRows []reports.InventoryCostRow
+
+	generalExpenses float64
+	expenseRows     []reports.ExpenseRow
+
+	expensesDaily      []reports.DailyAmount
+	expensesByCategory map[string]float64
+	topProducts        []reports.TopProductRow
+	criticalStock      reports.CriticalStockCounts
+
 	activeCalls int
 	incomeCalls int
 }
@@ -122,6 +133,30 @@ func (r *fakeReader) CheckinsDailySeries(_ sharedDomain.Transaction, _ uuid.UUID
 }
 func (r *fakeReader) ListRecentPayments(_ sharedDomain.Transaction, _ uuid.UUID, _ int) ([]reports.RecentPaymentRow, error) {
 	return r.recentPayments, nil
+}
+func (r *fakeReader) SumInventoryCostBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time) (float64, error) {
+	return r.inventoryCost, nil
+}
+func (r *fakeReader) ListInventoryCostsBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time, _ int) ([]reports.InventoryCostRow, error) {
+	return r.inventoryCostRows, nil
+}
+func (r *fakeReader) SumExpensesBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time) (float64, error) {
+	return r.generalExpenses, nil
+}
+func (r *fakeReader) ListExpensesBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time, _ int) ([]reports.ExpenseRow, error) {
+	return r.expenseRows, nil
+}
+func (r *fakeReader) ExpensesDailySeries(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time) ([]reports.DailyAmount, error) {
+	return r.expensesDaily, nil
+}
+func (r *fakeReader) ExpensesByCategoryBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time) (map[string]float64, error) {
+	return r.expensesByCategory, nil
+}
+func (r *fakeReader) TopProductsBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time, _ int) ([]reports.TopProductRow, error) {
+	return r.topProducts, nil
+}
+func (r *fakeReader) CountCriticalStock(_ sharedDomain.Transaction, _ uuid.UUID) (reports.CriticalStockCounts, error) {
+	return r.criticalStock, nil
 }
 
 // fakeUoW returns a no-op transaction. Reports use cases never actually

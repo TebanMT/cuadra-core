@@ -795,6 +795,300 @@ func (r *SQLiteReader) ListRecentPayments(tx sharedDomain.Transaction, gymID uui
 	return out, nil
 }
 
+// SumInventoryCostBetween — totaliza desembolsos por mercancía en el
+// rango (movimientos 'restock' con costo capturado). En SQLite cost se
+// guarda en cents (INTEGER) y delta es unidades — el total real es
+// cost*delta. Filtramos NULL para no contar restocks sin costo (el
+// operador puede no haberlo conocido al momento del registro).
+func (r *SQLiteReader) SumInventoryCostBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (float64, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	fromMs := time.Date(from.Year(), from.Month(), from.Day(), 0, 0, 0, 0, time.UTC).UnixMilli()
+	toMs := time.Date(to.Year(), to.Month(), to.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1).UnixMilli()
+	var cents sql.NullInt64
+	err := stx.Get(context.Background(), &cents, `
+		SELECT COALESCE(SUM(cost * delta), 0) FROM stock_movements
+		WHERE gym_id = ? AND deleted_at IS NULL
+		  AND movement_type = 'restock'
+		  AND cost IS NOT NULL
+		  AND created_at >= ? AND created_at < ?`,
+		gymID.String(), fromMs, toMs)
+	return float64(cents.Int64) / 100, err
+}
+
+// ListInventoryCostsBetween — JOINea product_name. ORDER BY created_at
+// DESC para que el último egreso quede arriba en la tabla del FE.
+func (r *SQLiteReader) ListInventoryCostsBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time, limit int) ([]reports.InventoryCostRow, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	if limit <= 0 {
+		limit = 200
+	}
+	fromMs := time.Date(from.Year(), from.Month(), from.Day(), 0, 0, 0, 0, time.UTC).UnixMilli()
+	toMs := time.Date(to.Year(), to.Month(), to.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1).UnixMilli()
+	type row struct {
+		MovementID  string         `db:"movement_id"`
+		ProductID   string         `db:"product_id"`
+		ProductName string         `db:"product_name"`
+		Delta       int            `db:"delta"`
+		CostCents   int64          `db:"cost"`
+		Reason      sql.NullString `db:"reason"`
+		CreatedAt   int64          `db:"created_at"`
+	}
+	var rows []row
+	if err := stx.Select(context.Background(), &rows, `
+		SELECT sm.id AS movement_id, sm.product_id, p.name AS product_name,
+		       sm.delta, sm.cost, sm.reason, sm.created_at
+		FROM stock_movements sm
+		JOIN products p ON p.id = sm.product_id
+		WHERE sm.gym_id = ? AND sm.deleted_at IS NULL
+		  AND sm.movement_type = 'restock'
+		  AND sm.cost IS NOT NULL
+		  AND sm.created_at >= ? AND sm.created_at < ?
+		ORDER BY sm.created_at DESC
+		LIMIT ?`, gymID.String(), fromMs, toMs, limit); err != nil {
+		return nil, err
+	}
+	out := make([]reports.InventoryCostRow, 0, len(rows))
+	for _, x := range rows {
+		mid, _ := uuid.Parse(x.MovementID)
+		pid, _ := uuid.Parse(x.ProductID)
+		costUnit := float64(x.CostCents) / 100
+		entry := reports.InventoryCostRow{
+			MovementID:  mid,
+			ProductID:   pid,
+			ProductName: x.ProductName,
+			Delta:       x.Delta,
+			CostUnit:    costUnit,
+			CostTotal:   costUnit * float64(x.Delta),
+			OccurredAt:  time.UnixMilli(x.CreatedAt).UTC(),
+		}
+		if x.Reason.Valid {
+			s := x.Reason.String
+			entry.Reason = &s
+		}
+		out = append(out, entry)
+	}
+	return out, nil
+}
+
+// SumExpensesBetween — totaliza gastos generales (BC expenses) en el
+// rango. expense_date es TEXT YYYY-MM-DD (orden lexicográfico). amount
+// está en cents → fromCents al edge.
+func (r *SQLiteReader) SumExpensesBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (float64, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	var cents sql.NullInt64
+	err := stx.Get(context.Background(), &cents, `
+		SELECT COALESCE(SUM(amount), 0) FROM expenses
+		WHERE gym_id = ? AND deleted_at IS NULL
+		  AND expense_date >= ? AND expense_date <= ?`,
+		gymID.String(), from.Format("2006-01-02"), to.Format("2006-01-02"))
+	return float64(cents.Int64) / 100, err
+}
+
+// ListExpensesBetween — lista expenses del rango. ORDER BY expense_date
+// DESC para que el último gasto quede arriba. amount en cents → float
+// al edge.
+func (r *SQLiteReader) ListExpensesBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time, limit int) ([]reports.ExpenseRow, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	if limit <= 0 {
+		limit = 200
+	}
+	type row struct {
+		ID            string         `db:"id"`
+		ExpenseDate   string         `db:"expense_date"`
+		AmountCents   int64          `db:"amount"`
+		Category      string         `db:"category"`
+		Description   sql.NullString `db:"description"`
+		PaymentMethod string         `db:"payment_method"`
+	}
+	var rows []row
+	if err := stx.Select(context.Background(), &rows, `
+		SELECT id, expense_date, amount, category, description, payment_method
+		FROM expenses
+		WHERE gym_id = ? AND deleted_at IS NULL
+		  AND expense_date >= ? AND expense_date <= ?
+		ORDER BY expense_date DESC, created_at DESC
+		LIMIT ?`, gymID.String(), from.Format("2006-01-02"), to.Format("2006-01-02"), limit); err != nil {
+		return nil, err
+	}
+	out := make([]reports.ExpenseRow, 0, len(rows))
+	for _, x := range rows {
+		id, _ := uuid.Parse(x.ID)
+		date, _ := time.Parse("2006-01-02", x.ExpenseDate)
+		entry := reports.ExpenseRow{
+			ID:            id,
+			ExpenseDate:   date,
+			Amount:        float64(x.AmountCents) / 100,
+			Category:      x.Category,
+			PaymentMethod: x.PaymentMethod,
+		}
+		if x.Description.Valid {
+			s := x.Description.String
+			entry.Description = &s
+		}
+		out = append(out, entry)
+	}
+	return out, nil
+}
+
+// ExpensesDailySeries — egresos por día = expenses (expense_date) +
+// stock_movements restock con costo (created_at). Suma en memoria por día
+// porque cada fuente vive en una tabla con un tipo de fecha distinto y un
+// UNION complicaría el binding.
+func (r *SQLiteReader) ExpensesDailySeries(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) ([]reports.DailyAmount, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	bucket := map[string]int64{}
+
+	type expRow struct {
+		Day   string `db:"day"`
+		Total int64  `db:"total"`
+	}
+	var expRows []expRow
+	if err := stx.Select(context.Background(), &expRows, `
+		SELECT expense_date AS day, COALESCE(SUM(amount), 0) AS total
+		FROM expenses
+		WHERE gym_id = ? AND deleted_at IS NULL
+		  AND expense_date >= ? AND expense_date <= ?
+		GROUP BY expense_date`,
+		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt)); err != nil {
+		return nil, err
+	}
+	for _, x := range expRows {
+		bucket[x.Day] += x.Total
+	}
+
+	fromMs := time.Date(from.Year(), from.Month(), from.Day(), 0, 0, 0, 0, time.UTC).UnixMilli()
+	toMs := time.Date(to.Year(), to.Month(), to.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1).UnixMilli()
+	type invRow struct {
+		Day   string `db:"day"`
+		Total int64  `db:"total"`
+	}
+	var invRows []invRow
+	if err := stx.Select(context.Background(), &invRows, `
+		SELECT date(created_at/1000, 'unixepoch') AS day,
+		       COALESCE(SUM(cost * delta), 0) AS total
+		FROM stock_movements
+		WHERE gym_id = ? AND deleted_at IS NULL
+		  AND movement_type = 'restock'
+		  AND cost IS NOT NULL
+		  AND created_at >= ? AND created_at < ?
+		GROUP BY day`,
+		gymID.String(), fromMs, toMs); err != nil {
+		return nil, err
+	}
+	for _, x := range invRows {
+		bucket[x.Day] += x.Total
+	}
+
+	out := make([]reports.DailyAmount, 0, len(bucket))
+	for day, total := range bucket {
+		t, err := time.Parse(sqliteDateFmt, day)
+		if err != nil {
+			continue
+		}
+		out = append(out, reports.DailyAmount{Date: t, Total: float64(total) / 100})
+	}
+	sortDailyAmountSqlite(out)
+	return out, nil
+}
+
+// ExpensesByCategoryBetween — SUM(amount) por categoría dentro del rango.
+// Sólo BC expenses (las compras de mercancía no son una categoría aquí).
+func (r *SQLiteReader) ExpensesByCategoryBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (map[string]float64, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	type row struct {
+		Category string `db:"category"`
+		Total    int64  `db:"total"`
+	}
+	var rows []row
+	if err := stx.Select(context.Background(), &rows, `
+		SELECT category, COALESCE(SUM(amount), 0) AS total
+		FROM expenses
+		WHERE gym_id = ? AND deleted_at IS NULL
+		  AND expense_date >= ? AND expense_date <= ?
+		GROUP BY category`,
+		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt)); err != nil {
+		return nil, err
+	}
+	out := make(map[string]float64, len(rows))
+	for _, x := range rows {
+		out[x.Category] = float64(x.Total) / 100
+	}
+	return out, nil
+}
+
+// TopProductsBetween — ranking por revenue (= SUM(line_total) en cents).
+// JOIN con payments para filtrar por payment_date — alinea la ventana con
+// el resto del use case.
+func (r *SQLiteReader) TopProductsBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time, limit int) ([]reports.TopProductRow, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	if limit <= 0 {
+		limit = 5
+	}
+	type row struct {
+		ProductID   string `db:"product_id"`
+		ProductName string `db:"product_name"`
+		Quantity    int    `db:"quantity"`
+		Revenue     int64  `db:"revenue"`
+	}
+	var rows []row
+	if err := stx.Select(context.Background(), &rows, `
+		SELECT si.product_id,
+		       MIN(si.product_name_snapshot) AS product_name,
+		       COALESCE(SUM(si.quantity), 0) AS quantity,
+		       COALESCE(SUM(si.line_total), 0) AS revenue
+		FROM sale_items si
+		JOIN sales s ON s.id = si.sale_id AND s.deleted_at IS NULL
+		JOIN payments p ON p.id = s.payment_id AND p.deleted_at IS NULL
+		WHERE si.gym_id = ? AND si.deleted_at IS NULL
+		  AND p.concept <> 'refund'
+		  AND p.payment_date >= ? AND p.payment_date <= ?
+		GROUP BY si.product_id
+		ORDER BY revenue DESC
+		LIMIT ?`,
+		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt), limit); err != nil {
+		return nil, err
+	}
+	out := make([]reports.TopProductRow, 0, len(rows))
+	for _, x := range rows {
+		pid, _ := uuid.Parse(x.ProductID)
+		out = append(out, reports.TopProductRow{
+			ProductID:   pid,
+			ProductName: x.ProductName,
+			Quantity:    x.Quantity,
+			Revenue:     float64(x.Revenue) / 100,
+		})
+	}
+	return out, nil
+}
+
+// CountCriticalStock — snapshot del catálogo. SQLite usa active=1 boolean
+// como integer.
+func (r *SQLiteReader) CountCriticalStock(tx sharedDomain.Transaction, gymID uuid.UUID) (reports.CriticalStockCounts, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	var out struct {
+		OutCount int `db:"out_count"`
+		LowCount int `db:"low_count"`
+	}
+	err := stx.Get(context.Background(), &out, `
+		SELECT
+		    SUM(CASE WHEN stock <= 0 THEN 1 ELSE 0 END) AS out_count,
+		    SUM(CASE WHEN stock > 0 AND stock <= stock_minimum THEN 1 ELSE 0 END) AS low_count
+		FROM products
+		WHERE gym_id = ? AND deleted_at IS NULL AND active = 1`,
+		gymID.String())
+	return reports.CriticalStockCounts{OutCount: out.OutCount, LowCount: out.LowCount}, err
+}
+
+// sortDailyAmountSqlite — insertion sort por fecha ascendente. Series cortas
+// (≤365 entradas), no vale la pena pull-in de sort.Slice acá.
+func sortDailyAmountSqlite(s []reports.DailyAmount) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j-1].Date.After(s[j].Date); j-- {
+			s[j-1], s[j] = s[j], s[j-1]
+		}
+	}
+}
+
 // daysBetweenSqlite returns floor((to - from) in days) treating both at day
 // granularity. Matches the Postgres impl's `daysBetween`.
 func daysBetweenSqlite(from, to time.Time) int {

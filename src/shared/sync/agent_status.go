@@ -68,12 +68,31 @@ func (s *StatusController) Trigger(c *gin.Context) {
 }
 
 // buildStatusResponse maps the in-memory AgentSnapshot to the wire shape
-// and applies UC-044's threshold rules:
+// for /sync/status.
 //
-//	green  — last_synced_at within 5 min OR initial sync still running.
-//	amber  — 5 min … 24 h since last_synced_at.
-//	long   — 24 h … 7 d.
-//	crit   — > 7 d.
+// Earlier this function classified state purely off the gap from
+// `LastSyncedAt`: "más de 5 min desde el último éxito" → `offline_medium`,
+// which the FE renders como "Sin internet, todo guardado en esta laptop."
+// Eso es incorrecto cuando NO hay falla real: el agente puede haber tickeado
+// sin nada que empujar (push/pull no-ops actualizan LastSyncedAt sólo si
+// hay actividad), el token puede no estar inyectado todavía, la laptop
+// pudo haber dormido — ninguno de esos es "sin internet" desde la
+// perspectiva del operador, y la alerta amarilla genera ansiedad
+// innecesaria.
+//
+// Nueva semántica: `ConsecutiveFailures` y `LastError` son los signos
+// primarios de "algo está mal". El gap se usa sólo como tiempo-de-vida
+// final cuando ya pasó tanto que algo silencioso está roto (>24h).
+//
+//	verde      — agente saludable: hubo sync exitoso reciente y cero
+//	             fallas consecutivas. También cubre el caso "agente
+//	             idle sin nada que mandar" — no hay razón para
+//	             pintar rojo/amarillo.
+//	amarillo   — hubo intentos fallidos (consecutive_failures > 0) o
+//	             pasaron >24h sin sincronizar.
+//	rojo       — >7d sin sincronizar, o nunca sincronizó y ya hubo
+//	             un intento fallido.
+//	syncing    — full-sync inicial corriendo.
 //
 // Pulled out so tests can drive synthetic "now" without spinning up an
 // agent.
@@ -83,6 +102,7 @@ func buildStatusResponse(snap AgentSnapshot, now time.Time) StatusResponse {
 		LastError:           snap.LastError,
 		ConsecutiveFailures: snap.ConsecutiveFailures,
 		InitialSyncDone:     !snap.InitialSyncCompletedAt.IsZero(),
+		AuthInvalid:         snap.AuthInvalid || snap.WaitingForAuth,
 	}
 	if !snap.LastSyncedAt.IsZero() {
 		t := snap.LastSyncedAt
@@ -96,18 +116,26 @@ func buildStatusResponse(snap AgentSnapshot, now time.Time) StatusResponse {
 		t := snap.NextRetryAt
 		r.NextRetryAt = &t
 	}
-	if snap.State == StateInitialSyncing && r.InitialSyncDone == false {
+
+	// Caso "initial syncing": full-sync corriendo todavía. Spinner.
+	if snap.State == StateInitialSyncing && !r.InitialSyncDone {
 		r.State = StateInitialSyncing
 		return r
 	}
+
+	// La credencial del cloud está muerta (401). Tiene prioridad sobre
+	// cualquier clasificación de "stale" — el operador necesita ver un
+	// mensaje accionable ("vuelve a iniciar sesión"), no la genérica
+	// "Sin internet".
+	if snap.AuthInvalid {
+		r.State = StateAuthInvalid
+		return r
+	}
+
+	// Sidecar recién canjeado: nunca completó un sync. Sin error → spinner
+	// (initial syncing). Con error → crítico (algo se rompió en el primer
+	// intento).
 	if snap.LastSyncedAt.IsZero() {
-		// Caso típico: el sidecar acaba de canjear el código de instalación
-		// y todavía no completa su primera tanda de sync. Antes mapeábamos
-		// esto a `offline_critical`, que en la UI sale como "Hay un
-		// problema sincronizando" con tono rojo — alarmante para un dueño
-		// recién instalado que no tiene NADA roto. Si hubo un intento y
-		// falló, `LastError` lo refleja → ahí sí escalar a critical. Sin
-		// error registrado, lo correcto es `initial_syncing` (spinner).
 		if snap.LastError != "" {
 			r.State = StateOfflineCritical
 		} else {
@@ -115,16 +143,39 @@ func buildStatusResponse(snap AgentSnapshot, now time.Time) StatusResponse {
 		}
 		return r
 	}
+
 	gap := now.Sub(snap.LastSyncedAt)
-	switch {
-	case gap < 5*time.Minute:
-		r.State = StateOnline
-	case gap < 24*time.Hour:
-		r.State = StateOfflineMedium
-	case gap < 7*24*time.Hour:
-		r.State = StateOfflineLong
-	default:
+
+	// Edge: pasó tanto que algo silencioso seguramente está roto. La alerta
+	// vale la pena aunque consecutive_failures haya sido reseteado o el
+	// agente esté pausado por falta de token. >7d siempre rojo; 24h..7d
+	// amarillo de tipo "long".
+	if gap >= 7*24*time.Hour {
 		r.State = StateOfflineCritical
+		return r
 	}
+	if gap >= 24*time.Hour {
+		r.State = StateOfflineLong
+		return r
+	}
+
+	// Hay fallas activas. Severidad escala con cuántas se acumulan y cuán
+	// vieja es la última sync exitosa. Una o dos fallas transitorias se
+	// muestran como "offline_short" (verde en el FE) — no asustar al
+	// dueño por un blip pasajero. A partir de 3+ saltamos a medium.
+	if snap.ConsecutiveFailures > 0 {
+		if snap.ConsecutiveFailures < 3 && gap < 5*time.Minute {
+			r.State = StateOfflineShort
+		} else {
+			r.State = StateOfflineMedium
+		}
+		return r
+	}
+
+	// Sin fallas, último éxito hace <24h. Estado saludable, incluso si la
+	// última sync fue hace varios minutos: lo importante es que no haya
+	// señal de problema. Si después aparece una falla real, este branch
+	// no aplica.
+	r.State = StateOnline
 	return r
 }

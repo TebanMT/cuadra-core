@@ -19,8 +19,9 @@ type CashClosePostgresReader struct{}
 func NewCashClosePostgresReader() *CashClosePostgresReader { return &CashClosePostgresReader{} }
 
 // Aggregate runs the per-day rollup. Refunds (negative amounts) are NOT folded
-// into ByMethod / ByConcept — they're surfaced in RefundTotal so the operator
-// can see the gross take separately.
+// into ByMethod / ByConcept — they're surfaced in RefundTotal + RefundCount so
+// the operator sees the gross take separately. ByConcept now carries counts;
+// ByOperator brings the user.full_name + sales count via subqueries.
 func (r *CashClosePostgresReader) Aggregate(tx sharedDomain.Transaction, q billingRepo.CashCloseQuery) (*billingRepo.CashCloseTotals, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	dateStr := q.Date.UTC().Format("2006-01-02")
@@ -41,57 +42,82 @@ func (r *CashClosePostgresReader) Aggregate(tx sharedDomain.Transaction, q billi
 	type conceptRow struct {
 		Concept string
 		Total   float64
+		Cnt     int
 	}
 	var conceptRows []conceptRow
 	if err := gormTx.Model(&models.PaymentModel{}).
-		Select("concept, SUM(amount) AS total").
+		Select("concept, SUM(amount) AS total, COUNT(*) AS cnt").
 		Where("gym_id = ? AND payment_date = ? AND concept <> ? AND deleted_at IS NULL",
 			q.GymID, dateStr, paymentDomain.ConceptRefund).
 		Group("concept").Scan(&conceptRows).Error; err != nil {
 		return nil, err
 	}
 
-	var refundTotal float64
+	type refundSummary struct {
+		Total float64
+		Cnt   int
+	}
+	var refundSum refundSummary
 	if err := gormTx.Model(&models.PaymentModel{}).
-		Select("COALESCE(SUM(amount), 0) AS total").
+		Select("COALESCE(SUM(amount), 0) AS total, COUNT(*) AS cnt").
 		Where("gym_id = ? AND payment_date = ? AND concept = ? AND deleted_at IS NULL",
 			q.GymID, dateStr, paymentDomain.ConceptRefund).
-		Scan(&refundTotal).Error; err != nil {
+		Scan(&refundSum).Error; err != nil {
 		return nil, err
 	}
 
+	// Operator rollup: JOIN users so the FE renders names, and use
+	// SUM(CASE WHEN concept='product' THEN 1 ELSE 0 END) for sales count.
+	// Excludes refunds — those are visualized separately in the report.
 	type opRow struct {
-		OperatorID uuid.UUID
-		Total      float64
-		Cnt        int
+		OperatorID   uuid.UUID
+		OperatorName *string
+		Total        float64
+		PaymentsN    int
+		SalesN       int
 	}
 	var opRows []opRow
-	if err := gormTx.Model(&models.PaymentModel{}).
-		Select("operator_id, SUM(amount) AS total, COUNT(*) AS cnt").
-		Where("gym_id = ? AND payment_date = ? AND concept <> ? AND deleted_at IS NULL",
-			q.GymID, dateStr, paymentDomain.ConceptRefund).
-		Group("operator_id").Scan(&opRows).Error; err != nil {
+	if err := gormTx.Raw(`
+		SELECT p.operator_id,
+		       u.full_name AS operator_name,
+		       COALESCE(SUM(p.amount), 0) AS total,
+		       COUNT(*) AS payments_n,
+		       SUM(CASE WHEN p.concept = 'product' THEN 1 ELSE 0 END) AS sales_n
+		FROM payments p
+		LEFT JOIN users u ON u.id = p.operator_id AND u.deleted_at IS NULL
+		WHERE p.gym_id = ? AND p.payment_date = ?
+		  AND p.concept <> ? AND p.deleted_at IS NULL
+		GROUP BY p.operator_id, u.full_name
+		ORDER BY total DESC`,
+		q.GymID, dateStr, paymentDomain.ConceptRefund).Scan(&opRows).Error; err != nil {
 		return nil, err
 	}
 
 	out := &billingRepo.CashCloseTotals{
 		ByMethod:    map[string]float64{},
-		ByConcept:   map[string]float64{},
+		ByConcept:   map[string]billingRepo.ConceptTotal{},
 		ByOperator:  make([]billingRepo.OperatorTotal, 0, len(opRows)),
-		RefundTotal: refundTotal,
+		RefundTotal: refundSum.Total,
+		RefundCount: refundSum.Cnt,
 	}
 	for _, m := range methodRows {
 		out.ByMethod[m.PaymentMethod] = m.Total
 		out.GrandTotal += m.Total
 	}
 	for _, c := range conceptRows {
-		out.ByConcept[c.Concept] = c.Total
+		out.ByConcept[c.Concept] = billingRepo.ConceptTotal{Total: c.Total, Count: c.Cnt}
 	}
 	for _, o := range opRows {
+		name := ""
+		if o.OperatorName != nil {
+			name = *o.OperatorName
+		}
 		out.ByOperator = append(out.ByOperator, billingRepo.OperatorTotal{
-			OperatorID: o.OperatorID,
-			Total:      o.Total,
-			PaymentsN:  o.Cnt,
+			OperatorID:   o.OperatorID,
+			OperatorName: name,
+			Total:        o.Total,
+			PaymentsN:    o.PaymentsN,
+			SalesN:       o.SalesN,
 		})
 	}
 	return out, nil

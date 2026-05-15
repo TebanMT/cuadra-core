@@ -196,6 +196,139 @@ func (r *CheckinSQLiteRepository) ListRecentByGym(tx sharedDomain.Transaction, g
 	return out, nil
 }
 
+// ListByGymBetween — drill-down: check-ins en rango [from,to] al día.
+// Misma shape de salida que ListRecentByGym.
+func (r *CheckinSQLiteRepository) ListByGymBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time, limit int) ([]chkRepo.RecentCheckinRow, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	fromMs := time.Date(from.Year(), from.Month(), from.Day(), 0, 0, 0, 0, time.UTC).UnixMilli()
+	toMs := time.Date(to.Year(), to.Month(), to.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1).UnixMilli()
+	type row struct {
+		ID             string         `db:"id"`
+		MemberID       sql.NullString `db:"member_id"`
+		MemberName     sql.NullString `db:"member_name"`
+		Method         string         `db:"method"`
+		Result         string         `db:"result"`
+		ManualOverride int            `db:"manual_override"`
+		OverrideReason sql.NullString `db:"override_reason"`
+		OperatorName   sql.NullString `db:"operator_name"`
+		CheckinAt      int64          `db:"checkin_at"`
+		ExpiryDate     sql.NullString `db:"expiry_date"`
+	}
+	var rows []row
+	if err := stx.Select(context.Background(), &rows, `
+		SELECT c.id, c.member_id,
+		       m.full_name AS member_name,
+		       c.method, c.result, c.manual_override, c.override_reason,
+		       u.full_name AS operator_name,
+		       c.checkin_at,
+		       (SELECT ms.expiry_date FROM memberships ms
+		        WHERE ms.member_id = c.member_id
+		          AND ms.status = 'active' AND ms.deleted_at IS NULL
+		        LIMIT 1) AS expiry_date
+		FROM checkins c
+		LEFT JOIN members m ON m.id = c.member_id AND m.deleted_at IS NULL
+		LEFT JOIN users u ON u.id = c.operator_id AND u.deleted_at IS NULL
+		WHERE c.gym_id = ? AND c.deleted_at IS NULL
+		  AND c.checkin_at >= ? AND c.checkin_at < ?
+		ORDER BY c.checkin_at DESC
+		LIMIT ?`, gymID.String(), fromMs, toMs, limit); err != nil {
+		return nil, err
+	}
+	out := make([]chkRepo.RecentCheckinRow, 0, len(rows))
+	for _, x := range rows {
+		id, _ := uuid.Parse(x.ID)
+		entry := chkRepo.RecentCheckinRow{
+			ID:             id,
+			Method:         x.Method,
+			Result:         x.Result,
+			ManualOverride: x.ManualOverride == 1,
+			CheckinAt:      time.UnixMilli(x.CheckinAt).UTC(),
+		}
+		if x.MemberID.Valid {
+			mid, _ := uuid.Parse(x.MemberID.String)
+			entry.MemberID = &mid
+		}
+		if x.MemberName.Valid {
+			v := x.MemberName.String
+			entry.MemberName = &v
+		}
+		if x.OverrideReason.Valid {
+			v := x.OverrideReason.String
+			entry.OverrideReason = &v
+		}
+		if x.OperatorName.Valid {
+			v := x.OperatorName.String
+			entry.OperatorName = &v
+		}
+		if x.ExpiryDate.Valid {
+			t, err := time.Parse(sqliteCheckinDateFmt, x.ExpiryDate.String)
+			if err == nil {
+				entry.ExpiryDate = &t
+			}
+		}
+		out = append(out, entry)
+	}
+	return out, nil
+}
+
+func (r *CheckinSQLiteRepository) ListByMemberDetailed(tx sharedDomain.Transaction, gymID, memberID uuid.UUID, limit int) ([]chkRepo.RecentCheckinRow, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	type row struct {
+		ID             string         `db:"id"`
+		MemberID       sql.NullString `db:"member_id"`
+		Method         string         `db:"method"`
+		Result         string         `db:"result"`
+		ManualOverride int            `db:"manual_override"`
+		OverrideReason sql.NullString `db:"override_reason"`
+		OperatorName   sql.NullString `db:"operator_name"`
+		CheckinAt      int64          `db:"checkin_at"`
+	}
+	var rows []row
+	if err := stx.Select(context.Background(), &rows, `
+		SELECT c.id, c.member_id,
+		       c.method, c.result, c.manual_override, c.override_reason,
+		       u.full_name AS operator_name,
+		       c.checkin_at
+		FROM checkins c
+		LEFT JOIN users u ON u.id = c.operator_id AND u.deleted_at IS NULL
+		WHERE c.gym_id = ? AND c.member_id = ? AND c.deleted_at IS NULL
+		ORDER BY c.checkin_at DESC
+		LIMIT ?`, gymID.String(), memberID.String(), limit); err != nil {
+		return nil, err
+	}
+	out := make([]chkRepo.RecentCheckinRow, 0, len(rows))
+	for _, x := range rows {
+		id, _ := uuid.Parse(x.ID)
+		entry := chkRepo.RecentCheckinRow{
+			ID:             id,
+			Method:         x.Method,
+			Result:         x.Result,
+			ManualOverride: x.ManualOverride == 1,
+			CheckinAt:      time.UnixMilli(x.CheckinAt).UTC(),
+		}
+		if x.MemberID.Valid {
+			mid, _ := uuid.Parse(x.MemberID.String)
+			entry.MemberID = &mid
+		}
+		if x.OverrideReason.Valid {
+			v := x.OverrideReason.String
+			entry.OverrideReason = &v
+		}
+		if x.OperatorName.Valid {
+			v := x.OperatorName.String
+			entry.OperatorName = &v
+		}
+		out = append(out, entry)
+	}
+	return out, nil
+}
+
 // ---------------------------------------------------------------------------
 // Mappers
 // ---------------------------------------------------------------------------

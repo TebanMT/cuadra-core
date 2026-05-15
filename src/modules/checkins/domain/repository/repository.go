@@ -30,6 +30,15 @@ type CheckinRepository interface {
 	// row. The active membership's expiry is included for the "vence en X
 	// días" badge — same query the kiosk shows after a successful pass.
 	ListRecentByGym(tx sharedDomain.Transaction, gymID uuid.UUID, limit int) ([]RecentCheckinRow, error)
+	// ListByGymBetween returns checkins in the day-grain window [from,to]
+	// (both inclusive). Used by the reports page drill-down ("ver entradas
+	// del día X"). Joins member name + expiry the same way ListRecentByGym
+	// does so the FE renders one shape.
+	ListByGymBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time, limit int) ([]RecentCheckinRow, error)
+	// ListByMemberDetailed returns the latest N checkins de un socio
+	// concreto con el operator_name resuelto. Lo consume la pestaña
+	// "Asistencia" del detalle de socio para evitar N+1 en el FE.
+	ListByMemberDetailed(tx sharedDomain.Transaction, gymID, memberID uuid.UUID, limit int) ([]RecentCheckinRow, error)
 }
 
 // RecentCheckinRow is the flat shape consumed by GET /api/v1/checkins

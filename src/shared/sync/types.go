@@ -102,6 +102,12 @@ type StatusResponse struct {
 	InitialSyncDone     bool       `json:"initial_sync_completed"`
 	NextRetryAt         *time.Time `json:"next_retry_at,omitempty"`
 	ConsecutiveFailures int        `json:"consecutive_failures"`
+	// AuthInvalid — el cloud rechazó la credencial. El FE renderea CTA de
+	// re-login en lugar de "Sin internet". También true cuando WaitingForAuth
+	// (sidecar nunca recibió token, ej. recién canjeado pero el desktop
+	// aún no llamó al login) — desde la perspectiva del operador es el
+	// mismo problema: hace falta autenticar.
+	AuthInvalid bool `json:"auth_invalid,omitempty"`
 }
 
 // State values returned by /sync/status, per UC-044.
@@ -112,4 +118,9 @@ const (
 	StateOfflineLong     = "offline_long"     // 24 h – 7 d
 	StateOfflineCritical = "offline_critical" // >7 d
 	StateInitialSyncing  = "initial_syncing"  // full-sync in progress
+	// StateAuthInvalid — el cloud rechazó la credencial del sidecar (401).
+	// Distinto de offline_*: ahí internet funciona, falta re-autenticar. La
+	// UI muestra un CTA explícito ("vuelve a iniciar sesión") en lugar de
+	// la genérica "Sin internet" que sólo confundiría.
+	StateAuthInvalid = "auth_invalid"
 )

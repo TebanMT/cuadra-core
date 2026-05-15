@@ -13,20 +13,23 @@ import (
 // ListProductsInput backs UC-023 (listado). The recepción UI calls this every
 // time the venta grid opens, so paging defaults are friendly.
 type ListProductsInput struct {
-	GymID           uuid.UUID
-	Search          string
-	Category        string
-	IncludeInactive bool
-	LowStockOnly    bool
-	Page            int
-	PageSize        int
+	GymID        uuid.UUID
+	Search       string
+	Category     string
+	ActiveFilter string // "active" | "inactive" | "all"; empty defaults to "active".
+	LowStockOnly bool
+	Sort         string // prodRepo.Sort* — empty defaults a "name".
+	Direction    string // prodRepo.SortDir* — empty defaults a "asc".
+	Page         int
+	PageSize     int
 }
 
 type ListProductsOutput struct {
-	Items    []*productDomain.Product
-	Total    int
-	Page     int
-	PageSize int
+	Items      []*productDomain.Product
+	Total      int
+	Page       int
+	PageSize   int
+	Aggregates prodRepo.ProductAggregates // stats globales del filtro completo
 }
 
 type ListProducts struct {
@@ -51,17 +54,30 @@ func (uc *ListProducts) Execute(ctx context.Context, in ListProductsInput) (*Lis
 	if pageSize < 1 || pageSize > 200 {
 		pageSize = 50
 	}
-	rows, total, err := uc.Products.List(tx, prodRepo.ListQuery{
-		GymID:           in.GymID,
-		Search:          in.Search,
-		Category:        in.Category,
-		IncludeInactive: in.IncludeInactive,
-		LowStockOnly:    in.LowStockOnly,
-		Page:            page,
-		PageSize:        pageSize,
-	})
+	listQuery := prodRepo.ListQuery{
+		GymID:        in.GymID,
+		Search:       in.Search,
+		Category:     in.Category,
+		ActiveFilter: in.ActiveFilter,
+		LowStockOnly: in.LowStockOnly,
+		Sort:         in.Sort,
+		Direction:    in.Direction,
+		Page:         page,
+		PageSize:     pageSize,
+	}
+	rows, total, err := uc.Products.List(tx, listQuery)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}
-	return &ListProductsOutput{Items: rows, Total: total, Page: page, PageSize: pageSize}, nil
+	// Aggregates corre sobre el mismo filtro (sin paginar) — alimenta
+	// las StatCards del FE. Si falla, degrada a ceros: prefiero que la
+	// página renderee con stats vacías que romperla porque un SUM falló.
+	aggs, _ := uc.Products.ListAggregates(tx, listQuery)
+	return &ListProductsOutput{
+		Items:      rows,
+		Total:      total,
+		Page:       page,
+		PageSize:   pageSize,
+		Aggregates: aggs,
+	}, nil
 }

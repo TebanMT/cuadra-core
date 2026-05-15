@@ -16,19 +16,62 @@ type ProductRepository interface {
 	Update(tx sharedDomain.Transaction, p *productDomain.Product) (*productDomain.Product, error)
 	GetByID(tx sharedDomain.Transaction, id uuid.UUID) (*productDomain.Product, error)
 	List(tx sharedDomain.Transaction, q ListQuery) ([]*productDomain.Product, int, error)
+	// ListAggregates devuelve totales sobre el filtro completo (no
+	// solo la página visible). Se llama en paralelo con List para
+	// alimentar las StatCards "Stock bajo" / "Agotados" / "Valor de
+	// stock" — sin esto los contadores reflejaban únicamente lo que el
+	// operador veía en pantalla, mintiendo cuando había paginación.
+	ListAggregates(tx sharedDomain.Transaction, q ListQuery) (ProductAggregates, error)
 	ExistsByGymAndName(tx sharedDomain.Transaction, gymID uuid.UUID, name string, excludeID *uuid.UUID) (bool, error)
 }
+
+// ProductAggregates — counters y totales del filtro completo.
+// TotalValue siempre considera solo productos activos (precio venta ×
+// stock); inactivos no cuentan porque no están a la venta.
+type ProductAggregates struct {
+	TotalValue float64 // precio venta × existencias, solo activos
+	LowCount   int     // activos con stock <= stock_minimum y > 0
+	OutCount   int     // activos con stock = 0
+}
+
+// ActiveFilter restringe la consulta por el flag `active` del producto.
+// Tres estados expuestos por la UI: solo activos (default), solo
+// inactivos (desactivados), o todos. La opción "inactivos" existe para
+// que el operador pueda reactivar productos sin tener que mostrar todo
+// el catálogo.
+const (
+	ActiveFilterActive   = "active"
+	ActiveFilterInactive = "inactive"
+	ActiveFilterAll      = "all"
+)
+
+// Sort columns expuestas por el header de la tabla del FE. Cualquier
+// otro valor cae al default (SortName) en los repos — defensa en
+// profundidad por si llega basura del cliente.
+const (
+	SortName     = "name"
+	SortPrice    = "price"
+	SortStock    = "stock"
+	SortCategory = "category"
+)
+
+const (
+	SortDirAsc  = "asc"
+	SortDirDesc = "desc"
+)
 
 // ListQuery is the input for UC-023 (list products). Filters are intentionally
 // minimal — the recepcionist UI is the main caller, the dashboard is secondary.
 type ListQuery struct {
-	GymID           uuid.UUID
-	Search          string // case-insensitive substring on name
-	Category        string // exact match; empty = all
-	IncludeInactive bool
-	LowStockOnly    bool
-	Page            int
-	PageSize        int
+	GymID        uuid.UUID
+	Search       string // case-insensitive substring on name (LIKE %s%)
+	Category     string // exact match; empty = all
+	ActiveFilter string // "active" | "inactive" | "all"; empty defaults to "active".
+	LowStockOnly bool
+	Sort         string // SortName (default) | SortPrice | SortStock | SortCategory
+	Direction    string // SortDirAsc (default) | SortDirDesc
+	Page         int
+	PageSize     int
 }
 
 // StockMovementRepository — append-only history. Used by UC-024 and UC-025.

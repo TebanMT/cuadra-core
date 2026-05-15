@@ -21,12 +21,20 @@ import (
 // RegisterSaleInput backs UC-025. The cart is a list of (product_id, quantity)
 // — price/name are looked up server-side from the current Product so the
 // frontend can't fake them. `MemberID` is optional (DA-25.3).
+//
+// `Paid` habilita el caso "fiado": cuando es no-nil y menor que el total
+// post-discount, el faltante se persiste como balance_pending en el
+// Payment y se liquida después por el flujo estándar de abonos
+// (POST /payments/:id/settle). Si es nil, se cobra el total — caso default.
+// Reglas adicionales: requiere MemberID (no se fía a walk-ins), y el valor
+// debe ser > 0.
 type RegisterSaleInput struct {
 	GymID       uuid.UUID
 	ActorUserID uuid.UUID
 	Method      string
 	MemberID    *uuid.UUID
 	Discount    float64 // optional, MVP usually 0
+	Paid        *float64
 	PaymentDate time.Time
 	Notes       *string
 	Items       []SaleLineInput
@@ -38,13 +46,15 @@ type SaleLineInput struct {
 }
 
 type RegisterSaleOutput struct {
-	SaleID    uuid.UUID
-	PaymentID uuid.UUID
-	Folio     string
-	Subtotal  float64
-	Discount  float64
-	Total     float64
-	Items     []SaleItemOutput
+	SaleID         uuid.UUID
+	PaymentID      uuid.UUID
+	Folio          string
+	Subtotal       float64
+	Discount       float64
+	Total          float64
+	Paid           float64 // monto cobrado (== Total cuando no hay fiado)
+	BalancePending float64 // queda > 0 en ventas a crédito
+	Items          []SaleItemOutput
 }
 
 type SaleItemOutput struct {
@@ -193,9 +203,20 @@ func (uc *RegisterSale) Execute(ctx context.Context, in RegisterSaleInput) (*Reg
 		}
 
 		// 6. Create the Payment row first — Sale.PaymentID has a NOT NULL FK.
+		// `paid` default = total (cobro completo). Si el operador eligió
+		// fiado, in.Paid trae el monto efectivamente cobrado y el resto
+		// queda como balance_pending. Fiado exige socio asociado: sin
+		// member_id no hay a quién cobrarle el saldo después.
+		paid := s.Total
+		if in.Paid != nil {
+			if in.MemberID == nil {
+				return sharedDomain.NewBusinessError(billingErrors.ErrCreditRequiresMember, "")
+			}
+			paid = *in.Paid
+		}
 		p, err := paymentDomain.NewProductSalePayment(
 			uuid.New(), in.GymID, in.ActorUserID, in.MemberID, folio,
-			s.Total, in.Method, in.PaymentDate, now, in.Notes,
+			s.Total, paid, in.Method, in.PaymentDate, now, in.Notes,
 		)
 		if err != nil {
 			return sharedDomain.NewValidationError(err)
@@ -242,14 +263,16 @@ func (uc *RegisterSale) Execute(ctx context.Context, in RegisterSaleInput) (*Reg
 			Action:      audit.ActionCreate,
 			ActorUserID: &in.ActorUserID,
 			Changes: map[string]any{
-				"folio":      p.Folio,
-				"payment_id": p.ID,
-				"member_id":  in.MemberID,
-				"items":      len(s.Items),
-				"subtotal":   s.Subtotal,
-				"discount":   s.Discount,
-				"total":      s.Total,
-				"method":     p.PaymentMethod,
+				"folio":           p.Folio,
+				"payment_id":      p.ID,
+				"member_id":       in.MemberID,
+				"items":           len(s.Items),
+				"subtotal":        s.Subtotal,
+				"discount":        s.Discount,
+				"total":           s.Total,
+				"paid":            p.Amount,
+				"balance_pending": p.BalancePending,
+				"method":          p.PaymentMethod,
 			},
 			IPAddress: audit.IPFromContext(ctx),
 			UserAgent: audit.UAFromContext(ctx),
@@ -278,13 +301,15 @@ func (uc *RegisterSale) Execute(ctx context.Context, in RegisterSaleInput) (*Reg
 			}
 		}
 		out = RegisterSaleOutput{
-			SaleID:    s.ID,
-			PaymentID: p.ID,
-			Folio:     p.Folio,
-			Subtotal:  s.Subtotal,
-			Discount:  s.Discount,
-			Total:     s.Total,
-			Items:     items,
+			SaleID:         s.ID,
+			PaymentID:      p.ID,
+			Folio:          p.Folio,
+			Subtotal:       s.Subtotal,
+			Discount:       s.Discount,
+			Total:          s.Total,
+			Paid:           p.Amount,
+			BalancePending: p.BalancePending,
+			Items:          items,
 		}
 		return nil
 	})

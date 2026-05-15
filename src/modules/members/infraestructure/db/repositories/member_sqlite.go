@@ -233,8 +233,20 @@ func (r *MemberSQLiteRepository) List(tx sharedDomain.Transaction, q memRepo.Lis
 	where := []string{`m.gym_id = ? AND m.deleted_at IS NULL`}
 	args := []any{q.GymID.String()}
 	if s := strings.TrimSpace(q.Search); s != "" {
-		where = append(where, `(m.full_name LIKE ? COLLATE NOCASE OR m.phone LIKE ?)`)
-		args = append(args, s+"%", "%"+s)
+		// Nombre: prefix match para mantener el ordenamiento por relevancia
+		// del operador ("Juan…" matchea "Juan García" pero no "García Juan").
+		// Teléfono: substring match sobre la versión solo-dígitos del
+		// término (los teléfonos en BD están normalizados sin espacios
+		// ni guiones). Antes era sufijo, así que tipear los primeros
+		// dígitos no encontraba nada.
+		phoneDigits := stripPhoneSeparators(s)
+		if phoneDigits != "" {
+			where = append(where, `(m.full_name LIKE ? COLLATE NOCASE OR m.phone LIKE ?)`)
+			args = append(args, s+"%", "%"+phoneDigits+"%")
+		} else {
+			where = append(where, `m.full_name LIKE ? COLLATE NOCASE`)
+			args = append(args, s+"%")
+		}
 	}
 	switch q.StatusFilter {
 	case "active":
@@ -363,9 +375,14 @@ func (r *MemberSQLiteRepository) ListPinCandidates(tx sharedDomain.Transaction, 
 		PinHash string `db:"pin_hash"`
 	}
 	var rows []pinRow
+	// NO filtramos por status — los inactivos también participan en el
+	// match para que el access evaluator pueda devolver denied_inactive
+	// con el nombre del socio. Antes los excluíamos y el kiosko mostraba
+	// "No encontré a este socio" para un PIN válido de un socio inactivo,
+	// lo que confunde al operador.
 	err := stx.Select(context.Background(), &rows,
 		`SELECT id, pin_hash FROM members
-		 WHERE gym_id = ? AND pin_hash IS NOT NULL AND deleted_at IS NULL AND status = 'active'`,
+		 WHERE gym_id = ? AND pin_hash IS NOT NULL AND deleted_at IS NULL`,
 		gymID.String())
 	if err != nil {
 		return nil, err

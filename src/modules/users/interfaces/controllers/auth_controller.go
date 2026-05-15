@@ -237,18 +237,19 @@ func (ctrl *AuthController) RegisterUploadsRoute(r *gin.Engine) {
 	r.Static("/uploads", ctrl.UploadsDir)
 }
 
-// RegisterLocalPhotoRoute expone GET /api/v1/uploads/local/members/:id
-// para que el desktop renderee fotos de socios desde el cache local
-// del sidecar (UploadsDir/members/<id>.<ext>). Existe específicamente
-// para que el FE NUNCA abra socket directo a R2: el sync agent baja
-// las imágenes a disco (upload propio O download tras pull) y este
-// handler las sirve. Sólo se monta en el binario sidecar — el cloud
-// no tiene cache local.
+// RegisterLocalPhotoRoute expone GET /api/v1/uploads/local/<entity>/:id
+// para que el desktop renderee fotos de socios y productos desde el
+// cache local del sidecar (UploadsDir/<entity>/<id>.<ext>). Existe
+// específicamente para que el FE NUNCA abra socket directo a R2: el
+// sync agent baja las imágenes a disco (upload propio O download tras
+// pull) y este handler las sirve. Sólo se monta en el binario sidecar
+// — el cloud no tiene cache local.
 func (ctrl *AuthController) RegisterLocalPhotoRoute(r *gin.Engine) {
 	if ctrl.UploadsDir == "" {
 		return
 	}
 	r.GET("/api/v1/uploads/local/members/:id", ctrl.handleServeLocalMemberPhoto)
+	r.GET("/api/v1/uploads/local/products/:id", ctrl.handleServeLocalProductPhoto)
 }
 
 // ---------------------------------------------------------------------------
@@ -612,11 +613,14 @@ var (
 )
 
 // uploadPresignReq — body que el sidecar manda al cloud. `kind` es para
-// scoping del key path; `member_id` y `ext` componen el nombre final
-// del objeto. `content_type` se bindea al signature del PUT.
+// scoping del key path; `member_id`/`product_id` y `ext` componen el
+// nombre final del objeto. `content_type` se bindea al signature del PUT.
+// Sólo uno de member_id/product_id se popula según `kind` (mutuamente
+// exclusivos, validado abajo).
 type uploadPresignReq struct {
 	Kind        string `json:"kind" validate:"required"`
 	MemberID    string `json:"member_id"`
+	ProductID   string `json:"product_id"`
 	Ext         string `json:"ext" validate:"required"`
 	ContentType string `json:"content_type" validate:"required"`
 }
@@ -647,9 +651,10 @@ type uploadPresignGetResp struct {
 // un blob directo a R2. El gym_id sale del middleware (token sidecar
 // scoped al gym, o JWT del dueño). Per-kind validamos campos:
 //
-//   - member_photo: requiere member_id + ext (jpg|jpeg|png|webp).
+//   - member_photo:  requiere member_id  + ext (jpg|jpeg|png|webp).
+//   - product_photo: requiere product_id + ext (jpg|jpeg|png|webp).
 //
-// Key naming: gyms/<gym_id>/members/<member_id>.<ext>. Determinístico
+// Key naming: gyms/<gym_id>/<subdir>/<entity_id>.<ext>. Determinístico
 // para que un re-upload sobreescriba al anterior (no acumulamos
 // huérfanos).
 func (ctrl *AuthController) handleUploadPresign(c *gin.Context) {
@@ -667,6 +672,7 @@ func (ctrl *AuthController) handleUploadPresign(c *gin.Context) {
 		return
 	}
 	ext := strings.ToLower(strings.TrimPrefix(req.Ext, "."))
+	var subdir, entityID string
 	switch req.Kind {
 	case "member_photo":
 		if req.MemberID == "" {
@@ -681,13 +687,28 @@ func (ctrl *AuthController) handleUploadPresign(c *gin.Context) {
 			utils.ErrorResponse(c, http.StatusBadRequest, errors.New("ext must be jpg|jpeg|png|webp"))
 			return
 		}
+		subdir, entityID = "members", req.MemberID
+	case "product_photo":
+		if req.ProductID == "" {
+			utils.ErrorResponse(c, http.StatusBadRequest, errors.New("product_id required for product_photo"))
+			return
+		}
+		if _, err := uuid.Parse(req.ProductID); err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, errors.New("product_id must be a uuid"))
+			return
+		}
+		if !isAllowedImageExt(ext) {
+			utils.ErrorResponse(c, http.StatusBadRequest, errors.New("ext must be jpg|jpeg|png|webp"))
+			return
+		}
+		subdir, entityID = "products", req.ProductID
 	default:
 		utils.ErrorResponse(c, http.StatusBadRequest, errors.New("unknown kind"))
 		return
 	}
 
-	objectKey := fmt.Sprintf("gyms/%s/members/%s.%s",
-		gymID, req.MemberID, ext,
+	objectKey := fmt.Sprintf("gyms/%s/%s/%s.%s",
+		gymID, subdir, entityID, ext,
 	)
 	ttl := 5 * time.Minute
 	uploadURL, err := ctrl.R2.PresignUpload(
@@ -759,25 +780,36 @@ func isAllowedImageExt(ext string) bool {
 }
 
 // handleServeLocalMemberPhoto — GET /api/v1/uploads/local/members/:id.
-// Sirve el archivo cacheado en UploadsDir/members/<id>.<ext> al FE
-// del desktop. Esta es la ÚNICA forma legítima que el FE tiene de
-// renderear fotos de socios — nunca abre un <img src> contra R2.
+// Sirve el archivo cacheado en UploadsDir/members/<id>.<ext> al FE.
+// Delega en serveLocalPhoto para reusar lógica con products.
+func (ctrl *AuthController) handleServeLocalMemberPhoto(c *gin.Context) {
+	ctrl.serveLocalPhoto(c, "members")
+}
+
+// handleServeLocalProductPhoto — GET /api/v1/uploads/local/products/:id.
+// Análogo a handleServeLocalMemberPhoto pero sobre UploadsDir/products.
+func (ctrl *AuthController) handleServeLocalProductPhoto(c *gin.Context) {
+	ctrl.serveLocalPhoto(c, "products")
+}
+
+// serveLocalPhoto sirve el archivo cacheado en UploadsDir/<subdir>/<id>.<ext>
+// al FE del desktop. Esta es la ÚNICA forma legítima que el FE tiene de
+// renderear fotos de socios y productos — nunca abre un <img src> contra
+// R2 (bucket privado).
 //
-// Estrategia: glob para encontrar <id>.* (no sabemos la extensión
-// a priori porque el sidecar la deriva del content-type). En el caso
-// raro de dos archivos con el mismo id (no debería pasar tras el
-// cleanup en writeMemberPhotoToDisk), tomamos el primero
-// determinísticamente (orden lex).
+// Estrategia: glob para encontrar <id>.* (no sabemos la extensión a
+// priori porque el sidecar la deriva del content-type). En el caso raro
+// de dos archivos con el mismo id (no debería pasar tras el cleanup en
+// writePhotoToDisk), tomamos el primero determinísticamente (orden lex).
 //
 // 404 cuando:
 //   - el id no es un UUID válido,
 //   - no existe ningún archivo en cache (la foto aún no fue
-//     descargada por el download task, o el socio no tiene foto).
+//     descargada por el download task, o la entidad no tiene foto).
 //
-// El FE muestra placeholder en 404, así que un miss aquí no
-// rompe nada — el download task la traerá en el próximo tick si
-// existe cloud-side.
-func (ctrl *AuthController) handleServeLocalMemberPhoto(c *gin.Context) {
+// El FE muestra placeholder en 404, así que un miss aquí no rompe nada
+// — el download task la traerá en el próximo tick si existe cloud-side.
+func (ctrl *AuthController) serveLocalPhoto(c *gin.Context, subdir string) {
 	if ctrl.UploadsDir == "" {
 		c.Status(http.StatusNotFound)
 		return
@@ -787,7 +819,7 @@ func (ctrl *AuthController) handleServeLocalMemberPhoto(c *gin.Context) {
 		c.Status(http.StatusNotFound)
 		return
 	}
-	dir := filepath.Join(ctrl.UploadsDir, "members")
+	dir := filepath.Join(ctrl.UploadsDir, subdir)
 	matches, err := filepath.Glob(filepath.Join(dir, id+".*"))
 	if err != nil || len(matches) == 0 {
 		c.Status(http.StatusNotFound)
@@ -811,7 +843,7 @@ func (ctrl *AuthController) handleServeLocalMemberPhoto(c *gin.Context) {
 		c.Status(http.StatusNotFound)
 		return
 	}
-	// Cache headers: el archivo es inmutable mientras el socio no
+	// Cache headers: el archivo es inmutable mientras la entidad no
 	// reemplace la foto. Pero como el id no incluye un hash de
 	// contenido, una rotación de foto invalidaría el cache. 30s es
 	// suficiente para evitar requests redundantes en una vista y lo

@@ -29,6 +29,17 @@ type DashboardOutput struct {
 
 	ActiveMembers      KPI                `json:"active_members"`
 	IncomeMonth        KPI                `json:"income_month"`
+	// ExpensesMonth — egresos del mes corriente vs mismo rango del mes
+	// anterior. Suma DOS fuentes: mercancía (stock_movements restock con
+	// costo) + gastos generales (BC expenses). Es el número visible en
+	// el dashboard para que "egresos" refleje todo lo que sale, no solo
+	// inventario.
+	ExpensesMonth KPI `json:"expenses_month"`
+	// InventoryCostMonth y GeneralExpensesMonth — sub-KPIs (no expuestos
+	// en el wire hoy, solo el agregado). Existen para que un futuro
+	// desglose en UI no requiera tocar el use case.
+	InventoryCostMonth   KPI `json:"-"`
+	GeneralExpensesMonth KPI `json:"-"`
 	ExpiringThisWeek   int                `json:"expiring_this_week"`
 	RecoverableExpired int                `json:"recoverable_expired"`
 	TodayCash          map[string]float64 `json:"today_cash_by_method"`
@@ -123,6 +134,28 @@ func (uc *Dashboard) Execute(ctx context.Context, in DashboardInput) (*Dashboard
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}
 
+	// Egresos del mes — agregamos dos fuentes: (1) compras de mercancía
+	// vía stock_movements restock con costo, (2) gastos generales del
+	// BC expenses. Mismo windowing que ingresos para que los KPIs sean
+	// comparables. Cada fuente se mantiene como sub-KPI por si después
+	// queremos exponer el desglose en UI.
+	inventoryCostMonth, err := uc.Reader.SumInventoryCostBetween(tx, in.GymID, monthStart, today)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
+	inventoryCostPrev, err := uc.Reader.SumInventoryCostBetween(tx, in.GymID, prevMonthStart, prevMonthEnd)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
+	generalExpensesMonth, err := uc.Reader.SumExpensesBetween(tx, in.GymID, monthStart, today)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
+	generalExpensesPrev, err := uc.Reader.SumExpensesBetween(tx, in.GymID, prevMonthStart, prevMonthEnd)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
+
 	expiringWeek, err := uc.Reader.CountExpiringBetween(tx, in.GymID, today, today.AddDate(0, 0, 7))
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
@@ -179,9 +212,15 @@ func (uc *Dashboard) Execute(ctx context.Context, in DashboardInput) (*Dashboard
 	}
 
 	out := &DashboardOutput{
-		GeneratedAt:        now,
-		ActiveMembers:      newKPI(float64(activeNow), float64(activePrev)),
-		IncomeMonth:        newKPI(incomeMonth, incomePrev),
+		GeneratedAt:          now,
+		ActiveMembers:        newKPI(float64(activeNow), float64(activePrev)),
+		IncomeMonth:          newKPI(incomeMonth, incomePrev),
+		InventoryCostMonth:   newKPI(inventoryCostMonth, inventoryCostPrev),
+		GeneralExpensesMonth: newKPI(generalExpensesMonth, generalExpensesPrev),
+		ExpensesMonth: newKPI(
+			inventoryCostMonth+generalExpensesMonth,
+			inventoryCostPrev+generalExpensesPrev,
+		),
 		ExpiringThisWeek:   expiringWeek,
 		RecoverableExpired: recoverable,
 		TodayCash:          todayCash,
@@ -212,6 +251,10 @@ const (
 	recentPaymentsLimit    = 10
 )
 
+// newKPI builds the standard {current, previous, delta, delta_pct} tile.
+// Shared by Dashboard (UC-033) and RangeReport (UC-036). delta_pct stays nil
+// when previous == 0 so the FE knows to render the absolute change instead
+// of a misleading "+∞%".
 func newKPI(current, previous float64) KPI {
 	k := KPI{Current: current, Previous: previous, Delta: current - previous}
 	if previous != 0 {

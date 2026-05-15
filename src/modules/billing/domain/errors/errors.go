@@ -47,4 +47,7 @@ var (
 	ErrSaleItemPriceInvalid    = errors.New("el precio del producto en la venta debe ser mayor a cero")
 	ErrSaleItemQuantityInvalid = errors.New("la cantidad de la línea de venta debe ser mayor a cero")
 	ErrSaleNotFound            = errors.New("venta no encontrada")
+	// Fiado: dejar saldo pendiente en una venta exige un socio asociado.
+	// No se fía a un walk-in porque no habría a quién cobrar después.
+	ErrCreditRequiresMember = errors.New("para dejar saldo pendiente debes asociar un socio")
 )

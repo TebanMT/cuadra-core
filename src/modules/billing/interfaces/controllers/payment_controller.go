@@ -511,13 +511,24 @@ type saleLineReq struct {
 	Quantity  int    `json:"quantity" validate:"required,min=1"`
 }
 
+// registerSaleReq — body de POST /api/v1/sales. Las JSON keys siguen la
+// convención del resto del módulo billing (payment_method, line_items)
+// — antes eran `method`/`items` y divergían del FE, lo que dejaba el
+// endpoint roto en producción (binding fallaba, FE recibía 400).
+//
+// `paid` (opcional) habilita el caso "fiado": cuando paid < total, el
+// faltante se persiste como balance_pending en el Payment para que se
+// liquide después vía POST /api/v1/payments/:id/settle (mismo flujo que
+// los abonos a mensualidades). Si se omite, el cobro es completo.
+// Requiere `member_id` — no se fía a un walk-in.
 type registerSaleReq struct {
-	Method      string        `json:"method" validate:"required,oneof=cash transfer card"`
+	Method      string        `json:"payment_method" validate:"required,oneof=cash transfer card"`
 	MemberID    *string       `json:"member_id,omitempty"`
 	Discount    float64       `json:"discount,omitempty"`
+	Paid        *float64      `json:"paid,omitempty"`
 	PaymentDate string        `json:"payment_date,omitempty"`
 	Notes       *string       `json:"notes,omitempty"`
-	Items       []saleLineReq `json:"items" validate:"required,min=1,dive"`
+	Items       []saleLineReq `json:"line_items" validate:"required,min=1,dive"`
 }
 
 type saleItemResp struct {
@@ -530,13 +541,15 @@ type saleItemResp struct {
 }
 
 type registerSaleResp struct {
-	SaleID    uuid.UUID      `json:"sale_id"`
-	PaymentID uuid.UUID      `json:"payment_id"`
-	Folio     string         `json:"folio"`
-	Subtotal  float64        `json:"subtotal"`
-	Discount  float64        `json:"discount"`
-	Total     float64        `json:"total"`
-	Items     []saleItemResp `json:"items"`
+	SaleID         uuid.UUID      `json:"sale_id"`
+	PaymentID      uuid.UUID      `json:"payment_id"`
+	Folio          string         `json:"folio"`
+	Subtotal       float64        `json:"subtotal"`
+	Discount       float64        `json:"discount"`
+	Total          float64        `json:"total"`
+	Paid           float64        `json:"paid"`
+	BalancePending float64        `json:"balance_pending"`
+	Items          []saleItemResp `json:"items"`
 }
 
 type refundSaleReq struct {
@@ -550,18 +563,53 @@ type refundSaleResp struct {
 }
 
 type operatorTotalResp struct {
-	OperatorID uuid.UUID `json:"operator_id"`
-	Total      float64   `json:"total"`
-	PaymentsN  int       `json:"payments"`
+	OperatorID    uuid.UUID `json:"operator_id"`
+	OperatorName  string    `json:"operator_name"`
+	Total         float64   `json:"total"`
+	PaymentsCount int       `json:"payments_count"`
+	SalesCount    int       `json:"sales_count"`
+}
+
+// conceptTotalResp matches the FE's `{total, count}` per concept. Same shape
+// the dashboard already uses for KPI-like breakdowns so the FE has a single
+// pattern.
+type conceptTotalResp struct {
+	Total float64 `json:"total"`
+	Count int     `json:"count"`
+}
+
+// cashCloseExpenseResp — one row of the "Gastos del día" section inside
+// the cash close. Mirrors the expenses entity at the wire edge so the FE
+// can render description / category / amount / method.
+type cashCloseExpenseResp struct {
+	ID            string  `json:"id"`
+	Category      string  `json:"category"`
+	Description   *string `json:"description,omitempty"`
+	Amount        float64 `json:"amount"`
+	PaymentMethod string  `json:"payment_method"`
+}
+
+type cashCloseClosedResp struct {
+	ClosedAt     string  `json:"closed_at"`
+	CountedCash  float64 `json:"counted_cash"`
+	Diff         float64 `json:"diff"`
+	Reason       *string `json:"reason,omitempty"`
+	ClosedByName *string `json:"closed_by_name,omitempty"`
 }
 
 type cashCloseReportResp struct {
-	Date        string              `json:"date"`
-	ByMethod    map[string]float64  `json:"by_method"`
-	ByConcept   map[string]float64  `json:"by_concept"`
-	ByOperator  []operatorTotalResp `json:"by_operator"`
-	GrandTotal  float64             `json:"grand_total"`
-	RefundTotal float64             `json:"refund_total"`
+	Date             string                      `json:"date"`
+	ByMethod         map[string]float64          `json:"by_method"`
+	ByConcept        map[string]conceptTotalResp `json:"by_concept"`
+	Operators        []operatorTotalResp         `json:"operators"`
+	Total            float64                     `json:"total"`
+	RefundsTotal     float64                     `json:"refunds_total"`
+	RefundsCount     int                         `json:"refunds_count"`
+	Expenses         []cashCloseExpenseResp      `json:"expenses"`
+	ExpensesTotal    float64                     `json:"expenses_total"`
+	ExpensesByMethod map[string]float64          `json:"expenses_by_method"`
+	NetTotal         float64                     `json:"net_total"`
+	Closed           *cashCloseClosedResp        `json:"closed,omitempty"`
 }
 
 type cashCloseReq struct {
@@ -617,6 +665,7 @@ func (ctrl *PaymentController) handleRegisterSale(c *gin.Context) {
 		Method:      req.Method,
 		MemberID:    memberID,
 		Discount:    req.Discount,
+		Paid:        req.Paid,
 		PaymentDate: paymentDate,
 		Notes:       req.Notes,
 		Items:       items,
@@ -636,6 +685,7 @@ func (ctrl *PaymentController) handleRegisterSale(c *gin.Context) {
 	utils.JsonResponse(c, http.StatusCreated, registerSaleResp{
 		SaleID: out.SaleID, PaymentID: out.PaymentID, Folio: out.Folio,
 		Subtotal: out.Subtotal, Discount: out.Discount, Total: out.Total,
+		Paid: out.Paid, BalancePending: out.BalancePending,
 		Items: respItems,
 	})
 }
@@ -684,16 +734,51 @@ func (ctrl *PaymentController) handleCashCloseReport(c *gin.Context) {
 	}
 	ops := make([]operatorTotalResp, len(out.Totals.ByOperator))
 	for i, o := range out.Totals.ByOperator {
-		ops[i] = operatorTotalResp{OperatorID: o.OperatorID, Total: o.Total, PaymentsN: o.PaymentsN}
+		ops[i] = operatorTotalResp{
+			OperatorID:    o.OperatorID,
+			OperatorName:  o.OperatorName,
+			Total:         o.Total,
+			PaymentsCount: o.PaymentsN,
+			SalesCount:    o.SalesN,
+		}
 	}
-	utils.JsonResponse(c, http.StatusOK, cashCloseReportResp{
-		Date:        date.Format("2006-01-02"),
-		ByMethod:    out.Totals.ByMethod,
-		ByConcept:   out.Totals.ByConcept,
-		ByOperator:  ops,
-		GrandTotal:  out.Totals.GrandTotal,
-		RefundTotal: out.Totals.RefundTotal,
-	})
+	concepts := make(map[string]conceptTotalResp, len(out.Totals.ByConcept))
+	for k, v := range out.Totals.ByConcept {
+		concepts[k] = conceptTotalResp{Total: v.Total, Count: v.Count}
+	}
+	gastos := make([]cashCloseExpenseResp, 0, len(out.Expenses))
+	for _, e := range out.Expenses {
+		gastos = append(gastos, cashCloseExpenseResp{
+			ID:            e.ID.String(),
+			Category:      e.Category,
+			Description:   e.Description,
+			Amount:        e.Amount,
+			PaymentMethod: e.PaymentMethod,
+		})
+	}
+	resp := cashCloseReportResp{
+		Date:             date.Format("2006-01-02"),
+		ByMethod:         out.Totals.ByMethod,
+		ByConcept:        concepts,
+		Operators:        ops,
+		Total:            out.Totals.GrandTotal,
+		RefundsTotal:     out.Totals.RefundTotal,
+		RefundsCount:     out.Totals.RefundCount,
+		Expenses:         gastos,
+		ExpensesTotal:    out.ExpensesTotal,
+		ExpensesByMethod: out.ExpensesByMethod,
+		NetTotal:         out.NetTotal,
+	}
+	if out.Closed != nil {
+		resp.Closed = &cashCloseClosedResp{
+			ClosedAt:     out.Closed.ClosedAt.Format(time.RFC3339),
+			CountedCash:  out.Closed.CountedCash,
+			Diff:         out.Closed.Diff,
+			Reason:       out.Closed.Reason,
+			ClosedByName: out.Closed.ClosedByName,
+		}
+	}
+	utils.JsonResponse(c, http.StatusOK, resp)
 }
 
 func (ctrl *PaymentController) handleCashClose(c *gin.Context) {

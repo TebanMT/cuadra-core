@@ -162,6 +162,18 @@ var SyncedTables = []EntityTable{
 		},
 	},
 	{
+		// expenses — gastos generales del gym (renta, servicios, etc.).
+		// Topológicamente va después de users porque created_by referencia
+		// a users(id). No tiene FKs hacia products / sales.
+		Type:  "expenses",
+		Table: "expenses",
+		Columns: []string{
+			"id", "gym_id", "version", "created_at", "updated_at", "deleted_at",
+			"expense_date", "amount", "category", "description",
+			"payment_method", "created_by",
+		},
+	},
+	{
 		Type:  "checkins",
 		Table: "checkins",
 		Columns: []string{

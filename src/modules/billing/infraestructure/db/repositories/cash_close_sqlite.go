@@ -21,7 +21,8 @@ type CashCloseSQLiteReader struct{}
 func NewCashCloseSQLiteReader() *CashCloseSQLiteReader { return &CashCloseSQLiteReader{} }
 
 // Aggregate computes the per-day rollup. Money is stored in cents (SQLite),
-// so we convert at the edge. Mirrors the Postgres implementation contract.
+// so we convert at the edge. Mirrors the Postgres implementation contract,
+// including concept counts + operator names + sales count.
 func (r *CashCloseSQLiteReader) Aggregate(tx sharedDomain.Transaction, q billingRepo.CashCloseQuery) (*billingRepo.CashCloseTotals, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	dateStr := q.Date.UTC().Format("2006-01-02")
@@ -42,43 +43,59 @@ func (r *CashCloseSQLiteReader) Aggregate(tx sharedDomain.Transaction, q billing
 	type conceptRow struct {
 		Concept string `db:"concept"`
 		Total   int64  `db:"total"`
+		Cnt     int    `db:"cnt"`
 	}
 	var conceptRows []conceptRow
 	if err := stx.Select(context.Background(), &conceptRows,
-		`SELECT concept, COALESCE(SUM(amount), 0) AS total FROM payments
+		`SELECT concept, COALESCE(SUM(amount), 0) AS total, COUNT(*) AS cnt FROM payments
 		 WHERE gym_id = ? AND payment_date = ? AND concept <> ? AND deleted_at IS NULL
 		 GROUP BY concept`,
 		q.GymID.String(), dateStr, paymentDomain.ConceptRefund); err != nil {
 		return nil, err
 	}
 
-	var refundCents sql.NullInt64
-	if err := stx.Get(context.Background(), &refundCents,
-		`SELECT COALESCE(SUM(amount), 0) FROM payments
+	type refundRow struct {
+		Total int64 `db:"total"`
+		Cnt   int   `db:"cnt"`
+	}
+	var refund refundRow
+	if err := stx.Get(context.Background(), &refund,
+		`SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS cnt FROM payments
 		 WHERE gym_id = ? AND payment_date = ? AND concept = ? AND deleted_at IS NULL`,
 		q.GymID.String(), dateStr, paymentDomain.ConceptRefund); err != nil {
 		return nil, err
 	}
 
 	type opRow struct {
-		OperatorID string `db:"operator_id"`
-		Total      int64  `db:"total"`
-		Cnt        int    `db:"cnt"`
+		OperatorID   string         `db:"operator_id"`
+		OperatorName sql.NullString `db:"operator_name"`
+		Total        int64          `db:"total"`
+		PaymentsN    int            `db:"payments_n"`
+		SalesN       int            `db:"sales_n"`
 	}
 	var opRows []opRow
 	if err := stx.Select(context.Background(), &opRows,
-		`SELECT operator_id, COALESCE(SUM(amount), 0) AS total, COUNT(*) AS cnt FROM payments
-		 WHERE gym_id = ? AND payment_date = ? AND concept <> ? AND deleted_at IS NULL
-		 GROUP BY operator_id`,
+		`SELECT p.operator_id,
+		        u.full_name AS operator_name,
+		        COALESCE(SUM(p.amount), 0) AS total,
+		        COUNT(*) AS payments_n,
+		        SUM(CASE WHEN p.concept = 'product' THEN 1 ELSE 0 END) AS sales_n
+		 FROM payments p
+		 LEFT JOIN users u ON u.id = p.operator_id AND u.deleted_at IS NULL
+		 WHERE p.gym_id = ? AND p.payment_date = ?
+		   AND p.concept <> ? AND p.deleted_at IS NULL
+		 GROUP BY p.operator_id, u.full_name
+		 ORDER BY total DESC`,
 		q.GymID.String(), dateStr, paymentDomain.ConceptRefund); err != nil {
 		return nil, err
 	}
 
 	out := &billingRepo.CashCloseTotals{
 		ByMethod:    map[string]float64{},
-		ByConcept:   map[string]float64{},
+		ByConcept:   map[string]billingRepo.ConceptTotal{},
 		ByOperator:  make([]billingRepo.OperatorTotal, 0, len(opRows)),
-		RefundTotal: fromCents(refundCents.Int64),
+		RefundTotal: fromCents(refund.Total),
+		RefundCount: refund.Cnt,
 	}
 	for _, m := range methodRows {
 		v := fromCents(m.Total)
@@ -86,14 +103,23 @@ func (r *CashCloseSQLiteReader) Aggregate(tx sharedDomain.Transaction, q billing
 		out.GrandTotal += v
 	}
 	for _, c := range conceptRows {
-		out.ByConcept[c.Concept] = fromCents(c.Total)
+		out.ByConcept[c.Concept] = billingRepo.ConceptTotal{
+			Total: fromCents(c.Total),
+			Count: c.Cnt,
+		}
 	}
 	for _, o := range opRows {
 		opID, _ := uuid.Parse(o.OperatorID)
+		name := ""
+		if o.OperatorName.Valid {
+			name = o.OperatorName.String
+		}
 		out.ByOperator = append(out.ByOperator, billingRepo.OperatorTotal{
-			OperatorID: opID,
-			Total:      fromCents(o.Total),
-			PaymentsN:  o.Cnt,
+			OperatorID:   opID,
+			OperatorName: name,
+			Total:        fromCents(o.Total),
+			PaymentsN:    o.PaymentsN,
+			SalesN:       o.SalesN,
 		})
 	}
 	return out, nil

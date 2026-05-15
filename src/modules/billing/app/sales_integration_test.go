@@ -216,6 +216,87 @@ func TestUC025_LinkedToMember(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// UC-025 — Fiado (venta a crédito con saldo pendiente)
+// ---------------------------------------------------------------------------
+// Cuando `Paid < Total`, RegisterSale crea el Payment con balance_pending
+// > 0 y exige socio asociado. El saldo se liquida después por el flujo
+// estándar UC-019 (SettlePendingBalance) — mismo path que las mensualidades
+// pagadas en partes.
+
+func TestUC025_Fiado_CreatesBalancePending(t *testing.T) {
+	f := setupSales(t)
+	p := f.seedProduct(t, "Proteína", 600, 3)
+	mid := f.memberID
+	paid := 200.0 // total = 600, queda 400 a deber
+	uc := f.registerSale()
+	out, err := uc.Execute(context.Background(), billingApp.RegisterSaleInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, Method: "cash",
+		MemberID: &mid,
+		Paid:     &paid,
+		Items:    []billingApp.SaleLineInput{{ProductID: p, Quantity: 1}},
+	})
+	if err != nil {
+		t.Fatalf("fiado sale: %v", err)
+	}
+	if out.Total != 600 || out.Paid != 200 || out.BalancePending != 400 {
+		t.Errorf("got total=%v paid=%v balance=%v (want 600/200/400)",
+			out.Total, out.Paid, out.BalancePending)
+	}
+	var amount, balance int64
+	_ = f.db.Get(&amount, "SELECT amount FROM payments WHERE id=?", out.PaymentID.String())
+	_ = f.db.Get(&balance, "SELECT balance_pending FROM payments WHERE id=?", out.PaymentID.String())
+	if amount != 20000 || balance != 40000 {
+		t.Errorf("persisted cents: amount=%d balance=%d (want 20000/40000)", amount, balance)
+	}
+}
+
+func TestUC025_Fiado_RequiresMember(t *testing.T) {
+	f := setupSales(t)
+	p := f.seedProduct(t, "Snickers", 25, 10)
+	paid := 10.0 // intento de fiado sin socio asociado
+	uc := f.registerSale()
+	_, err := uc.Execute(context.Background(), billingApp.RegisterSaleInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, Method: "cash",
+		Paid:  &paid,
+		Items: []billingApp.SaleLineInput{{ProductID: p, Quantity: 1}},
+	})
+	if err == nil {
+		t.Errorf("fiado sin socio debería fallar")
+	}
+}
+
+func TestUC025_Fiado_FullSettlementClearsBalance(t *testing.T) {
+	f := setupSales(t)
+	p := f.seedProduct(t, "Gatorade", 25, 20)
+	mid := f.memberID
+	paid := 10.0 // total 25, queda 15 a deber
+	saleOut, err := f.registerSale().Execute(context.Background(), billingApp.RegisterSaleInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, Method: "cash",
+		MemberID: &mid, Paid: &paid,
+		Items: []billingApp.SaleLineInput{{ProductID: p, Quantity: 1}},
+	})
+	if err != nil {
+		t.Fatalf("fiado: %v", err)
+	}
+
+	// Liquidación posterior usando el flujo estándar — debería bajar
+	// balance_pending a 0 en el Payment original.
+	settle := billingApp.NewSettlePendingBalance(f.paymentRepo, f.folios, f.uow, f.recorder)
+	if _, err := settle.Execute(context.Background(), billingApp.SettlePendingBalanceInput{
+		GymID: f.gymID, ActorUserID: f.ownerID,
+		ParentPaymentID: saleOut.PaymentID,
+		Amount:          15, Method: "cash",
+	}); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+	var bal int64
+	_ = f.db.Get(&bal, "SELECT balance_pending FROM payments WHERE id=?", saleOut.PaymentID.String())
+	if bal != 0 {
+		t.Errorf("balance after full settle = %d cents, want 0", bal)
+	}
+}
+
 // Property: vending the same set of items in different orders should yield
 // the same final stock and same total.
 func TestUC025_OrderIndependent_SameFinalState(t *testing.T) {
@@ -350,8 +431,8 @@ func TestUC027_Report_AggregatesByMethodAndConcept(t *testing.T) {
 	if got := rep.Totals.ByMethod["transfer"]; got != 20 {
 		t.Errorf("transfer = %v, want 20", got)
 	}
-	// concepts: membership 600, product 40.
-	if rep.Totals.ByConcept["membership"] != 600 || rep.Totals.ByConcept["product"] != 40 {
+	// concepts: membership 600, product 40. ByConcept ahora trae {Total,Count}.
+	if rep.Totals.ByConcept["membership"].Total != 600 || rep.Totals.ByConcept["product"].Total != 40 {
 		t.Errorf("by concept = %v", rep.Totals.ByConcept)
 	}
 }

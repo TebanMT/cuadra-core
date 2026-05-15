@@ -84,25 +84,13 @@ func (r *ProductPostgresRepository) ExistsByGymAndName(tx sharedDomain.Transacti
 func (r *ProductPostgresRepository) List(tx sharedDomain.Transaction, q prodRepo.ListQuery) ([]*productDomain.Product, int, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	page, pageSize := normalizePage(q.Page, q.PageSize)
-	base := gormTx.Model(&models.ProductModel{}).Where("gym_id = ? AND deleted_at IS NULL", q.GymID)
-	if !q.IncludeInactive {
-		base = base.Where("active = ?", true)
-	}
-	if q.Category != "" {
-		base = base.Where("category = ?", q.Category)
-	}
-	if q.Search != "" {
-		base = base.Where("LOWER(name) LIKE ?", strings.ToLower(strings.TrimSpace(q.Search))+"%")
-	}
-	if q.LowStockOnly {
-		base = base.Where("stock <= stock_minimum")
-	}
+	base := buildProductFilterPg(gormTx.Model(&models.ProductModel{}), q)
 	var total int64
 	if err := base.Session(&gorm.Session{}).Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
 	var rows []models.ProductModel
-	if err := base.Order("LOWER(name) ASC").
+	if err := base.Order(sortClausePostgres(q.Sort, q.Direction)).
 		Limit(pageSize).Offset((page - 1) * pageSize).Find(&rows).Error; err != nil {
 		return nil, 0, err
 	}
@@ -111,6 +99,81 @@ func (r *ProductPostgresRepository) List(tx sharedDomain.Transaction, q prodRepo
 		out[i] = productFromModel(&rows[i])
 	}
 	return out, int(total), nil
+}
+
+// ListAggregates — paralelo a la versión SQLite. Una sola query que
+// agrega total_value (solo activos), low_count y out_count usando
+// SUM(CASE WHEN ...). Sobre catálogos de 50-200 SKUs es trivial.
+func (r *ProductPostgresRepository) ListAggregates(tx sharedDomain.Transaction, q prodRepo.ListQuery) (prodRepo.ProductAggregates, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	base := buildProductFilterPg(gormTx.Model(&models.ProductModel{}), q)
+	var row struct {
+		TotalValue float64
+		LowCount   int
+		OutCount   int
+	}
+	if err := base.Session(&gorm.Session{}).Select(`
+		COALESCE(SUM(CASE WHEN active = true THEN price * stock ELSE 0 END), 0) AS total_value,
+		COALESCE(SUM(CASE WHEN active = true AND stock > 0 AND stock <= stock_minimum THEN 1 ELSE 0 END), 0) AS low_count,
+		COALESCE(SUM(CASE WHEN active = true AND stock = 0 THEN 1 ELSE 0 END), 0) AS out_count`).
+		Scan(&row).Error; err != nil {
+		return prodRepo.ProductAggregates{}, err
+	}
+	return prodRepo.ProductAggregates{
+		TotalValue: row.TotalValue,
+		LowCount:   row.LowCount,
+		OutCount:   row.OutCount,
+	}, nil
+}
+
+// buildProductFilterPg — extraído del cuerpo de List para reuso con
+// ListAggregates. Mismas reglas que buildProductWhereSqlite — los dos
+// implementations se mantienen en lockstep.
+func buildProductFilterPg(base *gorm.DB, q prodRepo.ListQuery) *gorm.DB {
+	base = base.Where("gym_id = ? AND deleted_at IS NULL", q.GymID)
+	switch q.ActiveFilter {
+	case prodRepo.ActiveFilterAll:
+		// no filter
+	case prodRepo.ActiveFilterInactive:
+		base = base.Where("active = ?", false)
+	default:
+		base = base.Where("active = ?", true)
+	}
+	if q.Category != "" {
+		base = base.Where("category = ?", q.Category)
+	}
+	if s := strings.TrimSpace(q.Search); s != "" {
+		// Substring (%s%) — antes era prefix; el FE buscaba "mineral"
+		// y no encontraba "Agua mineral". Mismo cambio en SQLite.
+		base = base.Where("LOWER(name) LIKE ?", "%"+strings.ToLower(s)+"%")
+	}
+	if q.LowStockOnly {
+		base = base.Where("stock <= stock_minimum")
+	}
+	return base
+}
+
+// sortClausePostgres — whitelist explícita igual que la versión SQLite.
+// Cualquier valor desconocido cae al default `LOWER(name) ASC`. Sin
+// esto el query string del cliente podría inyectar columnas arbitrarias.
+func sortClausePostgres(sort, dir string) string {
+	col := "LOWER(name)"
+	switch sort {
+	case prodRepo.SortPrice:
+		col = "price"
+	case prodRepo.SortStock:
+		col = "stock"
+	case prodRepo.SortCategory:
+		col = "LOWER(category)"
+	}
+	direction := "ASC"
+	if dir == prodRepo.SortDirDesc {
+		direction = "DESC"
+	}
+	if sort == prodRepo.SortName || sort == "" {
+		return col + " " + direction
+	}
+	return col + " " + direction + ", LOWER(name) ASC"
 }
 
 // ---------------------------------------------------------------------------

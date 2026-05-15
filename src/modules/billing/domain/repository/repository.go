@@ -81,20 +81,34 @@ type CashCloseQuery struct {
 
 // CashCloseTotals is the read model produced by the repository for UC-027.
 // All amounts are signed (refunds are negative). The map keys mirror the
-// `payment_method` and `concept` enums.
+// `payment_method` and `concept` enums. ByConcept carries both the total and
+// the row count so the FE can render "Mensualidades · 4 cobros" without a
+// second roundtrip.
 type CashCloseTotals struct {
 	ByMethod    map[string]float64
-	ByConcept   map[string]float64
+	ByConcept   map[string]ConceptTotal
 	ByOperator  []OperatorTotal
 	GrandTotal  float64
 	RefundTotal float64
+	RefundCount int
 }
 
+// ConceptTotal — total + count by payment concept.
+type ConceptTotal struct {
+	Total float64
+	Count int
+}
+
+// OperatorTotal — per-operator daily summary. OperatorName is resolved at
+// the repository edge (JOIN users) so the use case doesn't have to fan out.
+// SalesN counts product sales (concept='product') attributed to the operator,
+// independent of PaymentsN.
 type OperatorTotal struct {
-	OperatorID uuid.UUID
-	Total      float64
-	PaymentsN  int
-	SalesN     int
+	OperatorID   uuid.UUID
+	OperatorName string
+	Total        float64
+	PaymentsN    int
+	SalesN       int
 }
 
 // CashCloseReader is the read seam of UC-027. Implementations live alongside

@@ -71,7 +71,26 @@ func (ctrl *ReportsController) handleRange(c *gin.Context) {
 		return
 	}
 	period := c.DefaultQuery("period", reportsApp.PeriodMonth)
-	out, err := ctrl.Range.Execute(c.Request.Context(), reportsApp.RangeReportInput{GymID: gymID, Period: period})
+	in := reportsApp.RangeReportInput{GymID: gymID, Period: period}
+	if period == reportsApp.PeriodCustom {
+		if v := c.Query("from"); v != "" {
+			t, err := time.Parse("2006-01-02", v)
+			if err != nil {
+				utils.ErrorResponse(c, http.StatusBadRequest, err)
+				return
+			}
+			in.From = &t
+		}
+		if v := c.Query("to"); v != "" {
+			t, err := time.Parse("2006-01-02", v)
+			if err != nil {
+				utils.ErrorResponse(c, http.StatusBadRequest, err)
+				return
+			}
+			in.To = &t
+		}
+	}
+	out, err := ctrl.Range.Execute(c.Request.Context(), in)
 	if err != nil {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
 		return
@@ -147,15 +166,20 @@ type cashTodayWire struct {
 }
 
 type dashboardWire struct {
-	GeneratedAt      time.Time                   `json:"generated_at"`
-	ActiveMembers    kpiTrendWire                `json:"active_members"`
-	IncomeMonth      kpiTrendWire                `json:"income_month"`
-	ExpiringWeek     kpiTrendWire                `json:"expiring_week"`
-	Recoverable      kpiTrendWire                `json:"recoverable"`
-	Income30d        []reportsApp.DailyIncome    `json:"income_30d"`
-	AttentionSummary reportsApp.AttentionSummary `json:"attention_summary"`
-	RecentPayments   []recentPaymentWire         `json:"recent_payments"`
-	CashToday        cashTodayWire               `json:"cash_today"`
+	GeneratedAt        time.Time                   `json:"generated_at"`
+	ActiveMembers      kpiTrendWire                `json:"active_members"`
+	IncomeMonth        kpiTrendWire                `json:"income_month"`
+	// ExpensesMonth — agregado de mercancía + gastos generales. El FE
+	// muestra UN solo número con hint "Mercancía + otros". Internamente
+	// los sub-KPIs siguen existiendo en el use case por si después se
+	// expone el desglose.
+	ExpensesMonth      kpiTrendWire                `json:"expenses_month"`
+	ExpiringWeek       kpiTrendWire                `json:"expiring_week"`
+	Recoverable        kpiTrendWire                `json:"recoverable"`
+	Income30d          []reportsApp.DailyIncome    `json:"income_30d"`
+	AttentionSummary   reportsApp.AttentionSummary `json:"attention_summary"`
+	RecentPayments     []recentPaymentWire         `json:"recent_payments"`
+	CashToday          cashTodayWire               `json:"cash_today"`
 }
 
 func toDashboardWire(d *reportsApp.DashboardOutput) dashboardWire {
@@ -170,6 +194,11 @@ func toDashboardWire(d *reportsApp.DashboardOutput) dashboardWire {
 			Value:    d.IncomeMonth.Current,
 			Delta:    floatPtrIfMeaningful(d.IncomeMonth),
 			DeltaPct: d.IncomeMonth.DeltaPct,
+		},
+		ExpensesMonth: kpiTrendWire{
+			Value:    d.ExpensesMonth.Current,
+			Delta:    floatPtrIfMeaningful(d.ExpensesMonth),
+			DeltaPct: d.ExpensesMonth.DeltaPct,
 		},
 		// ExpiringThisWeek and RecoverableExpired are stored as ints (no
 		// previous-period snapshot in the use case yet). We promote to
@@ -396,33 +425,123 @@ func timePtrToISO(t *time.Time) *string {
 }
 
 // rangeWire mirrors the FE ReportsRangeData shape — superset of the
-// application-layer RangeReportOutput. recent_payments comes from the
-// dashboard's cached widget, attention_required_count is the sum across
-// the six attention summary buckets.
+// application-layer RangeReportOutput. Each totals.* surfaces as a
+// {value, delta, delta_pct} so StatCards can render trend chips. The two
+// FE-only extras (recent_payments, attention_required_count) come from the
+// dashboard's cached widget.
 type rangeWire struct {
-	Period                 string                    `json:"period"`
-	From                   string                    `json:"from"`
-	To                     string                    `json:"to"`
-	Totals                 reportsApp.RangeTotals    `json:"totals"`
-	IncomeByDay            []reportsApp.DailyIncome  `json:"income_by_day"`
-	CheckinsByDay          []reportsApp.DailyCount   `json:"checkins_by_day"`
-	IncomeByMethod         map[string]float64        `json:"income_by_method"`
-	TopMembers             []reportsApp.TopMemberRow `json:"top_members"`
-	RecentPayments         []recentPaymentWire       `json:"recent_payments"`
-	AttentionRequiredCount int                       `json:"attention_required_count"`
+	Period                 string                              `json:"period"`
+	From                   string                              `json:"from"`
+	To                     string                              `json:"to"`
+	Totals                 rangeTotalsWire                     `json:"totals"`
+	IncomeByDay            []reportsApp.DailyIncome            `json:"income_by_day"`
+	ExpensesByDay          []reportsApp.DailyAmount            `json:"expenses_by_day"`
+	CheckinsByDay          []reportsApp.DailyCount             `json:"checkins_by_day"`
+	IncomeByMethod         map[string]float64                  `json:"income_by_method"`
+	ExpensesByCategory     map[string]float64                  `json:"expenses_by_category"`
+	TopMembers             []reportsApp.TopMemberRow           `json:"top_members"`
+	TopProducts            []reportsApp.TopProductRow          `json:"top_products"`
+	InventoryCosts         []inventoryCostWire                 `json:"inventory_costs"`
+	Expenses               []expenseWire                       `json:"expenses"`
+	CriticalStock          reportsApp.CriticalStockCounts      `json:"critical_stock"`
+	RecentPayments         []recentPaymentWire                 `json:"recent_payments"`
+	AttentionRequiredCount int                                 `json:"attention_required_count"`
+}
+
+// rangeTotalsWire — cada total como KPI trend para que el FE renderee
+// deltas en los StatCards.
+type rangeTotalsWire struct {
+	Income          kpiTrendWire `json:"income"`
+	InventoryCost   kpiTrendWire `json:"inventory_cost"`
+	ExpensesGeneral kpiTrendWire `json:"expenses_general"`
+	Refunds         kpiTrendWire `json:"refunds"`
+	NewMembers      kpiTrendWire `json:"new_members"`
+	Checkins        kpiTrendWire `json:"checkins"`
+	Net             kpiTrendWire `json:"net"`
+}
+
+// expenseWire — fila de la tabla "Gastos del período". UUID y date van
+// como string. PaymentMethod usa los mismos buckets que payments
+// (cash/transfer/card).
+type expenseWire struct {
+	ID            string  `json:"id"`
+	ExpenseDate   string  `json:"expense_date"`
+	Amount        float64 `json:"amount"`
+	Category      string  `json:"category"`
+	Description   *string `json:"description,omitempty"`
+	PaymentMethod string  `json:"payment_method"`
+}
+
+func expensesToWire(in []reportsApp.ExpenseRow) []expenseWire {
+	out := make([]expenseWire, 0, len(in))
+	for _, r := range in {
+		out = append(out, expenseWire{
+			ID:            r.ID.String(),
+			ExpenseDate:   r.ExpenseDate.Format("2006-01-02"),
+			Amount:        r.Amount,
+			Category:      r.Category,
+			Description:   r.Description,
+			PaymentMethod: r.PaymentMethod,
+		})
+	}
+	return out
+}
+
+// inventoryCostWire — fila de la tabla "Compras de inventario". Las
+// fechas y UUIDs van como string para evitar idiosincrasias del FE.
+type inventoryCostWire struct {
+	MovementID  string  `json:"movement_id"`
+	ProductID   string  `json:"product_id"`
+	ProductName string  `json:"product_name"`
+	Delta       int     `json:"delta"`
+	CostUnit    float64 `json:"cost_unit"`
+	CostTotal   float64 `json:"cost_total"`
+	Reason      *string `json:"reason,omitempty"`
+	OccurredAt  string  `json:"occurred_at"`
+}
+
+func inventoryCostsToWire(in []reportsApp.InventoryCostRow) []inventoryCostWire {
+	out := make([]inventoryCostWire, 0, len(in))
+	for _, r := range in {
+		out = append(out, inventoryCostWire{
+			MovementID:  r.MovementID.String(),
+			ProductID:   r.ProductID.String(),
+			ProductName: r.ProductName,
+			Delta:       r.Delta,
+			CostUnit:    r.CostUnit,
+			CostTotal:   r.CostTotal,
+			Reason:      r.Reason,
+			OccurredAt:  r.OccurredAt.Format(time.RFC3339),
+		})
+	}
+	return out
 }
 
 func toRangeWire(r *reportsApp.RangeReportOutput, dash *reportsApp.DashboardOutput) rangeWire {
 	w := rangeWire{
-		Period:         r.Period,
-		From:           r.From,
-		To:             r.To,
-		Totals:         r.Totals,
-		IncomeByDay:    nonNilDailyIncome(r.IncomeByDay),
-		CheckinsByDay:  nonNilDailyCount(r.CheckinsByDay),
-		IncomeByMethod: cashByMethod(r.IncomeByMethod),
-		TopMembers:     nonNilTopMembers(r.TopMembers),
-		RecentPayments: []recentPaymentWire{},
+		Period: r.Period,
+		From:   r.From,
+		To:     r.To,
+		Totals: rangeTotalsWire{
+			Income:          kpiToWire(r.Totals.Income),
+			InventoryCost:   kpiToWire(r.Totals.InventoryCost),
+			ExpensesGeneral: kpiToWire(r.Totals.ExpensesGeneral),
+			Refunds:         kpiToWire(r.Totals.Refunds),
+			NewMembers:      kpiToWire(r.Totals.NewMembers),
+			Checkins:        kpiToWire(r.Totals.Checkins),
+			Net:             kpiToWire(r.Totals.Net),
+		},
+		IncomeByDay:        nonNilDailyIncome(r.IncomeByDay),
+		ExpensesByDay:      nonNilDailyAmount(r.ExpensesByDay),
+		CheckinsByDay:      nonNilDailyCount(r.CheckinsByDay),
+		IncomeByMethod:     cashByMethod(r.IncomeByMethod),
+		ExpensesByCategory: nonNilCategoryMap(r.ExpensesByCategory),
+		TopMembers:         nonNilTopMembers(r.TopMembers),
+		TopProducts:        nonNilTopProducts(r.TopProducts),
+		InventoryCosts:     inventoryCostsToWire(r.InventoryCosts),
+		Expenses:           expensesToWire(r.Expenses),
+		CriticalStock:      r.CriticalStock,
+		RecentPayments:     []recentPaymentWire{},
 	}
 	if dash != nil {
 		w.RecentPayments = recentPaymentsToWire(dash.RecentPayments)
@@ -431,6 +550,37 @@ func toRangeWire(r *reportsApp.RangeReportOutput, dash *reportsApp.DashboardOutp
 			s.LowStock + s.PendingBalance + s.BirthdaysToday
 	}
 	return w
+}
+
+// kpiToWire flattens the application-layer KPI into the FE-friendly
+// {value, delta, delta_pct} shape. Same convention dashboard uses.
+func kpiToWire(k reportsApp.KPI) kpiTrendWire {
+	return kpiTrendWire{
+		Value:    k.Current,
+		Delta:    floatPtrIfMeaningful(k),
+		DeltaPct: k.DeltaPct,
+	}
+}
+
+func nonNilDailyAmount(in []reportsApp.DailyAmount) []reportsApp.DailyAmount {
+	if in == nil {
+		return []reportsApp.DailyAmount{}
+	}
+	return in
+}
+
+func nonNilCategoryMap(in map[string]float64) map[string]float64 {
+	if in == nil {
+		return map[string]float64{}
+	}
+	return in
+}
+
+func nonNilTopProducts(in []reportsApp.TopProductRow) []reportsApp.TopProductRow {
+	if in == nil {
+		return []reportsApp.TopProductRow{}
+	}
+	return in
 }
 
 func nonNilDailyCount(in []reportsApp.DailyCount) []reportsApp.DailyCount {
@@ -467,7 +617,12 @@ func (ctrl *ReportsController) handleExport(c *gin.Context) {
 	reportType := c.Param("type")
 	format := c.DefaultQuery("format", reportsApp.FormatPDF)
 
-	in := reportsApp.ExportInput{GymID: gymID, Type: reportType, Format: format}
+	in := reportsApp.ExportInput{
+		GymID:  gymID,
+		Type:   reportType,
+		Format: format,
+		Period: c.Query("period"),
+	}
 	if v := c.Query("from"); v != "" {
 		t, err := time.Parse("2006-01-02", v)
 		if err != nil {

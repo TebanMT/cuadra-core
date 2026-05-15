@@ -161,9 +161,17 @@ func (r *MemberPostgresRepository) List(tx sharedDomain.Transaction, q memRepo.L
 		Where("m.gym_id = ? AND m.deleted_at IS NULL", q.GymID)
 
 	if s := strings.TrimSpace(q.Search); s != "" {
+		// Nombre: prefix match. Teléfono: substring match sobre la
+		// versión solo-dígitos del término (los teléfonos en BD están
+		// normalizados sin espacios ni guiones). Antes era sufijo y los
+		// primeros dígitos no matcheaban nada.
 		like := strings.ToLower(s) + "%"
-		phoneLike := "%" + s
-		base = base.Where("LOWER(m.full_name) LIKE ? OR m.phone LIKE ?", like, phoneLike)
+		phoneDigits := stripPhoneSeparators(s)
+		if phoneDigits != "" {
+			base = base.Where("LOWER(m.full_name) LIKE ? OR m.phone LIKE ?", like, "%"+phoneDigits+"%")
+		} else {
+			base = base.Where("LOWER(m.full_name) LIKE ?", like)
+		}
 	}
 	switch q.StatusFilter {
 	case "active":
@@ -293,10 +301,14 @@ func (r *MemberPostgresRepository) GetWithCurrentMembership(tx sharedDomain.Tran
 	return out, nil
 }
 
-// ListPinCandidates returns (member_id, pin_hash) for every active member in
-// `gymID` who has a PIN assigned. Used by checkins/UC-032 — see comment on
-// MemberPostgresRepository.PinHashCollidesInGym for the rationale of bcrypt
-// iteration in Go-land instead of an SQL hash compare.
+// ListPinCandidates returns (member_id, pin_hash) for every member in
+// `gymID` (active OR inactive) que tenga PIN asignado. Usado por
+// checkins/UC-032. NO filtramos por status: si un socio inactivo
+// ingresa su PIN, queremos que el access evaluator devuelva
+// denied_inactive con el nombre del socio en vez de "no encontré a este
+// socio" (que sugiere PIN incorrecto, no socio bloqueado).
+// Ver MemberPostgresRepository.PinHashCollidesInGym para el rationale
+// de iterar bcrypt en Go-land en vez de comparar el hash en SQL.
 func (r *MemberPostgresRepository) ListPinCandidates(tx sharedDomain.Transaction, gymID uuid.UUID) ([]memRepo.PinCandidate, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	var rows []struct {
@@ -304,7 +316,7 @@ func (r *MemberPostgresRepository) ListPinCandidates(tx sharedDomain.Transaction
 		PinHash string
 	}
 	err := gormTx.Model(&models.MemberModel{}).
-		Where("gym_id = ? AND pin_hash IS NOT NULL AND deleted_at IS NULL AND status = ?", gymID, memberDomain.StatusActive).
+		Where("gym_id = ? AND pin_hash IS NOT NULL AND deleted_at IS NULL", gymID).
 		Select("id, pin_hash").
 		Find(&rows).Error
 	if err != nil {

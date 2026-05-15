@@ -208,11 +208,17 @@ func NewBalanceSettlementPayment(
 // NewProductSalePayment builds a Payment row for UC-025 (concept='product').
 // `total` is the post-discount cart total (caller computed it from the Sale
 // aggregate). `memberID` is optional (anonymous walk-in sale — DA-25.3).
+// `paid` puede ser igual al total (cobro completo, caso default) o menor
+// (fiado — se cobra una parte y el resto queda como balance_pending para
+// liquidar después vía POST /payments/:id/settle, el mismo flujo que los
+// abonos a mensualidades). La verificación de que el caller pase un
+// member en el caso de fiado vive en el use case (RegisterSale), no
+// aquí — el domain solo enforce que paid > 0 y paid ≤ total.
 func NewProductSalePayment(
 	id, gymID, operatorID uuid.UUID,
 	memberID *uuid.UUID,
 	folio string,
-	total float64,
+	total, paid float64,
 	method string,
 	paymentDate, now time.Time,
 	notes *string,
@@ -226,26 +232,31 @@ func NewProductSalePayment(
 	if total <= 0 {
 		return nil, billingErrors.ErrAmountInvalid
 	}
+	if paid <= 0 || roundCents(paid) > roundCents(total) {
+		return nil, billingErrors.ErrPartialAmountInvalid
+	}
 	if err := validateNotes(notes); err != nil {
 		return nil, err
 	}
 	if paymentDate.IsZero() {
 		return nil, billingErrors.ErrPaymentDateInvalid
 	}
+	balance := roundCents(total - paid)
 	return &Payment{
-		ID:            id,
-		GymID:         gymID,
-		Version:       1,
-		Folio:         folio,
-		MemberID:      memberID,
-		Amount:        roundCents(total),
-		PaymentMethod: method,
-		Concept:       ConceptProduct,
-		PaymentDate:   truncateDate(paymentDate),
-		Notes:         notes,
-		OperatorID:    operatorID,
-		CreatedAt:     now,
-		UpdatedAt:     now,
+		ID:             id,
+		GymID:          gymID,
+		Version:        1,
+		Folio:          folio,
+		MemberID:       memberID,
+		Amount:         roundCents(paid),
+		PaymentMethod:  method,
+		Concept:        ConceptProduct,
+		BalancePending: balance,
+		PaymentDate:    truncateDate(paymentDate),
+		Notes:          notes,
+		OperatorID:     operatorID,
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}, nil
 }
 

@@ -123,31 +123,15 @@ func (r *ProductSQLiteRepository) ExistsByGymAndName(tx sharedDomain.Transaction
 func (r *ProductSQLiteRepository) List(tx sharedDomain.Transaction, q prodRepo.ListQuery) ([]*productDomain.Product, int, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	page, pageSize := normalizePage(q.Page, q.PageSize)
-	where := []string{"gym_id = ?", "deleted_at IS NULL"}
-	args := []any{q.GymID.String()}
-	if !q.IncludeInactive {
-		where = append(where, "active = 1")
-	}
-	if q.Category != "" {
-		where = append(where, "category = ?")
-		args = append(args, q.Category)
-	}
-	if s := strings.TrimSpace(q.Search); s != "" {
-		where = append(where, "name LIKE ? COLLATE NOCASE")
-		args = append(args, s+"%")
-	}
-	if q.LowStockOnly {
-		where = append(where, "stock <= stock_minimum")
-	}
-	whereClause := strings.Join(where, " AND ")
+	whereClause, args := buildProductWhereSqlite(q)
 	var total int
 	if err := stx.Get(context.Background(), &total,
 		`SELECT COUNT(*) FROM products WHERE `+whereClause, args...); err != nil {
 		return nil, 0, err
 	}
 	q2 := fmt.Sprintf(
-		`SELECT * FROM products WHERE %s ORDER BY name COLLATE NOCASE ASC LIMIT %d OFFSET %d`,
-		whereClause, pageSize, (page-1)*pageSize)
+		`SELECT * FROM products WHERE %s ORDER BY %s LIMIT %d OFFSET %d`,
+		whereClause, sortClauseSqlite(q.Sort, q.Direction), pageSize, (page-1)*pageSize)
 	var rows []sqliteProductRow
 	if err := stx.Select(context.Background(), &rows, q2, args...); err != nil {
 		return nil, 0, err
@@ -157,6 +141,101 @@ func (r *ProductSQLiteRepository) List(tx sharedDomain.Transaction, q prodRepo.L
 		out[i] = productFromRow(&rows[i])
 	}
 	return out, total, nil
+}
+
+// ListAggregates corre las mismas WHERE de List pero sin paginar ni
+// ordenar — solo SUM/COUNT sobre el set completo. TotalValue siempre
+// se restringe a activos porque inactivos no se venden. Devuelve totales
+// en moneda (cents → float al edge, mismo patrón que el resto del
+// modulo).
+func (r *ProductSQLiteRepository) ListAggregates(tx sharedDomain.Transaction, q prodRepo.ListQuery) (prodRepo.ProductAggregates, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	whereClause, args := buildProductWhereSqlite(q)
+	// Un solo round-trip — calcular todo en una query usando SUM/COUNT
+	// condicionales sobre la WHERE filtrada. Más eficiente que tres
+	// queries separadas, especialmente para catálogos chicos donde el
+	// overhead por query domina.
+	var row struct {
+		TotalValueCents sql.NullInt64 `db:"total_value"`
+		LowCount        int           `db:"low_count"`
+		OutCount        int           `db:"out_count"`
+	}
+	stmt := fmt.Sprintf(`
+		SELECT
+		  COALESCE(SUM(CASE WHEN active = 1 THEN price * stock ELSE 0 END), 0) AS total_value,
+		  COALESCE(SUM(CASE WHEN active = 1 AND stock > 0 AND stock <= stock_minimum THEN 1 ELSE 0 END), 0) AS low_count,
+		  COALESCE(SUM(CASE WHEN active = 1 AND stock = 0 THEN 1 ELSE 0 END), 0) AS out_count
+		FROM products WHERE %s`, whereClause)
+	if err := stx.Get(context.Background(), &row, stmt, args...); err != nil {
+		return prodRepo.ProductAggregates{}, err
+	}
+	return prodRepo.ProductAggregates{
+		TotalValue: float64(row.TotalValueCents.Int64) / 100,
+		LowCount:   row.LowCount,
+		OutCount:   row.OutCount,
+	}, nil
+}
+
+// buildProductWhereSqlite — extraído para reuso entre List y
+// ListAggregates. Cualquier cambio de filtro (nueva columna, nuevo
+// shape) entra aquí una sola vez.
+func buildProductWhereSqlite(q prodRepo.ListQuery) (string, []any) {
+	where := []string{"gym_id = ?", "deleted_at IS NULL"}
+	args := []any{q.GymID.String()}
+	// Default a "active" cuando el caller no pasa filtro — preserva el
+	// comportamiento histórico de la página de productos y de
+	// useActiveProducts en el FE.
+	switch q.ActiveFilter {
+	case prodRepo.ActiveFilterAll:
+		// no filter
+	case prodRepo.ActiveFilterInactive:
+		where = append(where, "active = 0")
+	default:
+		where = append(where, "active = 1")
+	}
+	if q.Category != "" {
+		where = append(where, "category = ?")
+		args = append(args, q.Category)
+	}
+	if s := strings.TrimSpace(q.Search); s != "" {
+		// Substring match (%s%) — antes era prefix (s%), lo que dejaba
+		// fuera resultados como "Agua mineral" al buscar "mineral". El
+		// catálogo típico de un gym tiene <200 SKUs así que el full
+		// scan que esto implica no es problema.
+		where = append(where, "name LIKE ? COLLATE NOCASE")
+		args = append(args, "%"+s+"%")
+	}
+	if q.LowStockOnly {
+		where = append(where, "stock <= stock_minimum")
+	}
+	return strings.Join(where, " AND "), args
+}
+
+// sortClauseSqlite — devuelve un ORDER BY válido. Whitelist explícita:
+// el valor viene del cliente vía query string y no quiero permitir
+// arbitrary column injection. Cualquier valor desconocido cae a
+// `name ASC` (default histórico).
+func sortClauseSqlite(sort, dir string) string {
+	col := "name COLLATE NOCASE"
+	switch sort {
+	case prodRepo.SortPrice:
+		col = "price"
+	case prodRepo.SortStock:
+		col = "stock"
+	case prodRepo.SortCategory:
+		col = "category COLLATE NOCASE"
+	}
+	direction := "ASC"
+	if dir == prodRepo.SortDirDesc {
+		direction = "DESC"
+	}
+	// Tiebreaker por nombre para resultados estables cuando hay
+	// empate en la columna elegida (p.ej. dos productos con el mismo
+	// precio).
+	if sort == prodRepo.SortName || sort == "" {
+		return col + " " + direction
+	}
+	return col + " " + direction + ", name COLLATE NOCASE ASC"
 }
 
 func productToRow(p *productDomain.Product) sqliteProductRow {

@@ -634,10 +634,281 @@ func (r *PostgresReader) ListRecentPayments(tx sharedDomain.Transaction, gymID u
 	return out, nil
 }
 
+// SumInventoryCostBetween — análogo a SumRefundsBetween pero sobre
+// stock_movements. cost (numeric(12,2)) es costo unitario; el total real
+// del egreso por fila es cost*delta. Filtramos NULL para no contar
+// restocks sin costo capturado.
+func (r *PostgresReader) SumInventoryCostBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (float64, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	var total float64
+	// Comparamos contra created_at (timestamp con TZ) directamente —
+	// from/to llegan ya en UTC desde el use case.
+	err := gormTx.Raw(`
+		SELECT COALESCE(SUM(cost * delta), 0) FROM stock_movements
+		WHERE gym_id = ? AND deleted_at IS NULL
+		  AND movement_type = 'restock'
+		  AND cost IS NOT NULL
+		  AND created_at >= ? AND created_at < ?`,
+		gymID, from, to.AddDate(0, 0, 1)).Scan(&total).Error
+	return total, err
+}
+
+// ListInventoryCostsBetween — JOIN a products para incluir el nombre y
+// evitar el N+1 desde el FE. ORDER DESC porque la tabla del FE muestra
+// el último egreso arriba.
+func (r *PostgresReader) ListInventoryCostsBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time, limit int) ([]reports.InventoryCostRow, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	if limit <= 0 {
+		limit = 200
+	}
+	type row struct {
+		MovementID  uuid.UUID
+		ProductID   uuid.UUID
+		ProductName string
+		Delta       int
+		Cost        float64
+		Reason      *string
+		CreatedAt   time.Time
+	}
+	var rows []row
+	if err := gormTx.Raw(`
+		SELECT sm.id AS movement_id, sm.product_id, p.name AS product_name,
+		       sm.delta, sm.cost, sm.reason, sm.created_at
+		FROM stock_movements sm
+		JOIN products p ON p.id = sm.product_id
+		WHERE sm.gym_id = ? AND sm.deleted_at IS NULL
+		  AND sm.movement_type = 'restock'
+		  AND sm.cost IS NOT NULL
+		  AND sm.created_at >= ? AND sm.created_at < ?
+		ORDER BY sm.created_at DESC
+		LIMIT ?`, gymID, from, to.AddDate(0, 0, 1), limit).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]reports.InventoryCostRow, len(rows))
+	for i, x := range rows {
+		out[i] = reports.InventoryCostRow{
+			MovementID:  x.MovementID,
+			ProductID:   x.ProductID,
+			ProductName: x.ProductName,
+			Delta:       x.Delta,
+			CostUnit:    x.Cost,
+			CostTotal:   x.Cost * float64(x.Delta),
+			Reason:      x.Reason,
+			OccurredAt:  x.CreatedAt.UTC(),
+		}
+	}
+	return out, nil
+}
+
+// SumExpensesBetween — totaliza gastos generales (BC expenses) en el
+// rango. Filtra por expense_date (el día que pasó el gasto según el
+// dueño), no por created_at, para que "egresos del mes" refleje cuándo
+// ocurrió el gasto y no cuándo se capturó.
+func (r *PostgresReader) SumExpensesBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (float64, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	var total float64
+	err := gormTx.Raw(`
+		SELECT COALESCE(SUM(amount), 0) FROM expenses
+		WHERE gym_id = ? AND deleted_at IS NULL
+		  AND expense_date >= ? AND expense_date <= ?`,
+		gymID, from.Format(dateFmt), to.Format(dateFmt)).Scan(&total).Error
+	return total, err
+}
+
+// ListExpensesBetween — gastos del rango ordenados por expense_date DESC.
+// Limit configurable; default 200 cuando llega 0.
+func (r *PostgresReader) ListExpensesBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time, limit int) ([]reports.ExpenseRow, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	if limit <= 0 {
+		limit = 200
+	}
+	type row struct {
+		ID            uuid.UUID
+		ExpenseDate   time.Time
+		Amount        float64
+		Category      string
+		Description   *string
+		PaymentMethod string
+	}
+	var rows []row
+	if err := gormTx.Raw(`
+		SELECT id, expense_date, amount, category, description, payment_method
+		FROM expenses
+		WHERE gym_id = ? AND deleted_at IS NULL
+		  AND expense_date >= ? AND expense_date <= ?
+		ORDER BY expense_date DESC, created_at DESC
+		LIMIT ?`, gymID, from.Format(dateFmt), to.Format(dateFmt), limit).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]reports.ExpenseRow, len(rows))
+	for i, x := range rows {
+		out[i] = reports.ExpenseRow{
+			ID:            x.ID,
+			ExpenseDate:   x.ExpenseDate.UTC(),
+			Amount:        x.Amount,
+			Category:      x.Category,
+			Description:   x.Description,
+			PaymentMethod: x.PaymentMethod,
+		}
+	}
+	return out, nil
+}
+
+// ExpensesDailySeries — total egresado por día sumando expenses + restocks
+// con costo. Hacemos las dos queries por separado y mergeamos en memoria
+// (los gyms tienen pocos días por ventana — O(días) keys), evita un UNION
+// complejo y mantiene el filtro por fecha homogéneo entre las dos fuentes.
+func (r *PostgresReader) ExpensesDailySeries(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) ([]reports.DailyAmount, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	type row struct {
+		Day   time.Time
+		Total float64
+	}
+	bucket := map[string]float64{}
+
+	var expRows []row
+	if err := gormTx.Raw(`
+		SELECT expense_date AS day, COALESCE(SUM(amount), 0) AS total
+		FROM expenses
+		WHERE gym_id = ? AND deleted_at IS NULL
+		  AND expense_date >= ? AND expense_date <= ?
+		GROUP BY expense_date`,
+		gymID, from.Format(dateFmt), to.Format(dateFmt)).Scan(&expRows).Error; err != nil {
+		return nil, err
+	}
+	for _, x := range expRows {
+		bucket[x.Day.Format(dateFmt)] += x.Total
+	}
+
+	var invRows []row
+	if err := gormTx.Raw(`
+		SELECT created_at::date AS day, COALESCE(SUM(cost * delta), 0) AS total
+		FROM stock_movements
+		WHERE gym_id = ? AND deleted_at IS NULL
+		  AND movement_type = 'restock'
+		  AND cost IS NOT NULL
+		  AND created_at >= ? AND created_at < ?
+		GROUP BY created_at::date`,
+		gymID, from, to.AddDate(0, 0, 1)).Scan(&invRows).Error; err != nil {
+		return nil, err
+	}
+	for _, x := range invRows {
+		bucket[x.Day.Format(dateFmt)] += x.Total
+	}
+
+	out := make([]reports.DailyAmount, 0, len(bucket))
+	for day, total := range bucket {
+		t, _ := time.Parse(dateFmt, day)
+		out = append(out, reports.DailyAmount{Date: t, Total: total})
+	}
+	// Sort ascending by date — the FE chart expects chronological order.
+	sortDailyAmount(out)
+	return out, nil
+}
+
+// ExpensesByCategoryBetween — total por categoría dentro del rango. No
+// incluye compras de mercancía (eso vive en stock_movements y se reporta
+// como "Compras de inventario" aparte).
+func (r *PostgresReader) ExpensesByCategoryBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (map[string]float64, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	type row struct {
+		Category string
+		Total    float64
+	}
+	var rows []row
+	if err := gormTx.Raw(`
+		SELECT category, COALESCE(SUM(amount), 0) AS total
+		FROM expenses
+		WHERE gym_id = ? AND deleted_at IS NULL
+		  AND expense_date >= ? AND expense_date <= ?
+		GROUP BY category`,
+		gymID, from.Format(dateFmt), to.Format(dateFmt)).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[string]float64, len(rows))
+	for _, r := range rows {
+		out[r.Category] = r.Total
+	}
+	return out, nil
+}
+
+// TopProductsBetween — ranking por revenue (= price * quantity de
+// sale_items). JOIN con payments para filtrar por payment_date — la misma
+// ventana que usa el resto de las queries de UC-036.
+func (r *PostgresReader) TopProductsBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time, limit int) ([]reports.TopProductRow, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	if limit <= 0 {
+		limit = 5
+	}
+	type row struct {
+		ProductID   uuid.UUID
+		ProductName string
+		Quantity    int
+		Revenue     float64
+	}
+	var rows []row
+	if err := gormTx.Raw(`
+		SELECT si.product_id,
+		       MIN(si.product_name_snapshot) AS product_name,
+		       COALESCE(SUM(si.quantity), 0) AS quantity,
+		       COALESCE(SUM(si.line_total), 0) AS revenue
+		FROM sale_items si
+		JOIN sales s ON s.id = si.sale_id AND s.deleted_at IS NULL
+		JOIN payments p ON p.id = s.payment_id AND p.deleted_at IS NULL
+		WHERE si.gym_id = ? AND si.deleted_at IS NULL
+		  AND p.concept <> 'refund'
+		  AND p.payment_date >= ? AND p.payment_date <= ?
+		GROUP BY si.product_id
+		ORDER BY revenue DESC
+		LIMIT ?`,
+		gymID, from.Format(dateFmt), to.Format(dateFmt), limit).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]reports.TopProductRow, len(rows))
+	for i, x := range rows {
+		out[i] = reports.TopProductRow{
+			ProductID:   x.ProductID,
+			ProductName: x.ProductName,
+			Quantity:    x.Quantity,
+			Revenue:     x.Revenue,
+		}
+	}
+	return out, nil
+}
+
+// CountCriticalStock — snapshot del catálogo. Out = stock = 0; Low = stock
+// >0 pero <= stock_minimum. Solo productos activos no borrados.
+func (r *PostgresReader) CountCriticalStock(tx sharedDomain.Transaction, gymID uuid.UUID) (reports.CriticalStockCounts, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	var out struct {
+		OutCount int
+		LowCount int
+	}
+	err := gormTx.Raw(`
+		SELECT
+		    COUNT(*) FILTER (WHERE stock <= 0) AS out_count,
+		    COUNT(*) FILTER (WHERE stock > 0 AND stock <= stock_minimum) AS low_count
+		FROM products
+		WHERE gym_id = ? AND deleted_at IS NULL AND active = TRUE`,
+		gymID).Scan(&out).Error
+	return reports.CriticalStockCounts{OutCount: out.OutCount, LowCount: out.LowCount}, err
+}
+
 // daysBetween returns floor((to - from) in days). Negative when `to` is before
 // `from`. Both arguments are interpreted at day granularity.
 func daysBetween(from, to time.Time) int {
 	a := time.Date(from.Year(), from.Month(), from.Day(), 0, 0, 0, 0, time.UTC)
 	b := time.Date(to.Year(), to.Month(), to.Day(), 0, 0, 0, 0, time.UTC)
 	return int(b.Sub(a).Hours() / 24)
+}
+
+// sortDailyAmount sorts a slice in-place ascending by Date. Tiny helper kept
+// in this file to avoid pulling in sort.Slice from callers — daily series
+// are small (≤365 entries even for "1 year").
+func sortDailyAmount(s []reports.DailyAmount) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j-1].Date.After(s[j].Date); j-- {
+			s[j-1], s[j] = s[j], s[j-1]
+		}
+	}
 }

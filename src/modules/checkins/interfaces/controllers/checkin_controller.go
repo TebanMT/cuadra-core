@@ -97,6 +97,10 @@ func (c *CheckinController) RegisterRoutes(r *gin.Engine) {
 		api.GET("/checkins", c.handleListRecent)
 		api.GET("/checkins/methods", c.handleMethods)
 		api.GET("/checkins/count-today", c.handleCountToday)
+		// Pestaña "Asistencia" del detalle de socio. Vive bajo /members/:id
+		// para que el FE no tenga que armar query params raros — un GET y
+		// listo.
+		api.GET("/members/:id/checkins", c.handleListByMember)
 	}
 }
 
@@ -262,6 +266,20 @@ func (c *CheckinController) handleListRecent(ctx *gin.Context) {
 			limit = n
 		}
 	}
+	// Drill-down support: when both `from` and `to` (YYYY-MM-DD) are
+	// present, scope the query to that window instead of the default
+	// "latest N recent". Used by reports drill-down dialogs.
+	var fromT, toT time.Time
+	if v := ctx.Query("from"); v != "" {
+		if t, err := time.Parse("2006-01-02", v); err == nil {
+			fromT = t
+		}
+	}
+	if v := ctx.Query("to"); v != "" {
+		if t, err := time.Parse("2006-01-02", v); err == nil {
+			toT = t
+		}
+	}
 	if c.Repo == nil || c.UoW == nil {
 		utils.JsonResponse(ctx, http.StatusOK, recentCheckinsResp{Items: []checkinEventWire{}})
 		return
@@ -271,7 +289,12 @@ func (c *CheckinController) handleListRecent(ctx *gin.Context) {
 		utils.ErrorResponse(ctx, http.StatusInternalServerError, err)
 		return
 	}
-	rows, err := c.Repo.ListRecentByGym(tx, gymID, limit)
+	var rows []chkRepo.RecentCheckinRow
+	if !fromT.IsZero() && !toT.IsZero() {
+		rows, err = c.Repo.ListByGymBetween(tx, gymID, fromT, toT, limit)
+	} else {
+		rows, err = c.Repo.ListRecentByGym(tx, gymID, limit)
+	}
 	if err != nil {
 		utils.ErrorResponse(ctx, http.StatusInternalServerError, err)
 		return
@@ -308,6 +331,40 @@ func (c *CheckinController) handleCountToday(ctx *gin.Context) {
 		return
 	}
 	utils.JsonResponse(ctx, http.StatusOK, countTodayResp{CountToday: n})
+}
+
+func (c *CheckinController) handleListByMember(ctx *gin.Context) {
+	gymID, _ := middleware.GetGymID(ctx)
+	memberID, err := uuid.Parse(ctx.Param("id"))
+	if err != nil {
+		utils.ErrorResponse(ctx, http.StatusBadRequest, errBadID)
+		return
+	}
+	limit := 50
+	if v := ctx.Query("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if c.Repo == nil || c.UoW == nil {
+		utils.JsonResponse(ctx, http.StatusOK, recentCheckinsResp{Items: []checkinEventWire{}})
+		return
+	}
+	tx, err := c.UoW.Query(ctx.Request.Context())
+	if err != nil {
+		utils.ErrorResponse(ctx, http.StatusInternalServerError, err)
+		return
+	}
+	rows, err := c.Repo.ListByMemberDetailed(tx, gymID, memberID, limit)
+	if err != nil {
+		utils.ErrorResponse(ctx, http.StatusInternalServerError, err)
+		return
+	}
+	items := make([]checkinEventWire, 0, len(rows))
+	for _, r := range rows {
+		items = append(items, recentToWire(r))
+	}
+	utils.JsonResponse(ctx, http.StatusOK, recentCheckinsResp{Items: items})
 }
 
 func (c *CheckinController) handleOverride(ctx *gin.Context) {
