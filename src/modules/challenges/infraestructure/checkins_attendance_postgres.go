@@ -1,4 +1,4 @@
-//go:build server
+//go:build server && !sidecar
 
 // Package infraestructure ties the challenges (retos) module to other
 // modules' persistence without breaking DDD layering — concretely, the

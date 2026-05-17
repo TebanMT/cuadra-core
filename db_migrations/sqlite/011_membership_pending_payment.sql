@@ -1,11 +1,22 @@
 -- Migration 011 — soporte para "membresía inscrita sin pago todavía".
 -- Espeja postgres/014.
 --
--- SQLite no soporta DROP CONSTRAINT en CHECKs, así que recreamos la
--- tabla manteniendo todos los índices. Si el archivo de init schema
--- ya se ejecutó hoy con la nueva forma (chk relajado + expiry_date
--- nullable), esta migración es un no-op porque el _migrations row
--- existe; pero la dejamos por consistencia con prod migrations.
+-- SQLite no soporta DROP CONSTRAINT en CHECKs, así que recreamos las
+-- tablas memberships y checkins manteniendo todos los índices.
+--
+-- Patrón de rebuild: create-new → copy → drop-old → rename-new (igual
+-- que las migraciones 007 y 016). NO rename-first: el `ALTER TABLE ...
+-- RENAME TO` del SQLite moderno reescribe las FK refs de las tablas
+-- hijas (p.ej. membership_adjustments.membership_id), así que renombrar
+-- la tabla viva a un nombre temporal dejaba esas FKs apuntando a la
+-- tabla temporal — y tras el DROP quedaban colgantes ("no such table:
+-- _memberships_old" al primer write). Creando la tabla _new y
+-- renombrándola al final, el único RENAME es new→canónico y no hay
+-- refs a `_new` que reescribir.
+--
+-- foreign_keys=OFF durante el rebuild: el DROP TABLE de una tabla
+-- referenciada haría un implicit DELETE que viola los FK RESTRICT de
+-- las hijas. Se reactiva al final.
 --
 -- Cambios:
 --   * status CHECK agrega 'pending_payment'.
@@ -14,13 +25,14 @@
 --   * uq_memberships_member_active incluye 'pending_payment' en la
 --     condición parcial (un socio sólo puede estar inscrito en un
 --     plan a la vez, pagado o no).
+--   * checkins.result añade 'denied_unpaid_enrollment'.
+
+PRAGMA foreign_keys = OFF;
 
 BEGIN;
 
--- Rename + recreate pattern para reemplazar el CHECK constraint.
-ALTER TABLE memberships RENAME TO _memberships_old;
-
-CREATE TABLE memberships (
+-- ── memberships rebuild ────────────────────────────────────────────────
+CREATE TABLE memberships_new (
     id              TEXT PRIMARY KEY,
     gym_id          TEXT NOT NULL REFERENCES gyms(id) ON DELETE RESTRICT,
     version         INTEGER NOT NULL DEFAULT 1,
@@ -39,18 +51,19 @@ CREATE TABLE memberships (
     start_date      TEXT NOT NULL,
     expiry_date     TEXT,
     status          TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','expired','replaced','cancelled','pending_payment')),
-    replaced_by     TEXT REFERENCES memberships(id),
+    replaced_by     TEXT REFERENCES memberships_new(id),
 
     CHECK (expiry_date IS NULL OR expiry_date >= start_date)
 );
 
-INSERT INTO memberships
+INSERT INTO memberships_new
 SELECT id, gym_id, version, created_at, updated_at, deleted_at, synced_at,
        member_id, membership_type_id, type_name_snapshot, price_snapshot,
        duration_days_snapshot, start_date, expiry_date, status, replaced_by
-FROM _memberships_old;
+FROM memberships;
 
-DROP TABLE _memberships_old;
+DROP TABLE memberships;
+ALTER TABLE memberships_new RENAME TO memberships;
 
 CREATE INDEX IF NOT EXISTS idx_memberships_member ON memberships(member_id, status) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_memberships_gym_expiry ON memberships(gym_id, expiry_date) WHERE status = 'active' AND deleted_at IS NULL;
@@ -58,11 +71,8 @@ CREATE INDEX IF NOT EXISTS idx_memberships_sync ON memberships(gym_id, updated_a
 CREATE INDEX IF NOT EXISTS idx_memberships_sync_pending ON memberships(synced_at) WHERE synced_at IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_memberships_member_active ON memberships(member_id) WHERE status IN ('active','pending_payment') AND deleted_at IS NULL;
 
--- checkins.result añade el código 'denied_unpaid_enrollment' para el
--- caso "socio inscrito que aún no paga su primer ciclo". Mismo patrón
--- del DROP/CREATE para reemplazar el CHECK en sqlite.
-ALTER TABLE checkins RENAME TO _checkins_old;
-CREATE TABLE checkins (
+-- ── checkins rebuild ───────────────────────────────────────────────────
+CREATE TABLE checkins_new (
     id              TEXT PRIMARY KEY,
     gym_id          TEXT NOT NULL REFERENCES gyms(id) ON DELETE RESTRICT,
     version         INTEGER NOT NULL DEFAULT 1,
@@ -78,8 +88,12 @@ CREATE TABLE checkins (
     manual_override     INTEGER NOT NULL DEFAULT 0,
     override_reason     TEXT
 );
-INSERT INTO checkins SELECT * FROM _checkins_old;
-DROP TABLE _checkins_old;
+
+INSERT INTO checkins_new SELECT * FROM checkins;
+
+DROP TABLE checkins;
+ALTER TABLE checkins_new RENAME TO checkins;
+
 CREATE INDEX IF NOT EXISTS idx_checkins_member_date ON checkins(member_id, checkin_at DESC) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_checkins_gym_date ON checkins(gym_id, checkin_at DESC) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_checkins_sync ON checkins(gym_id, updated_at);
@@ -89,3 +103,5 @@ SELECT 11, '011_membership_pending_payment', CAST(strftime('%s','now') AS INTEGE
 WHERE NOT EXISTS (SELECT 1 FROM _migrations WHERE version = 11);
 
 COMMIT;
+
+PRAGMA foreign_keys = ON;
