@@ -156,7 +156,7 @@ func seed(tx *gorm.DB, now, today time.Time) error {
 			ID: membershipID, GymID: gymID, Version: 1, CreatedAt: now, UpdatedAt: now,
 			MemberID: memberID, MembershipTypeID: planMonthlyID,
 			TypeNameSnapshot: "Mensual", PriceSnapshot: 500, DurationDaysSnapshot: 30,
-			StartDate: startDate, ExpiryDate: expiryDate, Status: "active",
+			StartDate: startDate, ExpiryDate: &expiryDate, Status: "active",
 		}).Error; err != nil {
 			return fmt.Errorf("membership %s: %w", sm.Name, err)
 		}

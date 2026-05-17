@@ -1243,6 +1243,10 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 		} else if sm.Estado == 3 {
 			status = "cancelled"
 		}
+		// ExpiryDate del modelo es *time.Time (nullable desde la migración
+		// 011). startOfDay devuelve time.Time, así que materializamos en una
+		// variable para poder tomar su dirección.
+		expiryDate := startOfDay(expiry)
 		prep = append(prep, prepared{
 			legacyID:     sm.ID,
 			legacyEstado: sm.Estado,
@@ -1256,7 +1260,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 				PriceSnapshot:        typePrice,
 				DurationDaysSnapshot: durationDays(sm.Meses, sm.Semanas, sm.Dias),
 				StartDate:            startOfDay(startDate),
-				ExpiryDate:           startOfDay(expiry),
+				ExpiryDate:           &expiryDate,
 				Status:               status,
 			},
 		})
@@ -1276,7 +1280,9 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 			continue
 		}
 		sort.Slice(idxs, func(a, b int) bool {
-			return prep[idxs[a]].row.ExpiryDate.After(prep[idxs[b]].row.ExpiryDate)
+			// ExpiryDate es *time.Time; el import siempre lo setea non-nil
+			// (línea ~1263), así que derefear el argumento es seguro acá.
+			return prep[idxs[a]].row.ExpiryDate.After(*prep[idxs[b]].row.ExpiryDate)
 		})
 		for _, i := range idxs[1:] {
 			prep[i].row.Status = "expired"
@@ -1297,7 +1303,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 			"price_snapshot":         toCents(row.PriceSnapshot),
 			"duration_days_snapshot": row.DurationDaysSnapshot,
 			"start_date":             dateStr(row.StartDate),
-			"expiry_date":            dateStr(row.ExpiryDate),
+			"expiry_date":            dateStr(*row.ExpiryDate),
 			"status":                 row.Status,
 		}); err != nil {
 			return fmt.Errorf("emit membership %d: %w", p.legacyID, err)
