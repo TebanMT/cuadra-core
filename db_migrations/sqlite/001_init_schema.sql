@@ -156,7 +156,6 @@ CREATE TABLE IF NOT EXISTS members (
     last_maintenance_paid   TEXT,
 
     pin_hash                TEXT,
-    pin_plain               TEXT,
     pin_assigned_at         INTEGER,
 
     last_contact_attempt_at INTEGER,
@@ -322,7 +321,6 @@ CREATE TABLE IF NOT EXISTS payments (
     balance_pending         INTEGER NOT NULL DEFAULT 0,
     payment_date            TEXT NOT NULL,
     notes                   TEXT,
-    breakdown               TEXT,
     operator_id             TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_payments_gym_folio ON payments(gym_id, folio) WHERE deleted_at IS NULL;
