@@ -288,27 +288,36 @@ func (ctrl *AuthController) handleUpdateProfileWire(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, err)
 		return
 	}
+	upd := gymDomain.ProfileUpdate{
+		Name:                req.Name,
+		City:                req.City,
+		WhatsApp:            req.WhatsAppNumber,
+		Timezone:            req.Timezone,
+		RFC:                 req.RFC,
+		RazonSocial:         req.LegalName,
+		CodigoPostal:        req.PostalCode,
+		RegimenFiscal:       req.TaxRegime,
+		LogoURL:             req.LogoURL,
+		PrimaryColor:        req.PrimaryColor,
+		SecondaryColor:      req.SecondaryColor,
+		OpenTime:            req.OpenTime,
+		CloseTime:           req.CloseTime,
+		KioskVolume:         req.KioskVolume,
+		KioskFeedbackTTLMs:  req.KioskFeedbackTTLMs,
+		AccessWebhookURL:    req.AccessWebhookURL,
+		AccessWebhookSecret: req.AccessWebhookSecret,
+	}
+	// Si el dueño tocó campos exclusivos de Plus (branding, datos fiscales,
+	// webhook), gatear contra el SKU. El resto del PATCH (city, horario,
+	// kiosko) sigue siendo Standard y no llega al gate.
+	if upd.HasPlusOnlyFields() {
+		if !middleware.EnforcePlusInline(c, ctrl.Gyms, ctrl.UoW) {
+			return
+		}
+	}
 	out, err := ctrl.UpdateProfile.Execute(c.Request.Context(), gymApp.UpdateProfileInput{
 		GymID: gymID, ActorUserID: userID,
-		Update: gymDomain.ProfileUpdate{
-			Name:                req.Name,
-			City:                req.City,
-			WhatsApp:            req.WhatsAppNumber,
-			Timezone:            req.Timezone,
-			RFC:                 req.RFC,
-			RazonSocial:         req.LegalName,
-			CodigoPostal:        req.PostalCode,
-			RegimenFiscal:       req.TaxRegime,
-			LogoURL:             req.LogoURL,
-			PrimaryColor:        req.PrimaryColor,
-			SecondaryColor:      req.SecondaryColor,
-			OpenTime:            req.OpenTime,
-			CloseTime:           req.CloseTime,
-			KioskVolume:         req.KioskVolume,
-			KioskFeedbackTTLMs:  req.KioskFeedbackTTLMs,
-			AccessWebhookURL:    req.AccessWebhookURL,
-			AccessWebhookSecret: req.AccessWebhookSecret,
-		},
+		Update: upd,
 	})
 	if err != nil {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
@@ -581,7 +590,11 @@ func toGymProfileWire(g *gymDomain.Gym) gymProfileWire {
 	return out
 }
 
-// operatorWire mirrors cuadra-desktop's `Operator` interface.
+// operatorWire mirrors cuadra-desktop's `Operator` interface. `has_pin`
+// se expone para que la pantalla de Operadores pueda pintar el badge
+// "PIN" sin re-pegar otro endpoint, y para que el modal de edición
+// decida si esconder la acción legacy "Resetear contraseña" (operadores
+// PIN-first sin email no la necesitan).
 type operatorWire struct {
 	ID                 uuid.UUID  `json:"id"`
 	GymID              uuid.UUID  `json:"gym_id"`
@@ -591,6 +604,7 @@ type operatorWire struct {
 	Role               string     `json:"role"`
 	Active             bool       `json:"active"`
 	MustChangePassword bool       `json:"must_change_password"`
+	HasPIN             bool       `json:"has_pin"`
 	LastLoginAt        *time.Time `json:"last_login_at"`
 	CreatedAt          time.Time  `json:"created_at"`
 }
@@ -608,6 +622,7 @@ func toOperatorWire(u *userDomain.User) operatorWire {
 		Role:               u.Role,
 		Active:             u.Active,
 		MustChangePassword: u.MustChangePassword,
+		HasPIN:             u.HasPIN(),
 		LastLoginAt:        u.LastLoginAt,
 		CreatedAt:          u.CreatedAt,
 	}

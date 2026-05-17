@@ -35,12 +35,23 @@ type SignupOwnerInput struct {
 }
 
 // SignupOwnerOutput mirrors the JSON the handler returns to the wizard.
+//
+// PIN se devuelve plaintext UNA vez (al igual que en CreateOperator). El
+// dueño lo memoriza o lo cambia inmediatamente desde su perfil en el
+// desktop (POST /auth/me/pin). No mandamos WhatsApp en este punto: el gym
+// recién se acaba de crear y todavía no tiene WhatsApp Business conectado.
 type SignupOwnerOutput struct {
 	UserID         uuid.UUID
 	GymID          uuid.UUID
 	AccessToken    string
 	RefreshToken   string
 	SetupCompleted bool
+	PIN            string
+	// PinHash: bcrypt del PIN para que el sidecar pueda mirrorearlo al
+	// sqlite local cuando el cuadra-desktop signs up directo (poco común
+	// pero soportado). El cloud-dashboard flow no necesita este campo —
+	// solo el plaintext PIN para mostrarlo en pantalla.
+	PinHash string
 }
 
 // SignupOwner is the UC-001 step 1 use case: register a new owner + a
@@ -95,6 +106,18 @@ func (uc *SignupOwner) Execute(ctx context.Context, in SignupOwnerInput) (Signup
 		return SignupOwnerOutput{}, sharedDomain.NewUnexpectedError(err)
 	}
 
+	// El dueño también recibe un PIN al alta. Lo necesita para entrar al
+	// kiosko de recepción desde el primer día, antes de que cree operadores.
+	// Se hashea con el mismo helper que el PIN del operador.
+	pin, err := auth.GenerateTempPIN()
+	if err != nil {
+		return SignupOwnerOutput{}, sharedDomain.NewUnexpectedError(err)
+	}
+	pinHash, err := auth.HashPIN(pin)
+	if err != nil {
+		return SignupOwnerOutput{}, sharedDomain.NewUnexpectedError(err)
+	}
+
 	now := uc.NowFunc()
 	gymID := uuid.New()
 	userID := uuid.New()
@@ -102,6 +125,9 @@ func (uc *SignupOwner) Execute(ctx context.Context, in SignupOwnerInput) (Signup
 	gym := gymDomain.NewTrialGym(gymID, uc.TrialDays, now)
 	user := userDomain.NewUser(userID, gymID, in.Email, hash, in.FullName, userDomain.RoleOwner, false, nil, now)
 	user.SetInitialPhone(trimmedPhone)
+	user.AssignPIN(pinHash, now)
+	// AssignPIN bumpea Version a 2; el row recién creado es v1.
+	user.Version = 1
 
 	err = uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
 		exists, err := uc.Users.ExistsByEmail(tx, in.Email)
@@ -123,10 +149,14 @@ func (uc *SignupOwner) Execute(ctx context.Context, in SignupOwnerInput) (Signup
 			EntityID:    userID,
 			Action:      audit.ActionCreate,
 			ActorUserID: &userID,
-			Changes:     map[string]any{"role": "owner", "self_signup": true},
-			IPAddress:   audit.IPFromContext(ctx),
-			UserAgent:   audit.UAFromContext(ctx),
-			At:          now,
+			Changes: map[string]any{
+				"role":         "owner",
+				"self_signup":  true,
+				"pin_assigned": true,
+			},
+			IPAddress: audit.IPFromContext(ctx),
+			UserAgent: audit.UAFromContext(ctx),
+			At:        now,
 		})
 		return nil
 	})
@@ -149,5 +179,7 @@ func (uc *SignupOwner) Execute(ctx context.Context, in SignupOwnerInput) (Signup
 		AccessToken:    access,
 		RefreshToken:   refresh,
 		SetupCompleted: false,
+		PIN:            pin,
+		PinHash:        pinHash,
 	}, nil
 }

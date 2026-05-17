@@ -83,7 +83,7 @@ func (uc *EnqueueOwnerAlert) Execute(ctx context.Context, in EnqueueOwnerAlertIn
 	now := time.Now().UTC()
 	out := EnqueueOwnerAlertOutput{}
 
-	templateKey, ok := ownerAlertTemplate(in.Kind)
+	templateKey, ok := OwnerAlertTemplateKey(in.Kind)
 	if !ok {
 		out.Skipped = true
 		out.SkippedReason = "unknown_alert_kind"
@@ -181,7 +181,10 @@ func (uc *EnqueueOwnerAlert) Execute(ctx context.Context, in EnqueueOwnerAlertIn
 	return &out, nil
 }
 
-func ownerAlertTemplate(k OwnerAlertKind) (string, bool) {
+// OwnerAlertTemplateKey resolves the WhatsApp template key for a canonical
+// AlertKey. Every AlertKey in alertconfig.Defaults must have a matching
+// template — the default branch is a defensive guard for enum drift.
+func OwnerAlertTemplateKey(k OwnerAlertKind) (string, bool) {
 	switch k {
 	case OwnerAlertLowStock:
 		return "owner_alert_low_stock", true
@@ -189,10 +192,11 @@ func ownerAlertTemplate(k OwnerAlertKind) (string, bool) {
 		return "owner_alert_expired_batch", true
 	case OwnerAlertCashCloseDiff:
 		return "owner_alert_cash_close_diff", true
+	case OwnerAlertVIPMemberNoVisit:
+		return "owner_alert_vip_no_visit", true
+	case OwnerAlertNoPaymentsToday:
+		return "owner_alert_no_payments_today", true
 	default:
-		// vip_member_no_visit and no_payments_today have no matching
-		// WhatsApp template yet — callers see SkippedReason="unknown_alert_kind"
-		// until the template library catches up.
 		return "", false
 	}
 }

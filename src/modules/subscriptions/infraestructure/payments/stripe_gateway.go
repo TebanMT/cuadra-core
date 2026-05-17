@@ -21,8 +21,12 @@ import (
 // even on the Stripe-hosted page.
 type StripeConfig struct {
 	SecretKey     string
-	PriceStandard string // monthly $799 MXN — maps to gym plan "pro_monthly"
-	PricePlus     string // monthly $1,599 MXN — maps to gym plan "pro_annual"
+	PriceStandard string // monthly $799 MXN — maps to gym plan "standard_monthly"
+	// PricePlus mapea al plan "plus_monthly" a $1,199 MXN. Plus aún no
+	// se vende públicamente (espera a que app del socio + tap-to-sell +
+	// WhatsApp completo entren en producción), pero el price ID se puede
+	// pre-crear en Stripe para tenerlo listo el día del lanzamiento.
+	PricePlus string
 }
 
 // StripeGateway implements subDomain.CheckoutGateway by calling the Stripe
@@ -41,10 +45,10 @@ func NewStripeGateway(cfg StripeConfig) *StripeGateway {
 	}
 	prices := map[string]string{}
 	if cfg.PriceStandard != "" {
-		prices[gymDomain.PlanProMonthly] = cfg.PriceStandard
+		prices[gymDomain.PlanStandardMonthly] = cfg.PriceStandard
 	}
 	if cfg.PricePlus != "" {
-		prices[gymDomain.PlanProAnnual] = cfg.PricePlus
+		prices[gymDomain.PlanPlusMonthly] = cfg.PricePlus
 	}
 	return &StripeGateway{
 		client: stripe.NewClient(cfg.SecretKey),

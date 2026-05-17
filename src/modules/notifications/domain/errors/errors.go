@@ -49,5 +49,6 @@ var (
 	ErrInvalidPayload   = errors.New("payload del webhook inválido")
 
 	// Owner-alert config (UC-040 DA-40.1)
-	ErrAlertKeyUnknown = errors.New("clave de alerta desconocida")
+	ErrAlertKeyUnknown  = errors.New("clave de alerta desconocida")
+	ErrAlertUpdateEmpty = errors.New("nada que actualizar: incluye al menos enabled o body")
 )

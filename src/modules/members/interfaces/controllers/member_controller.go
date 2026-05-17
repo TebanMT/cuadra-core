@@ -1,9 +1,11 @@
 package controllers
 
 import (
+	"errors"
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -11,6 +13,7 @@ import (
 
 	memApp "github.com/cuadra/cuadra-core/src/modules/members/app"
 	"github.com/cuadra/cuadra-core/src/modules/members/domain/access"
+	memErrors "github.com/cuadra/cuadra-core/src/modules/members/domain/errors"
 	memberDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/member"
 	membershipDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/membership"
 	"github.com/cuadra/cuadra-core/src/shared/auth"
@@ -18,7 +21,7 @@ import (
 	"github.com/cuadra/cuadra-core/src/shared/utils"
 )
 
-// MemberController bundles UC-012..UC-017 + UC-032 partial.
+// MemberController bundles UC-012..UC-017 + UC-032 + UC-046 partial.
 type MemberController struct {
 	Create     *memApp.CreateMember
 	Update     *memApp.UpdateMember
@@ -27,6 +30,10 @@ type MemberController struct {
 	Toggle     *memApp.ToggleMemberStatus
 	LockExpiry *memApp.LockMembershipExpiry
 	AssignPin  *memApp.AssignPin
+	// ImportCSV es opcional: el wiring real lo inyecta cmd/server y
+	// cmd/sidecar via WithImportCSV. Si queda nil, el endpoint responde
+	// 503 — útil para tests que no exercisan importación.
+	ImportCSV *memApp.ImportMembersFromCSV
 	Tokens     auth.TokenService
 	// UploadsDir es la raíz del cache local de blobs (igual variable
 	// que la AgentConfig). Cuando está seteada, los handlers de create
@@ -58,6 +65,13 @@ func (ctrl *MemberController) WithSyncTrigger(fn func()) *MemberController {
 	return ctrl
 }
 
+// WithImportCSV cablea el use case de importación masiva (UC-046). Llamado
+// desde cmd/server + cmd/sidecar tras construir el controller base.
+func (ctrl *MemberController) WithImportCSV(uc *memApp.ImportMembersFromCSV) *MemberController {
+	ctrl.ImportCSV = uc
+	return ctrl
+}
+
 func NewMemberController(
 	create *memApp.CreateMember,
 	update *memApp.UpdateMember,
@@ -85,6 +99,10 @@ func (ctrl *MemberController) RegisterRoutes(r *gin.Engine) {
 		members.PATCH("/:id", ctrl.handleUpdate)
 		members.PATCH("/:id/status", ctrl.handleToggleStatus)
 		members.POST("/:id/pin", ctrl.handleAssignPin)
+
+		// UC-046 — sólo el dueño puede importar masivo (DA-46.2). El gym
+		// completo cambia con un click; ese poder no lo damos a operadores.
+		members.POST("/import-csv", middleware.RequireOwner(), ctrl.handleImportCSV)
 
 		// UC-017 — only owner can adjust expiry (DA-17.1).
 		api.POST("/memberships/:id/lock-expiry", middleware.RequireOwner(), ctrl.handleLockExpiry)
@@ -509,6 +527,110 @@ func (ctrl *MemberController) handleAssignPin(c *gin.Context) {
 		resp["pin_dispatch"] = d
 	}
 	utils.JsonResponse(c, http.StatusOK, resp)
+}
+
+// ---------------------------------------------------------------------------
+// UC-046 — importación masiva de socios + membresías desde CSV
+// ---------------------------------------------------------------------------
+
+// maxCSVImportBytes acota la carga del wizard. 5 MB cubre ~50K filas
+// (CSV con socio + membresía ≈ 100 bytes/row). Más que eso huele a
+// archivo equivocado, no a un gym de barrio.
+const maxCSVImportBytes int64 = 5 * 1024 * 1024
+
+type importCSVSummary struct {
+	ImportedCount int  `json:"imported_count"`
+	SkippedCount  int  `json:"skipped_count"`
+	ErrorsCount   int  `json:"errors_count"`
+	TotalDataRows int  `json:"total_data_rows"`
+	Atomic        bool `json:"atomic"`
+}
+
+type importCSVResp struct {
+	Imported []memApp.ImportedRow `json:"imported"`
+	Skipped  []memApp.SkipRow     `json:"skipped"`
+	Errors   []memApp.ErrorRow    `json:"errors"`
+	Summary  importCSVSummary     `json:"summary"`
+}
+
+// handleImportCSV procesa multipart/form-data { file: <csv>, allow_duplicates: bool }.
+// El query param ?allow_duplicates=true|false toma precedencia si está presente —
+// el FE lo manda así para simplificar la mutation (no tiene que crear un field
+// extra en el form).
+func (ctrl *MemberController) handleImportCSV(c *gin.Context) {
+	if ctrl.ImportCSV == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, errors.New("importación no configurada"))
+		return
+	}
+	gymID, ok := middleware.GetGymID(c)
+	if !ok || gymID == uuid.Nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, errBadAuth)
+		return
+	}
+	userID, _ := middleware.GetUserID(c)
+
+	fh, err := c.FormFile("file")
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, memErrors.ErrCSVMissingHeader)
+		return
+	}
+	if fh.Size > maxCSVImportBytes {
+		utils.ErrorResponse(c, http.StatusBadRequest, memErrors.ErrCSVTooLarge)
+		return
+	}
+	// Content-Type del multipart header es informativo; lo chequeamos pero
+	// no exclusivamente — Excel a veces manda application/vnd.ms-excel o
+	// text/plain. Lo importante es que el contenido parseé bien como CSV;
+	// la extensión .csv en filename y el header MIME los chequeamos juntos
+	// como pista, no como gate duro.
+	if !looksLikeCSV(fh.Filename, fh.Header.Get("Content-Type")) {
+		utils.ErrorResponse(c, http.StatusBadRequest, errors.New("sube un archivo .csv exportado de Excel"))
+		return
+	}
+
+	src, err := fh.Open()
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, err)
+		return
+	}
+	defer src.Close()
+
+	allowDup := strings.EqualFold(c.Query("allow_duplicates"), "true") ||
+		strings.EqualFold(c.PostForm("allow_duplicates"), "true")
+
+	out, err := ctrl.ImportCSV.Execute(c.Request.Context(), memApp.ImportMembersFromCSVInput{
+		GymID:           gymID,
+		ActorUserID:     userID,
+		Reader:          src,
+		AllowDuplicates: allowDup,
+	})
+	if err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	utils.JsonResponse(c, http.StatusOK, importCSVResp{
+		Imported: out.Imported,
+		Skipped:  out.Skipped,
+		Errors:   out.Errors,
+		Summary: importCSVSummary{
+			ImportedCount: out.ImportedCount,
+			SkippedCount:  out.SkippedCount,
+			ErrorsCount:   out.ErrorsCount,
+			TotalDataRows: out.TotalDataRows,
+			Atomic:        true,
+		},
+	})
+}
+
+// looksLikeCSV es una heurística amable: aceptamos cualquier filename con
+// extensión .csv o un Content-Type que contenga "csv". No bloqueamos por
+// MIME exacto porque Excel/Sheets/Numbers reportan inconsistentemente.
+func looksLikeCSV(filename, contentType string) bool {
+	if strings.HasSuffix(strings.ToLower(filename), ".csv") {
+		return true
+	}
+	ct := strings.ToLower(contentType)
+	return strings.Contains(ct, "csv")
 }
 
 // ---------------------------------------------------------------------------

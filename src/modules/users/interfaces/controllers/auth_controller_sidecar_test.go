@@ -260,9 +260,11 @@ func TestProxy_SignupMirrorsCloudIdentityIntoLocalDB(t *testing.T) {
 	gymID := uuid.NewString()
 	userID := uuid.NewString()
 	cloud.respStatus = 201
+	// Cloud envelope shape: gym_name vive top-level en data (no en `gyms[]`),
+	// para alinear con loginResp / signupResp del cloud actual.
 	cloud.respBody = []byte(fmt.Sprintf(
-		`{"status_code":201,"data":{"user_id":%q,"gym_id":%q,"role":"owner","access_token":"jwt","refresh_token":"r","setup_completed":false,"gyms":[{"id":%q,"name":"Brand New Gym"}],"sidecar_token":"sk_live_xyz"}}`,
-		userID, gymID, gymID,
+		`{"status_code":201,"data":{"user_id":%q,"gym_id":%q,"role":"owner","full_name":"Owner Name","access_token":"jwt","refresh_token":"r","setup_completed":false,"gym_name":"Brand New Gym","sidecar_token":"sk_live_xyz"}}`,
+		userID, gymID,
 	))
 	r := newProxyRouter(t, usersCtrl.SidecarAuthProxy{
 		CloudURL:    cloud.srv.URL,

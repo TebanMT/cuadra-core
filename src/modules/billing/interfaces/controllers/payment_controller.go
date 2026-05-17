@@ -37,6 +37,9 @@ type PaymentController struct {
 	RefundSale   *billingApp.RefundSale
 	CashClose    *reportsApp.CashClose
 	Tokens       auth.TokenService
+	// PlanGate (opcional) restringe cash-close a Plus. Los cobros normales,
+	// ventas, comprobantes y refunds permanecen en Standard.
+	PlanGate gin.HandlerFunc
 }
 
 func NewPaymentController(
@@ -73,8 +76,14 @@ func (ctrl *PaymentController) RegisterRoutes(r *gin.Engine) {
 		api.POST("/payments/:id/refund", middleware.RequireOwner(), ctrl.handleRefund)
 		api.POST("/sales", ctrl.handleRegisterSale)
 		api.POST("/sales/:id/refund", middleware.RequireOwner(), ctrl.handleRefundSale)
-		api.GET("/cash-close", ctrl.handleCashCloseReport)
-		api.POST("/cash-close", ctrl.handleCashClose)
+		// Cash close (cierre de caja) es Plus. Standard cierra a mano /
+		// con libreta; el módulo de cash close + reportes es admin avanzado.
+		plus := api.Group("")
+		if ctrl.PlanGate != nil {
+			plus.Use(ctrl.PlanGate)
+		}
+		plus.GET("/cash-close", ctrl.handleCashCloseReport)
+		plus.POST("/cash-close", ctrl.handleCashClose)
 	}
 }
 

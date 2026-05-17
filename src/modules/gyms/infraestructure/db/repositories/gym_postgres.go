@@ -54,6 +54,28 @@ func (r *GymPostgresRepository) Update(tx sharedDomain.Transaction, g *gymDomain
 	return toDomain(&m), nil
 }
 
+// ExistsByWhatsApp implementa GymRepository.ExistsByWhatsApp. La consulta
+// se hace contra el índice partial uq_gyms_whatsapp creado en la migración
+// 018, así que es O(log n). `excludeGymID == uuid.Nil` se trata como "no
+// excluir nada" — útil para creación donde el gym aún no existe.
+func (r *GymPostgresRepository) ExistsByWhatsApp(tx sharedDomain.Transaction, whatsapp string, excludeGymID uuid.UUID) (bool, error) {
+	if whatsapp == "" {
+		return false, nil
+	}
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	q := gormTx.Table("gyms").
+		Where("whatsapp = ?", whatsapp).
+		Where("deleted_at IS NULL")
+	if excludeGymID != uuid.Nil {
+		q = q.Where("id <> ?", excludeGymID)
+	}
+	var count int64
+	if err := q.Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 // HasMembershipType is the cross-BC peek the wizard needs to decide whether
 // the user can complete setup (UC-001 step 5). We deliberately query the
 // table directly instead of importing members/repository: this keeps the

@@ -110,6 +110,15 @@ type RedeemInstallerBootstrapOutput struct {
 	TrialEndsAt      *time.Time
 	SubscriptionPlan string
 	SidecarToken     string
+	// HasPIN: el bootstrap se redime POSTERIOR al signup en cloud (donde
+	// el dueño ya recibió un PIN auto-asignado). Sin esto, el desktop
+	// arrancaba con has_pin=false y pintaba "Crear PIN" en perfil para
+	// un dueño que ya tenía pin_hash en DB.
+	HasPIN bool
+	// PinHash viaja para que el sidecar pueda mirrorear el bcrypt al
+	// sqlite local y el flujo login-pin offline funcione desde t=0 (sin
+	// esperar el primer sync pull). Mismo tier que password_hash.
+	PinHash string
 }
 
 func (uc *RedeemInstallerBootstrap) Execute(ctx context.Context, in RedeemInstallerBootstrapInput) (RedeemInstallerBootstrapOutput, error) {
@@ -131,6 +140,8 @@ func (uc *RedeemInstallerBootstrap) Execute(ctx context.Context, in RedeemInstal
 		setupDone                          bool
 		trialEnd                           *time.Time
 		gymName                            *string
+		hasPIN                             bool
+		pinHash                            string
 	)
 	err = uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
 		user, err := uc.Users.GetByID(tx, bs.UserID)
@@ -151,6 +162,10 @@ func (uc *RedeemInstallerBootstrap) Execute(ctx context.Context, in RedeemInstal
 		trialEnd = gym.TrialEndsAt
 		plan = gym.SubscriptionPlan
 		gymName = gym.Name
+		hasPIN = user.HasPIN()
+		if user.PinHash != nil {
+			pinHash = *user.PinHash
+		}
 		user.MarkLoggedIn(now)
 		_, _ = uc.Users.Update(tx, user)
 		return nil
@@ -181,6 +196,8 @@ func (uc *RedeemInstallerBootstrap) Execute(ctx context.Context, in RedeemInstal
 		SetupCompleted:   setupDone,
 		TrialEndsAt:      trialEnd,
 		SubscriptionPlan: plan,
+		HasPIN:           hasPIN,
+		PinHash:          pinHash,
 	}
 	if uc.SidecarBoot != nil && in.ClientID != uuid.Nil {
 		tok, err := uc.SidecarBoot.Execute(ctx, BootstrapSidecarTokenInput{

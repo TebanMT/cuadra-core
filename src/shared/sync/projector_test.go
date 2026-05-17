@@ -153,6 +153,116 @@ func TestBuildProjectorUpsert_TimestampMsConvertedToTime(t *testing.T) {
 	}
 }
 
+// TestBuildProjectorUpsert_NonAtTimestampsCoerced — regresión del bug
+// "cannot find encode plan for OID 1184" en challenges: las columnas
+// measurement_t0_deadline y measurement_t1_start son TIMESTAMPTZ pero no
+// terminan en `_at`, y antes la heurística por sufijo las dejaba pasar como
+// int64 crudo al driver pgx. timestamptzColumns ahora las cataloga
+// explícitamente.
+func TestBuildProjectorUpsert_NonAtTimestampsCoerced(t *testing.T) {
+	cases := []struct {
+		table  string
+		column string
+		extras map[string]any
+	}{
+		{
+			table:  "challenges",
+			column: "measurement_t0_deadline",
+			extras: map[string]any{
+				"name":                    "Reto Test",
+				"starts_at":               time.UnixMilli(1714060000000).UnixMilli(),
+				"measurement_t0_deadline": int64(1779926400000),
+				"measurement_t1_start":    int64(1779926400000),
+				"ends_at":                 int64(1781136000000),
+				"status":                  "active",
+				"inscription_fee_cents":   int64(20000),
+				"inscription_refundable":  true,
+				"min_weekly_attendance":   3,
+				"attendance_grace_weeks":  2,
+				"strength_cap_pct":        25,
+				"tie_margin_ir":           5,
+				"bf_floor_male_pct":       6,
+				"bf_floor_female_pct":     14,
+			},
+		},
+		{
+			table:  "challenges",
+			column: "measurement_t1_start",
+			extras: map[string]any{
+				"name":                    "Reto Test",
+				"starts_at":               int64(1714060000000),
+				"measurement_t0_deadline": int64(1779926400000),
+				"measurement_t1_start":    int64(1779926400000),
+				"ends_at":                 int64(1781136000000),
+				"status":                  "active",
+				"inscription_fee_cents":   int64(20000),
+				"inscription_refundable":  true,
+				"min_weekly_attendance":   3,
+				"attendance_grace_weeks":  2,
+				"strength_cap_pct":        25,
+				"tie_margin_ir":           5,
+				"bf_floor_male_pct":       6,
+				"bf_floor_female_pct":     14,
+			},
+		},
+		{
+			table:  "notification_queue",
+			column: "scheduled_for",
+			extras: map[string]any{
+				"channel":       "whatsapp",
+				"template":      "expiring_soon",
+				"payload":       map[string]any{},
+				"scheduled_for": int64(1779926400000),
+				"status":        "pending",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.table+"."+tc.column, func(t *testing.T) {
+			gymID := uuid.New()
+			entityID := uuid.New()
+			body := map[string]any{
+				"id":      entityID.String(),
+				"gym_id":  gymID.String(),
+				"version": 1,
+			}
+			for k, v := range tc.extras {
+				body[k] = v
+			}
+			payload, _ := json.Marshal(body)
+			tbl := FindTable(tc.table)
+			if tbl == nil {
+				t.Fatalf("table %q not registered in SyncedTables", tc.table)
+			}
+			cols, args, err := buildProjectorUpsert(*tbl, gymID, entityID, payload)
+			if err != nil {
+				t.Fatalf("build: %v", err)
+			}
+			// Find the arg at the slot matching tc.column.
+			idx := -1
+			split := strings.SplitN(cols[strings.Index(cols, "("):], ",", -1)
+			_ = split
+			// Easier: re-parse the columns out of the SQL header to locate idx.
+			start := strings.Index(cols, "(") + 1
+			end := strings.Index(cols, ")")
+			colList := strings.Split(cols[start:end], ", ")
+			for i, c := range colList {
+				if c == tc.column {
+					idx = i
+					break
+				}
+			}
+			if idx < 0 {
+				t.Fatalf("column %q not in projected columns: %v", tc.column, colList)
+			}
+			if _, ok := args[idx].(time.Time); !ok {
+				t.Errorf("%s.%s arg type = %T, want time.Time (raw int would fail pgx encode for OID 1184)",
+					tc.table, tc.column, args[idx])
+			}
+		})
+	}
+}
+
 func TestBuildProjectorUpsert_ByteaBase64Decoded(t *testing.T) {
 	gymID := uuid.New()
 	memberID := uuid.New()

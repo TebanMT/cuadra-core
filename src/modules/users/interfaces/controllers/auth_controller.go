@@ -41,10 +41,11 @@ type AuthController struct {
 	CompleteSetup    *gymApp.CompleteSetup
 	UpdateProfile    *gymApp.UpdateProfile
 	UpdateChargeSet  *gymApp.UpdateChargeSettings
-	CreateOperator   *usersApp.CreateOperator
-	UpdateOperator   *usersApp.UpdateOperator
-	ToggleActive     *usersApp.ToggleOperatorActive
-	ResetOpPassword  *usersApp.ResetOperatorPassword
+	CreateOperator    *usersApp.CreateOperator
+	UpdateOperator    *usersApp.UpdateOperator
+	ToggleActive      *usersApp.ToggleOperatorActive
+	ResetOpPassword   *usersApp.ResetOperatorPassword
+	RotateOperatorPIN *usersApp.RotateOperatorPIN
 	RequestTransfer  *usersApp.RequestTransferOwnership
 	ConfirmTransfer  *usersApp.ConfirmTransferOwnership
 	Tokens           auth.TokenService
@@ -192,10 +193,21 @@ func (ctrl *AuthController) RegisterOperatorRoutes(r *gin.Engine) {
 	users := api.Group("/users")
 	users.Use(middleware.AuthMiddleware(ctrl.Tokens))
 	{
+		// GET /api/v1/users — owner-only. La página Operadores del desktop la
+		// pega para listar a todo el staff del gym (dueño + recepcionistas)
+		// con su estado de activación. Aceptamos `?include_inactive=true|false`
+		// (default true: Operadores muestra desactivados con badge gris para
+		// que el dueño los reactive en un click). Estaba ausente del registro
+		// y la página caía en 404 desde el primer load.
+		users.GET("", middleware.RequireOwner(), ctrl.handleListOperators)
 		users.POST("", middleware.RequireOwner(), ctrl.handleCreateOperator)
 		users.PATCH("/:id", middleware.RequireOwner(), ctrl.handleUpdateOperator)
 		users.PATCH("/:id/active", middleware.RequireOwner(), ctrl.handleToggleActive)
 		users.POST("/:id/reset-password", middleware.RequireOwner(), ctrl.handleResetOpPassword)
+		// rotate-pin sustituye a reset-password como la acción primaria.
+		// reset-password se conserva para operadores legacy con email+pwd;
+		// rotate-pin genera un PIN nuevo, hashea, audita y dispara WhatsApp.
+		users.POST("/:id/rotate-pin", middleware.RequireOwner(), ctrl.handleRotateOperatorPIN)
 	}
 }
 
@@ -210,9 +222,14 @@ func (ctrl *AuthController) RegisterAccountRoutes(r *gin.Engine) {
 	{
 		gyms.GET("/me", ctrl.handleGetGymProfile)
 		gyms.GET("/me/setup-status", ctrl.handleSetupStatus)
-		gyms.PATCH("/me/setup", ctrl.handleUpdateSetup)                  // step 2
-		gyms.POST("/me/setup/complete", ctrl.handleCompleteSetup)        // step 5
-		gyms.PATCH("/me/payment-methods", ctrl.handleUpdatePaymentMeths) // step 4
+		// El wizard inicial (steps 2-5) sólo lo corre el dueño en signup —
+		// el usuario recién creado siempre tiene rol owner, así que el
+		// guard no rompe el flujo normal. Existe como defensa en
+		// profundidad para que un operador no pueda re-disparar el wizard
+		// y pisar configuración del gym vía API.
+		gyms.PATCH("/me/setup", middleware.RequireOwner(), ctrl.handleUpdateSetup)                  // step 2
+		gyms.POST("/me/setup/complete", middleware.RequireOwner(), ctrl.handleCompleteSetup)        // step 5
+		gyms.PATCH("/me/payment-methods", middleware.RequireOwner(), ctrl.handleUpdatePaymentMeths) // step 4
 		// PATCH /me uses the FE-driven shape (whatsapp_number, legal_name,
 		// kiosk_volume, …). The legacy handleUpdateProfile is dead code kept
 		// around for direct test callers; the wire handler is the active path.
@@ -271,6 +288,18 @@ type signupResp struct {
 	RefreshToken   string    `json:"refresh_token"`
 	SetupCompleted bool      `json:"setup_completed"`
 	SidecarToken   string    `json:"sidecar_token,omitempty"`
+	// PIN plaintext del dueño — viaja UNA vez en la respuesta del signup
+	// para que el wizard lo muestre en pantalla. El dueño lo memoriza
+	// (o lo cambia desde su perfil con POST /auth/me/pin).
+	PIN string `json:"pin"`
+	// El dueño siempre queda con PIN asignado tras signup. Lo exponemos
+	// para que el FE pueda setear has_pin=true en su session local sin
+	// tener que pegar /auth/me como sanity check.
+	HasPIN bool `json:"has_pin"`
+	// PinHash es el bcrypt — útil sólo cuando el signup va por el
+	// sidecar (desktop "primer arranque" sin web), para que el mirror
+	// local quede con login-pin operativo desde t=0.
+	PinHash string `json:"pin_hash,omitempty"`
 }
 
 type loginReq struct {
@@ -293,6 +322,12 @@ type loginResp struct {
 	SubscriptionPlan   string     `json:"subscription_plan"`
 	MustChangePassword bool       `json:"must_change_password"`
 	SidecarToken       string     `json:"sidecar_token,omitempty"`
+	HasPIN             bool       `json:"has_pin"`
+	// PinHash es el bcrypt del PIN actual del user. Viaja para que el
+	// sidecar lo mirroree en su sqlite local — el flujo login-pin offline
+	// del kiosko depende de tener el hash localmente. Mismo tier de
+	// sensibilidad que password_hash que ya se almacenaba (bcrypt local).
+	PinHash string `json:"pin_hash,omitempty"`
 }
 
 type logoutReq struct {
@@ -334,22 +369,43 @@ type updateGymProfileReq struct {
 	CloseTime      *string `json:"close_time,omitempty"`
 }
 
+// createOperatorReq es el wire del POST /users (alta de operador). Modelo
+// PIN-first: phone obligatorio (entrega del PIN por WhatsApp), email
+// opcional (operadores de barrio rara vez tienen correo), sin password
+// (el servidor genera el PIN automáticamente y lo devuelve UNA vez en la
+// respuesta).
 type createOperatorReq struct {
-	FullName string `json:"full_name" validate:"required,min=3,max=100"`
-	Email    string `json:"email" validate:"required,email"`
-	Password string `json:"password,omitempty"` // optional; empty -> auto-generated
+	FullName string  `json:"full_name" validate:"required,min=3,max=100"`
+	Phone    string  `json:"phone" validate:"required"`
+	Email    *string `json:"email,omitempty"`
 }
 
+// createOperatorResp viaja al FE con el PIN plaintext (mostrado UNA vez +
+// como fallback si WhatsApp no estaba conectado). whatsapp_delivery es el
+// boolean que el modal usa para pintar el badge verde/ámbar.
 type createOperatorResp struct {
-	UserID   uuid.UUID `json:"user_id"`
-	Email    string    `json:"email"`
-	Password string    `json:"password"` // shown ONCE; the wizard tells the user to copy
+	UserID            uuid.UUID `json:"user_id"`
+	FullName          string    `json:"full_name"`
+	Phone             string    `json:"phone"`
+	Email             string    `json:"email"`
+	PIN               string    `json:"pin"`
+	WhatsAppDelivery  bool      `json:"whatsapp_delivery"`
+	WhatsAppSkipped   string    `json:"whatsapp_skipped,omitempty"`
 }
 
 type updateOperatorReq struct {
 	FullName *string `json:"full_name,omitempty"`
 	Email    *string `json:"email,omitempty"`
 	Phone    *string `json:"phone,omitempty"`
+}
+
+// rotateOperatorPINResp viaja al FE cuando el dueño regenera el PIN del
+// operador. Mismo shape que la mitad relevante del 201 de alta.
+type rotateOperatorPINResp struct {
+	UserID           uuid.UUID `json:"user_id"`
+	PIN              string    `json:"pin"`
+	WhatsAppDelivery bool      `json:"whatsapp_delivery"`
+	WhatsAppSkipped  string    `json:"whatsapp_skipped,omitempty"`
 }
 
 type toggleActiveReq struct {
@@ -408,6 +464,8 @@ type redeemInstallerResp struct {
 	TrialEndsAt      *time.Time `json:"trial_ends_at,omitempty"`
 	SubscriptionPlan string     `json:"subscription_plan"`
 	SidecarToken     string     `json:"sidecar_token,omitempty"`
+	HasPIN           bool       `json:"has_pin"`
+	PinHash          string     `json:"pin_hash,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -434,6 +492,9 @@ func (ctrl *AuthController) handleSignup(c *gin.Context) {
 		RefreshToken:   out.RefreshToken,
 		SetupCompleted: out.SetupCompleted,
 		SidecarToken:   ctrl.maybeMintSidecarToken(c, out.UserID, out.GymID),
+		PIN:            out.PIN,
+		HasPIN:         true,
+		PinHash:        out.PinHash,
 	})
 }
 
@@ -462,6 +523,8 @@ func (ctrl *AuthController) handleLogin(c *gin.Context) {
 		SubscriptionPlan:   out.SubscriptionPlan,
 		MustChangePassword: out.MustChangePassword,
 		SidecarToken:       ctrl.maybeMintSidecarToken(c, out.UserID, out.GymID),
+		HasPIN:             out.HasPIN,
+		PinHash:            out.PinHash,
 	})
 }
 
@@ -601,6 +664,8 @@ func (ctrl *AuthController) handleRedeemInstaller(c *gin.Context) {
 		TrialEndsAt:      out.TrialEndsAt,
 		SubscriptionPlan: out.SubscriptionPlan,
 		SidecarToken:     out.SidecarToken,
+		HasPIN:           out.HasPIN,
+		PinHash:          out.PinHash,
 	})
 }
 
@@ -1007,6 +1072,45 @@ func (ctrl *AuthController) handleUpdateProfile(c *gin.Context) {
 	utils.JsonResponse(c, http.StatusOK, toGymResponse(out))
 }
 
+// handleListOperators — GET /api/v1/users (owner-only). Lista a todo el staff
+// del gym del owner autenticado (dueño + operadores). El query param
+// `include_inactive=true|false` filtra por `active`. Default: true (la página
+// Operadores muestra desactivados con badge gris).
+//
+// Wire shape: `{ items: operatorWire[] }` — espeja la interfaz Operator del
+// desktop (useOperators). El handler delega a `Users.ListByGym` ya existente
+// y filtra in-process; el volumen es bajo (<= 10 por gym, MaxOperatorsPerGym).
+func (ctrl *AuthController) handleListOperators(c *gin.Context) {
+	gymID, ok := middleware.GetGymID(c)
+	if !ok || gymID == uuid.Nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, errBadAuth)
+		return
+	}
+	if ctrl.Users == nil || ctrl.UoW == nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, errBadAuth)
+		return
+	}
+	includeInactive := c.DefaultQuery("include_inactive", "true") == "true"
+	tx, err := ctrl.UoW.Query(c.Request.Context())
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, err)
+		return
+	}
+	rows, err := ctrl.Users.ListByGym(tx, gymID)
+	if err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	items := make([]operatorWire, 0, len(rows))
+	for _, u := range rows {
+		if !includeInactive && !u.Active {
+			continue
+		}
+		items = append(items, toOperatorWire(u))
+	}
+	utils.JsonResponse(c, http.StatusOK, gin.H{"items": items})
+}
+
 func (ctrl *AuthController) handleCreateOperator(c *gin.Context) {
 	gymID, _ := middleware.GetGymID(c)
 	ownerID, _ := middleware.GetUserID(c)
@@ -1016,14 +1120,44 @@ func (ctrl *AuthController) handleCreateOperator(c *gin.Context) {
 	}
 	out, err := ctrl.CreateOperator.Execute(c.Request.Context(), usersApp.CreateOperatorInput{
 		GymID: gymID, OwnerID: ownerID,
-		FullName: req.FullName, Email: req.Email, Password: req.Password,
+		FullName: req.FullName,
+		Phone:    req.Phone,
+		Email:    req.Email,
 	})
 	if err != nil {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
 		return
 	}
 	utils.JsonResponse(c, http.StatusCreated, createOperatorResp{
-		UserID: out.UserID, Email: out.Email, Password: out.Password,
+		UserID:           out.UserID,
+		FullName:         out.FullName,
+		Phone:            out.Phone,
+		Email:            out.Email,
+		PIN:              out.PIN,
+		WhatsAppDelivery: out.WhatsAppDelivery,
+		WhatsAppSkipped:  out.WhatsAppSkipped,
+	})
+}
+
+func (ctrl *AuthController) handleRotateOperatorPIN(c *gin.Context) {
+	gymID, _ := middleware.GetGymID(c)
+	actorID, _ := middleware.GetUserID(c)
+	targetID, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	out, err := ctrl.RotateOperatorPIN.Execute(c.Request.Context(), usersApp.RotateOperatorPINInput{
+		GymID: gymID, ActorUserID: actorID, TargetID: targetID,
+	})
+	if err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	utils.JsonResponse(c, http.StatusOK, rotateOperatorPINResp{
+		UserID:           out.UserID,
+		PIN:              out.PIN,
+		WhatsAppDelivery: out.WhatsAppDelivery,
+		WhatsAppSkipped:  out.WhatsAppSkipped,
 	})
 }
 

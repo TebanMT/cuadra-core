@@ -44,6 +44,10 @@ type cachedLoginRow struct {
 	TrialEndsAt     *time.Time `json:"trial_ends_at,omitempty"`
 	SubscriptionPln string     `json:"subscription_plan,omitempty"`
 	UpdatedAtMs     int64      `json:"updated_at_ms"`
+	// PinHash bcrypt del PIN del user. Viene del cloud (loginResp /
+	// redeemInstallerResp) y se mirrorea al sqlite local para que el
+	// flujo login-pin offline funcione sin esperar el primer sync pull.
+	PinHash string `json:"pin_hash,omitempty"`
 }
 
 // SidecarAuthProxy reimplements /api/v1/auth/* on the sidecar build as a
@@ -73,6 +77,14 @@ type SidecarAuthProxy struct {
 	// agent keeps presenting the old (rejected-by-cloud) token until the
 	// sidecar restarts.
 	OnSidecarTokenChanged func(token string)
+
+	// OnActiveGymChanged (optional) tells process-wide stateful subsystems
+	// which gym the operator just signed in to. Today only the biometric
+	// matcher consumes it (NBIS matcher needs the per-gym GMK to decrypt
+	// the gallery in Identify). Fires on every successful login (cloud or
+	// offline, password or PIN, redeem-installer) and on refresh; uuid.Nil
+	// means "no operator signed in" so subsystems can clear state.
+	OnActiveGymChanged func(gymID uuid.UUID)
 
 	// ClientID is the persistent UUID this sidecar advertises to the
 	// cloud bootstrap (X-Cuadra-Client-ID). The sync agent sets it on
@@ -247,6 +259,9 @@ func (p *SidecarAuthProxy) handleLogin(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	if p.OnActiveGymChanged != nil {
+		p.OnActiveGymChanged(gymID)
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"status_code": http.StatusOK,
 		"data": gin.H{
@@ -313,6 +328,9 @@ func (p *SidecarAuthProxy) handleRefresh(c *gin.Context) {
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+	if p.OnActiveGymChanged != nil {
+		p.OnActiveGymChanged(gymID)
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"status_code": http.StatusOK,
@@ -746,6 +764,9 @@ func (p *SidecarAuthProxy) absorbAuthResponse(ctx context.Context, email, passwo
 	if v, ok := d["phone"].(string); ok {
 		cached.Phone = v
 	}
+	if v, ok := d["pin_hash"].(string); ok && v != "" {
+		cached.PinHash = v
+	}
 	if v, ok := d["gym_name"].(string); ok {
 		cached.GymName = v
 	}
@@ -767,6 +788,12 @@ func (p *SidecarAuthProxy) absorbAuthResponse(ctx context.Context, email, passwo
 		_ = p.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
 			return mirrorCloudIdentity(ctx, tx, cached, hash)
 		})
+	}
+
+	if p.OnActiveGymChanged != nil {
+		if gymID, err := uuid.Parse(cached.GymID); err == nil {
+			p.OnActiveGymChanged(gymID)
+		}
 	}
 }
 
@@ -844,17 +871,30 @@ func mirrorCloudIdentity(ctx context.Context, tx sharedDomain.Transaction, cache
 	if role == "" {
 		role = "owner"
 	}
+	// pin_hash + pin_assigned_at: el cloud manda pin_hash en el response;
+	// si está set, lo mirroreamos también para que el dueño pueda hacer
+	// login-pin offline desde el primer arranque del desktop. Si no viene,
+	// el row queda con pin_hash=NULL y el sync agent eventualmente lo
+	// rellena al pull del row del cloud.
+	var pinAssignedAt any
+	if cached.PinHash != "" {
+		pinAssignedAt = now
+	}
 	if _, err := stx.Exec(ctx, `
 		INSERT INTO users (id, gym_id, version, created_at, updated_at,
-		                    email, password_hash, full_name, phone, role, active, synced_at)
-		VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+		                    email, password_hash, full_name, phone, role, active,
+		                    pin_hash, pin_assigned_at, synced_at)
+		VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			full_name = excluded.full_name,
 			phone = COALESCE(excluded.phone, users.phone),
+			pin_hash = COALESCE(excluded.pin_hash, users.pin_hash),
+			pin_assigned_at = COALESCE(excluded.pin_assigned_at, users.pin_assigned_at),
 			synced_at = excluded.synced_at`,
 		cached.UserID, cached.GymID, now, now,
 		cached.Email, string(passwordHash), nonEmpty(cached.FullName, cached.Email),
-		nilIfEmpty(cached.Phone), role, now,
+		nilIfEmpty(cached.Phone), role,
+		nilIfEmpty(cached.PinHash), pinAssignedAt, now,
 	); err != nil {
 		return fmt.Errorf("mirror user: %w", err)
 	}
@@ -980,6 +1020,9 @@ func (p *SidecarAuthProxy) handleLoginPIN(c *gin.Context) {
 			"error": "auth.login_pin.errors.invalid_credentials",
 		})
 		return
+	}
+	if p.OnActiveGymChanged != nil {
+		p.OnActiveGymChanged(out.GymID)
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"status_code": http.StatusOK,

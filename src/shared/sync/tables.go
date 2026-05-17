@@ -228,6 +228,21 @@ var SyncedTables = []EntityTable{
 		},
 	},
 	{
+		// subscription_events — pull-only desde la perspectiva del sidecar.
+		// El cloud es la fuente de verdad (webhooks de Stripe/MP escriben
+		// acá), y el sidecar sólo necesita lectura para mostrar el historial
+		// en la página Suscripción. La tabla es append-only: version siempre
+		// 1, deleted_at siempre null. raw_payload es JSONB en Postgres.
+		Type:  "subscription_events",
+		Table: "subscription_events",
+		Columns: []string{
+			"id", "gym_id", "version", "created_at", "updated_at", "deleted_at",
+			"provider", "type", "external_id", "plan",
+			"amount", "currency", "period_ends_at",
+			"raw_payload", "occurred_at", "recorded_at",
+		},
+	},
+	{
 		// owner_alert_configs has no surrogate id — its identity is the
 		// (gym_id, alert_key) pair. The sidecar composes entity_id as
 		// "<gym_id>:<alert_key>" for sync_queue dedupe; the projector

@@ -16,9 +16,15 @@ const (
 	RoleOwner    = "owner"
 	RoleOperator = "operator"
 
-	// MaxOperatorsPerGym enforces UC-006 DA-6.2 (hard cap of 10 operators).
-	// Includes the owner.
+	// MaxOperatorsPerGym es el techo absoluto del producto (anti-abuso) y
+	// vale para gyms en Plus. Incluye al dueño. Si más adelante necesitas
+	// gyms con 50+ operadores (cadenas), levanta este número o introduce
+	// un override por cuenta.
 	MaxOperatorsPerGym = 11
+	// MaxOperatorsStandard es el cap por SKU para Standard. 2 = el dueño
+	// + 1 operador (recepcionista). El delta hasta MaxOperatorsPerGym se
+	// desbloquea con Plus.
+	MaxOperatorsStandard = 2
 )
 
 // User is the gym operator / owner aggregate. Email is canonicalised to lower
@@ -50,6 +56,11 @@ type User struct {
 // NewUser constructs a User with role + canonicalised email. Caller is
 // responsible for hashing the password (shared/auth.HashPassword) and for
 // validating phone via ValidatePhone before calling SetInitialPhone.
+//
+// Prefer NewOwner / NewOperator below — those carry role-aware defaults
+// (password optional for operators, phone required, etc.). NewUser is kept
+// for paths like sync projection and legacy callers that already have the
+// final shape pre-validated.
 func NewUser(id, gymID uuid.UUID, email, passwordHash, fullName, role string, mustChange bool, createdBy *uuid.UUID, now time.Time) *User {
 	return &User{
 		ID:                 id,
@@ -66,6 +77,88 @@ func NewUser(id, gymID uuid.UUID, email, passwordHash, fullName, role string, mu
 		UpdatedAt:          now,
 	}
 }
+
+// NewOwner constructs the gym's owner. Email + password are required (the
+// owner is the financial account that pays the Tinta subscription and
+// authenticates via the cloud dashboard). Phone is optional. Caller is
+// responsible for hashing the password.
+func NewOwner(id, gymID uuid.UUID, email, passwordHash, fullName string, mustChange bool, now time.Time) (*User, error) {
+	cleanEmail := strings.ToLower(strings.TrimSpace(email))
+	if !ValidateEmail(cleanEmail) {
+		return nil, userErrors.ErrInvalidEmail
+	}
+	if err := ValidateFullName(fullName); err != nil {
+		return nil, err
+	}
+	if passwordHash == "" {
+		return nil, userErrors.ErrPasswordTooShort
+	}
+	return &User{
+		ID:                 id,
+		GymID:              gymID,
+		Version:            1,
+		Email:              cleanEmail,
+		PasswordHash:       passwordHash,
+		FullName:           strings.TrimSpace(fullName),
+		Role:               RoleOwner,
+		Active:             true,
+		MustChangePassword: mustChange,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}, nil
+}
+
+// NewOperator constructs an operator (recepcionista). Phone is required —
+// the PIN of the operator gets delivered by WhatsApp, and the number also
+// works as the secondary identifier when the operator has no email. Email
+// is optional. Password is optional too: operadores nuevos no llevan
+// password (solo PIN), pero los legacy sí — `passwordHash == ""` deja la
+// columna NULL. El owner que da de alta queda como CreatedBy.
+//
+// El PIN no se asigna aquí — el use case lo genera, hashea, y llama a
+// AssignPIN sobre el user retornado.
+func NewOperator(id, gymID uuid.UUID, fullName, phone string, email *string, passwordHash string, ownerID uuid.UUID, now time.Time) (*User, error) {
+	if err := ValidateFullName(fullName); err != nil {
+		return nil, err
+	}
+	phoneClean := NormalizePhone(phone)
+	if phoneClean == "" {
+		return nil, userErrors.ErrOperatorPhoneRequired
+	}
+	if err := ValidatePhone(phoneClean); err != nil {
+		return nil, err
+	}
+	cleanEmail := ""
+	if email != nil {
+		trimmed := strings.ToLower(strings.TrimSpace(*email))
+		if trimmed != "" {
+			if !ValidateEmail(trimmed) {
+				return nil, userErrors.ErrInvalidEmail
+			}
+			cleanEmail = trimmed
+		}
+	}
+	u := &User{
+		ID:           id,
+		GymID:        gymID,
+		Version:      1,
+		Email:        cleanEmail,
+		PasswordHash: passwordHash,
+		FullName:     strings.TrimSpace(fullName),
+		Phone:        &phoneClean,
+		Role:         RoleOperator,
+		Active:       true,
+		CreatedBy:    &ownerID,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	return u, nil
+}
+
+// RequiresPhone reports whether the role makes phone mandatory. Operators
+// receive their PIN by WhatsApp, so the field has to be present and unique
+// within the gym; owners can leave it blank.
+func (u *User) RequiresPhone() bool { return u.Role == RoleOperator }
 
 // SetInitialPhone stores phone at create time without bumping Version (the
 // user is still v1). Empty / whitespace-only resets to nil.
@@ -155,6 +248,14 @@ func (u *User) DemoteToOperator(now time.Time) {
 }
 
 // UpdateProfile applies UC-007's editable fields. Only sets provided pointers.
+//
+// Email becomes optional when the user is an operator: passing a nil-pointer
+// keeps the existing value, passing a pointer to "" clears the column, and a
+// non-empty value is validated as before. For owners, clearing the email is
+// rejected — the cloud login still depends on it.
+//
+// Phone follows the role: operators MUST have phone (empty -> error), owners
+// can have it blank.
 func (u *User) UpdateProfile(name *string, email *string, phone *string, now time.Time) error {
 	if name != nil {
 		v := strings.TrimSpace(*name)
@@ -165,14 +266,24 @@ func (u *User) UpdateProfile(name *string, email *string, phone *string, now tim
 	}
 	if email != nil {
 		v := strings.ToLower(strings.TrimSpace(*email))
-		if !ValidateEmail(v) {
-			return userErrors.ErrInvalidEmail
+		if v == "" {
+			if u.IsOwner() {
+				return userErrors.ErrInvalidEmail
+			}
+			u.Email = ""
+		} else {
+			if !ValidateEmail(v) {
+				return userErrors.ErrInvalidEmail
+			}
+			u.Email = v
 		}
-		u.Email = v
 	}
 	if phone != nil {
-		v := strings.TrimSpace(*phone)
+		v := NormalizePhone(*phone)
 		if v == "" {
+			if u.RequiresPhone() {
+				return userErrors.ErrOperatorPhoneRequired
+			}
 			u.Phone = nil
 		} else {
 			if err := ValidatePhone(v); err != nil {
@@ -184,6 +295,39 @@ func (u *User) UpdateProfile(name *string, email *string, phone *string, now tim
 	u.Version++
 	u.UpdatedAt = now
 	return nil
+}
+
+// NormalizeEmail lowercases + trims. Centralised so use cases compare
+// against the same shape the unique index sees (LOWER(email)).
+func NormalizeEmail(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
+}
+
+// NormalizePhone strips whitespace and the visual separators humans type
+// ("(", ")", "-", ".") while preserving the leading "+" for international
+// prefixes and the digits themselves. Empty / whitespace-only input returns
+// "" — callers decide whether to treat that as "clear the field" or as an
+// error (depending on the user's role; see RequiresPhone).
+//
+// We deliberately keep the "+" because users in MX routinely type
+// "+52 442 ..." and the country-code prefix is meaningful when WhatsApp
+// later dispatches the welcome PIN message.
+func NormalizePhone(phone string) string {
+	v := strings.TrimSpace(phone)
+	if v == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(v))
+	for _, r := range v {
+		switch {
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '+' && b.Len() == 0:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // ---------------------------------------------------------------------------

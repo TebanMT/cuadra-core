@@ -26,8 +26,8 @@ import (
 // preview during testing, so we keep it inline.
 type MercadoPagoConfig struct {
 	AccessToken    string
-	AmountStandard float64 // MXN per month for "pro_monthly"
-	AmountPlus     float64 // MXN per month for "pro_annual"
+	AmountStandard float64 // MXN per month for "standard_monthly"
+	AmountPlus     float64 // MXN per month for "plus_monthly"
 	BackURL        string  // post-checkout redirect (success + cancel use the same)
 }
 
@@ -47,10 +47,10 @@ func NewMercadoPagoGateway(cfg MercadoPagoConfig) *MercadoPagoGateway {
 	}
 	amounts := map[string]float64{}
 	if cfg.AmountStandard > 0 {
-		amounts[gymDomain.PlanProMonthly] = cfg.AmountStandard
+		amounts[gymDomain.PlanStandardMonthly] = cfg.AmountStandard
 	}
 	if cfg.AmountPlus > 0 {
-		amounts[gymDomain.PlanProAnnual] = cfg.AmountPlus
+		amounts[gymDomain.PlanPlusMonthly] = cfg.AmountPlus
 	}
 	return &MercadoPagoGateway{
 		cfg:     cfg,

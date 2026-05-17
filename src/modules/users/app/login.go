@@ -36,6 +36,17 @@ type LoginOutput struct {
 	TrialEndsAt        *time.Time
 	SubscriptionPlan   string
 	MustChangePassword bool
+	// HasPIN — el FE lo lee para pintar "Cambiar PIN" vs. "Crear PIN" en
+	// el perfil sin re-pegar /auth/me. Sin esto, owners con pin_hash en DB
+	// veían "Crear PIN" tras un login, causando confusión y un audit row
+	// extra cada vez que se "creaba" un PIN que en realidad ya existía.
+	HasPIN bool
+	// PinHash es el bcrypt del PIN actual (vacío si no hay). El sidecar lo
+	// mirrorea al sqlite local para que login-pin offline funcione desde
+	// el momento del primer redeem/login — sin tener que esperar al primer
+	// sync pull. Mismo tier de sensibilidad que password_hash, que ya
+	// viajaba en el cached_login.
+	PinHash string
 }
 
 type Login struct {
@@ -73,6 +84,8 @@ func (uc *Login) Execute(ctx context.Context, in LoginInput) (LoginOutput, error
 		trialEnd   *time.Time
 		plan       string
 		mustChange bool
+		hasPIN     bool
+		pinHash    string
 	)
 	err := uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
 		user, err := uc.Users.GetByEmail(tx, in.Email)
@@ -118,6 +131,10 @@ func (uc *Login) Execute(ctx context.Context, in LoginInput) (LoginOutput, error
 		trialEnd = gym.TrialEndsAt
 		plan = gym.SubscriptionPlan
 		mustChange = user.MustChangePassword
+		hasPIN = user.HasPIN()
+		if user.PinHash != nil {
+			pinHash = *user.PinHash
+		}
 		return nil
 	})
 	if err != nil {
@@ -147,5 +164,7 @@ func (uc *Login) Execute(ctx context.Context, in LoginInput) (LoginOutput, error
 		TrialEndsAt:        trialEnd,
 		SubscriptionPlan:   plan,
 		MustChangePassword: mustChange,
+		HasPIN:             hasPIN,
+		PinHash:            pinHash,
 	}, nil
 }

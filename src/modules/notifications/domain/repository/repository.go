@@ -31,6 +31,29 @@ type NotificationRepository interface {
 
 	// ListByGym is the debug listing endpoint (UC-040 dashboard).
 	ListByGym(tx sharedDomain.Transaction, gymID uuid.UUID, statusFilter string, page, pageSize int) ([]*notiDomain.Notification, int, error)
+
+	// ChannelStats agrega contadores del último período (since → now) para un
+	// canal específico (whatsapp, email, …). Lo consume el handler de
+	// /api/v1/gyms/me/whatsapp para llenar la card de stats sin tener que
+	// proxy-ear al cloud — el sync ya trae notification_queue al sidecar
+	// (ver SyncedTables), así que la agregación es un COUNT local.
+	ChannelStats(tx sharedDomain.Transaction, gymID uuid.UUID, channel string, since time.Time) (NotificationStats, error)
+
+	// LastError devuelve el error_message + failed_at del último envío
+	// fallido del canal indicado. Se usa para mostrar "último error" en la
+	// card de estado de WhatsApp. Devuelve ("", nil, nil) si no hay
+	// fallidos — el caller renderiza "—" en ese caso.
+	LastError(tx sharedDomain.Transaction, gymID uuid.UUID, channel string) (msg string, at *time.Time, err error)
+}
+
+// NotificationStats es el agregado que ChannelStats devuelve. Sent cuenta
+// todos los rows del canal en el rango (incluye los pending y failed);
+// Delivered cuenta los que llegaron a sent_at; Failed cuenta los que
+// terminaron en failed_at. Pending = Sent − Delivered − Failed implícito.
+type NotificationStats struct {
+	Sent      int
+	Delivered int
+	Failed    int
 }
 
 // TemplateOverrideRepository — `notification_templates`. The default template

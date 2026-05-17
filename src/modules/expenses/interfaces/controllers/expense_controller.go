@@ -31,6 +31,10 @@ type ExpenseController struct {
 	Delete *expApp.DeleteExpense
 	List   *expApp.ListExpenses
 	Tokens auth.TokenService
+	// PlanGate (opcional) gatea todo el módulo a Plus. Gastos es feature
+	// administrativa avanzada; el gym de barrio típico no la usa y entra
+	// en el tier Plus por pricing.
+	PlanGate gin.HandlerFunc
 }
 
 func NewExpenseController(
@@ -46,6 +50,9 @@ func NewExpenseController(
 func (ctrl *ExpenseController) RegisterRoutes(r *gin.Engine) {
 	api := r.Group("/api/v1")
 	api.Use(middleware.AuthMiddleware(ctrl.Tokens))
+	if ctrl.PlanGate != nil {
+		api.Use(ctrl.PlanGate)
+	}
 	{
 		api.POST("/expenses", ctrl.handleCreate)
 		api.GET("/expenses", ctrl.handleList)

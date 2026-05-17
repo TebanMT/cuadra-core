@@ -41,8 +41,13 @@ type ChallengeController struct {
 	ListMeasurements        *challengesApp.ListMeasurements
 	GetChallengeRanking     *challengesApp.GetChallengeRanking
 	GetAttendanceReport     *challengesApp.GetAttendanceReport
-	CheckDisqualifications  *challengesApp.CheckDisqualifications
-	Tokens                  auth.TokenService
+	CheckDisqualifications *challengesApp.CheckDisqualifications
+	Tokens                 auth.TokenService
+	// PlanGate (opcional) corre justo después del AuthMiddleware y aborta
+	// con 402 si el gym no tiene Plus / trial. Retos es feature Plus por
+	// pricing: gym de barrio puede operar sin gamification. Cuando es nil
+	// (tests, dev local), no se aplica.
+	PlanGate gin.HandlerFunc
 }
 
 func NewChallengeController(deps ChallengeController) *ChallengeController {
@@ -57,6 +62,9 @@ func NewChallengeController(deps ChallengeController) *ChallengeController {
 func (ctrl *ChallengeController) RegisterRoutes(r *gin.Engine) {
 	api := r.Group("/api/v1/challenges")
 	api.Use(middleware.AuthMiddleware(ctrl.Tokens))
+	if ctrl.PlanGate != nil {
+		api.Use(ctrl.PlanGate)
+	}
 	{
 		api.GET("", ctrl.handleList)
 		api.GET("/:id", ctrl.handleDetail)

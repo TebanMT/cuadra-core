@@ -11,6 +11,12 @@ var (
 	ErrSetupIncomplete      = errors.New("aún faltan datos de configuración")
 	ErrInvalidGymName       = errors.New("nombre del gimnasio inválido")
 	ErrInvalidWhatsApp      = errors.New("número de WhatsApp inválido")
+	// ErrWhatsAppAlreadyTaken — el mismo número no puede pertenecer a dos
+	// gyms vivos a la vez. Razones: (a) Twilio/Meta sólo permiten un sender
+	// por número (la conexión de WhatsApp Business reventaría más adelante),
+	// (b) los recordatorios automáticos al socio salen desde ese número y
+	// mezclarlo entre gimnasios genera confusión sin contexto.
+	ErrWhatsAppAlreadyTaken = errors.New("ese WhatsApp ya está registrado en otro gimnasio")
 	ErrInvalidRFC           = errors.New("RFC con formato inválido")
 	ErrInvalidColor         = errors.New("color inválido (hex #RRGGBB)")
 	ErrInvalidPaymentMethod = errors.New("método de pago no soportado")

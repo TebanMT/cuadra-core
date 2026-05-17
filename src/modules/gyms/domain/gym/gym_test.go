@@ -141,3 +141,46 @@ func TestNextSetupStep(t *testing.T) {
 		t.Errorf("step = %d, want 5", got)
 	}
 }
+
+// TestIsAccessHardBlocked cubre la matriz de bloqueo que aplica el sidecar
+// para hacer cumplir la decisión "offline tolera, sync exitoso confirma
+// cancelación". Importante: el trial vencido localmente NO bloquea (porque
+// el cloud aún no ha bajado el flip a cancelled vía sync); sólo el status
+// cancelled + grace vencida bloquea.
+func TestIsAccessHardBlocked(t *testing.T) {
+	now := time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC)
+	past := now.Add(-72 * time.Hour)
+	future := now.Add(72 * time.Hour)
+
+	type tc struct {
+		name        string
+		plan        string
+		status      string
+		trialEndsAt *time.Time
+		subEndsAt   *time.Time
+		want        bool
+	}
+	cases := []tc{
+		{"trial activo, no vencido", gymDomain.PlanTrial, gymDomain.StatusActive, &future, nil, false},
+		{"trial activo, ya pasó trial_ends_at (offline indefinido)", gymDomain.PlanTrial, gymDomain.StatusActive, &past, nil, false},
+		{"paid activo", gymDomain.PlanStandardMonthly, gymDomain.StatusActive, nil, &future, false},
+		{"past_due — sólo warning, no bloqueo", gymDomain.PlanPlusMonthly, gymDomain.StatusPastDue, nil, &past, false},
+		{"cancelled con grace vigente", gymDomain.PlanStandardMonthly, gymDomain.StatusCancelled, nil, &future, false},
+		{"cancelled con grace vencida → BLOQUEAR", gymDomain.PlanStandardMonthly, gymDomain.StatusCancelled, nil, &past, true},
+		{"cancelled sin grace (nil) → BLOQUEAR", gymDomain.PlanPlusMonthly, gymDomain.StatusCancelled, nil, nil, true},
+		{"cancelled + grace == now (exactamente venció)", gymDomain.PlanStandardMonthly, gymDomain.StatusCancelled, nil, &now, true},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			g := gymDomain.NewTrialGym(uuid.New(), 30, now)
+			g.SubscriptionPlan = c.plan
+			g.SubscriptionStatus = c.status
+			g.TrialEndsAt = c.trialEndsAt
+			g.SubscriptionEndsAt = c.subEndsAt
+			if got := g.IsAccessHardBlocked(now); got != c.want {
+				t.Errorf("IsAccessHardBlocked() = %v, want %v", got, c.want)
+			}
+		})
+	}
+}

@@ -34,6 +34,10 @@ type ReportsController struct {
 	MarkContacted     *memApp.MarkContacted
 	MarkLost          *memApp.MarkLost
 	Tokens            auth.TokenService
+	// PlanGate (opcional) restringe la exportación de reportes a Plus. El
+	// dashboard, atención inmediata y los reportes por rango siguen en
+	// Standard — el export (CSV/Excel) es para contador / gym formal.
+	PlanGate gin.HandlerFunc
 }
 
 func NewReportsController(
@@ -58,9 +62,14 @@ func (ctrl *ReportsController) RegisterRoutes(r *gin.Engine) {
 		api.GET("/dashboard", ctrl.handleDashboard)
 		api.GET("/attention-required", ctrl.handleAttentionRequired)
 		api.GET("/reports", ctrl.handleRange)
-		api.GET("/reports/:type/export", ctrl.handleExport)
 		api.POST("/members/:id/contact-attempts", ctrl.handleMarkContacted)
 		api.POST("/members/:id/mark-lost", ctrl.handleMarkLost)
+		// Export de reportes (CSV/Excel) es Plus.
+		plus := api.Group("")
+		if ctrl.PlanGate != nil {
+			plus.Use(ctrl.PlanGate)
+		}
+		plus.GET("/reports/:type/export", ctrl.handleExport)
 	}
 }
 

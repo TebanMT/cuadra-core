@@ -68,6 +68,28 @@ func TestSignupOwner_SQLite(t *testing.T) {
 	if out.UserID.String() == "" || out.GymID.String() == "" || out.AccessToken == "" {
 		t.Errorf("missing fields in output: %+v", out)
 	}
+	// El dueño recibe un PIN auto-generado al alta. Debe ser de 4 dígitos y
+	// llegar plaintext en la respuesta (la única vez que viaja en claro).
+	if len(out.PIN) != 4 {
+		t.Errorf("expected 4-digit PIN in output, got %q", out.PIN)
+	}
+	for _, r := range out.PIN {
+		if r < '0' || r > '9' {
+			t.Errorf("PIN should be numeric, got %q", out.PIN)
+			break
+		}
+	}
+	// Y el row del owner debe quedar con pin_hash poblado (NUNCA el plaintext).
+	var pinHash *string
+	if err := db.Get(&pinHash, "SELECT pin_hash FROM users WHERE id = ?", out.UserID.String()); err != nil {
+		t.Fatalf("query pin_hash: %v", err)
+	}
+	if pinHash == nil || *pinHash == "" {
+		t.Errorf("owner pin_hash should be set after signup")
+	}
+	if pinHash != nil && *pinHash == out.PIN {
+		t.Errorf("pin_hash stored plaintext PIN; should be bcrypt-hashed")
+	}
 
 	var n int
 	if err := db.Get(&n, "SELECT COUNT(*) FROM users"); err != nil {

@@ -1,0 +1,206 @@
+# Compila los binarios NBIS (mindtct + bozorth3) para Windows x86_64 y los
+# publica como release artifacts de cuadra-core. El sidecar Go los invoca
+# como subprocess (ADR-004-bis): mindtct extrae la plantilla ANSI/ISO 19794-2
+# del PNG capturado en el frontend, bozorth3 hace 1:N contra la galería.
+#
+# Por qué un workflow aparte:
+#   - El build Windows con MSYS2/MinGW es lento (~6-10 min) y los binarios
+#     cambian rara vez (sólo cuando bumpeamos NBIS o tocamos los flags).
+#     Correrlo en cada push de cuadra-core es desperdicio.
+#   - El runner Windows es ~2x más caro que Linux. Tag-only minimiza gasto.
+#   - Reproducible: los binarios resultantes son public-domain (NIST), así
+#     que se pueden publicar como release assets sin licencia.
+#
+# Trigger:
+#   - push de tag `nbis-v*` → build + release con los .exe como assets.
+#   - workflow_dispatch → builds ad-hoc para validar cambios de flags antes
+#     de tagear (no crea release).
+#
+# Fuente NBIS:
+#   El mirror oficial https://github.com/lessandro/nbis es un git import de
+#   la última release pública de NIST (5.0.0, 2015). Lo clonamos en cada
+#   run en lugar de vendorear el tarball — el repo es chico (~10MB) y así
+#   evitamos checkear-in C que jamás vamos a tocar nosotros.
+#
+# Flags de build (validados manualmente 2026-05-16, ver memoria
+# project_biometric_strategy.md):
+#
+#     ./setup.sh "$INSTALL_DIR" --MSYS --64
+#
+#   --MSYS implica --STDLIBS (sin libpng/openjp2 — usamos JPEG vía libjpegb,
+#   el sidecar Go re-encodea el PNG entrante como JPEG antes de invocar
+#   mindtct) y --without-X11 (NBIS sólo lo usa para utilidades gráficas
+#   irrelevantes para nosotros).
+#
+# Output:
+#   Cada release tag `nbis-vX.Y` queda con dos assets en
+#   https://github.com/TebanMT/cuadra-core/releases/tag/nbis-vX.Y :
+#     - mindtct.exe
+#     - bozorth3.exe
+#   El workflow de cuadra-desktop los descarga en su build Windows vía
+#   scripts/prepare-nbis-windows.sh.
+
+name: Build NBIS Windows binaries
+
+on:
+  push:
+    tags: ["nbis-v*"]
+  workflow_dispatch:
+    inputs:
+      nbis_ref:
+        description: "lessandro/nbis git ref to build (default: master)"
+        required: false
+        default: master
+
+permissions:
+  contents: write # necesario para crear el release en el step final
+
+env:
+  NBIS_REPO: https://github.com/lessandro/nbis.git
+  NBIS_REF: ${{ inputs.nbis_ref || 'master' }}
+
+jobs:
+  build:
+    name: Build mindtct.exe + bozorth3.exe
+    runs-on: windows-latest
+    defaults:
+      run:
+        # Todo el flow corre dentro del shell MSYS2 — el script setup.sh
+        # detecta el entorno por `uname` y rules_msys.mak.src espera /usr/bin.
+        # Usar bash de Git for Windows acá rompe el sed-pipeline interno
+        # del setup.
+        shell: msys2 {0}
+
+    steps:
+      - name: Setup MSYS2 + MinGW (64-bit)
+        # `msystem: MINGW64` apunta a la toolchain x86_64-w64-mingw32. NBIS
+        # compila con gcc estándar, sin dependencias exóticas — sólo make,
+        # gcc, sed, cp. CMake aparece mencionado en INSTALL_WINDOWS.txt
+        # pero el path moderno con setup.sh + make NO lo requiere; lo
+        # incluimos defensivamente por si algún sub-Makefile lo invoca.
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            base-devel
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-make
+            mingw-w64-x86_64-cmake
+            git
+
+      - name: Clone NBIS source
+        # El repo `lessandro/nbis` es público y chico — clone shallow para
+        # cortar tiempo de checkout. No usamos actions/checkout porque
+        # estamos en msys2 shell y queremos control del path absoluto.
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "${NBIS_REF}" "${NBIS_REPO}" nbis
+          cd nbis
+          echo "NBIS_DIR=$(pwd -W)" >> "$GITHUB_ENV"
+
+      - name: Configure NBIS (setup.sh --MSYS --64)
+        # `--MSYS` activa el path rules_msys.mak.src + implica --STDLIBS +
+        # --without-X11. `--64` fuerza -m64. El install dir tiene que ser
+        # absoluto y en formato `C:/...` (con forward slashes) según
+        # INSTALL_WINDOWS.txt; pwd -W ya lo entrega así en MSYS2.
+        working-directory: nbis
+        run: |
+          set -euo pipefail
+          INSTALL_DIR="$(pwd -W)/install"
+          mkdir -p "$INSTALL_DIR"
+          # Aceptamos automáticamente el prompt de licencia (NBIS pide
+          # confirmación al primer setup.sh; echo y es lo más portable).
+          yes | ./setup.sh "$INSTALL_DIR" --MSYS --64
+          echo "INSTALL_DIR=$INSTALL_DIR" >> "$GITHUB_ENV"
+
+      - name: Build NBIS (make config && make it)
+        # `make it` es el target compuesto de NBIS (build + libs + bins).
+        # Es serial en muchos sub-Makefiles — -j6 puede romper dependencias
+        # internas, así que dejamos make sin paralelizar para reproducibilidad.
+        working-directory: nbis
+        run: |
+          set -euo pipefail
+          make config
+          make it
+
+      - name: Verify binaries exist
+        # Defensa contra "make it" silenciosamente saltando un sub-build.
+        # Los dos binarios viven en <module>/bin/ después de `make it`.
+        # `make install` los movería al INSTALL_DIR pero no lo necesitamos
+        # para empaquetarlos — los tomamos directo de la build tree.
+        working-directory: nbis
+        run: |
+          set -euo pipefail
+          ls -la mindtct/bin/mindtct.exe bozorth3/bin/bozorth3.exe
+          file mindtct/bin/mindtct.exe bozorth3/bin/bozorth3.exe
+
+      - name: Stage release artifacts
+        # Strip los binarios para bajar peso (~40% menos). Stripping NBIS
+        # nunca rompió nada en pruebas — son ejecutables straight C, sin
+        # exception tables que dependan de símbolos.
+        working-directory: nbis
+        run: |
+          set -euo pipefail
+          mkdir -p ../artifacts
+          cp mindtct/bin/mindtct.exe ../artifacts/mindtct.exe
+          cp bozorth3/bin/bozorth3.exe ../artifacts/bozorth3.exe
+          strip ../artifacts/mindtct.exe ../artifacts/bozorth3.exe
+          ls -lh ../artifacts/
+
+      - name: Capture build metadata
+        # Guardamos un .txt al lado de los binarios con el SHA del source y
+        # los flags usados. Útil para auditar qué versión exacta del NBIS
+        # está empaquetada en un installer publicado hace 6 meses.
+        working-directory: nbis
+        run: |
+          set -euo pipefail
+          NBIS_SHA=$(git rev-parse HEAD)
+          {
+            echo "nbis_source_repo=${NBIS_REPO}"
+            echo "nbis_source_ref=${NBIS_REF}"
+            echo "nbis_source_sha=${NBIS_SHA}"
+            echo "build_flags=--MSYS --64 (implica --STDLIBS --without-X11)"
+            echo "built_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "github_ref=${GITHUB_REF:-}"
+            echo "github_sha=${GITHUB_SHA:-}"
+          } > ../artifacts/BUILD_INFO.txt
+          cat ../artifacts/BUILD_INFO.txt
+
+      - name: Upload artifacts (workflow_dispatch)
+        # En runs ad-hoc dejamos los binarios sólo como workflow artifact
+        # para que se puedan descargar manualmente desde la UI de Actions
+        # antes de comprometer un release.
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nbis-windows-x86_64
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Create release with binaries
+        # En push de tag `nbis-vX.Y` creamos un release de GitHub con los
+        # dos .exe + BUILD_INFO.txt. softprops/action-gh-release respeta el
+        # tag actual (no crea uno nuevo) y sube los archivos como assets.
+        if: startsWith(github.ref, 'refs/tags/nbis-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/mindtct.exe
+            artifacts/bozorth3.exe
+            artifacts/BUILD_INFO.txt
+          # `name` y `body` deliberadamente cortos — el README del repo
+          # tiene el contexto completo del por qué publicamos estos binarios.
+          name: NBIS Windows binaries (${{ github.ref_name }})
+          body: |
+            Public-domain NBIS matchers (mindtct + bozorth3) compilados para
+            Windows x86_64 con MSYS2/MinGW. Consumidos por el sidecar Go del
+            desktop (ADR-004-bis) — no hay licencia ni runtime distinto.
+
+            Build flags: `./setup.sh --MSYS --64` (implica `--STDLIBS
+            --without-X11`).
+
+            Para detalles de provenance ver `BUILD_INFO.txt` adjunto.
+          draft: false
+          prerelease: false

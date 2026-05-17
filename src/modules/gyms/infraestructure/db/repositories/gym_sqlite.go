@@ -224,6 +224,34 @@ func (r *GymSQLiteRepository) Update(tx sharedDomain.Transaction, g *gymDomain.G
 	return g, nil
 }
 
+// ExistsByWhatsApp — defense en profundidad en el sidecar: aunque el cloud
+// es la fuente de verdad para la unicidad (uq_gyms_whatsapp en Postgres),
+// también enforcement local para que si la fila duplicada se cuela por sync
+// el repo no quede inconsistente. excludeGymID = uuid.Nil = "no excluir".
+func (r *GymSQLiteRepository) ExistsByWhatsApp(tx sharedDomain.Transaction, whatsapp string, excludeGymID uuid.UUID) (bool, error) {
+	if whatsapp == "" {
+		return false, nil
+	}
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	var n int
+	if excludeGymID == uuid.Nil {
+		err := stx.Get(context.Background(), &n,
+			`SELECT COUNT(1) FROM gyms WHERE whatsapp = ? AND deleted_at IS NULL`,
+			whatsapp)
+		if err != nil {
+			return false, err
+		}
+		return n > 0, nil
+	}
+	err := stx.Get(context.Background(), &n,
+		`SELECT COUNT(1) FROM gyms WHERE whatsapp = ? AND deleted_at IS NULL AND id <> ?`,
+		whatsapp, excludeGymID.String())
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 func (r *GymSQLiteRepository) HasMembershipType(tx sharedDomain.Transaction, gymID uuid.UUID) (bool, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	var n int

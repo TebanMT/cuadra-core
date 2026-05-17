@@ -13,7 +13,7 @@ import (
 // in receipts and MP uses the email as the payer hint.
 type CheckoutRequest struct {
 	GymID         uuid.UUID
-	Plan          string // gym domain plan code: "pro_monthly" / "pro_annual"
+	Plan          string // gym domain plan code: "standard_monthly" / "standard_annual" / "plus_monthly" / "plus_annual"
 	GymName       string
 	CustomerEmail string
 	SuccessURL    string

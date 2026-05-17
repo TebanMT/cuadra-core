@@ -15,10 +15,17 @@ import (
 
 // SubscriptionPlan and SubscriptionStatus mirror the chk_ constraints in
 // db_migrations/postgres/001_init_schema.sql.
+//
+// Plan naming convention: <tier>_<cadence>. Two tiers live today (Standard,
+// Plus) across two cadences (monthly, annual). The annual SKUs are accepted
+// by the domain so checkout/migrations can land them ahead of the gateway
+// pricing wiring.
 const (
-	PlanTrial      = "trial"
-	PlanProMonthly = "pro_monthly"
-	PlanProAnnual  = "pro_annual"
+	PlanTrial           = "trial"
+	PlanStandardMonthly = "standard_monthly"
+	PlanStandardAnnual  = "standard_annual"
+	PlanPlusMonthly     = "plus_monthly"
+	PlanPlusAnnual      = "plus_annual"
 
 	StatusActive    = "active"
 	StatusPastDue   = "past_due"
@@ -28,6 +35,35 @@ const (
 	PaymentTransfer = "transfer"
 	PaymentCard     = "card"
 )
+
+// IsPlusPlan reports whether `plan` is one of the Plus-tier SKUs. Used por
+// la lógica de gating que expone features exclusivas de Plus. Trial NO
+// cuenta como Plus para el cálculo del SKU comprado (facturación,
+// reporting interno).
+func IsPlusPlan(plan string) bool {
+	return plan == PlanPlusMonthly || plan == PlanPlusAnnual
+}
+
+// CanAccessPlusFeatures incluye trial deliberadamente: el trial otorga
+// "full Plus" por 30 días para que el dueño pruebe rutinas, broadcast,
+// retos, etc. — ese es el gancho que lo convierte. Si el trial sólo viera
+// Standard, no tendría con qué evaluar el upgrade.
+//
+// Use este helper en los gates de feature; usa IsPlusPlan SOLO cuando el
+// punto de la decisión es el SKU comprado (no el acceso a la feature).
+func CanAccessPlusFeatures(plan string) bool {
+	return plan == PlanTrial || plan == PlanPlusMonthly || plan == PlanPlusAnnual
+}
+
+// IsPaidPlan reports whether the gym is on any paid SKU (Standard or Plus,
+// monthly or annual). Trial returns false.
+func IsPaidPlan(plan string) bool {
+	switch plan {
+	case PlanStandardMonthly, PlanStandardAnnual, PlanPlusMonthly, PlanPlusAnnual:
+		return true
+	}
+	return false
+}
 
 // Gym is the multi-tenant root. Every other entity in the system carries the
 // gym's id; for the gym itself the gym_id column equals id (ADR-002 §3.1).
@@ -114,7 +150,7 @@ func (g *Gym) IsSetupComplete() bool { return g.SetupCompletedAt != nil }
 // by the subscriptions use case on `subscription.created` and on
 // `invoice.paid` events.
 func (g *Gym) ActivateSubscription(plan string, endsAt *time.Time, now time.Time) error {
-	if plan != PlanProMonthly && plan != PlanProAnnual {
+	if !IsPaidPlan(plan) {
 		return gymErrors.ErrSetupIncomplete
 	}
 	g.SubscriptionPlan = plan
@@ -184,8 +220,10 @@ func (g *Gym) IsTrialExpired(now time.Time) bool {
 //   - cancelled + within grace window → allow
 //   - everything else                 → deny
 //
-// The DESKTOP app never hard-blocks via this — the cloud server uses it to
-// decide whether to keep accepting sync writes from a long-uncollected gym.
+// Lo usa el cloud para decidir si sigue aceptando sync writes de un gym
+// sin pagar. Para el bloqueo en el SIDECAR usamos IsAccessHardBlocked, que
+// es más permisivo: respeta la decisión de producto "offline tolera, sync
+// exitoso confirma cancelación".
 func (g *Gym) HasActiveAccess(now time.Time) bool {
 	switch g.SubscriptionStatus {
 	case StatusActive:
@@ -203,6 +241,31 @@ func (g *Gym) HasActiveAccess(now time.Time) bool {
 	default:
 		return false
 	}
+}
+
+// IsAccessHardBlocked es el bloqueo de operación que aplica el sidecar.
+// A diferencia de HasActiveAccess, NO bloquea por trial vencido localmente —
+// el dueño puede seguir operando offline aunque el reloj local pase el
+// trial_ends_at. Sólo se bloquea cuando el cloud ya marcó la suscripción
+// como cancelled (vía sync) Y la grace period venció.
+//
+// Esta asimetría es deliberada por producto:
+//   - Sin internet, Tinta debe seguir funcionando — es la promesa offline-first.
+//   - Con internet + sync exitoso, el cloud es la fuente de verdad de billing
+//     y el sidecar respeta lo que diga.
+//
+// El cron del cloud es quien decide CUÁNDO marcar cancelled (típicamente al
+// final del trial sin upgrade, o tras N intentos fallidos de cobro). El
+// sidecar no se mete en esa decisión — sólo aplica el resultado.
+func (g *Gym) IsAccessHardBlocked(now time.Time) bool {
+	if g.SubscriptionStatus != StatusCancelled {
+		return false
+	}
+	// Grace period activa = sigue operando hasta que venza.
+	if g.SubscriptionEndsAt != nil && g.SubscriptionEndsAt.After(now) {
+		return false
+	}
+	return true
 }
 
 // SetupStep figures out which wizard step the user lands on if they bail
@@ -328,6 +391,26 @@ type ProfileUpdate struct {
 	// AccessWebhookSecret is an HMAC shared secret. Empty string clears,
 	// nil keeps existing.
 	AccessWebhookSecret *string
+}
+
+// HasPlusOnlyFields reporta si la actualización toca algún campo
+// reservado al tier Plus. Lo usa el handler PATCH /gyms/me para gatear
+// la mutación cuando el gym está en Standard: branding (logo + colores),
+// datos fiscales (RFC, razón social, código postal, régimen) y webhook
+// de access-granted son features Plus por pricing.
+//
+// City, WhatsApp, Timezone, OpenTime, CloseTime, KioskVolume / TTL
+// siguen siendo Standard — no entran en este check.
+func (u ProfileUpdate) HasPlusOnlyFields() bool {
+	return u.RFC != nil ||
+		u.RazonSocial != nil ||
+		u.CodigoPostal != nil ||
+		u.RegimenFiscal != nil ||
+		u.LogoURL != nil ||
+		u.PrimaryColor != nil ||
+		u.SecondaryColor != nil ||
+		u.AccessWebhookURL != nil ||
+		u.AccessWebhookSecret != nil
 }
 
 func (g *Gym) ApplyProfileUpdate(u ProfileUpdate) error {
@@ -575,6 +658,21 @@ func (g *Gym) IsWhatsAppConnected() bool {
 	return g.WhatsAppConnectedAt != nil && g.WhatsAppBusinessPhone != nil && *g.WhatsAppBusinessPhone != ""
 }
 
+// DisconnectWhatsApp limpia los campos de WhatsApp del gym (UC-037 desconectar).
+// Idempotente: llamarlo sobre un gym que ya está desconectado es no-op.
+// El número y token se borran completamente — si el dueño quiere volver a
+// conectar tiene que pasar por el flow de OTP de cero.
+func (g *Gym) DisconnectWhatsApp(now time.Time) {
+	if !g.IsWhatsAppConnected() {
+		return
+	}
+	g.WhatsAppBusinessPhone = nil
+	g.WhatsAppBusinessTokenEnc = nil
+	g.WhatsAppConnectedAt = nil
+	g.Version++
+	g.UpdatedAt = now
+}
+
 // NotifyMemberPinEnabled reports whether the welcome-PIN WhatsApp message
 // should fire when a socio is enrolled or has their PIN regenerated.
 // Stored under KioskSettings["notify_member_pin"]; default true (a missing
@@ -628,7 +726,7 @@ type subscriptionValidator struct{ Next Validator }
 
 func (v *subscriptionValidator) Validate(g *Gym) error {
 	switch g.SubscriptionPlan {
-	case PlanTrial, PlanProMonthly, PlanProAnnual:
+	case PlanTrial, PlanStandardMonthly, PlanStandardAnnual, PlanPlusMonthly, PlanPlusAnnual:
 	default:
 		return gymErrors.ErrSetupIncomplete
 	}

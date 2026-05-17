@@ -57,11 +57,33 @@ func (r *UserPostgresRepository) GetByEmail(tx sharedDomain.Transaction, email s
 
 func (r *UserPostgresRepository) ExistsByEmail(tx sharedDomain.Transaction, email string) (bool, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	clean := strings.ToLower(strings.TrimSpace(email))
+	if clean == "" {
+		return false, nil
+	}
 	var n int64
 	err := gormTx.Model(&models.UserModel{}).
-		Where("LOWER(email) = ? AND deleted_at IS NULL", strings.ToLower(email)).
+		Where("LOWER(email) = ? AND deleted_at IS NULL", clean).
 		Count(&n).Error
 	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+func (r *UserPostgresRepository) ExistsByPhoneInGym(tx sharedDomain.Transaction, gymID uuid.UUID, phone string, excludeUserID *uuid.UUID) (bool, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	normalized := userDomain.NormalizePhone(phone)
+	if normalized == "" {
+		return false, nil
+	}
+	q := gormTx.Model(&models.UserModel{}).
+		Where("gym_id = ? AND phone = ? AND deleted_at IS NULL", gymID, normalized)
+	if excludeUserID != nil {
+		q = q.Where("id <> ?", *excludeUserID)
+	}
+	var n int64
+	if err := q.Count(&n).Error; err != nil {
 		return false, err
 	}
 	return n > 0, nil

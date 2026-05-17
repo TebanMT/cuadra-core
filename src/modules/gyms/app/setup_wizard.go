@@ -40,6 +40,20 @@ func (uc *UpdateBasicInfo) Execute(ctx context.Context, in UpdateBasicInfoInput)
 		if err != nil {
 			return err
 		}
+		// Chequeo de duplicado ANTES de mutar el agregado — si el número
+		// ya está en otro gym vivo, devolvemos un error de negocio claro
+		// para que el wizard del dashboard lo muestre bajo el campo.
+		// Excluimos el propio gym del lookup: re-guardar el mismo número
+		// (idempotencia del PATCH) no debe colisionar.
+		if in.WhatsApp != "" {
+			taken, err := uc.Gyms.ExistsByWhatsApp(tx, in.WhatsApp, in.GymID)
+			if err != nil {
+				return sharedDomain.NewUnexpectedError(err)
+			}
+			if taken {
+				return sharedDomain.NewBusinessError(gymErrors.ErrWhatsAppAlreadyTaken, "")
+			}
+		}
 		if err := g.UpdateBasicInfo(in.Name, in.City, in.WhatsApp); err != nil {
 			return sharedDomain.NewValidationError(err)
 		}
@@ -185,6 +199,22 @@ func (uc *UpdateProfile) Execute(ctx context.Context, in UpdateProfileInput) (*g
 		g, err := uc.Gyms.GetByID(tx, in.GymID)
 		if err != nil {
 			return err
+		}
+		// Si el PATCH incluye whatsapp y NO es el mismo del gym actual,
+		// chequear duplicado entre otros gyms vivos. Si el dueño re-envía
+		// el mismo número o lo limpia (string vacío) saltamos la consulta.
+		if in.Update.WhatsApp != nil {
+			candidate := *in.Update.WhatsApp
+			isSame := g.WhatsApp != nil && *g.WhatsApp == candidate
+			if candidate != "" && !isSame {
+				taken, err := uc.Gyms.ExistsByWhatsApp(tx, candidate, in.GymID)
+				if err != nil {
+					return sharedDomain.NewUnexpectedError(err)
+				}
+				if taken {
+					return sharedDomain.NewBusinessError(gymErrors.ErrWhatsAppAlreadyTaken, "")
+				}
+			}
 		}
 		if err := g.ApplyProfileUpdate(in.Update); err != nil {
 			return sharedDomain.NewValidationError(err)

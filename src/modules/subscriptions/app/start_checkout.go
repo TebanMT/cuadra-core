@@ -64,8 +64,8 @@ func (uc *StartCheckout) Execute(ctx context.Context, in StartCheckoutInput) (St
 	if in.GymID == uuid.Nil {
 		return StartCheckoutOutput{}, sharedDomain.NewValidationError(errors.New("gym_id is required"))
 	}
-	if in.Plan != gymDomain.PlanProMonthly && in.Plan != gymDomain.PlanProAnnual {
-		return StartCheckoutOutput{}, sharedDomain.NewValidationError(errors.New("plan must be pro_monthly or pro_annual"))
+	if !gymDomain.IsPaidPlan(in.Plan) {
+		return StartCheckoutOutput{}, sharedDomain.NewValidationError(errors.New("plan must be standard_monthly, standard_annual, plus_monthly or plus_annual"))
 	}
 	gateway, ok := uc.Gateways[in.Provider]
 	if !ok || gateway == nil {

@@ -66,6 +66,7 @@ import (
 	reportsInfra "github.com/cuadra/cuadra-core/src/application/reports/infraestructure"
 	reportsCtrl "github.com/cuadra/cuadra-core/src/application/reports/interfaces"
 	"github.com/cuadra/cuadra-core/src/shared/audit"
+	"github.com/cuadra/cuadra-core/src/shared/audit/audithttp"
 	"github.com/cuadra/cuadra-core/src/shared/auth"
 	bcrypto "github.com/cuadra/cuadra-core/src/shared/biometric/crypto"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
@@ -172,10 +173,11 @@ func main() {
 	completeSetup := gymApp.NewCompleteSetup(gymRepo, uow, recorder)
 	updateProfile := gymApp.NewUpdateProfile(gymRepo, uow, recorder)
 	updateChargeSettings := gymApp.NewUpdateChargeSettings(gymRepo, uow, recorder)
-	createOp := usersApp.NewCreateOperator(userRepo, uow, recorder)
+	createOp := usersApp.NewCreateOperator(userRepo, uow, recorder).WithGymRepo(gymRepo)
 	updateOp := usersApp.NewUpdateOperator(userRepo, uow, recorder)
 	toggleOp := usersApp.NewToggleOperatorActive(userRepo, blRepo, uow, recorder)
 	resetOp := usersApp.NewResetOperatorPassword(userRepo, blRepo, uow, recorder)
+	rotateOpPIN := usersApp.NewRotateOperatorPIN(userRepo, uow, recorder)
 	requestTransfer := usersApp.NewRequestTransferOwnership(userRepo, otpRepo, uow, recorder, emailSender)
 	confirmTransfer := usersApp.NewConfirmTransferOwnership(userRepo, otpRepo, transferRepo, blRepo, uow, recorder, emailSender)
 	createMT := memApp.NewCreateMembershipType(mtRepo, uow, recorder)
@@ -192,6 +194,7 @@ func main() {
 	toggleMember := memApp.NewToggleMemberStatus(memberRepo, uow, recorder)
 	lockExpiry := memApp.NewLockMembershipExpiry(membershipRepo, adjustmentRepo, uow, recorder)
 	assignPin := memApp.NewAssignPin(memberRepo, uow, recorder)
+	importCSV := memApp.NewImportMembersFromCSV(memberRepo, membershipRepo, mtRepo, uow, recorder)
 	memberSvc := memApp.NewMemberService(memberRepo, membershipRepo, mtRepo).WithFingerprints(fingerprintRepo)
 
 	// ── Biometric (UC-028, UC-029, UC-032) ────────────────────────────────
@@ -213,15 +216,22 @@ func main() {
 	// importar el paquete de notificaciones.
 	createMember.WithWelcomePinNotifier(enqueueWelcomePin)
 	assignPin.WithWelcomePinNotifier(enqueueWelcomePin)
+	// Mismo patrón para el alta/rotación de operadores: el PIN viaja por
+	// WhatsApp al número del operador. Skip silencioso cuando el gym no
+	// tiene WhatsApp conectado — el owner ve el PIN en el response.
+	enqueueOperatorWelcomePIN := notiApp.NewEnqueueOperatorWelcomePIN(notificationRepo, gymRepo, userRepo)
+	createOp.WithWelcomePINNotifier(enqueueOperatorWelcomePIN)
+	rotateOpPIN.WithWelcomePINNotifier(enqueueOperatorWelcomePIN)
 	enqueueExpiry := notiApp.NewEnqueueExpiryReminder(notificationRepo, expiryReader, uow)
 	enqueueOwnerAlert := notiApp.NewEnqueueOwnerAlert(notificationRepo, gymRepo, userRepo, alertConfigRepo, uow)
 	dispatchNoti := notiApp.NewDispatchNotification(notificationRepo, templateRepo, gymRepo, whatsappProvider, notiEmailProvider, uow)
 	connectWhatsApp := notiApp.NewConnectWhatsApp(gymRepo, whatsappProvider, uow, recorder)
-	whatsappStatus := notiApp.NewGetWhatsAppStatus(gymRepo, uow)
+	disconnectWhatsApp := notiApp.NewDisconnectWhatsApp(gymRepo, uow, recorder)
+	whatsappStatus := notiApp.NewGetWhatsAppStatus(gymRepo, notificationRepo, uow)
 	listTemplates := notiApp.NewListTemplates(templateRepo, uow)
 	updateTemplate := notiApp.NewUpdateTemplate(templateRepo, uow, recorder)
-	listOwnerAlerts := notiApp.NewListOwnerAlerts(alertConfigRepo, uow)
-	updateOwnerAlert := notiApp.NewUpdateOwnerAlert(alertConfigRepo, uow, recorder)
+	listOwnerAlerts := notiApp.NewListOwnerAlerts(alertConfigRepo, templateRepo, uow)
+	updateOwnerAlert := notiApp.NewUpdateOwnerAlert(alertConfigRepo, templateRepo, uow, recorder)
 	broadcast := notiApp.NewBroadcast(notificationRepo, memberRepo, gymRepo, uow, recorder)
 	listNotifications := notiApp.NewListNotifications(notificationRepo, uow)
 	processWebhook := notiApp.NewProcessWebhook(notificationRepo, whatsappEventRepo, uow)
@@ -285,6 +295,7 @@ func main() {
 		UpdateOperator:     updateOp,
 		ToggleActive:       toggleOp,
 		ResetOpPassword:    resetOp,
+		RotateOperatorPIN:  rotateOpPIN,
 		RequestTransfer:    requestTransfer,
 		ConfirmTransfer:    confirmTransfer,
 		AssignSelfPIN:      assignSelfPIN,
@@ -301,16 +312,26 @@ func main() {
 		SidecarTokens:      sidecarStore,
 		R2:                 r2Client,
 	})
+	// PlanGate corre después de AuthMiddleware en módulos / rutas Plus. Lee
+	// el SKU del gym desde el repo local; trial/plus_* pasan, Standard cae
+	// con 402. Sin el gate, todas las features Plus quedan abiertas.
+	plusGate := middleware.RequirePlusPlan(gymRepo, uow)
+
 	mtCtrl := memCtrl.NewMembershipTypeController(createMT, updateMT, deactivateMT, listMT, tokens)
-	memberCtrl := memCtrl.NewMemberController(createMember, updateMember, listMembers, memberDetail, toggleMember, lockExpiry, assignPin, tokens)
+	memberCtrl := memCtrl.NewMemberController(createMember, updateMember, listMembers, memberDetail, toggleMember, lockExpiry, assignPin, tokens).
+		WithImportCSV(importCSV)
 	fingerprintCtrl := memCtrl.NewFingerprintController(registerFingerprint, tokens)
 	paymentCtrl := billingCtrl.NewPaymentController(registerPayment, settlePayment, receiptPayment, sendReceipt, listMemberPayments, listGymPayments, refundPayment, registerSale, refundSale, cashClose, tokens)
+	paymentCtrl.PlanGate = plusGate
 	productCtrl := prodCtrl.NewProductController(createProduct, updateProduct, deactivateProduct, listProducts, adjustStock, tokens)
 	expenseController := expCtrl.NewExpenseController(createExpense, updateExpense, deleteExpense, listExpenses, tokens)
+	expenseController.PlanGate = plusGate
 	// Cloud has no biometric reader — fingerprint flows live on the sidecar.
 	checkinCtrl := chkCtrl.NewCheckinController(checkinManual, checkinPin, checkinOverride, checkinRepo, uow, nil, tokens)
 	reportsController := reportsCtrl.NewReportsController(dashboard, attentionRequired, rangeReport, exportReport, markContacted, markLost, tokens)
-	notificationsCtrl := notiCtrl.NewController(connectWhatsApp, whatsappStatus, listTemplates, updateTemplate, broadcast, listNotifications, listOwnerAlerts, updateOwnerAlert, whatsappProvider, tokens)
+	reportsController.PlanGate = plusGate
+	notificationsCtrl := notiCtrl.NewController(connectWhatsApp, disconnectWhatsApp, whatsappStatus, listTemplates, updateTemplate, broadcast, listNotifications, listOwnerAlerts, updateOwnerAlert, whatsappProvider, tokens)
+	notificationsCtrl.PlanGate = plusGate
 
 	// ── Challenges (retos) ────────────────────────────────────────────────
 	// Full vertical slice: list/detail/config, categories, participants,
@@ -358,6 +379,7 @@ func main() {
 		GetAttendanceReport:    attendanceReport,
 		CheckDisqualifications: checkDQ,
 		Tokens:                 tokens,
+		PlanGate:               plusGate,
 	})
 
 	// ── Subscriptions (Fase 1: cobranza al dueño) ─────────────────────────
@@ -402,6 +424,12 @@ func main() {
 	notiWebhookCtrl.RegisterRoutes(r)
 	subscriptionsCtrl.RegisterRoutes(r)
 	challengeCtrl.RegisterRoutes(r)
+
+	// Bitácora cloud (item 9) — owner-only, lee de Postgres. El sidecar
+	// monta su propio controller con SQLiteReader para ver el log local.
+	auditCtrl := audithttp.NewController(audit.NewPostgresReader(), userRepo, uow, tokens)
+	auditCtrl.PlanGate = plusGate
+	auditCtrl.RegisterRoutes(r)
 
 	// Sync protocol (Sesión 8 / ADR-001) — push/pull/full + Prometheus
 	// metrics at /_internal/metrics. The handler depends only on the UoW

@@ -98,6 +98,7 @@ func newWhatsappRouter(t *testing.T, provider *whatsapp.MockProvider) (*gin.Engi
 
 	ctrl := controllers.NewController(
 		(*notiApp.ConnectWhatsApp)(nil),
+		(*notiApp.DisconnectWhatsApp)(nil),
 		(*notiApp.GetWhatsAppStatus)(nil),
 		(*notiApp.ListTemplates)(nil),
 		(*notiApp.UpdateTemplate)(nil),

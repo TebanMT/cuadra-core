@@ -119,6 +119,20 @@ func DefaultLibrary() []Definition {
 			Body:      "Alerta de {gym_name}: cierre de caja con diferencia de ${diff_amount}. Revisa en Cuadra.",
 		},
 		{
+			Key:       "owner_alert_vip_no_visit",
+			Channel:   ChannelWhatsApp,
+			Category:  CategoryUtility,
+			Variables: []string{"gym_name", "member_name", "days_inactive"},
+			Body:      "Alerta de {gym_name}: {member_name} (socio VIP) no viene desde hace {days_inactive} días.",
+		},
+		{
+			Key:       "owner_alert_no_payments_today",
+			Channel:   ChannelWhatsApp,
+			Category:  CategoryUtility,
+			Variables: []string{"gym_name", "date"},
+			Body:      "Alerta de {gym_name}: no se registraron cobros el {date}. Revisa con tu operador.",
+		},
+		{
 			Key:       "broadcast_freeform",
 			Channel:   ChannelWhatsApp,
 			Category:  CategoryMarketing,
@@ -126,11 +140,15 @@ func DefaultLibrary() []Definition {
 			Body:      "Hola {member_first_name}, {message} — {gym_name}",
 		},
 		{
-			Key:       "operator_temp_password",
+			// operator_welcome_pin: se envía al operador (recepcionista) al
+			// alta y cuando el dueño regenera su PIN. Reemplaza al viejo
+			// "operator_temp_password" — los operadores nuevos ya no llevan
+			// password, sólo PIN de 4 dígitos para login en recepción.
+			Key:       "operator_welcome_pin",
 			Channel:   ChannelWhatsApp,
 			Category:  CategoryAuthentication,
-			Variables: []string{"full_name", "gym_name", "temp_password"},
-			Body:      "Hola {full_name}, {gym_name} te creó una cuenta en Cuadra. Tu contraseña temporal: {temp_password}",
+			Variables: []string{"full_name", "gym_name", "pin"},
+			Body:      "Hola {full_name} 👋 {gym_name} te dio de alta en Tinta. Tu PIN de acceso es *{pin}*. Lo usas en el sistema del gym para iniciar sesión.",
 		},
 		{
 			// member_welcome_pin: se envía al socio al inscribirse y cuando

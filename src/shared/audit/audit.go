@@ -29,6 +29,7 @@ const (
 	ActionLoginPIN           = "login_pin"
 	ActionAssignPIN          = "assign_pin"
 	ActionClearPIN           = "clear_pin"
+	ActionRotateOperatorPIN  = "rotate_operator_pin"
 )
 
 // Entry is the value the use case hands to Recorder.Record. Changes is an

@@ -28,6 +28,11 @@ var (
 	ErrCannotDeactivateOwner = errors.New("no puedes desactivar al dueño del gimnasio")
 	ErrCrossGym              = errors.New("ese usuario no pertenece a tu gimnasio")
 	ErrOperatorLimitReached  = errors.New("alcanzaste el máximo de 10 operadores por gimnasio")
+	// ErrOperatorLimitStandard se devuelve cuando el gym intenta crear un
+	// operador adicional sobre el cap del SKU Standard. El FE lo detecta
+	// para mostrar el upsell "mejora a Plus para operadores ilimitados"
+	// en lugar del límite absoluto del producto.
+	ErrOperatorLimitStandard = errors.New("tu plan Standard incluye 1 operador. Mejora a Plus para agregar más")
 	ErrInvalidOTP            = errors.New("código incorrecto o expirado")
 	ErrTargetNotEligible     = errors.New("el usuario seleccionado no existe o no es operador activo de tu gimnasio")
 	ErrAlreadyOwner          = errors.New("ese usuario ya es dueño")
@@ -37,4 +42,11 @@ var (
 	ErrInvalidPIN            = errors.New("el PIN debe ser de 4 dígitos")
 	ErrPINNotSet             = errors.New("este usuario no tiene PIN configurado")
 	ErrInvalidPINLogin       = errors.New("PIN incorrecto")
+	// El alta y la edición de operadores exigen teléfono: la entrega del PIN
+	// va por WhatsApp y el número también funciona como identificador
+	// secundario cuando el operador no tiene correo.
+	ErrOperatorPhoneRequired = errors.New("el teléfono es obligatorio para operadores")
+	// Unicidad por gym (no global): la misma persona puede trabajar en dos
+	// gyms distintos con el mismo número.
+	ErrPhoneTakenInGym = errors.New("ese teléfono ya está registrado en este gimnasio")
 )

@@ -13,6 +13,7 @@ import (
 
 	notiErrors "github.com/cuadra/cuadra-core/src/modules/notifications/domain/errors"
 	notiDomain "github.com/cuadra/cuadra-core/src/modules/notifications/domain/notification"
+	notiRepo "github.com/cuadra/cuadra-core/src/modules/notifications/domain/repository"
 	"github.com/cuadra/cuadra-core/src/modules/notifications/infraestructure/db/models"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 )
@@ -177,6 +178,68 @@ func notificationToModel(n *notiDomain.Notification) (models.NotificationModel, 
 		IdempotencyKey:    n.IdempotencyKey,
 		ProviderMessageID: n.ProviderMessageID,
 	}, nil
+}
+
+// ChannelStats agrega el conteo de notificaciones del canal indicado en el
+// rango (since, now]. Sent = total enviadas (incluye pending/failed que sí
+// salieron de la cola); Delivered = las que tienen sent_at; Failed = las que
+// tienen failed_at. Pending no se reporta — el FE no lo muestra.
+//
+// Excluimos soft-deletes para que el dueño no vea contadores inflados por
+// rows reseteadas. La query single-pass con FILTER es barata aún con
+// notification_queue creciendo (índice en gym_id+channel+created_at lo cubre).
+func (r *NotificationPostgresRepository) ChannelStats(tx sharedDomain.Transaction, gymID uuid.UUID, channel string, since time.Time) (notiRepo.NotificationStats, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	var row struct {
+		Sent      int64
+		Delivered int64
+		Failed    int64
+	}
+	err := gormTx.Raw(`
+		SELECT
+			COUNT(*) AS sent,
+			COUNT(*) FILTER (WHERE sent_at IS NOT NULL) AS delivered,
+			COUNT(*) FILTER (WHERE failed_at IS NOT NULL) AS failed
+		FROM notification_queue
+		WHERE gym_id = ? AND channel = ?
+		  AND created_at >= ?
+		  AND deleted_at IS NULL
+	`, gymID, channel, since.UTC()).Scan(&row).Error
+	if err != nil {
+		return notiRepo.NotificationStats{}, err
+	}
+	return notiRepo.NotificationStats{
+		Sent:      int(row.Sent),
+		Delivered: int(row.Delivered),
+		Failed:    int(row.Failed),
+	}, nil
+}
+
+// LastError devuelve el último error_message del canal — el FE lo muestra
+// como banner debajo de stats si no es nil. Ignoramos rows sin failed_at
+// (status=failed pero retry_count<max no llena failed_at todavía).
+func (r *NotificationPostgresRepository) LastError(tx sharedDomain.Transaction, gymID uuid.UUID, channel string) (string, *time.Time, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	var row struct {
+		ErrorMessage *string
+		FailedAt     *time.Time
+	}
+	err := gormTx.Raw(`
+		SELECT error_message, failed_at
+		FROM notification_queue
+		WHERE gym_id = ? AND channel = ?
+		  AND failed_at IS NOT NULL
+		  AND deleted_at IS NULL
+		ORDER BY failed_at DESC
+		LIMIT 1
+	`, gymID, channel).Scan(&row).Error
+	if err != nil {
+		return "", nil, err
+	}
+	if row.ErrorMessage == nil {
+		return "", row.FailedAt, nil
+	}
+	return *row.ErrorMessage, row.FailedAt, nil
 }
 
 func notificationFromModel(m *models.NotificationModel) (*notiDomain.Notification, error) {

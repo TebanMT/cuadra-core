@@ -149,6 +149,14 @@ func (m *MockReader) Enroll(ctx context.Context, samples int) (*CaptureResult, e
 	return m.Capture(ctx)
 }
 
+// ExtractTemplate in the mock just returns the staged capture — tests that
+// exercise the frontend → sidecar flow set `nextCapture` to the template
+// they want the matcher to produce when it sees a particular "image". The
+// image bytes themselves are ignored, since the mock has no real extractor.
+func (m *MockReader) ExtractTemplate(ctx context.Context, _ []byte) (*CaptureResult, error) {
+	return m.Capture(ctx)
+}
+
 // Identify decrypts each enrolled blob with the configured GMKProvider and
 // returns the first one whose plaintext bytes equal input.Bytes. Score is
 // always 1.0 on a hit (we don't simulate fuzzy matching in the mock).

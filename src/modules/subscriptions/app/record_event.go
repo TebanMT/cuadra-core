@@ -25,7 +25,7 @@ type RecordEventInput struct {
 	Provider     subDomain.Provider
 	Type         subDomain.EventType
 	ExternalID   string
-	Plan         string // "pro_monthly" / "pro_annual" — required for activated/renewed
+	Plan         string // "standard_monthly" / "standard_annual" / "plus_monthly" / "plus_annual" — required for activated/renewed
 	Amount       *float64
 	Currency     *string
 	PeriodEndsAt *time.Time

@@ -15,6 +15,14 @@ type GymRepository interface {
 	GetByID(tx sharedDomain.Transaction, id uuid.UUID) (*gymDomain.Gym, error)
 	Update(tx sharedDomain.Transaction, g *gymDomain.Gym) (*gymDomain.Gym, error)
 	HasMembershipType(tx sharedDomain.Transaction, gymID uuid.UUID) (bool, error)
+
+	// ExistsByWhatsApp devuelve true si OTRO gym vivo ya tiene ese número
+	// de WhatsApp registrado. `excludeGymID` se pasa para que el mismo gym
+	// pueda re-guardar su número actual sin colisionar consigo mismo (el
+	// caso típico: PATCH /gyms/me/setup re-enviando los mismos datos).
+	// Implementaciones DEBEN excluir filas con deleted_at != NULL para
+	// no bloquear por gimnasios soft-deletados.
+	ExistsByWhatsApp(tx sharedDomain.Transaction, whatsapp string, excludeGymID uuid.UUID) (bool, error)
 }
 
 type OwnershipTransferRepository interface {

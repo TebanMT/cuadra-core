@@ -37,6 +37,7 @@ var (
 // the owner re-runs /start. Production should swap for a Redis/SQL impl.
 type Controller struct {
 	Connect          *notiApp.ConnectWhatsApp
+	Disconnect       *notiApp.DisconnectWhatsApp
 	Status           *notiApp.GetWhatsAppStatus
 	ListTemplates    *notiApp.ListTemplates
 	UpdateTemplate   *notiApp.UpdateTemplate
@@ -47,10 +48,15 @@ type Controller struct {
 	WhatsApp         notifications.WhatsAppProvider
 	OTPStore         *whatsappOTPStore
 	Tokens           auth.TokenService
+	// PlanGate (opcional) wrappea las rutas exclusivas de Plus dentro del
+	// módulo de notifications. Hoy solo broadcast (envío masivo a socios)
+	// es Plus; los recordatorios automáticos + comprobantes son Standard.
+	PlanGate gin.HandlerFunc
 }
 
 func NewController(
 	connect *notiApp.ConnectWhatsApp,
+	disconnect *notiApp.DisconnectWhatsApp,
 	status *notiApp.GetWhatsAppStatus,
 	listTemplates *notiApp.ListTemplates,
 	updateTemplate *notiApp.UpdateTemplate,
@@ -63,6 +69,7 @@ func NewController(
 ) *Controller {
 	return &Controller{
 		Connect:          connect,
+		Disconnect:       disconnect,
 		Status:           status,
 		ListTemplates:    listTemplates,
 		UpdateTemplate:   updateTemplate,
@@ -84,10 +91,23 @@ func (ctrl *Controller) RegisterRoutes(r *gin.Engine) {
 		// provider, /connect verifies it and persists the gym credential.
 		api.POST("/gyms/me/whatsapp/start", middleware.RequireOwner(), ctrl.handleWhatsappStart)
 		api.POST("/gyms/me/whatsapp/connect", middleware.RequireOwner(), ctrl.handleConnect)
+		// Wire shape canónico (item 7): el FE consume `GET /whatsapp` con un
+		// shape rico (status, phone_number, stats, last_error). Mantenemos
+		// `/status` como alias por compat — el handler es el mismo y devuelve
+		// la versión rica. El DELETE desconecta el número.
+		api.GET("/gyms/me/whatsapp", ctrl.handleStatus)
 		api.GET("/gyms/me/whatsapp/status", ctrl.handleStatus)
+		api.DELETE("/gyms/me/whatsapp", middleware.RequireOwner(), ctrl.handleDisconnect)
 		api.GET("/notification-templates", ctrl.handleListTemplates)
 		api.PATCH("/notification-templates/:key", middleware.RequireOwner(), ctrl.handleUpdateTemplate)
-		api.POST("/broadcasts", middleware.RequireOwner(), ctrl.handleBroadcast)
+		// Broadcast (envío masivo a socios) es Plus: el gym de barrio
+		// arranca con Standard y manda comms 1-a-1; el masivo aplica al
+		// gym más activo que justifica Plus.
+		plus := api.Group("")
+		if ctrl.PlanGate != nil {
+			plus.Use(ctrl.PlanGate)
+		}
+		plus.POST("/broadcasts", middleware.RequireOwner(), ctrl.handleBroadcast)
 		api.GET("/notifications", ctrl.handleList)
 
 		// Owner-alerts (UC-040 DA-40.1). Defaults live in
@@ -125,21 +145,44 @@ type connectResp struct {
 	ConnectedAt time.Time `json:"connected_at"`
 }
 
-type statusResp struct {
-	Connected   bool       `json:"connected"`
-	Phone       *string    `json:"phone,omitempty"`
-	ConnectedAt *time.Time `json:"connected_at,omitempty"`
+// statusResp espeja FE WhatsappState (cuadra-desktop/.../useNotifications.ts).
+// Reemplaza al shape antiguo `{connected, phone, connected_at}` que tenía dos
+// problemas: (a) los nombres no coincidían con el FE (phone vs phone_number),
+// y (b) faltaban stats / last_error que el FE renderea cuando hay conexión.
+//
+// `stats` es nullable: el sidecar local no tiene contadores reales — los
+// agregados de envíos viven cloud-side. Cuando el FE recibe null muestra
+// "—" en cada métrica (fallback ya implementado en ConnectedView).
+type whatsappStats struct {
+	SentLast30d      int `json:"sent_last_30d"`
+	DeliveredLast30d int `json:"delivered_last_30d"`
+	FailedLast30d    int `json:"failed_last_30d"`
 }
 
+type statusResp struct {
+	Status      string         `json:"status"` // not_connected | pending_verification | connected | error
+	PhoneNumber *string        `json:"phone_number"`
+	ConnectedAt *time.Time     `json:"connected_at"`
+	Provider    *string        `json:"provider"`
+	Stats       *whatsappStats `json:"stats"`
+	LastError   *string        `json:"last_error"`
+}
+
+// templateResp matches the FE's NotificationTemplate interface
+// (cuadra-desktop/src/hooks/useNotifications.ts). `is_default` is the inverse
+// of internal `Custom`: FE renders a "Personalizada" badge cuando la plantilla
+// tiene override, y un botón "Restaurar texto por defecto" que sólo aparece
+// si !is_default. Mantenemos `default_body` aparte para previsualizar el
+// original y permitir el restore sin re-pegarle al endpoint.
 type templateResp struct {
-	Key       string   `json:"key"`
-	Channel   string   `json:"channel"`
-	Category  string   `json:"category"`
-	Variables []string `json:"variables"`
-	Default   string   `json:"default_body"`
-	Body      string   `json:"body"`
-	Enabled   bool     `json:"enabled"`
-	Custom    bool     `json:"custom"`
+	Key         string   `json:"key"`
+	Channel     string   `json:"channel"`
+	Category    string   `json:"category"`
+	Variables   []string `json:"variables"`
+	DefaultBody string   `json:"default_body"`
+	Body        string   `json:"body"`
+	Enabled     bool     `json:"enabled"`
+	IsDefault   bool     `json:"is_default"`
 }
 
 type updateTemplateReq struct {
@@ -226,9 +269,54 @@ func (ctrl *Controller) handleStatus(c *gin.Context) {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
 		return
 	}
-	utils.JsonResponse(c, http.StatusOK, statusResp{
-		Connected: out.Connected, Phone: out.Phone, ConnectedAt: out.ConnectedAt,
-	})
+	resp := statusResp{
+		Status:      "not_connected",
+		PhoneNumber: out.Phone,
+		ConnectedAt: out.ConnectedAt,
+		// Stats salen del agregado de notification_queue (sincronizada al
+		// sidecar). Damos el shape aún cuando el gym no tiene WhatsApp
+		// conectado — los contadores en cero son data útil ("nunca enviaste
+		// nada por aquí").
+		Stats: &whatsappStats{
+			SentLast30d:      out.StatsSent,
+			DeliveredLast30d: out.StatsDelivd,
+			FailedLast30d:    out.StatsFailed,
+		},
+	}
+	if out.Connected {
+		resp.Status = "connected"
+	}
+	if out.LastError != "" {
+		msg := out.LastError
+		resp.LastError = &msg
+	}
+	utils.JsonResponse(c, http.StatusOK, resp)
+}
+
+// handleDisconnect — DELETE /api/v1/gyms/me/whatsapp (owner-only). Borra los
+// campos WhatsApp del gym; el provider remoto (Twilio/Meta) NO recibe
+// notificación todavía — mejor dejar el sender registrado que romper la API
+// en producción cuando el dueño hizo click por error. El re-connect simplemente
+// vuelve a llamar provider.RegisterSender, que es idempotente.
+func (ctrl *Controller) handleDisconnect(c *gin.Context) {
+	gymID, ok := middleware.GetGymID(c)
+	if !ok {
+		utils.ErrorResponse(c, http.StatusUnauthorized, errBadAuth)
+		return
+	}
+	userID, _ := middleware.GetUserID(c)
+	if ctrl.Disconnect == nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, errBadAuth)
+		return
+	}
+	if err := ctrl.Disconnect.Execute(c.Request.Context(), notiApp.DisconnectWhatsAppInput{
+		GymID:       gymID,
+		ActorUserID: userID,
+	}); err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	utils.JsonResponse(c, http.StatusOK, gin.H{"ok": true})
 }
 
 func (ctrl *Controller) handleListTemplates(c *gin.Context) {
@@ -245,8 +333,14 @@ func (ctrl *Controller) handleListTemplates(c *gin.Context) {
 	out := make([]templateResp, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, templateResp{
-			Key: r.Key, Channel: r.Channel, Category: r.Category, Variables: r.Variables,
-			Default: r.Default, Body: r.Body, Enabled: r.Enabled, Custom: r.Custom,
+			Key:         r.Key,
+			Channel:     r.Channel,
+			Category:    r.Category,
+			Variables:   r.Variables,
+			DefaultBody: r.Default,
+			Body:        r.Body,
+			Enabled:     r.Enabled,
+			IsDefault:   !r.Custom,
 		})
 	}
 	utils.JsonResponse(c, http.StatusOK, gin.H{"items": out})
@@ -431,14 +525,38 @@ var _ = errInvalidOTP
 // Owner-alerts (UC-040 DA-40.1)
 // ---------------------------------------------------------------------------
 
+// alertConfigWire mirrors the FE's AlertConfig (cuadra-desktop/.../useNotifications.ts).
+// Each row carries both the toggle (enabled) and the mirror WhatsApp template
+// (template_key + variables + default_body + body + is_default) so the FE
+// renders toggle and editable copy in one place. GET and PATCH echo the
+// same shape — no follow-up fetch needed after a save.
 type alertConfigWire struct {
-	Key         string `json:"key"`
-	Enabled     bool   `json:"enabled"`
-	Description string `json:"description"`
+	Key         string   `json:"key"`
+	Enabled     bool     `json:"enabled"`
+	Description string   `json:"description"`
+	TemplateKey string   `json:"template_key"`
+	Variables   []string `json:"variables"`
+	DefaultBody string   `json:"default_body"`
+	Body        string   `json:"body"`
+	IsDefault   bool     `json:"is_default"`
 }
 
 type updateAlertReq struct {
-	Enabled bool `json:"enabled"`
+	Enabled *bool   `json:"enabled,omitempty"`
+	Body    *string `json:"body,omitempty"`
+}
+
+func toAlertWire(v notiApp.AlertConfigView) alertConfigWire {
+	return alertConfigWire{
+		Key:         string(v.Key),
+		Enabled:     v.Enabled,
+		Description: v.Description,
+		TemplateKey: v.TemplateKey,
+		Variables:   v.Variables,
+		DefaultBody: v.DefaultBody,
+		Body:        v.Body,
+		IsDefault:   v.IsDefault,
+	}
 }
 
 func (ctrl *Controller) handleListAlerts(c *gin.Context) {
@@ -454,11 +572,7 @@ func (ctrl *Controller) handleListAlerts(c *gin.Context) {
 	}
 	items := make([]alertConfigWire, 0, len(rows))
 	for _, r := range rows {
-		items = append(items, alertConfigWire{
-			Key:         string(r.Key),
-			Enabled:     r.Enabled,
-			Description: r.Description,
-		})
+		items = append(items, toAlertWire(r))
 	}
 	utils.JsonResponse(c, http.StatusOK, gin.H{"items": items})
 }
@@ -471,8 +585,7 @@ func (ctrl *Controller) handleUpdateAlert(c *gin.Context) {
 	}
 	userID, _ := middleware.GetUserID(c)
 	key := alertDomain.Key(c.Param("key"))
-	def := alertDomain.LookupDefault(key)
-	if def == nil {
+	if alertDomain.LookupDefault(key) == nil {
 		utils.ErrorResponse(c, http.StatusNotFound, errBadID)
 		return
 	}
@@ -486,14 +599,11 @@ func (ctrl *Controller) handleUpdateAlert(c *gin.Context) {
 		ActorUserID: userID,
 		Key:         key,
 		Enabled:     req.Enabled,
+		Body:        req.Body,
 	})
 	if err != nil {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
 		return
 	}
-	utils.JsonResponse(c, http.StatusOK, alertConfigWire{
-		Key:         string(saved.Key),
-		Enabled:     saved.Enabled,
-		Description: def.Description,
-	})
+	utils.JsonResponse(c, http.StatusOK, toAlertWire(*saved))
 }

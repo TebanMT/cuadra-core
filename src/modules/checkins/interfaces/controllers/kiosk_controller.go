@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"net/http"
-	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -18,18 +17,14 @@ import (
 	"github.com/cuadra/cuadra-core/src/shared/utils"
 )
 
-// kioskLongPollTimeout is how long the long-poll handler holds the request
-// open before returning an empty array. The frontend re-issues immediately —
-// 25s leaves margin under most load-balancer 30s read timeouts.
-const kioskLongPollTimeout = 25 * time.Second
-
 // KioskController is the sidecar-only set of endpoints that talk to the
 // fingerprint reader directly: fingerprint checkin, biometric status, kiosk
-// start/stop + event long-poll.
+// start/stop. The frontend drives the capture loop now (ADR-004-bis), so
+// there's no /kiosk/events long-poll anymore — the BiometricController +
+// JS SDK in cuadra-desktop publish events client-side.
 type KioskController struct {
 	Fingerprint *chkApp.CheckinByFingerprint
 	Loop        *chkApp.KioskLoop
-	Events      *chkApp.KioskBroadcaster
 	Reader      biometric.Reader
 	Tokens      auth.TokenService
 	// Sibling controller — we call its dispatch helper after each
@@ -41,12 +36,11 @@ type KioskController struct {
 func NewKioskController(
 	fingerprint *chkApp.CheckinByFingerprint,
 	loop *chkApp.KioskLoop,
-	events *chkApp.KioskBroadcaster,
 	reader biometric.Reader,
 	tokens auth.TokenService,
 ) *KioskController {
 	return &KioskController{
-		Fingerprint: fingerprint, Loop: loop, Events: events,
+		Fingerprint: fingerprint, Loop: loop,
 		Reader: reader, Tokens: tokens,
 	}
 }
@@ -66,7 +60,6 @@ func (c *KioskController) RegisterRoutes(r *gin.Engine) {
 		api.POST("/checkins/fingerprint", c.handleFingerprintCheckin)
 		api.POST("/kiosk/start", c.handleKioskStart)
 		api.POST("/kiosk/stop", c.handleKioskStop)
-		api.GET("/kiosk/events", c.handleKioskEvents)
 	}
 }
 
@@ -164,49 +157,6 @@ func (c *KioskController) handleKioskStop(ctx *gin.Context) {
 	}
 	c.Loop.Stop()
 	utils.JsonResponse(ctx, http.StatusOK, kioskStateResp{Running: false})
-}
-
-// handleKioskEvents long-polls the broadcaster. Returns when (a) at least
-// one event is queued, (b) the timeout fires (returns empty list — client
-// re-polls), or (c) the request context cancels.
-func (c *KioskController) handleKioskEvents(ctx *gin.Context) {
-	sub, cancel := c.Events.Subscribe()
-	defer cancel()
-
-	timeout := time.NewTimer(kioskLongPollTimeout)
-	defer timeout.Stop()
-
-	events := make([]chkApp.KioskEvent, 0, 4)
-
-	// Wait for at least one event, then drain whatever else is queued.
-	select {
-	case evt, ok := <-sub:
-		if !ok {
-			utils.JsonResponse(ctx, http.StatusOK, gin.H{"events": events})
-			return
-		}
-		events = append(events, evt)
-	case <-timeout.C:
-		utils.JsonResponse(ctx, http.StatusOK, gin.H{"events": events})
-		return
-	case <-ctx.Request.Context().Done():
-		utils.JsonResponse(ctx, http.StatusOK, gin.H{"events": events})
-		return
-	}
-
-drain:
-	for {
-		select {
-		case evt, ok := <-sub:
-			if !ok {
-				break drain
-			}
-			events = append(events, evt)
-		default:
-			break drain
-		}
-	}
-	utils.JsonResponse(ctx, http.StatusOK, gin.H{"events": events})
 }
 
 // decodeBase64 wraps base64.StdEncoding.DecodeString with a friendlier error

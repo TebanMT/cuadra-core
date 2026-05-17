@@ -172,10 +172,37 @@ func (r *UserSQLiteRepository) GetByEmail(tx sharedDomain.Transaction, email str
 
 func (r *UserSQLiteRepository) ExistsByEmail(tx sharedDomain.Transaction, email string) (bool, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
+	clean := strings.ToLower(strings.TrimSpace(email))
+	if clean == "" {
+		return false, nil
+	}
 	var n int
 	err := stx.Get(context.Background(), &n,
 		`SELECT COUNT(1) FROM users WHERE email = ? COLLATE NOCASE AND deleted_at IS NULL`,
-		strings.ToLower(email))
+		clean)
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+func (r *UserSQLiteRepository) ExistsByPhoneInGym(tx sharedDomain.Transaction, gymID uuid.UUID, phone string, excludeUserID *uuid.UUID) (bool, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	normalized := userDomain.NormalizePhone(phone)
+	if normalized == "" {
+		return false, nil
+	}
+	var n int
+	var err error
+	if excludeUserID != nil {
+		err = stx.Get(context.Background(), &n,
+			`SELECT COUNT(1) FROM users WHERE gym_id = ? AND phone = ? AND id <> ? AND deleted_at IS NULL`,
+			gymID.String(), normalized, excludeUserID.String())
+	} else {
+		err = stx.Get(context.Background(), &n,
+			`SELECT COUNT(1) FROM users WHERE gym_id = ? AND phone = ? AND deleted_at IS NULL`,
+			gymID.String(), normalized)
+	}
 	if err != nil {
 		return false, err
 	}

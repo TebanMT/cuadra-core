@@ -59,6 +59,21 @@ func (ctrl *SubscriptionController) RegisterRoutes(r *gin.Engine) {
 	wh.POST("/mercadopago", ctrl.handleMercadoPago)
 }
 
+// RegisterReadOnlyRoutes expone solamente GET /subscriptions/me. El sidecar
+// lo monta porque la página de Suscripción del desktop necesita poder leer el
+// plan/status para no caer en error de carga, pero el resto del surface
+// (checkout, webhooks, extend-trial) son cloud-only — el dueño hace ese flujo
+// desde el browser cuando hay internet. La historia de eventos puede venir
+// vacía si el repo del sidecar es un stub (no sincronizamos
+// `subscription_events` todavía); el FE renderea "aún no hay movimientos"
+// como empty state.
+func (ctrl *SubscriptionController) RegisterReadOnlyRoutes(r *gin.Engine) {
+	api := r.Group("/api/v1")
+	authed := api.Group("/subscriptions")
+	authed.Use(middleware.AuthMiddleware(ctrl.Tokens))
+	authed.GET("/me", middleware.RequireOwner(), ctrl.handleGetMine)
+}
+
 // ---------------------------------------------------------------------------
 // Read.
 // ---------------------------------------------------------------------------
@@ -125,7 +140,7 @@ func (ctrl *SubscriptionController) handleGetMine(c *gin.Context) {
 
 type startCheckoutReq struct {
 	Provider string `json:"provider"` // "stripe" | "mercadopago"
-	Plan     string `json:"plan"`     // "pro_monthly" | "pro_annual"
+	Plan     string `json:"plan"`     // "standard_monthly" | "standard_annual" | "plus_monthly" | "plus_annual"
 }
 
 type startCheckoutResp struct {
@@ -369,8 +384,9 @@ func extractStripeFields(data map[string]any) (uuid.UUID, string, *time.Time, *f
 		}
 	}
 	if plan == "" {
-		// Fallback: monthly is the default.
-		plan = "pro_monthly"
+		// Fallback: Standard mensual es el SKU por defecto cuando Stripe no nos
+		// devuelve nickname (gym sin price asignado en dashboard).
+		plan = "standard_monthly"
 	}
 	var periodEnd *time.Time
 	if pe, ok := obj["current_period_end"].(float64); ok && pe > 0 {
@@ -440,7 +456,7 @@ func parseMercadoPagoEvent(body []byte) (*subApp.RecordEventInput, error) {
 			occurred = t.UTC()
 		}
 	}
-	plan := "pro_monthly"
+	plan := "standard_monthly"
 	return &subApp.RecordEventInput{
 		GymID:      gymID,
 		Provider:   subDomain.ProviderMercadoPago,

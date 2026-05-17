@@ -137,6 +137,9 @@ func (s *stubReader) Capture(context.Context) (*biometric.CaptureResult, error) 
 func (s *stubReader) Enroll(context.Context, int) (*biometric.CaptureResult, error) {
 	return nil, biometric.ErrNotAvailable
 }
+func (s *stubReader) ExtractTemplate(context.Context, []byte) (*biometric.CaptureResult, error) {
+	return nil, biometric.ErrNotAvailable
+}
 func (s *stubReader) Identify(_ context.Context, _ *biometric.CaptureResult, _ []biometric.EncryptedTemplate, _ float64) (*biometric.MatchResult, error) {
 	s.calls++
 	if s.err != nil {

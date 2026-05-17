@@ -16,6 +16,13 @@ type UserRepository interface {
 	GetByID(tx sharedDomain.Transaction, id uuid.UUID) (*userDomain.User, error)
 	GetByEmail(tx sharedDomain.Transaction, email string) (*userDomain.User, error)
 	ExistsByEmail(tx sharedDomain.Transaction, email string) (bool, error)
+	// ExistsByPhoneInGym is the cheap check used by CreateOperator /
+	// UpdateOperator before persisting. excludeUserID lets the caller
+	// pass the row being edited so an update that keeps the same number
+	// doesn't trigger a false collision. The repo normalizes the phone
+	// the same way the domain does (userDomain.NormalizePhone) so callers
+	// can pass user-typed input directly.
+	ExistsByPhoneInGym(tx sharedDomain.Transaction, gymID uuid.UUID, phone string, excludeUserID *uuid.UUID) (bool, error)
 	Update(tx sharedDomain.Transaction, u *userDomain.User) (*userDomain.User, error)
 	ListByGym(tx sharedDomain.Transaction, gymID uuid.UUID) ([]*userDomain.User, error)
 	CountOperatorsByGym(tx sharedDomain.Transaction, gymID uuid.UUID) (int, error)

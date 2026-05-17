@@ -25,8 +25,9 @@ func TestUC040_OwnerAlertsRespectConfigToggle(t *testing.T) {
 	userRepo := usersRepoLite.NewUserSQLiteRepository()
 
 	configRepo := notiRepoLite.NewAlertConfigSQLiteRepository()
-	updateUC := notiApp.NewUpdateOwnerAlert(configRepo, f.uow, recorder)
-	listUC := notiApp.NewListOwnerAlerts(configRepo, f.uow)
+	templateRepo := notiRepoLite.NewTemplateOverrideSQLiteRepository()
+	updateUC := notiApp.NewUpdateOwnerAlert(configRepo, templateRepo, f.uow, recorder)
+	listUC := notiApp.NewListOwnerAlerts(configRepo, templateRepo, f.uow)
 	enqueueUC := notiApp.NewEnqueueOwnerAlert(f.notiRepo, f.gymRepo, userRepo, configRepo, f.uow)
 
 	// 1. Defaults: every key reports enabled=true with no rows persisted.
@@ -44,11 +45,12 @@ func TestUC040_OwnerAlertsRespectConfigToggle(t *testing.T) {
 	}
 
 	// 2. Disable cash_close_diff. Persists an override row.
+	off := false
 	saved, err := updateUC.Execute(context.Background(), notiApp.UpdateOwnerAlertInput{
 		GymID:       f.gymID,
 		ActorUserID: f.ownerID,
 		Key:         alertDomain.KeyCashCloseDiff,
-		Enabled:     false,
+		Enabled:     &off,
 	})
 	if err != nil {
 		t.Fatalf("update toggle: %v", err)
@@ -108,11 +110,14 @@ func TestUC040_VersionBumpsOnToggleChange(t *testing.T) {
 	f := newFixture(t)
 	recorder := audit.NewSQLiteRecorder()
 	configRepo := notiRepoLite.NewAlertConfigSQLiteRepository()
-	updateUC := notiApp.NewUpdateOwnerAlert(configRepo, f.uow, recorder)
+	templateRepo := notiRepoLite.NewTemplateOverrideSQLiteRepository()
+	updateUC := notiApp.NewUpdateOwnerAlert(configRepo, templateRepo, f.uow, recorder)
 
+	off := false
+	on := true
 	v1, err := updateUC.Execute(context.Background(), notiApp.UpdateOwnerAlertInput{
 		GymID: f.gymID, ActorUserID: f.ownerID,
-		Key: alertDomain.KeyLowStock, Enabled: false,
+		Key: alertDomain.KeyLowStock, Enabled: &off,
 	})
 	if err != nil {
 		t.Fatalf("first toggle: %v", err)
@@ -123,7 +128,7 @@ func TestUC040_VersionBumpsOnToggleChange(t *testing.T) {
 
 	v2, err := updateUC.Execute(context.Background(), notiApp.UpdateOwnerAlertInput{
 		GymID: f.gymID, ActorUserID: f.ownerID,
-		Key: alertDomain.KeyLowStock, Enabled: false,
+		Key: alertDomain.KeyLowStock, Enabled: &off,
 	})
 	if err != nil {
 		t.Fatalf("idempotent toggle: %v", err)
@@ -134,7 +139,7 @@ func TestUC040_VersionBumpsOnToggleChange(t *testing.T) {
 
 	v3, err := updateUC.Execute(context.Background(), notiApp.UpdateOwnerAlertInput{
 		GymID: f.gymID, ActorUserID: f.ownerID,
-		Key: alertDomain.KeyLowStock, Enabled: true,
+		Key: alertDomain.KeyLowStock, Enabled: &on,
 	})
 	if err != nil {
 		t.Fatalf("flip toggle: %v", err)
@@ -150,11 +155,13 @@ func TestUC040_UnknownKeyRejected(t *testing.T) {
 	f := newFixture(t)
 	recorder := audit.NewSQLiteRecorder()
 	configRepo := notiRepoLite.NewAlertConfigSQLiteRepository()
-	updateUC := notiApp.NewUpdateOwnerAlert(configRepo, f.uow, recorder)
+	templateRepo := notiRepoLite.NewTemplateOverrideSQLiteRepository()
+	updateUC := notiApp.NewUpdateOwnerAlert(configRepo, templateRepo, f.uow, recorder)
 
+	off := false
 	_, err := updateUC.Execute(context.Background(), notiApp.UpdateOwnerAlertInput{
 		GymID: f.gymID, ActorUserID: f.ownerID,
-		Key: alertDomain.Key("not_a_real_key"), Enabled: false,
+		Key: alertDomain.Key("not_a_real_key"), Enabled: &off,
 	})
 	if err == nil {
 		t.Fatal("expected validation error for unknown key")

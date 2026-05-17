@@ -15,6 +15,7 @@ import (
 
 	notiErrors "github.com/cuadra/cuadra-core/src/modules/notifications/domain/errors"
 	notiDomain "github.com/cuadra/cuadra-core/src/modules/notifications/domain/notification"
+	notiRepo "github.com/cuadra/cuadra-core/src/modules/notifications/domain/repository"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 )
 
@@ -322,6 +323,74 @@ func enqueueNotification(stx *sharedDomain.SqlxTransaction, n *notiDomain.Notifi
 		return err
 	}
 	return stx.EnqueueSync(context.Background(), "notification_queue", n.ID.String(), "upsert", payloadJSON, n.Version)
+}
+
+// ChannelStats — espeja la versión Postgres pero usando los timestamps en
+// milisegundos del SQLite local. Se ejecuta sobre la fila local de
+// notification_queue (que el sync agent rellena vía pull desde cloud).
+func (r *NotificationSQLiteRepository) ChannelStats(tx sharedDomain.Transaction, gymID uuid.UUID, channel string, since time.Time) (notiRepo.NotificationStats, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	var row struct {
+		Sent      int64 `db:"sent"`
+		Delivered int64 `db:"delivered"`
+		Failed    int64 `db:"failed"`
+	}
+	// SQLite no soporta FILTER (WHERE …) en versiones <3.30, pero el sidecar
+	// trae 3.40+. Aún así uso CASE para máxima portabilidad (simétrico con
+	// el resto del repo).
+	err := stx.Get(context.Background(), &row, `
+		SELECT
+			COUNT(*) AS sent,
+			SUM(CASE WHEN sent_at IS NOT NULL THEN 1 ELSE 0 END) AS delivered,
+			SUM(CASE WHEN failed_at IS NOT NULL THEN 1 ELSE 0 END) AS failed
+		FROM notification_queue
+		WHERE gym_id = ? AND channel = ?
+		  AND created_at >= ?
+		  AND deleted_at IS NULL`,
+		gymID.String(), channel, since.UTC().UnixMilli(),
+	)
+	if err != nil {
+		return notiRepo.NotificationStats{}, err
+	}
+	return notiRepo.NotificationStats{
+		Sent:      int(row.Sent),
+		Delivered: int(row.Delivered),
+		Failed:    int(row.Failed),
+	}, nil
+}
+
+func (r *NotificationSQLiteRepository) LastError(tx sharedDomain.Transaction, gymID uuid.UUID, channel string) (string, *time.Time, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	var row struct {
+		ErrorMessage sql.NullString `db:"error_message"`
+		FailedAt     sql.NullInt64  `db:"failed_at"`
+	}
+	err := stx.Get(context.Background(), &row, `
+		SELECT error_message, failed_at
+		FROM notification_queue
+		WHERE gym_id = ? AND channel = ?
+		  AND failed_at IS NOT NULL
+		  AND deleted_at IS NULL
+		ORDER BY failed_at DESC
+		LIMIT 1`,
+		gymID.String(), channel,
+	)
+	if err != nil {
+		// sql.ErrNoRows = no hay fallidos todavía; devolvemos vacío sin error.
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil, nil
+		}
+		return "", nil, err
+	}
+	var failedAt *time.Time
+	if row.FailedAt.Valid {
+		t := time.UnixMilli(row.FailedAt.Int64).UTC()
+		failedAt = &t
+	}
+	if !row.ErrorMessage.Valid {
+		return "", failedAt, nil
+	}
+	return row.ErrorMessage.String, failedAt, nil
 }
 
 func nullInt64FromTime(t *time.Time) sql.NullInt64 {

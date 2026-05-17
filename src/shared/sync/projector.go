@@ -31,6 +31,9 @@ var jsonbColumns = map[string]map[string]bool{
 	// Go slice as a Postgres record/tuple and the upsert fails with
 	// "expression is of type record" (SQLSTATE 42804).
 	"payments": {"breakdown": true},
+	// subscription_events.raw_payload — el cuerpo del webhook normalizado
+	// como objeto JSON. Mismo tratamiento que cualquier otra columna JSONB.
+	"subscription_events": {"raw_payload": true},
 }
 
 // byteaColumns lists BYTEA columns that arrive in the payload base64-encoded.
@@ -46,6 +49,26 @@ var byteaColumns = map[string]map[string]bool{
 // belong here, not scattered across each projector.
 var payloadKeyAliases = map[string]map[string]string{
 	"member_fingerprints": {"deleted_at_ms": "deleted_at"},
+}
+
+// timestamptzColumns lists the extra columns whose Postgres type is
+// TIMESTAMPTZ but whose name does NOT end in `_at`, so the suffix
+// heuristic in isTimestampColumn would miss them. Without an entry here,
+// epoch-ms ints from the sidecar payload reach pgx as raw float64 and the
+// upsert dies with "cannot find encode plan for OID 1184".
+//
+// Discover new entries by grepping `db_migrations/postgres/` for
+// `TIMESTAMPTZ` and filtering out names ending in `_at`. Mirror to SQLite
+// is irrelevant — sidecar stores epoch-ms regardless of column name.
+var timestamptzColumns = map[string]map[string]bool{
+	"challenges":         {"measurement_t0_deadline": true, "measurement_t1_start": true},
+	"notification_queue": {"scheduled_for": true},
+	// subscription_events tiene tres TIMESTAMPTZ que no terminan en `_at`-
+	// del-record-estándar: occurred_at sí matchea, pero period_ends_at va
+	// con sufijo distinto y recorded_at es semántica BE — los tres llegan
+	// como epoch-ms del sidecar (en realidad sólo cloud → sidecar pull,
+	// pero declararlos hace simétrico el wire shape si algún día cambia).
+	"subscription_events": {"period_ends_at": true, "occurred_at": true, "recorded_at": true},
 }
 
 // projectors is the dispatch table. Every entry in SyncedTables must have a
@@ -288,7 +311,7 @@ func buildProjectorUpsert(
 				return "", nil, fmt.Errorf("projector %s column %s: %w", table.Type, c, err)
 			}
 			arg = b
-		case isTimestampColumn(c):
+		case isTimestampColumn(table.Table, c):
 			arg = coerceTimestamp(v)
 		default:
 			arg = nullifyEmptyString(v)
@@ -371,11 +394,20 @@ func decodeBytea(v any) ([]byte, error) {
 
 // isTimestampColumn returns true for columns whose Postgres type is
 // timestamptz and whose payload value may arrive as an epoch-ms number.
-// All known timestamp columns end in `_at`; date columns end in `_date` or
-// `birthdate` and arrive as ISO date strings, which Postgres parses
-// natively without conversion.
-func isTimestampColumn(name string) bool {
-	return strings.HasSuffix(name, "_at")
+//
+// La mayoría de columnas timestamp del schema terminan en `_at`, así que
+// esa es la heurística rápida. Para las que no (medición t0/t1 de retos,
+// scheduled_for de notification_queue), el override por tabla en
+// timestamptzColumns las atrapa. Las columnas tipo `_date` / `birthdate`
+// llegan como strings ISO y Postgres las parsea sin coerción.
+func isTimestampColumn(table, name string) bool {
+	if strings.HasSuffix(name, "_at") {
+		return true
+	}
+	if cols := timestamptzColumns[table]; cols != nil {
+		return cols[name]
+	}
+	return false
 }
 
 // nullifyEmptyString collapses sidecar's `""` defaults into SQL NULL.

@@ -61,11 +61,16 @@ import (
 	notiWhatsApp "github.com/cuadra/cuadra-core/src/modules/notifications/infraestructure/whatsapp"
 	notiCtrl "github.com/cuadra/cuadra-core/src/modules/notifications/interfaces/controllers"
 
+	subApp "github.com/cuadra/cuadra-core/src/modules/subscriptions/app"
+	subRepoLite "github.com/cuadra/cuadra-core/src/modules/subscriptions/infraestructure/db/repositories"
+	subCtrl "github.com/cuadra/cuadra-core/src/modules/subscriptions/interfaces/controllers"
+
 	reportsApp "github.com/cuadra/cuadra-core/src/application/reports"
 	reportsInfra "github.com/cuadra/cuadra-core/src/application/reports/infraestructure"
 	reportsCtrl "github.com/cuadra/cuadra-core/src/application/reports/interfaces"
 	"github.com/cuadra/cuadra-core/src/shared/accesswebhook"
 	"github.com/cuadra/cuadra-core/src/shared/audit"
+	"github.com/cuadra/cuadra-core/src/shared/audit/audithttp"
 	"github.com/cuadra/cuadra-core/src/shared/auth"
 	"github.com/cuadra/cuadra-core/src/shared/biometric"
 	bcrypto "github.com/cuadra/cuadra-core/src/shared/biometric/crypto"
@@ -158,14 +163,25 @@ func main() {
 	emailSender := email.NewStdoutSender()
 	trialDays := envInt("TRIAL_DURATION_DAYS", 30)
 
-	// Biometric reader (UC-028, UC-029, UC-031). The actual implementation is
-	// chosen by build tag (digitalpersona.go for `bio_dp`, mock.go for
-	// `bio_mock`, digitalpersona_disabled.go for the default dev sidecar).
-	bioReader := biometric.NewDigitalPersonaReader()
-	gmkProvider := bcrypto.NewInMemoryGMKProvider()
-	// TODO(humano — Sesión 8): swap InMemoryGMKProvider for an OS-keychain
-	// provider that reads cuadra.gmk.<gym_id> via Tauri command. The current
-	// in-memory provider is dev-only and forgets keys on restart.
+	// Biometric reader (UC-028, UC-029, UC-031). The sidecar build wires the
+	// NBIS matcher (mindtct + bozorth3 subprocesses, ADR-004-bis); the mock
+	// lives behind `bio_mock` for tests and is consumed via NewMockReader in
+	// the test fixtures, not here.
+	//
+	// GMKs go to the OS keychain (Windows Credential Manager / macOS
+	// Keychain) per ADR-006 §2.6 so a sidecar restart doesn't orphan every
+	// enrolled gallery. KeyringGMKProvider lazy-generates the per-gym key on
+	// first GetGMK and caches in-process. Override with SIDECAR_GMK_INMEMORY=1
+	// for ad-hoc tests on a box without an OS keyring (CI runners that
+	// don't keep a logged-in user, headless Linux dev VMs).
+	var gmkProvider bcrypto.GMKProvider
+	if os.Getenv("SIDECAR_GMK_INMEMORY") == "1" {
+		log.Printf("[biometric] SIDECAR_GMK_INMEMORY=1 — using in-memory GMK provider (galleries die at restart)")
+		gmkProvider = bcrypto.NewInMemoryGMKProvider()
+	} else {
+		gmkProvider = bcrypto.NewKeyringGMKProvider()
+	}
+	bioReader := biometric.NewDigitalPersonaReader().WithGMK(gmkProvider)
 
 	// Sidecar use cases — password-reset / refresh-blacklist flows (UC-003,
 	// UC-004, UC-008/9 token revocation) live cloud-side, so the sidecar
@@ -178,10 +194,11 @@ func main() {
 	completeSetup := gymApp.NewCompleteSetup(gymRepo, uow, recorder)
 	updateProfile := gymApp.NewUpdateProfile(gymRepo, uow, recorder)
 	updateChargeSettings := gymApp.NewUpdateChargeSettings(gymRepo, uow, recorder)
-	createOp := usersApp.NewCreateOperator(userRepo, uow, recorder)
+	createOp := usersApp.NewCreateOperator(userRepo, uow, recorder).WithGymRepo(gymRepo)
 	updateOp := usersApp.NewUpdateOperator(userRepo, uow, recorder)
 	toggleOp := usersApp.NewToggleOperatorActive(userRepo, nil, uow, recorder)
 	resetOp := usersApp.NewResetOperatorPassword(userRepo, nil, uow, recorder)
+	rotateOpPIN := usersApp.NewRotateOperatorPIN(userRepo, uow, recorder)
 	requestTransfer := usersApp.NewRequestTransferOwnership(userRepo, otpRepo, uow, recorder, emailSender)
 	confirmTransfer := usersApp.NewConfirmTransferOwnership(userRepo, otpRepo, transferRepo, nil, uow, recorder, emailSender)
 	// PIN use cases (auth-refactor v0.7). assignSelfPIN + clearSelfPIN power
@@ -207,6 +224,7 @@ func main() {
 	toggleMember := memApp.NewToggleMemberStatus(memberRepo, uow, recorder)
 	lockExpiry := memApp.NewLockMembershipExpiry(membershipRepo, adjustmentRepo, uow, recorder)
 	assignPin := memApp.NewAssignPin(memberRepo, uow, recorder)
+	importCSV := memApp.NewImportMembersFromCSV(memberRepo, membershipRepo, mtRepo, uow, recorder)
 	memberSvc := memApp.NewMemberService(memberRepo, membershipRepo, mtRepo).WithFingerprints(fingerprintRepo)
 
 	// ── Biometric + Checkins (Sesión 5) ───────────────────────────────────
@@ -233,13 +251,21 @@ func main() {
 	enqueueWelcomePin := notiApp.NewEnqueueWelcomePin(notificationRepo, gymRepo, memberRepo)
 	createMember.WithWelcomePinNotifier(enqueueWelcomePin)
 	assignPin.WithWelcomePinNotifier(enqueueWelcomePin)
+	// Operator PIN-first: alta y rotación encolan WhatsApp con el PIN.
+	// Sidecar registra la noti localmente y el sync agent la empuja a
+	// cloud — el worker cloud despacha el outbound. Si el gym no tiene
+	// WhatsApp conectado, el notifier hace skip silencioso.
+	enqueueOperatorWelcomePIN := notiApp.NewEnqueueOperatorWelcomePIN(notificationRepo, gymRepo, userRepo)
+	createOp.WithWelcomePINNotifier(enqueueOperatorWelcomePIN)
+	rotateOpPIN.WithWelcomePINNotifier(enqueueOperatorWelcomePIN)
 	enqueueOwnerAlert := notiApp.NewEnqueueOwnerAlert(notificationRepo, gymRepo, userRepo, alertConfigRepo, uow)
 	connectWhatsApp := notiApp.NewConnectWhatsApp(gymRepo, whatsappMock, uow, recorder)
-	whatsappStatus := notiApp.NewGetWhatsAppStatus(gymRepo, uow)
+	disconnectWhatsApp := notiApp.NewDisconnectWhatsApp(gymRepo, uow, recorder)
+	whatsappStatus := notiApp.NewGetWhatsAppStatus(gymRepo, notificationRepo, uow)
 	listTemplates := notiApp.NewListTemplates(templateRepo, uow)
 	updateTemplate := notiApp.NewUpdateTemplate(templateRepo, uow, recorder)
-	listOwnerAlerts := notiApp.NewListOwnerAlerts(alertConfigRepo, uow)
-	updateOwnerAlert := notiApp.NewUpdateOwnerAlert(alertConfigRepo, uow, recorder)
+	listOwnerAlerts := notiApp.NewListOwnerAlerts(alertConfigRepo, templateRepo, uow)
+	updateOwnerAlert := notiApp.NewUpdateOwnerAlert(alertConfigRepo, templateRepo, uow, recorder)
 	broadcast := notiApp.NewBroadcast(notificationRepo, memberRepo, gymRepo, uow, recorder)
 	listNotifications := notiApp.NewListNotifications(notificationRepo, uow)
 	billingSubscriber := notiApp.NewBillingEventSubscriber(enqueueReceipt)
@@ -321,10 +347,11 @@ func main() {
 		CompleteSetup:    completeSetup,
 		UpdateProfile:    updateProfile,
 		UpdateChargeSet:  updateChargeSettings,
-		CreateOperator:   createOp,
-		UpdateOperator:   updateOp,
-		ToggleActive:     toggleOp,
-		ResetOpPassword:  resetOp,
+		CreateOperator:    createOp,
+		UpdateOperator:    updateOp,
+		ToggleActive:      toggleOp,
+		ResetOpPassword:   resetOp,
+		RotateOperatorPIN: rotateOpPIN,
 		RequestTransfer:  requestTransfer,
 		ConfirmTransfer:  confirmTransfer,
 		AssignSelfPIN:    assignSelfPIN,
@@ -337,15 +364,23 @@ func main() {
 		UploadsDir:       envOrDefault("UPLOADS_DIR", "./tmp/uploads"),
 	})
 	mtCtrl := memCtrl.NewMembershipTypeController(createMT, updateMT, deactivateMT, listMT, tokens)
+	// PlanGate aplica en el sidecar igual que en cloud: el SKU del gym
+	// vive en el mirror local (sync agent lo mantiene fresco), así que el
+	// gate funciona offline.
+	plusGate := middleware.RequirePlusPlan(gymRepo, uow)
+
 	memberCtrl := memCtrl.NewMemberController(createMember, updateMember, listMembers, memberDetail, toggleMember, lockExpiry, assignPin, tokens).
-		WithUploadsDir(envOrDefault("UPLOADS_DIR", "./tmp/uploads"))
+		WithUploadsDir(envOrDefault("UPLOADS_DIR", "./tmp/uploads")).
+		WithImportCSV(importCSV)
 	// SyncTrigger se setea más abajo cuando el agente está construido
 	// (orden temporal: el agente necesita el cloudURL y la config, que
 	// llegan después de los controllers).
 	fingerprintCtrl := memCtrl.NewFingerprintController(registerFingerprint, tokens)
 	paymentCtrl := billingCtrl.NewPaymentController(registerPayment, settlePayment, receiptPayment, sendReceipt, listMemberPayments, listGymPayments, refundPayment, registerSale, refundSale, cashClose, tokens)
+	paymentCtrl.PlanGate = plusGate
 	productCtrl := prodCtrl.NewProductController(createProduct, updateProduct, deactivateProduct, listProducts, adjustStock, tokens)
 	expenseController := expCtrl.NewExpenseController(createExpense, updateExpense, deleteExpense, listExpenses, tokens)
+	expenseController.PlanGate = plusGate
 	fingerprintAvailable := func() bool { return bioReader.Available(context.Background()) }
 	// Outbound access-granted webhook (Fase 1 differentiator: lets the gym
 	// drive any turnstile / cerradura over HTTP). URL + HMAC secret live in
@@ -353,10 +388,34 @@ func main() {
 	accessWebhook := accesswebhook.NewHTTPDispatcher(uow, gymRepo)
 	checkinCtrl := chkCtrl.NewCheckinController(checkinManual, checkinPin, checkinOverride, checkinRepo, uow, fingerprintAvailable, tokens).
 		WithWebhook(accessWebhook)
-	kioskCtrl := chkCtrl.NewKioskController(checkinFingerprint, kioskLoop, kioskEvents, bioReader, tokens).
+	kioskCtrl := chkCtrl.NewKioskController(checkinFingerprint, kioskLoop, bioReader, tokens).
 		WithSibling(checkinCtrl)
-	notificationsCtrl := notiCtrl.NewController(connectWhatsApp, whatsappStatus, listTemplates, updateTemplate, broadcast, listNotifications, listOwnerAlerts, updateOwnerAlert, whatsappMock, tokens)
+	// New PNG-in HTTP surface per ADR-004-bis: the Tauri frontend captures
+	// via the DigitalPersona JS SDK and POSTs the raw image; the sidecar
+	// runs ExtractTemplate + the use case here. The base64-in routes on
+	// fingerprintCtrl + kioskCtrl stay for kiosk-loop and test callers.
+	biometricCtrl := chkCtrl.NewBiometricController(bioReader, registerFingerprint, checkinFingerprint, tokens).
+		WithSibling(checkinCtrl)
+	notificationsCtrl := notiCtrl.NewController(connectWhatsApp, disconnectWhatsApp, whatsappStatus, listTemplates, updateTemplate, broadcast, listNotifications, listOwnerAlerts, updateOwnerAlert, whatsappMock, tokens)
+	notificationsCtrl.PlanGate = plusGate
+
+	// Suscripción — sidecar sólo expone el GET. El historial ahora SÍ vive
+	// local: subscription_events es una SyncedTable pull-only (cloud → sidecar)
+	// que el sync agent llena. Checkout/extend-trial siguen cloud-only — el
+	// FE abre el dashboard cloud para ese flujo via openExternal (decisión
+	// del riesgo 1: pagos siempre suceden en browser conectado a internet,
+	// proxy-ear sólo agregaría complejidad sin ganancia de UX).
+	subEvents := subRepoLite.NewEventSQLiteRepository()
+	getSubscription := subApp.NewGetSubscription(subEvents, gymRepo, uow)
+	subscriptionCtrl := subCtrl.NewSubscriptionController(nil, getSubscription, nil, nil, tokens)
+
+	// Bitácora (item 9) — owner-only. El sidecar lee del audit_log local
+	// (recordado por cada use case en cada gym). El reader concreto lo
+	// elige el build tag (NewSQLiteReader sólo compila bajo //go:build sidecar).
+	auditCtrl := audithttp.NewController(audit.NewSQLiteReader(), userRepo, uow, tokens)
+	auditCtrl.PlanGate = plusGate
 	reportsController := reportsCtrl.NewReportsController(dashboard, attentionRequired, rangeReport, exportReport, markContacted, markLost, tokens)
+	reportsController.PlanGate = plusGate
 	challengeCtrl := challengesCtrl.NewChallengeController(challengesCtrl.ChallengeController{
 		CreateChallenge:        createChallenge,
 		ListChallenges:         listChallenges,
@@ -377,6 +436,7 @@ func main() {
 		GetAttendanceReport:    attendanceReport,
 		CheckDisqualifications: checkDQ,
 		Tokens:                 tokens,
+		PlanGate:               plusGate,
 	})
 
 	if os.Getenv("ENVIRONMENT") == "production" {
@@ -387,6 +447,13 @@ func main() {
 		AllowedOrigins: parseOrigins(envOrDefault("CORS_ALLOWED_ORIGINS", "http://localhost:5173,tauri://localhost,http://tauri.localhost")),
 	}))
 	r.Use(localTokenMiddleware(envOrDefault("LOCAL_AUTH_TOKEN", "")))
+	// Hard-block por suscripción vencida (riesgo 1 — decisión "offline tolera,
+	// sync exitoso confirma cancelación"). Va a nivel engine para cubrir TODA
+	// la API sin tener que modificar cada controller. El middleware tiene su
+	// propia whitelist de paths que SIEMPRE deben pasar (auth/*, gyms/me read,
+	// subscription/me read, sync/*) para que la pantalla de bloqueo del FE
+	// pueda renderearse y el dueño pueda escapar al dashboard cloud.
+	r.Use(middleware.EnforceActiveSubscription(tokens, gymRepo, uow))
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "cuadra-sidecar"})
 	})
@@ -423,6 +490,16 @@ func main() {
 			return loginGymIDFromCache(uow)
 		},
 	})
+	// Bind the biometric matcher's active gym to the auth flow so Identify
+	// can fetch the right GMK without each request having to pass it in.
+	// Logout passes uuid.Nil and the matcher refuses to decrypt.
+	authProxy.OnActiveGymChanged = bioReader.SetActiveGym
+	// Seed the matcher with whatever gym this sidecar is currently paired
+	// to (cached_login row) so the kiosk loop works right after sidecar
+	// restart, before any operator re-logs in.
+	if gymID := loginGymIDFromCache(uow); gymID != uuid.Nil {
+		bioReader.SetActiveGym(gymID)
+	}
 	authProxy.RegisterRoutes(r)
 	authCtrl.RegisterMeRoute(r)
 	authCtrl.RegisterAccountRoutes(r)
@@ -437,9 +514,12 @@ func main() {
 	expenseController.RegisterRoutes(r)
 	checkinCtrl.RegisterRoutes(r)
 	kioskCtrl.RegisterRoutes(r)
+	biometricCtrl.RegisterRoutes(r)
 	notificationsCtrl.RegisterRoutes(r)
 	reportsController.RegisterRoutes(r)
 	challengeCtrl.RegisterRoutes(r)
+	subscriptionCtrl.RegisterReadOnlyRoutes(r)
+	auditCtrl.RegisterRoutes(r)
 
 	// ── Sync agent (Sesión 8 / ADR-001) ──────────────────────────────────
 	// The agent reads its sk_live_* sidecar credential from sync_state on
