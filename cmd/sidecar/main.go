@@ -103,7 +103,16 @@ func main() {
 		startParentWatcher()
 	}
 
-	dbPath := envOrDefault("SIDECAR_DB_PATH", "./tmp/cuadra.db")
+	// Persistent storage paths. El desktop Tauri normalmente inyecta
+	// SIDECAR_DB_PATH / UPLOADS_DIR apuntando al app-data dir del OS;
+	// defaultSidecarDataDir() es el fallback para runs standalone y para
+	// cualquier caso donde el env no llegue. Nunca un ./tmp relativo: esa
+	// DB es la operación completa del gym (no es scratch), y un path
+	// relativo revienta cuando el sidecar corre desde un install dir
+	// no-escribible (ej. C:\Program Files\Tinta).
+	dataDir := defaultSidecarDataDir()
+	dbPath := envOrDefault("SIDECAR_DB_PATH", filepath.Join(dataDir, "tinta.db"))
+	uploadsDir := envOrDefault("UPLOADS_DIR", filepath.Join(dataDir, "uploads"))
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 		log.Fatalf("create db dir: %v", err)
 	}
@@ -361,7 +370,7 @@ func main() {
 		Users:            userRepo,
 		MembershipTypes:  mtRepo,
 		UoW:              uow,
-		UploadsDir:       envOrDefault("UPLOADS_DIR", "./tmp/uploads"),
+		UploadsDir:       uploadsDir,
 	})
 	mtCtrl := memCtrl.NewMembershipTypeController(createMT, updateMT, deactivateMT, listMT, tokens)
 	// PlanGate aplica en el sidecar igual que en cloud: el SKU del gym
@@ -370,7 +379,7 @@ func main() {
 	plusGate := middleware.RequirePlusPlan(gymRepo, uow)
 
 	memberCtrl := memCtrl.NewMemberController(createMember, updateMember, listMembers, memberDetail, toggleMember, lockExpiry, assignPin, tokens).
-		WithUploadsDir(envOrDefault("UPLOADS_DIR", "./tmp/uploads")).
+		WithUploadsDir(uploadsDir).
 		WithImportCSV(importCSV)
 	// SyncTrigger se setea más abajo cuando el agente está construido
 	// (orden temporal: el agente necesita el cloudURL y la config, que
@@ -530,7 +539,7 @@ func main() {
 		BaseURL:    cloudURL,
 		Interval:   syncInterval,
 		Logger:     log.New(os.Stderr, "[sync] ", log.LstdFlags),
-		UploadsDir: envOrDefault("UPLOADS_DIR", "./tmp/uploads"),
+		UploadsDir: uploadsDir,
 	}, db, uow)
 	// Wire the proxy's hooks so a fresh login (or a re-login after the
 	// previous credential was revoked) takes effect immediately:
@@ -648,6 +657,30 @@ func envOrDefault(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// defaultSidecarDataDir resolves the per-user persistent directory where the
+// sidecar keeps its SQLite DB y la cache de uploads cuando SIDECAR_DB_PATH /
+// UPLOADS_DIR no vienen seteados. El desktop Tauri normalmente sí los inyecta
+// (apuntando al mismo app-data dir del OS); este default es el fallback para
+// runs standalone y cualquier caso donde el env no llegue.
+//
+// Deliberadamente NO usa ./tmp: esa DB es la operación local completa del gym
+// (sobrevive reinicios), no scratch data, y un ./tmp relativo además revienta
+// cuando el sidecar corre desde un install dir no-escribible (C:\Program
+// Files\Tinta). os.UserConfigDir() devuelve %AppData% en Windows,
+// ~/Library/Application Support en macOS, ~/.config en Linux.
+//
+// "app.tinta.desktop" matchea el bundle identifier de Tauri (APP_DIR_NAME en
+// cuadra-desktop) — así un run fallback y uno normal aterrizan en el mismo dir.
+func defaultSidecarDataDir() string {
+	if base, err := os.UserConfigDir(); err == nil {
+		return filepath.Join(base, "app.tinta.desktop")
+	}
+	// os.UserConfigDir sólo falla si HOME/AppData no están seteados —
+	// rarísimo. Caemos a un dir claramente persistente bajo el cwd
+	// (nunca ./tmp, que se lee como descartable).
+	return "tinta-data"
 }
 
 // startParentWatcher launches a goroutine that exits the process when
