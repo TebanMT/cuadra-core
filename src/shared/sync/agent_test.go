@@ -183,13 +183,23 @@ func setupSidecarDB(t *testing.T) (*sqlx.DB, sharedDomain.UnitOfWork, uuid.UUID)
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	db.SetMaxOpenConns(1)
-	for _, m := range []string{
-		"../../../db_migrations/sqlite/001_init_schema.sql",
-		"../../../db_migrations/sqlite/002_notifications.sql",
-		"../../../db_migrations/sqlite/003_sync_local.sql",
-		"../../../db_migrations/sqlite/005_users_pin.sql",
-		"../../../db_migrations/sqlite/008_gym_charge_settings.sql",
-	} {
+	// Aplicamos TODAS las migraciones sqlite en orden — no un subset
+	// cherry-picked. El schema del test tiene que matchear producción:
+	// el sync agent puede pull-ear filas con cualquier columna que una
+	// migración haya agregado (ej. members.pin_plain de la 009), y un
+	// subset desactualizado rompe en silencio cada vez que se agrega una.
+	// os.ReadDir devuelve las entries ordenadas por nombre, y los archivos
+	// están zero-padded (001_..016_) → orden léxico == orden numérico.
+	migDir := "../../../db_migrations/sqlite"
+	entries, err := os.ReadDir(migDir)
+	if err != nil {
+		t.Fatalf("read migrations dir: %v", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".sql" {
+			continue
+		}
+		m := filepath.Join(migDir, e.Name())
 		b, err := os.ReadFile(m)
 		if err != nil {
 			t.Fatalf("read %s: %v", m, err)

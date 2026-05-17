@@ -57,11 +57,20 @@ func setupMembersFixture(t *testing.T) *membersFixture {
 	t.Cleanup(func() { db.Close() })
 	db.SetMaxOpenConns(1)
 
-	for _, m := range []string{
-		"../../../../db_migrations/sqlite/001_init_schema.sql",
-		"../../../../db_migrations/sqlite/005_users_pin.sql",
-		"../../../../db_migrations/sqlite/008_gym_charge_settings.sql",
-	} {
+	// Todas las migraciones en orden — no un subset cherry-picked. Así el
+	// schema del test matchea producción y no se rompe cada vez que una
+	// migración agrega una columna a una tabla base. os.ReadDir ordena por
+	// nombre y los archivos están zero-padded (001_..) → orden correcto.
+	migDir := "../../../../db_migrations/sqlite"
+	migEntries, err := os.ReadDir(migDir)
+	if err != nil {
+		t.Fatalf("read migrations dir: %v", err)
+	}
+	for _, e := range migEntries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".sql" {
+			continue
+		}
+		m := filepath.Join(migDir, e.Name())
 		schema, err := os.ReadFile(m)
 		if err != nil {
 			t.Fatalf("read %s: %v", m, err)
