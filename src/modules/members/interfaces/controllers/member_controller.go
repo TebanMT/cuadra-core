@@ -34,7 +34,7 @@ type MemberController struct {
 	// cmd/sidecar via WithImportCSV. Si queda nil, el endpoint responde
 	// 503 — útil para tests que no exercisan importación.
 	ImportCSV *memApp.ImportMembersFromCSV
-	Tokens     auth.TokenService
+	Tokens    auth.TokenService
 	// UploadsDir es la raíz del cache local de blobs (igual variable
 	// que la AgentConfig). Cuando está seteada, los handlers de create
 	// y update extraen sincronámente data URLs a disco para que el FE
@@ -132,9 +132,9 @@ type createMemberReq struct {
 }
 
 type createMemberResp struct {
-	MemberID uuid.UUID `json:"member_id"`
-	MembershipID        uuid.UUID `json:"membership_id"`
-	Folio               string    `json:"folio"`
+	MemberID     uuid.UUID `json:"member_id"`
+	MembershipID uuid.UUID `json:"membership_id"`
+	Folio        string    `json:"folio"`
 	// ExpiryDate vacío cuando la membresía quedó en pending_payment.
 	ExpiryDate          string `json:"expiry_date,omitempty"`
 	MembershipStatus    string `json:"membership_status"`
@@ -143,20 +143,20 @@ type createMemberResp struct {
 	// gym). Siempre se envía para que el operador lo lea / escriba en la
 	// credencial; vacío sólo en el caso muy raro de que el gym esté
 	// saturado de PINs y se haya saltado la auto-asignación.
-	Pin         string       `json:"pin,omitempty"`
-	PinDispatch *pinDispatch `json:"pin_dispatch,omitempty"`
-	PaymentID   *uuid.UUID   `json:"payment_id,omitempty"`
-	PaymentFolio string      `json:"payment_folio,omitempty"`
-	PaymentTotal float64     `json:"payment_total,omitempty"`
+	Pin          string       `json:"pin,omitempty"`
+	PinDispatch  *pinDispatch `json:"pin_dispatch,omitempty"`
+	PaymentID    *uuid.UUID   `json:"payment_id,omitempty"`
+	PaymentFolio string       `json:"payment_folio,omitempty"`
+	PaymentTotal float64      `json:"payment_total,omitempty"`
 }
 
 // pinDispatch surfaces whether the welcome-PIN WhatsApp notification was
 // enqueued. The FE renders one of three copies based on the shape:
 //   - dispatched=true, recipient_phone="+52…"   → "PIN enviado a +52…"
 //   - dispatched=false, skipped_reason="whatsapp_not_connected" / "no_member_phone"
-//                                              → "Escríbelo en la credencial"
+//     → "Escríbelo en la credencial"
 //   - dispatched=false, skipped_reason="disabled_by_gym"
-//                                              → "Escríbelo en la credencial" (silencioso)
+//     → "Escríbelo en la credencial" (silencioso)
 type pinDispatch struct {
 	Dispatched     bool   `json:"dispatched"`
 	SkippedReason  string `json:"skipped_reason,omitempty"`
@@ -200,19 +200,19 @@ type assignPinReq struct {
 }
 
 type memberResp struct {
-	ID                   uuid.UUID  `json:"id"`
-	GymID                uuid.UUID  `json:"gym_id"`
-	Folio                string     `json:"folio"`
-	FullName             string     `json:"full_name"`
-	Phone                string     `json:"phone"`
-	Email                *string    `json:"email,omitempty"`
-	Birthdate            *string    `json:"birthdate,omitempty"`
-	PhotoURL             *string    `json:"photo_url,omitempty"`
-	Notes                *string    `json:"notes,omitempty"`
-	Status               string     `json:"status"`
-	EnrollmentPaid       bool       `json:"enrollment_paid"`
-	LastMaintenancePaid  *string    `json:"last_maintenance_paid,omitempty"`
-	HasPin               bool       `json:"has_pin"`
+	ID                  uuid.UUID `json:"id"`
+	GymID               uuid.UUID `json:"gym_id"`
+	Folio               string    `json:"folio"`
+	FullName            string    `json:"full_name"`
+	Phone               string    `json:"phone"`
+	Email               *string   `json:"email,omitempty"`
+	Birthdate           *string   `json:"birthdate,omitempty"`
+	PhotoURL            *string   `json:"photo_url,omitempty"`
+	Notes               *string   `json:"notes,omitempty"`
+	Status              string    `json:"status"`
+	EnrollmentPaid      bool      `json:"enrollment_paid"`
+	LastMaintenancePaid *string   `json:"last_maintenance_paid,omitempty"`
+	HasPin              bool      `json:"has_pin"`
 	// Pin: el código de 4 dígitos visible para el operador (mismo
 	// rationale que la migración 012 — texto plano, no es un secreto).
 	// Vacío sólo cuando el socio no tiene PIN aún (caso histórico
@@ -223,11 +223,11 @@ type memberResp struct {
 }
 
 type membershipResp struct {
-	ID                   uuid.UUID `json:"id"`
-	MembershipTypeID     uuid.UUID `json:"membership_type_id"`
-	TypeName             string    `json:"type_name"`
-	Price                float64   `json:"price"`
-	StartDate            string    `json:"start_date"`
+	ID               uuid.UUID `json:"id"`
+	MembershipTypeID uuid.UUID `json:"membership_type_id"`
+	TypeName         string    `json:"type_name"`
+	Price            float64   `json:"price"`
+	StartDate        string    `json:"start_date"`
 	// ExpiryDate vacío cuando la membresía está en pending_payment.
 	ExpiryDate           string `json:"expiry_date,omitempty"`
 	Status               string `json:"status"`

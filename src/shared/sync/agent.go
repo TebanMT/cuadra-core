@@ -896,4 +896,3 @@ func isAuthError(err error) bool {
 	msg := err.Error()
 	return strings.Contains(msg, "401") || strings.Contains(msg, "unauthorized")
 }
-

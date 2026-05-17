@@ -175,20 +175,20 @@ type cashTodayWire struct {
 }
 
 type dashboardWire struct {
-	GeneratedAt        time.Time                   `json:"generated_at"`
-	ActiveMembers      kpiTrendWire                `json:"active_members"`
-	IncomeMonth        kpiTrendWire                `json:"income_month"`
+	GeneratedAt   time.Time    `json:"generated_at"`
+	ActiveMembers kpiTrendWire `json:"active_members"`
+	IncomeMonth   kpiTrendWire `json:"income_month"`
 	// ExpensesMonth — agregado de mercancía + gastos generales. El FE
 	// muestra UN solo número con hint "Mercancía + otros". Internamente
 	// los sub-KPIs siguen existiendo en el use case por si después se
 	// expone el desglose.
-	ExpensesMonth      kpiTrendWire                `json:"expenses_month"`
-	ExpiringWeek       kpiTrendWire                `json:"expiring_week"`
-	Recoverable        kpiTrendWire                `json:"recoverable"`
-	Income30d          []reportsApp.DailyIncome    `json:"income_30d"`
-	AttentionSummary   reportsApp.AttentionSummary `json:"attention_summary"`
-	RecentPayments     []recentPaymentWire         `json:"recent_payments"`
-	CashToday          cashTodayWire               `json:"cash_today"`
+	ExpensesMonth    kpiTrendWire                `json:"expenses_month"`
+	ExpiringWeek     kpiTrendWire                `json:"expiring_week"`
+	Recoverable      kpiTrendWire                `json:"recoverable"`
+	Income30d        []reportsApp.DailyIncome    `json:"income_30d"`
+	AttentionSummary reportsApp.AttentionSummary `json:"attention_summary"`
+	RecentPayments   []recentPaymentWire         `json:"recent_payments"`
+	CashToday        cashTodayWire               `json:"cash_today"`
 }
 
 func toDashboardWire(d *reportsApp.DashboardOutput) dashboardWire {
@@ -439,22 +439,22 @@ func timePtrToISO(t *time.Time) *string {
 // FE-only extras (recent_payments, attention_required_count) come from the
 // dashboard's cached widget.
 type rangeWire struct {
-	Period                 string                              `json:"period"`
-	From                   string                              `json:"from"`
-	To                     string                              `json:"to"`
-	Totals                 rangeTotalsWire                     `json:"totals"`
-	IncomeByDay            []reportsApp.DailyIncome            `json:"income_by_day"`
-	ExpensesByDay          []reportsApp.DailyAmount            `json:"expenses_by_day"`
-	CheckinsByDay          []reportsApp.DailyCount             `json:"checkins_by_day"`
-	IncomeByMethod         map[string]float64                  `json:"income_by_method"`
-	ExpensesByCategory     map[string]float64                  `json:"expenses_by_category"`
-	TopMembers             []reportsApp.TopMemberRow           `json:"top_members"`
-	TopProducts            []reportsApp.TopProductRow          `json:"top_products"`
-	InventoryCosts         []inventoryCostWire                 `json:"inventory_costs"`
-	Expenses               []expenseWire                       `json:"expenses"`
-	CriticalStock          reportsApp.CriticalStockCounts      `json:"critical_stock"`
-	RecentPayments         []recentPaymentWire                 `json:"recent_payments"`
-	AttentionRequiredCount int                                 `json:"attention_required_count"`
+	Period                 string                         `json:"period"`
+	From                   string                         `json:"from"`
+	To                     string                         `json:"to"`
+	Totals                 rangeTotalsWire                `json:"totals"`
+	IncomeByDay            []reportsApp.DailyIncome       `json:"income_by_day"`
+	ExpensesByDay          []reportsApp.DailyAmount       `json:"expenses_by_day"`
+	CheckinsByDay          []reportsApp.DailyCount        `json:"checkins_by_day"`
+	IncomeByMethod         map[string]float64             `json:"income_by_method"`
+	ExpensesByCategory     map[string]float64             `json:"expenses_by_category"`
+	TopMembers             []reportsApp.TopMemberRow      `json:"top_members"`
+	TopProducts            []reportsApp.TopProductRow     `json:"top_products"`
+	InventoryCosts         []inventoryCostWire            `json:"inventory_costs"`
+	Expenses               []expenseWire                  `json:"expenses"`
+	CriticalStock          reportsApp.CriticalStockCounts `json:"critical_stock"`
+	RecentPayments         []recentPaymentWire            `json:"recent_payments"`
+	AttentionRequiredCount int                            `json:"attention_required_count"`
 }
 
 // rangeTotalsWire — cada total como KPI trend para que el FE renderee

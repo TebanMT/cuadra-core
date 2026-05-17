@@ -31,11 +31,11 @@ type ExpenseRepository interface {
 // DominantCategory es la categoría con mayor monto acumulado (string
 // vacío si no hay filas).
 type ExpenseAggregates struct {
-	Total             float64
-	CashTotal         float64
-	NonCashTotal      float64
-	DominantCategory  string
-	DominantCatTotal  float64
+	Total            float64
+	CashTotal        float64
+	NonCashTotal     float64
+	DominantCategory string
+	DominantCatTotal float64
 }
 
 // Sort columns expuestas por el header de la tabla.

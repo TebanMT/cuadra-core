@@ -12,10 +12,10 @@ import (
 
 func validDates() (time.Time, time.Time, time.Time, time.Time) {
 	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	return now.Add(7 * 24 * time.Hour),  // starts in 1 week
-		now.Add(21 * 24 * time.Hour),    // T0 deadline in 3 weeks
-		now.Add(91 * 24 * time.Hour),    // T1 starts in 13 weeks
-		now.Add(105 * 24 * time.Hour)    // ends in 15 weeks
+	return now.Add(7 * 24 * time.Hour), // starts in 1 week
+		now.Add(21 * 24 * time.Hour), // T0 deadline in 3 weeks
+		now.Add(91 * 24 * time.Hour), // T1 starts in 13 weeks
+		now.Add(105 * 24 * time.Hour) // ends in 15 weeks
 }
 
 func TestNewChallenge_HappyPath(t *testing.T) {
@@ -49,8 +49,8 @@ func TestNewChallenge_RejectsEmptyName(t *testing.T) {
 func TestNewChallenge_RejectsBadDates(t *testing.T) {
 	now := time.Now().UTC()
 	cases := []struct {
-		name                       string
-		starts, t0, t1, ends       time.Time
+		name                 string
+		starts, t0, t1, ends time.Time
 	}{
 		{
 			name:   "T0 before start",

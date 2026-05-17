@@ -168,14 +168,14 @@ type GetWhatsAppStatusInput struct {
 // es el último mensaje fallido del canal whatsapp; nil cuando no hay
 // fallidos aún.
 type GetWhatsAppStatusOutput struct {
-	Connected     bool
-	Phone         *string
-	ConnectedAt   *time.Time
-	StatsSent     int
-	StatsDelivd   int
-	StatsFailed   int
-	LastError     string
-	LastErrorAt   *time.Time
+	Connected   bool
+	Phone       *string
+	ConnectedAt *time.Time
+	StatsSent   int
+	StatsDelivd int
+	StatsFailed int
+	LastError   string
+	LastErrorAt *time.Time
 }
 
 type GetWhatsAppStatus struct {

@@ -38,10 +38,10 @@ const maxFingerprintImageBytes int64 = 2 << 20
 // POST /checkins/fingerprint) stay around for callers that already have a
 // base64 template (kiosk loop, integration tests). These are additive.
 type BiometricController struct {
-	Reader   biometric.Reader
-	Enroll   *memApp.RegisterFingerprint
-	Checkin  *chkApp.CheckinByFingerprint
-	Tokens   auth.TokenService
+	Reader  biometric.Reader
+	Enroll  *memApp.RegisterFingerprint
+	Checkin *chkApp.CheckinByFingerprint
+	Tokens  auth.TokenService
 	// Sibling lets the checkin path fire the access webhook on allowed
 	// results — same wire as KioskController. Optional; nil → skip.
 	Sibling *CheckinController

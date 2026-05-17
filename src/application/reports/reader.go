@@ -119,14 +119,14 @@ type ExpenseRow struct {
 // inicial al crear el producto (reason="Stock inicial") o ajustes
 // posteriores via /adjust-stock.
 type InventoryCostRow struct {
-	MovementID   uuid.UUID
-	ProductID    uuid.UUID
-	ProductName  string
-	Delta        int     // unidades recibidas (siempre positivo para restock)
-	CostUnit     float64 // costo unitario en moneda (no cents)
-	CostTotal    float64 // CostUnit * Delta — pre-computado para evitar N+1 en FE
-	Reason       *string
-	OccurredAt   time.Time
+	MovementID  uuid.UUID
+	ProductID   uuid.UUID
+	ProductName string
+	Delta       int     // unidades recibidas (siempre positivo para restock)
+	CostUnit    float64 // costo unitario en moneda (no cents)
+	CostTotal   float64 // CostUnit * Delta — pre-computado para evitar N+1 en FE
+	Reason      *string
+	OccurredAt  time.Time
 }
 
 // DailyIncome — one bar of the dashboard chart (UC-033).

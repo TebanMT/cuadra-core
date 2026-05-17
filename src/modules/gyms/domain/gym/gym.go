@@ -105,10 +105,10 @@ type Gym struct {
 	//   maintenance_frequency   (string: monthly|bimonthly|quarterly|semiannual|annual)
 	// Reemplaza el storage previo en localStorage del desktop — volátil
 	// y per-device, inconsistente cuando un gym tiene varios equipos.
-	ChargeSettings           map[string]any
-	CreatedAt                time.Time
-	UpdatedAt                time.Time
-	DeletedAt                *time.Time
+	ChargeSettings map[string]any
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	DeletedAt      *time.Time
 }
 
 // NewTrialGym creates a placeholder gym at signup (UC-001 step 1). Most fields
@@ -130,7 +130,7 @@ func NewTrialGym(id uuid.UUID, trialDays int, now time.Time) *Gym {
 		},
 		ChargeSettings: map[string]any{},
 		CreatedAt:      now,
-		UpdatedAt: now,
+		UpdatedAt:      now,
 	}
 }
 

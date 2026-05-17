@@ -25,13 +25,13 @@ var (
 
 // Challenge creation / configuration.
 var (
-	ErrNameRequired             = errors.New("el nombre del reto es obligatorio")
-	ErrInvalidDates             = errors.New("las fechas no son válidas (T₀ debe ser antes que T₁ y el cierre)")
-	ErrInvalidConfig            = errors.New("la configuración del reto tiene un valor fuera de rango")
-	ErrConfigLocked             = errors.New("ya hay mediciones capturadas; no se puede editar la configuración del reto")
-	ErrInvalidStatusTransition  = errors.New("ese cambio de estado no está permitido")
-	ErrNoCategories             = errors.New("agrega al menos una categoría antes de abrir inscripciones")
-	ErrChallengeNotRegistering  = errors.New("el reto no está aceptando inscripciones")
+	ErrNameRequired            = errors.New("el nombre del reto es obligatorio")
+	ErrInvalidDates            = errors.New("las fechas no son válidas (T₀ debe ser antes que T₁ y el cierre)")
+	ErrInvalidConfig           = errors.New("la configuración del reto tiene un valor fuera de rango")
+	ErrConfigLocked            = errors.New("ya hay mediciones capturadas; no se puede editar la configuración del reto")
+	ErrInvalidStatusTransition = errors.New("ese cambio de estado no está permitido")
+	ErrNoCategories            = errors.New("agrega al menos una categoría antes de abrir inscripciones")
+	ErrChallengeNotRegistering = errors.New("el reto no está aceptando inscripciones")
 )
 
 // Categories.

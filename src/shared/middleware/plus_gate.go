@@ -15,10 +15,10 @@ import (
 // /settings/subscription. "current_plan" viaja para que el copy del upsell
 // hable de "Estás en Standard" vs el genérico "necesitas Plus".
 type PlanGateResponse struct {
-	Error       string `json:"error"`        // siempre "plan_required"
+	Error        string `json:"error"`         // siempre "plan_required"
 	RequiredPlan string `json:"required_plan"` // "plus"
-	CurrentPlan string `json:"current_plan"`
-	Message     string `json:"message"`
+	CurrentPlan  string `json:"current_plan"`
+	Message      string `json:"message"`
 }
 
 // RequirePlusPlan corre DESPUÉS de AuthMiddleware (lee gym_id de las claims
@@ -57,10 +57,10 @@ func RequirePlusPlan(gyms gymRepo.GymRepository, uow sharedDomain.UnitOfWork) gi
 			return
 		}
 		c.AbortWithStatusJSON(http.StatusPaymentRequired, PlanGateResponse{
-			Error:       "plan_required",
+			Error:        "plan_required",
 			RequiredPlan: "plus",
-			CurrentPlan: g.SubscriptionPlan,
-			Message:     "Esta acción requiere el plan Plus. Mejora tu suscripción para usarla.",
+			CurrentPlan:  g.SubscriptionPlan,
+			Message:      "Esta acción requiere el plan Plus. Mejora tu suscripción para usarla.",
 		})
 	}
 }
@@ -98,4 +98,3 @@ func EnforcePlusInline(c *gin.Context, gyms gymRepo.GymRepository, uow sharedDom
 	})
 	return false
 }
-

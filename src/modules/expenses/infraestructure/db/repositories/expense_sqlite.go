@@ -124,9 +124,9 @@ func (r *ExpenseSQLiteRepository) ListAggregates(tx sharedDomain.Transaction, q 
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	whereClause, args := buildExpenseWhereSqlite(q)
 	var row struct {
-		TotalCents        sql.NullInt64 `db:"total"`
-		CashCents         sql.NullInt64 `db:"cash_total"`
-		NonCashCents      sql.NullInt64 `db:"non_cash_total"`
+		TotalCents   sql.NullInt64 `db:"total"`
+		CashCents    sql.NullInt64 `db:"cash_total"`
+		NonCashCents sql.NullInt64 `db:"non_cash_total"`
 	}
 	stmt := fmt.Sprintf(`
 		SELECT

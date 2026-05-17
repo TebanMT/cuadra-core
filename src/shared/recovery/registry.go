@@ -33,9 +33,9 @@ func (r *EmailOnlyRegistry) Pick(_ context.Context, _, _ string, _ string) (Send
 // file the team can find. Wiring is left to a future change so this stays
 // inert in MVP. The selection logic is intentionally explicit:
 //
-//   1. If the gym is on a tier that includes WhatsApp recovery AND the
-//      user has a phone on file, return WhatsApp.
-//   2. Else return email.
+//  1. If the gym is on a tier that includes WhatsApp recovery AND the
+//     user has a phone on file, return WhatsApp.
+//  2. Else return email.
 //
 // We do NOT silently fall back from WhatsApp to email when the WhatsApp
 // send fails — the user explicitly chose phone-based recovery and the

@@ -111,10 +111,10 @@ type Reader interface {
 }
 
 var (
-	ErrNotAvailable            = errors.New("biometric reader not available")
-	ErrNoMatch                 = errors.New("no fingerprint match above threshold")
-	ErrQualityThreshold        = errors.New("fingerprint quality below threshold")
-	ErrNoFingerDetected        = errors.New("no finger detected on reader")
-	ErrCaptureMovedToFrontend  = errors.New("capture lives in frontend per ADR-004-bis; call ExtractTemplate with image bytes")
-	ErrTemplateExtractFailed   = errors.New("mindtct could not extract a usable template from the image")
+	ErrNotAvailable           = errors.New("biometric reader not available")
+	ErrNoMatch                = errors.New("no fingerprint match above threshold")
+	ErrQualityThreshold       = errors.New("fingerprint quality below threshold")
+	ErrNoFingerDetected       = errors.New("no finger detected on reader")
+	ErrCaptureMovedToFrontend = errors.New("capture lives in frontend per ADR-004-bis; call ExtractTemplate with image bytes")
+	ErrTemplateExtractFailed  = errors.New("mindtct could not extract a usable template from the image")
 )

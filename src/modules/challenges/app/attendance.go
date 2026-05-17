@@ -27,15 +27,15 @@ type WeeklyAttendance struct {
 
 // AttendanceReport is the per-participant slice the dashboard shows.
 type AttendanceReport struct {
-	ParticipantID       uuid.UUID
-	MemberID            uuid.UUID
-	CategoryID          uuid.UUID
-	Weeks               []WeeklyAttendance
-	WeeksMet            int
-	WeeksMissed         int
-	GraceWeeksAllowed   int
-	WithinGrace         bool
-	Status              string
+	ParticipantID     uuid.UUID
+	MemberID          uuid.UUID
+	CategoryID        uuid.UUID
+	Weeks             []WeeklyAttendance
+	WeeksMet          int
+	WeeksMissed       int
+	GraceWeeksAllowed int
+	WithinGrace       bool
+	Status            string
 }
 
 // GetAttendanceReport returns the week-by-week attendance for every

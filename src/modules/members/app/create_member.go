@@ -75,7 +75,7 @@ type CreateMemberInput struct {
 // encoló — el FE lo usa para decidir entre "enviado a +52…" y "escríbelo
 // en la credencial".
 type CreateMemberOutput struct {
-	MemberID uuid.UUID
+	MemberID     uuid.UUID
 	MembershipID uuid.UUID
 	Folio        string
 	// ExpiryDate es nil cuando no se cobró primer pago — el membership

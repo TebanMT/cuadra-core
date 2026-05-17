@@ -20,7 +20,9 @@ import (
 // track *what* the use case wrote so the assertions can check business
 // invariants without depending on SQL.
 
-type fakeCategoryRepo struct{ rows map[uuid.UUID]*categoryDomain.Category }
+type fakeCategoryRepo struct {
+	rows map[uuid.UUID]*categoryDomain.Category
+}
 
 func newFakeCategoryRepo(cats ...*categoryDomain.Category) *fakeCategoryRepo {
 	r := &fakeCategoryRepo{rows: map[uuid.UUID]*categoryDomain.Category{}}

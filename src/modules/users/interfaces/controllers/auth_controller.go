@@ -31,24 +31,24 @@ import (
 // AuthController bundles every UC that touches identity. It also owns the
 // gym-side wizard endpoints since they share the same lifecycle.
 type AuthController struct {
-	Signup           *usersApp.SignupOwner
-	Login            *usersApp.Login
-	Logout           *usersApp.Logout
-	RequestReset     *usersApp.RequestPasswordReset
-	ConfirmReset     *usersApp.ConfirmPasswordReset
-	UpdateBasicInfo  *gymApp.UpdateBasicInfo
-	UpdatePayMethods *gymApp.UpdatePaymentMethods
-	CompleteSetup    *gymApp.CompleteSetup
-	UpdateProfile    *gymApp.UpdateProfile
-	UpdateChargeSet  *gymApp.UpdateChargeSettings
+	Signup            *usersApp.SignupOwner
+	Login             *usersApp.Login
+	Logout            *usersApp.Logout
+	RequestReset      *usersApp.RequestPasswordReset
+	ConfirmReset      *usersApp.ConfirmPasswordReset
+	UpdateBasicInfo   *gymApp.UpdateBasicInfo
+	UpdatePayMethods  *gymApp.UpdatePaymentMethods
+	CompleteSetup     *gymApp.CompleteSetup
+	UpdateProfile     *gymApp.UpdateProfile
+	UpdateChargeSet   *gymApp.UpdateChargeSettings
 	CreateOperator    *usersApp.CreateOperator
 	UpdateOperator    *usersApp.UpdateOperator
 	ToggleActive      *usersApp.ToggleOperatorActive
 	ResetOpPassword   *usersApp.ResetOperatorPassword
 	RotateOperatorPIN *usersApp.RotateOperatorPIN
-	RequestTransfer  *usersApp.RequestTransferOwnership
-	ConfirmTransfer  *usersApp.ConfirmTransferOwnership
-	Tokens           auth.TokenService
+	RequestTransfer   *usersApp.RequestTransferOwnership
+	ConfirmTransfer   *usersApp.ConfirmTransferOwnership
+	Tokens            auth.TokenService
 	// Read deps used by me_controller.go for GET /auth/me, GET /gyms/me, and
 	// GET /gyms/me/setup-status. They're optional in the sense that nil-safe
 	// guards in the handlers turn them into 500s — main.go is expected to
@@ -384,13 +384,13 @@ type createOperatorReq struct {
 // como fallback si WhatsApp no estaba conectado). whatsapp_delivery es el
 // boolean que el modal usa para pintar el badge verde/ámbar.
 type createOperatorResp struct {
-	UserID            uuid.UUID `json:"user_id"`
-	FullName          string    `json:"full_name"`
-	Phone             string    `json:"phone"`
-	Email             string    `json:"email"`
-	PIN               string    `json:"pin"`
-	WhatsAppDelivery  bool      `json:"whatsapp_delivery"`
-	WhatsAppSkipped   string    `json:"whatsapp_skipped,omitempty"`
+	UserID           uuid.UUID `json:"user_id"`
+	FullName         string    `json:"full_name"`
+	Phone            string    `json:"phone"`
+	Email            string    `json:"email"`
+	PIN              string    `json:"pin"`
+	WhatsAppDelivery bool      `json:"whatsapp_delivery"`
+	WhatsAppSkipped  string    `json:"whatsapp_skipped,omitempty"`
 }
 
 type updateOperatorReq struct {

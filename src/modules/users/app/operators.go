@@ -40,13 +40,13 @@ type CreateOperatorInput struct {
 // lo serializa en snake_case). El campo PIN va sólo en la respuesta 201; el
 // audit row NUNCA logea el plaintext.
 type CreateOperatorOutput struct {
-	UserID            uuid.UUID
-	FullName          string
-	Phone             string
-	Email             string
-	PIN               string
-	WhatsAppDelivery  bool   // true = enqueued; false = skip silencioso
-	WhatsAppSkipped   string // razón cuando WhatsAppDelivery=false ("whatsapp_not_connected", "no_user_phone", …)
+	UserID           uuid.UUID
+	FullName         string
+	Phone            string
+	Email            string
+	PIN              string
+	WhatsAppDelivery bool   // true = enqueued; false = skip silencioso
+	WhatsAppSkipped  string // razón cuando WhatsAppDelivery=false ("whatsapp_not_connected", "no_user_phone", …)
 }
 
 type CreateOperator struct {

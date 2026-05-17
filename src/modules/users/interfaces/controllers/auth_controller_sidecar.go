@@ -921,7 +921,8 @@ func nonEmpty(primary, fallback string) string {
 // laptop is already paired but the operator just logged out.
 //
 // Returns (always 200):
-//   { paired: bool, email?: string, gym_name?: string }
+//
+//	{ paired: bool, email?: string, gym_name?: string }
 //
 // Email + gym_name are included so the login screen can show a friendly
 // "Continúa como X en Y" hint without an extra round-trip.

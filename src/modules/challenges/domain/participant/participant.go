@@ -36,24 +36,24 @@ const (
 )
 
 type Participant struct {
-	ID                    uuid.UUID
-	GymID                 uuid.UUID
-	ChallengeID           uuid.UUID
-	MemberID              uuid.UUID
-	CategoryID            uuid.UUID
-	Version               int
-	ExerciseLegs          string
-	ExercisePush          string
-	ExercisePull          string
-	InscriptionFeePaid    bool
-	InscriptionPaidAt     *time.Time
-	InscriptionRefundedAt *time.Time
-	Status                string
+	ID                     uuid.UUID
+	GymID                  uuid.UUID
+	ChallengeID            uuid.UUID
+	MemberID               uuid.UUID
+	CategoryID             uuid.UUID
+	Version                int
+	ExerciseLegs           string
+	ExercisePush           string
+	ExercisePull           string
+	InscriptionFeePaid     bool
+	InscriptionPaidAt      *time.Time
+	InscriptionRefundedAt  *time.Time
+	Status                 string
 	DisqualificationReason string
-	DisqualifiedAt        *time.Time
-	CreatedAt             time.Time
-	UpdatedAt             time.Time
-	DeletedAt             *time.Time
+	DisqualifiedAt         *time.Time
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
+	DeletedAt              *time.Time
 }
 
 // NewParticipant constructs a registered participant. Exercise choices

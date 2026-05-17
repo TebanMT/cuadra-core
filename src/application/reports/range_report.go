@@ -42,17 +42,17 @@ type RangeReportInput struct {
 
 // RangeReportOutput matches the FE ReportsRangeData shape.
 type RangeReportOutput struct {
-	Period            string             `json:"period"`
-	From              string             `json:"from"`
-	To                string             `json:"to"`
-	Totals            RangeTotals        `json:"totals"`
-	IncomeByDay       []DailyIncome      `json:"income_by_day"`
-	ExpensesByDay     []DailyAmount      `json:"expenses_by_day"`
-	CheckinsByDay     []DailyCount       `json:"checkins_by_day"`
-	IncomeByMethod    map[string]float64 `json:"income_by_method"`
+	Period             string             `json:"period"`
+	From               string             `json:"from"`
+	To                 string             `json:"to"`
+	Totals             RangeTotals        `json:"totals"`
+	IncomeByDay        []DailyIncome      `json:"income_by_day"`
+	ExpensesByDay      []DailyAmount      `json:"expenses_by_day"`
+	CheckinsByDay      []DailyCount       `json:"checkins_by_day"`
+	IncomeByMethod     map[string]float64 `json:"income_by_method"`
 	ExpensesByCategory map[string]float64 `json:"expenses_by_category"`
-	TopMembers        []TopMemberRow     `json:"top_members"`
-	TopProducts       []TopProductRow    `json:"top_products"`
+	TopMembers         []TopMemberRow     `json:"top_members"`
+	TopProducts        []TopProductRow    `json:"top_products"`
 	// InventoryCosts — movimientos restock con costo del período.
 	InventoryCosts []InventoryCostRow `json:"inventory_costs"`
 	// Expenses — gastos generales (BC expenses) del período.
@@ -66,13 +66,13 @@ type RangeReportOutput struct {
 // derived: income − inventory_cost − expenses_general (both current and
 // previous so the trend chip is meaningful).
 type RangeTotals struct {
-	Income           KPI `json:"income"`
-	InventoryCost    KPI `json:"inventory_cost"`
-	ExpensesGeneral  KPI `json:"expenses_general"`
-	Refunds          KPI `json:"refunds"`
-	NewMembers       KPI `json:"new_members"`
-	Checkins         KPI `json:"checkins"`
-	Net              KPI `json:"net"`
+	Income          KPI `json:"income"`
+	InventoryCost   KPI `json:"inventory_cost"`
+	ExpensesGeneral KPI `json:"expenses_general"`
+	Refunds         KPI `json:"refunds"`
+	NewMembers      KPI `json:"new_members"`
+	Checkins        KPI `json:"checkins"`
+	Net             KPI `json:"net"`
 }
 
 // CriticalStockCounts — productos sin stock o por debajo del mínimo. Es un

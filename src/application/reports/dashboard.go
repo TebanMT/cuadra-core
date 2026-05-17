@@ -27,8 +27,8 @@ type DashboardInput struct {
 type DashboardOutput struct {
 	GeneratedAt time.Time `json:"generated_at"`
 
-	ActiveMembers      KPI                `json:"active_members"`
-	IncomeMonth        KPI                `json:"income_month"`
+	ActiveMembers KPI `json:"active_members"`
+	IncomeMonth   KPI `json:"income_month"`
 	// ExpensesMonth — egresos del mes corriente vs mismo rango del mes
 	// anterior. Suma DOS fuentes: mercancía (stock_movements restock con
 	// costo) + gastos generales (BC expenses). Es el número visible en
@@ -38,12 +38,12 @@ type DashboardOutput struct {
 	// InventoryCostMonth y GeneralExpensesMonth — sub-KPIs (no expuestos
 	// en el wire hoy, solo el agregado). Existen para que un futuro
 	// desglose en UI no requiera tocar el use case.
-	InventoryCostMonth   KPI `json:"-"`
-	GeneralExpensesMonth KPI `json:"-"`
-	ExpiringThisWeek   int                `json:"expiring_this_week"`
-	RecoverableExpired int                `json:"recoverable_expired"`
-	TodayCash          map[string]float64 `json:"today_cash_by_method"`
-	TodayCashTotal     float64            `json:"today_cash_total"`
+	InventoryCostMonth   KPI                `json:"-"`
+	GeneralExpensesMonth KPI                `json:"-"`
+	ExpiringThisWeek     int                `json:"expiring_this_week"`
+	RecoverableExpired   int                `json:"recoverable_expired"`
+	TodayCash            map[string]float64 `json:"today_cash_by_method"`
+	TodayCashTotal       float64            `json:"today_cash_total"`
 
 	IncomeLast30Days []DailyIncome `json:"income_last_30_days"`
 

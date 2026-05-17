@@ -24,9 +24,9 @@ type MembershipModel struct {
 	DurationDaysSnapshot int        `gorm:"not null;column:duration_days_snapshot"`
 	StartDate            time.Time  `gorm:"type:date;not null;column:start_date"`
 	// ExpiryDate es nullable: nil cuando status = pending_payment.
-	ExpiryDate           *time.Time `gorm:"type:date;column:expiry_date"`
-	Status               string     `gorm:"not null;default:active;column:status"`
-	ReplacedBy           *uuid.UUID `gorm:"type:uuid;column:replaced_by"`
+	ExpiryDate *time.Time `gorm:"type:date;column:expiry_date"`
+	Status     string     `gorm:"not null;default:active;column:status"`
+	ReplacedBy *uuid.UUID `gorm:"type:uuid;column:replaced_by"`
 }
 
 func (MembershipModel) TableName() string { return "memberships" }

@@ -121,8 +121,8 @@ func setupChallenges(t *testing.T) *challengesFixture {
 	for i := 0; i < 6; i++ {
 		mem, err := createMember.Execute(context.Background(), memApp.CreateMemberInput{
 			GymID: owner.GymID, ActorUserID: owner.UserID,
-			FullName: fmt.Sprintf("Socio %d", i+1),
-			Phone:    fmt.Sprintf("+5244400000%02d", i+1),
+			FullName:         fmt.Sprintf("Socio %d", i+1),
+			Phone:            fmt.Sprintf("+5244400000%02d", i+1),
 			MembershipTypeID: mt.ID,
 			StartDate:        time.Now().UTC(),
 		})

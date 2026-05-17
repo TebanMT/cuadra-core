@@ -24,20 +24,20 @@
 //
 // Notes worth keeping in mind for future maintainers:
 //
-//	1. The strength cap applies only on the upper side. Losing strength
-//	   (negative ΔF%) is NOT clamped — it should hurt the participant.
-//	2. The 2× weight on ΔM% is intentional. Ganar músculo es ~2x más
-//	   difícil que perder grasa en el mismo horizonte; sin el factor, los
-//	   participantes que solo bajan grasa dominan. Documentado en el
-//	   landing público; cambiarlo rompe el contrato con los inscritos.
-//	3. Strength is normalised by body weight at each moment separately.
-//	   This way a participant who gained 5 kg of bodyweight while keeping
-//	   the same absolute lifts is correctly scored as flat strength, not
-//	   stronger.
-//	4. Degenerate inputs (any required denominator = 0) return the zero
-//	   breakdown instead of NaN / panic / Inf. Ranking treats IR=0 as
-//	   valid; participants without a real T₁ never reach scoring in the
-//	   first place (the ranking query filters them out upstream).
+//  1. The strength cap applies only on the upper side. Losing strength
+//     (negative ΔF%) is NOT clamped — it should hurt the participant.
+//  2. The 2× weight on ΔM% is intentional. Ganar músculo es ~2x más
+//     difícil que perder grasa en el mismo horizonte; sin el factor, los
+//     participantes que solo bajan grasa dominan. Documentado en el
+//     landing público; cambiarlo rompe el contrato con los inscritos.
+//  3. Strength is normalised by body weight at each moment separately.
+//     This way a participant who gained 5 kg of bodyweight while keeping
+//     the same absolute lifts is correctly scored as flat strength, not
+//     stronger.
+//  4. Degenerate inputs (any required denominator = 0) return the zero
+//     breakdown instead of NaN / panic / Inf. Ranking treats IR=0 as
+//     valid; participants without a real T₁ never reach scoring in the
+//     first place (the ranking query filters them out upstream).
 package scoring
 
 // Measurement is the per-moment snapshot the scoring function consumes.

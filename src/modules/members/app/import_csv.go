@@ -95,13 +95,13 @@ type ErrorRow struct {
 
 // ImportMembersFromCSVOutput is what handlers + tests assert on.
 type ImportMembersFromCSVOutput struct {
-	Imported       []ImportedRow `json:"imported"`
-	Skipped        []SkipRow     `json:"skipped"`
-	Errors         []ErrorRow    `json:"errors"`
-	ImportedCount  int           `json:"imported_count"`
-	SkippedCount   int           `json:"skipped_count"`
-	ErrorsCount    int           `json:"errors_count"`
-	TotalDataRows  int           `json:"total_data_rows"`
+	Imported      []ImportedRow `json:"imported"`
+	Skipped       []SkipRow     `json:"skipped"`
+	Errors        []ErrorRow    `json:"errors"`
+	ImportedCount int           `json:"imported_count"`
+	SkippedCount  int           `json:"skipped_count"`
+	ErrorsCount   int           `json:"errors_count"`
+	TotalDataRows int           `json:"total_data_rows"`
 }
 
 // Skip reasons surfaced to the FE.
@@ -125,17 +125,17 @@ const utf8BOM = "\ufeff"
 // en memoria toda la importación porque la dedupe in-file necesita un segundo
 // pase sobre todas las filas válidas.
 type parsedRow struct {
-	rowNumber       int // 1-based, incluye header (header = fila 1, primer dato = fila 2)
-	fullName        string
-	phone           string
-	email           *string
-	birthdate       *time.Time
-	notes           *string
-	planName        string
-	startDate       *time.Time
-	expiryDate      *time.Time
-	hasMembership   bool // las 3 cols vinieron completas y válidas
-	preParseError   error
+	rowNumber     int // 1-based, incluye header (header = fila 1, primer dato = fila 2)
+	fullName      string
+	phone         string
+	email         *string
+	birthdate     *time.Time
+	notes         *string
+	planName      string
+	startDate     *time.Time
+	expiryDate    *time.Time
+	hasMembership bool // las 3 cols vinieron completas y válidas
+	preParseError error
 }
 
 // Execute parses, validates and persists. Error sólo se devuelve para fallos

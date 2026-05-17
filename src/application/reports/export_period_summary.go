@@ -19,13 +19,13 @@ import (
 // expenseCategoryLabel — labels human-friendly. Si el enum crece, sólo hay
 // que agregar acá; las llaves desconocidas caen a la propia key.
 var expenseCategoryLabel = map[string]string{
-	"renta":               "Renta",
-	"servicios":           "Servicios",
-	"mantenimiento":       "Mantenimiento",
-	"sueldos":             "Sueldos",
-	"marketing":           "Marketing",
-	"mercaderia_externa":  "Mercadería externa",
-	"otros":               "Otros",
+	"renta":              "Renta",
+	"servicios":          "Servicios",
+	"mantenimiento":      "Mantenimiento",
+	"sueldos":            "Sueldos",
+	"marketing":          "Marketing",
+	"mercaderia_externa": "Mercadería externa",
+	"otros":              "Otros",
 }
 
 func labelCategory(k string) string {

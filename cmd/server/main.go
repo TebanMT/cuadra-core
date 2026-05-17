@@ -71,10 +71,10 @@ import (
 	bcrypto "github.com/cuadra/cuadra-core/src/shared/biometric/crypto"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 	"github.com/cuadra/cuadra-core/src/shared/email"
-	"github.com/cuadra/cuadra-core/src/shared/recovery"
 	"github.com/cuadra/cuadra-core/src/shared/installerbootstrap"
 	"github.com/cuadra/cuadra-core/src/shared/middleware"
 	"github.com/cuadra/cuadra-core/src/shared/r2"
+	"github.com/cuadra/cuadra-core/src/shared/recovery"
 	"github.com/cuadra/cuadra-core/src/shared/sidecartoken"
 	syncShared "github.com/cuadra/cuadra-core/src/shared/sync"
 )

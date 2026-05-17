@@ -67,11 +67,11 @@ type CashCloseExpenseEntry struct {
 // ClosedCashEvent — snapshot del cierre persistido. Surface solo cuando el
 // FE necesita renderear el banner "caja cerrada".
 type ClosedCashEvent struct {
-	ClosedAt          time.Time
-	CountedCash       float64
-	Diff              float64 // counted - calculated; 0 cuando no se contó
-	Reason            *string
-	ClosedByName      *string
+	ClosedAt     time.Time
+	CountedCash  float64
+	Diff         float64 // counted - calculated; 0 cuando no se contó
+	Reason       *string
+	ClosedByName *string
 }
 
 type CashCloseInput struct {

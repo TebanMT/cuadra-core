@@ -115,7 +115,7 @@ func TestMigration013_SubscriptionPlansRename(t *testing.T) {
 	// 4) El CHECK nuevo acepta los SKUs nuevos.
 	_, err = db.Exec(`
 		INSERT INTO gyms (id, gym_id, name, subscription_plan, subscription_status, created_at, updated_at)
-		VALUES ('00000000-0000-0000-0000-000000000099', '00000000-0000-0000-0000-000000000099', 'Plus Test', 'plus_annual', 'active', `+now+`, `+now+`)`)
+		VALUES ('00000000-0000-0000-0000-000000000099', '00000000-0000-0000-0000-000000000099', 'Plus Test', 'plus_annual', 'active', ` + now + `, ` + now + `)`)
 	if err != nil {
 		t.Errorf("CHECK should accept plus_annual: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestMigration013_SubscriptionPlansRename(t *testing.T) {
 	// 5) El CHECK nuevo rechaza los SKUs viejos.
 	_, err = db.Exec(`
 		INSERT INTO gyms (id, gym_id, name, subscription_plan, subscription_status, created_at, updated_at)
-		VALUES ('00000000-0000-0000-0000-000000000098', '00000000-0000-0000-0000-000000000098', 'Old SKU', 'pro_monthly', 'active', `+now+`, `+now+`)`)
+		VALUES ('00000000-0000-0000-0000-000000000098', '00000000-0000-0000-0000-000000000098', 'Old SKU', 'pro_monthly', 'active', ` + now + `, ` + now + `)`)
 	if err == nil {
 		t.Errorf("CHECK should reject pro_monthly post-013, but insert succeeded")
 	}

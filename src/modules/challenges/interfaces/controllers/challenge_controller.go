@@ -24,23 +24,23 @@ import (
 // ChallengeController bundles every retos endpoint. Use cases are
 // optional (nil-safe) so the wiring layer can ship endpoints in phases.
 type ChallengeController struct {
-	CreateChallenge         *challengesApp.CreateChallenge
-	ListChallenges          *challengesApp.ListChallenges
-	GetChallengeDetail      *challengesApp.GetChallengeDetail
-	UpdateChallengeConfig   *challengesApp.UpdateChallengeConfig
-	TransitionStatus        *challengesApp.TransitionChallengeStatus
-	AddCategory             *challengesApp.AddCategory
-	UpdateCategory          *challengesApp.UpdateCategory
-	DeleteCategory          *challengesApp.DeleteCategory
-	ListCategories          *challengesApp.ListCategories
-	AddParticipant          *challengesApp.AddParticipant
-	UpdateParticipant       *challengesApp.UpdateParticipant
-	RemoveParticipant       *challengesApp.RemoveParticipant
-	ListParticipants        *challengesApp.ListParticipants
-	CaptureMeasurement      *challengesApp.CaptureMeasurement
-	ListMeasurements        *challengesApp.ListMeasurements
-	GetChallengeRanking     *challengesApp.GetChallengeRanking
-	GetAttendanceReport     *challengesApp.GetAttendanceReport
+	CreateChallenge        *challengesApp.CreateChallenge
+	ListChallenges         *challengesApp.ListChallenges
+	GetChallengeDetail     *challengesApp.GetChallengeDetail
+	UpdateChallengeConfig  *challengesApp.UpdateChallengeConfig
+	TransitionStatus       *challengesApp.TransitionChallengeStatus
+	AddCategory            *challengesApp.AddCategory
+	UpdateCategory         *challengesApp.UpdateCategory
+	DeleteCategory         *challengesApp.DeleteCategory
+	ListCategories         *challengesApp.ListCategories
+	AddParticipant         *challengesApp.AddParticipant
+	UpdateParticipant      *challengesApp.UpdateParticipant
+	RemoveParticipant      *challengesApp.RemoveParticipant
+	ListParticipants       *challengesApp.ListParticipants
+	CaptureMeasurement     *challengesApp.CaptureMeasurement
+	ListMeasurements       *challengesApp.ListMeasurements
+	GetChallengeRanking    *challengesApp.GetChallengeRanking
+	GetAttendanceReport    *challengesApp.GetAttendanceReport
 	CheckDisqualifications *challengesApp.CheckDisqualifications
 	Tokens                 auth.TokenService
 	// PlanGate (opcional) corre justo después del AuthMiddleware y aborta

@@ -24,20 +24,20 @@ const (
 // uq_memberships_member_active partial index). PIN is optional; assigned via
 // AssignPin (UC-032).
 type Member struct {
-	ID                   uuid.UUID
-	GymID                uuid.UUID
-	Version              int
-	Folio                string
-	FullName             string
-	Phone                string
-	Email                *string
-	Birthdate            *time.Time
-	PhotoURL             *string
-	Notes                *string
-	Status               string
-	EnrollmentPaid       bool
-	LastMaintenancePaid  *time.Time
-	PinHash              *string
+	ID                  uuid.UUID
+	GymID               uuid.UUID
+	Version             int
+	Folio               string
+	FullName            string
+	Phone               string
+	Email               *string
+	Birthdate           *time.Time
+	PhotoURL            *string
+	Notes               *string
+	Status              string
+	EnrollmentPaid      bool
+	LastMaintenancePaid *time.Time
+	PinHash             *string
 	// PinPlain mirrors PinHash but stores the 4-digit code as-is so the
 	// operator can read it from the member profile (the gym operator's
 	// recurring workflow is "leer el PIN al socio que lo olvidó"). The
