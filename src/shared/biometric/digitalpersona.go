@@ -336,6 +336,10 @@ func (r *DigitalPersonaReader) Identify(
 	if err != nil {
 		return nil, err
 	}
+	// Log every probe's raw score — the only way to calibrate the threshold
+	// against a real reader and finger population in the field.
+	log.Printf("[biometric] identify: best score=%d threshold=%.0f gallery=%d match=%t",
+		bestScore, threshold, len(gallery), float64(bestScore) >= threshold)
 	if float64(bestScore) < threshold {
 		return nil, ErrNoMatch
 	}
