@@ -8,12 +8,26 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"testing"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 )
+
+// bcryptCost es el factor de costo de HashPassword / HashPIN. Producción usa
+// 12 (ADR-002 §3.2). Bajo `go test` cae a bcrypt.MinCost: las suites de
+// integración crean muchos socios y CreateMember → generateUniquePin hace
+// O(N²) bcrypt-compares; con cost 12 + `-race` eso revienta el timeout de
+// 10 min de `go test`. testing.Testing() es true sólo bajo el harness de
+// test, así que el binario de producción nunca ve el costo bajo.
+var bcryptCost = func() int {
+	if testing.Testing() {
+		return bcrypt.MinCost
+	}
+	return 12
+}()
 
 // Default token durations. Cloud server uses these as-is so the web
 // dashboard sees a 15-min access window. Sidecar overrides via
@@ -160,7 +174,7 @@ func (s *JWTService) validate(token, expected string) (Claims, error) {
 
 // HashPassword wraps bcrypt with our standard cost (12, ADR-002 §3.2).
 func HashPassword(plaintext string) (string, error) {
-	b, err := bcrypt.GenerateFromPassword([]byte(plaintext), 12)
+	b, err := bcrypt.GenerateFromPassword([]byte(plaintext), bcryptCost)
 	if err != nil {
 		return "", err
 	}
@@ -177,7 +191,7 @@ func VerifyPassword(hash, plaintext string) error {
 // "strong". The /auth/login-pin endpoint enforces a lockout to handle the
 // online side.
 func HashPIN(plaintext string) (string, error) {
-	b, err := bcrypt.GenerateFromPassword([]byte(plaintext), 12)
+	b, err := bcrypt.GenerateFromPassword([]byte(plaintext), bcryptCost)
 	if err != nil {
 		return "", err
 	}
