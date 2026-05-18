@@ -18,9 +18,13 @@ import (
 )
 
 // FingerprintMatchThresholdDefault is what UC-029 uses when the gym hasn't
-// overridden it via gyms.kiosk_settings (UC-029 DA-29.4). Range is 0..1; lower
-// = more permissive, higher = stricter.
-const FingerprintMatchThresholdDefault = 0.7
+// overridden it via gyms.kiosk_settings (UC-029 DA-29.4). It is a raw
+// bozorth3 score, NOT a 0-1 ratio — Identify compares the matcher's integer
+// score directly against it. bozorth3 scores the same finger ~55 and
+// unrelated fingers 3-7 (reader validation 2026-05-16); 40 is the operational
+// floor that admits same-finger variation while rejecting strangers. Lower =
+// more permissive, higher = stricter.
+const FingerprintMatchThresholdDefault = 40
 
 // CheckinByFingerprintInput. The Capture is a *plaintext* template that the
 // caller (kiosko loop or manual flow) just got from biometric.Reader.Capture.

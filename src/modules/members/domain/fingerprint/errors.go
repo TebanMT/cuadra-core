@@ -17,10 +17,13 @@ var (
 	ErrConsentRequired       = errors.New("falta el consentimiento del socio para registrar la huella")
 )
 
-// CollisionThreshold (stricter than the check-in default 0.7) gates the
-// 1:N pre-enrollment match. Asymmetry is intentional: at enrollment we
-// decide "this finger IS the same person" and want minimal false positives
-// — blocking a legitimate operator is costlier than letting a rare duplicate
-// slip through. At check-in we identify the SAME person across captures,
-// where natural variation justifies the more permissive threshold.
-const CollisionThreshold = 0.85
+// CollisionThreshold gates the 1:N pre-enrollment match. Like the check-in
+// threshold it is a raw bozorth3 score (NOT a 0-1 ratio): Identify compares
+// the matcher's integer score directly against it. Set stricter (higher)
+// than the check-in default — at enrollment we decide "this finger IS the
+// same person" and want minimal false collisions (wrongly blocking a legit
+// new socio is costlier than letting a rare duplicate slip through).
+// bozorth3 scores the same finger ~55 and unrelated fingers 3-7 (reader
+// validation 2026-05-16), so 50 catches a genuine duplicate without
+// false-flagging strangers.
+const CollisionThreshold = 50
