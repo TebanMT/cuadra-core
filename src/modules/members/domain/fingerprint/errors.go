@@ -10,6 +10,7 @@ var (
 	ErrQualityBelowFloor     = errors.New("la calidad de la huella es muy baja; vuelve a capturarla")
 	ErrFingerprintNotFound   = errors.New("este socio no tiene huella registrada")
 	ErrFingerprintAlreadySet = errors.New("este socio ya tiene huella registrada (borra la anterior antes de registrar una nueva)")
+	ErrTooManyCaptures       = errors.New("se permiten máximo 3 capturas por registro de huella")
 	ErrFingerprintCollision  = errors.New("esta huella ya está registrada para otro socio")
 	ErrEncryptionFailed      = errors.New("no se pudo cifrar la huella; revisa la configuración del gimnasio")
 	ErrDecryptionFailed      = errors.New("no se pudo descifrar una huella; pasa con recepción")

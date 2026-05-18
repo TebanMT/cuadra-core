@@ -7,7 +7,6 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"time"
 
 	"github.com/google/uuid"
@@ -76,22 +75,24 @@ func (r *FingerprintSQLiteRepository) Update(tx sharedDomain.Transaction, fp *fp
 	return fp, nil
 }
 
-func (r *FingerprintSQLiteRepository) GetByMember(tx sharedDomain.Transaction, memberID uuid.UUID) (*fpDomain.MemberFingerprint, error) {
+func (r *FingerprintSQLiteRepository) ListByMember(tx sharedDomain.Transaction, memberID uuid.UUID) ([]*fpDomain.MemberFingerprint, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
-	var row sqliteFingerprintRow
-	err := stx.Get(context.Background(), &row,
+	var rows []sqliteFingerprintRow
+	err := stx.Select(context.Background(), &rows,
 		`SELECT id, gym_id, version, created_at, updated_at, deleted_at, synced_at,
 		        member_id, template_encrypted, template_format, quality_score, registered_by
 		 FROM member_fingerprints
-		 WHERE member_id = ? AND deleted_at IS NULL`,
+		 WHERE member_id = ? AND deleted_at IS NULL
+		 ORDER BY created_at ASC`,
 		memberID.String())
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
 	if err != nil {
 		return nil, err
 	}
-	return fingerprintFromRow(&row), nil
+	out := make([]*fpDomain.MemberFingerprint, 0, len(rows))
+	for i := range rows {
+		out = append(out, fingerprintFromRow(&rows[i]))
+	}
+	return out, nil
 }
 
 func (r *FingerprintSQLiteRepository) ListByGym(tx sharedDomain.Transaction, gymID uuid.UUID) ([]*fpDomain.MemberFingerprint, error) {

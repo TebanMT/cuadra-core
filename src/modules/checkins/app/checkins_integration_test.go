@@ -173,11 +173,11 @@ func TestUC028AndUC029_FingerprintEnrollmentAndCheckin(t *testing.T) {
 		ActorUserID:     f.ownerID,
 		MemberID:        f.memberID,
 		ConsentAccepted: true,
-		Capture: &biometric.CaptureResult{
+		Captures: []*biometric.CaptureResult{{
 			Bytes:        append([]byte{}, templatePlain...), // copy — register zeroes the input
 			Format:       biometric.CaptureResult{}.Format,
 			QualityScore: 92,
-		},
+		}},
 	})
 	if err != nil {
 		t.Fatalf("RegisterFingerprint: %v", err)
@@ -190,9 +190,9 @@ func TestUC028AndUC029_FingerprintEnrollmentAndCheckin(t *testing.T) {
 	_, err = registerFP.Execute(ctx, memApp.RegisterFingerprintInput{
 		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: f.memberID,
 		ConsentAccepted: true,
-		Capture: &biometric.CaptureResult{
+		Captures: []*biometric.CaptureResult{{
 			Bytes: append([]byte{}, templatePlain...), QualityScore: 92,
-		},
+		}},
 	})
 	if err == nil {
 		t.Errorf("expected error on second enrollment")
@@ -251,7 +251,7 @@ func TestUC029_NoMatch_ReturnsBusinessError(t *testing.T) {
 	if _, err := registerFP.Execute(ctx, memApp.RegisterFingerprintInput{
 		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: f.memberID,
 		ConsentAccepted: true,
-		Capture:         &biometric.CaptureResult{Bytes: []byte("template-A"), QualityScore: 85},
+		Captures:        []*biometric.CaptureResult{{Bytes: []byte("template-A"), QualityScore: 85}},
 	}); err != nil {
 		t.Fatalf("enroll: %v", err)
 	}

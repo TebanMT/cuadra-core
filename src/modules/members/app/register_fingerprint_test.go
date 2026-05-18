@@ -92,28 +92,27 @@ func (r *fpFakeMemberRepo) GetNamesByIDs(_ sharedDomain.Transaction, ids []uuid.
 }
 
 type fpFakeFpRepo struct {
-	byMember map[uuid.UUID]*fpDomain.MemberFingerprint
+	byMember map[uuid.UUID][]*fpDomain.MemberFingerprint
 	byGym    map[uuid.UUID][]*fpDomain.MemberFingerprint
 	created  []*fpDomain.MemberFingerprint
 }
 
 func newFpFakeRepo() *fpFakeFpRepo {
 	return &fpFakeFpRepo{
-		byMember: map[uuid.UUID]*fpDomain.MemberFingerprint{},
+		byMember: map[uuid.UUID][]*fpDomain.MemberFingerprint{},
 		byGym:    map[uuid.UUID][]*fpDomain.MemberFingerprint{},
 	}
 }
 func (r *fpFakeFpRepo) Create(_ sharedDomain.Transaction, fp *fpDomain.MemberFingerprint) (*fpDomain.MemberFingerprint, error) {
 	r.created = append(r.created, fp)
-	r.byMember[fp.MemberID] = fp
+	r.byMember[fp.MemberID] = append(r.byMember[fp.MemberID], fp)
 	r.byGym[fp.GymID] = append(r.byGym[fp.GymID], fp)
 	return fp, nil
 }
 func (r *fpFakeFpRepo) Update(_ sharedDomain.Transaction, fp *fpDomain.MemberFingerprint) (*fpDomain.MemberFingerprint, error) {
-	r.byMember[fp.MemberID] = fp
 	return fp, nil
 }
-func (r *fpFakeFpRepo) GetByMember(_ sharedDomain.Transaction, memberID uuid.UUID) (*fpDomain.MemberFingerprint, error) {
+func (r *fpFakeFpRepo) ListByMember(_ sharedDomain.Transaction, memberID uuid.UUID) ([]*fpDomain.MemberFingerprint, error) {
 	return r.byMember[memberID], nil
 }
 func (r *fpFakeFpRepo) ListByGym(_ sharedDomain.Transaction, gymID uuid.UUID) ([]*fpDomain.MemberFingerprint, error) {
@@ -210,11 +209,11 @@ func validInput(f *fixture, plain []byte) app.RegisterFingerprintInput {
 		ActorUserID:     f.actor,
 		MemberID:        f.memberID,
 		ConsentAccepted: true,
-		Capture: &biometric.CaptureResult{
+		Captures: []*biometric.CaptureResult{{
 			Bytes:        append([]byte{}, plain...),
 			Format:       fpDomain.FormatDP,
 			QualityScore: 90,
-		},
+		}},
 	}
 }
 
@@ -300,7 +299,7 @@ func TestRegisterFingerprint_Collision_ExcludesSelfFromCandidates(t *testing.T) 
 	// Self is already enrolled → today this returns ErrFingerprintAlreadySet
 	// AFTER the collision check skipped (empty candidate set means Identify
 	// is never called).
-	f.fps.byMember[f.memberID] = f.fps.byGym[f.gym][0]
+	f.fps.byMember[f.memberID] = f.fps.byGym[f.gym]
 
 	_, err := f.uc.Execute(context.Background(), validInput(f, []byte("template-pedro-mismo")))
 	if err == nil {
@@ -355,5 +354,53 @@ func TestRegisterFingerprint_ReaderNotAvailable_SkipsCollisionCheck(t *testing.T
 	}
 	if len(f.fps.created) != 1 {
 		t.Errorf("expected fingerprint persisted despite reader-unavailable, got %d rows", len(f.fps.created))
+	}
+}
+
+// Enrolling with 3 captures of the same finger persists all 3 as separate
+// templates in one atomic call — the data model behind UC-028 best-of-3
+// matching. Output carries every id and the best quality across captures.
+func TestRegisterFingerprint_ThreeCaptures_PersistsAll(t *testing.T) {
+	reader := &stubReader{err: biometric.ErrNoMatch}
+	f := newFixture(t, reader)
+
+	in := validInput(f, []byte("template-pedro"))
+	in.Captures = []*biometric.CaptureResult{
+		{Bytes: []byte("cap-1"), Format: fpDomain.FormatDP, QualityScore: 85},
+		{Bytes: []byte("cap-2"), Format: fpDomain.FormatDP, QualityScore: 91},
+		{Bytes: []byte("cap-3"), Format: fpDomain.FormatDP, QualityScore: 78},
+	}
+
+	out, err := f.uc.Execute(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(f.fps.created) != 3 {
+		t.Errorf("expected 3 templates persisted, got %d", len(f.fps.created))
+	}
+	if len(out.FingerprintIDs) != 3 {
+		t.Errorf("expected 3 fingerprint ids, got %d", len(out.FingerprintIDs))
+	}
+	if out.QualityScore == nil || *out.QualityScore != 91 {
+		t.Errorf("expected best quality 91, got %v", out.QualityScore)
+	}
+}
+
+// More than MaxFingerprintsPerMember captures is a validation error — the FE
+// always sends exactly 3, so this guards a misbehaving client.
+func TestRegisterFingerprint_TooManyCaptures_Rejected(t *testing.T) {
+	f := newFixture(t, nil)
+
+	in := validInput(f, []byte("x"))
+	in.Captures = make([]*biometric.CaptureResult, fpDomain.MaxFingerprintsPerMember+1)
+	for i := range in.Captures {
+		in.Captures[i] = &biometric.CaptureResult{Bytes: []byte("c"), QualityScore: 80}
+	}
+
+	if _, err := f.uc.Execute(context.Background(), in); !errors.Is(err, fpDomain.ErrTooManyCaptures) {
+		t.Fatalf("expected ErrTooManyCaptures, got %v", err)
+	}
+	if len(f.fps.created) != 0 {
+		t.Errorf("rejected enroll must persist nothing, got %d rows", len(f.fps.created))
 	}
 }

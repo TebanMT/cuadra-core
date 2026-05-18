@@ -3,11 +3,9 @@
 package repositories
 
 import (
-	"errors"
 	"time"
 
 	"github.com/google/uuid"
-	"gorm.io/gorm"
 
 	fpDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/fingerprint"
 	"github.com/cuadra/cuadra-core/src/modules/members/infraestructure/db/models"
@@ -41,17 +39,18 @@ func (r *FingerprintPostgresRepository) Update(tx sharedDomain.Transaction, fp *
 	return fingerprintFromModel(&row), nil
 }
 
-func (r *FingerprintPostgresRepository) GetByMember(tx sharedDomain.Transaction, memberID uuid.UUID) (*fpDomain.MemberFingerprint, error) {
+func (r *FingerprintPostgresRepository) ListByMember(tx sharedDomain.Transaction, memberID uuid.UUID) ([]*fpDomain.MemberFingerprint, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
-	var row models.MemberFingerprintModel
-	err := gormTx.Where("member_id = ? AND deleted_at IS NULL", memberID).First(&row).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, nil
-	}
-	if err != nil {
+	var rows []models.MemberFingerprintModel
+	if err := gormTx.Where("member_id = ? AND deleted_at IS NULL", memberID).
+		Order("created_at ASC").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	return fingerprintFromModel(&row), nil
+	out := make([]*fpDomain.MemberFingerprint, 0, len(rows))
+	for i := range rows {
+		out = append(out, fingerprintFromModel(&rows[i]))
+	}
+	return out, nil
 }
 
 func (r *FingerprintPostgresRepository) ListByGym(tx sharedDomain.Transaction, gymID uuid.UUID) ([]*fpDomain.MemberFingerprint, error) {

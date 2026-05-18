@@ -90,23 +90,27 @@ func (c *BiometricController) handleEnroll(ctx *gin.Context) {
 	}
 	consent := parseBool(ctx.PostForm("consent_accepted"))
 
-	imageBytes, err := readImageField(ctx)
+	images, err := readImageFields(ctx)
 	if err != nil {
 		utils.ErrorResponse(ctx, http.StatusBadRequest, err)
 		return
 	}
 
-	capture, err := c.Reader.ExtractTemplate(ctx.Request.Context(), imageBytes)
-	if err != nil {
-		utils.ErrorResponse(ctx, extractErrorCode(err), err)
-		return
+	captures := make([]*biometric.CaptureResult, 0, len(images))
+	for _, img := range images {
+		capture, err := c.Reader.ExtractTemplate(ctx.Request.Context(), img)
+		if err != nil {
+			utils.ErrorResponse(ctx, extractErrorCode(err), err)
+			return
+		}
+		captures = append(captures, capture)
 	}
 
 	out, err := c.Enroll.Execute(ctx.Request.Context(), memApp.RegisterFingerprintInput{
 		GymID:           gymID,
 		ActorUserID:     actor,
 		MemberID:        memberID,
-		Capture:         capture,
+		Captures:        captures,
 		ConsentAccepted: consent,
 	})
 	if err != nil {
@@ -118,11 +122,12 @@ func (c *BiometricController) handleEnroll(ctx *gin.Context) {
 		return
 	}
 	utils.JsonResponse(ctx, http.StatusCreated, gin.H{
-		"fingerprint_id": out.FingerprintID,
-		"member_id":      out.MemberID,
-		"quality_score":  out.QualityScore,
-		"registered_at":  out.RegisteredAt.UTC().Format("2006-01-02T15:04:05Z"),
-		"status":         "success",
+		"fingerprint_ids": out.FingerprintIDs,
+		"member_id":       out.MemberID,
+		"quality_score":   out.QualityScore,
+		"count":           len(out.FingerprintIDs),
+		"registered_at":   out.RegisteredAt.UTC().Format("2006-01-02T15:04:05Z"),
+		"status":          "success",
 	})
 }
 
@@ -194,6 +199,48 @@ func readImageField(ctx *gin.Context) ([]byte, error) {
 		return nil, errors.New("imagen demasiado grande")
 	}
 	return bytes, nil
+}
+
+// readImageFields pulls every multipart `image` part as raw bytes. The enroll
+// flow sends up to MaxFingerprintsPerMember samples of the same finger under
+// the repeated `image` field. Each part is size-capped; empty or oversized
+// parts are rejected.
+func readImageFields(ctx *gin.Context) ([][]byte, error) {
+	maxTotal := maxFingerprintImageBytes * int64(fpDomain.MaxFingerprintsPerMember)
+	if err := ctx.Request.ParseMultipartForm(maxTotal); err != nil {
+		return nil, errors.New("multipart inválido o demasiado grande")
+	}
+	form := ctx.Request.MultipartForm
+	if form == nil || len(form.File["image"]) == 0 {
+		return nil, errors.New("campo `image` requerido")
+	}
+	headers := form.File["image"]
+	if len(headers) > fpDomain.MaxFingerprintsPerMember {
+		return nil, errors.New("máximo 3 imágenes por registro")
+	}
+	out := make([][]byte, 0, len(headers))
+	for _, h := range headers {
+		if h.Size > maxFingerprintImageBytes {
+			return nil, errors.New("imagen demasiado grande")
+		}
+		f, err := h.Open()
+		if err != nil {
+			return nil, errors.New("no se pudo leer la imagen")
+		}
+		bytes, err := io.ReadAll(io.LimitReader(f, maxFingerprintImageBytes+1))
+		_ = f.Close()
+		if err != nil {
+			return nil, errors.New("no se pudo leer la imagen")
+		}
+		if len(bytes) == 0 {
+			return nil, errors.New("imagen vacía")
+		}
+		if int64(len(bytes)) > maxFingerprintImageBytes {
+			return nil, errors.New("imagen demasiado grande")
+		}
+		out = append(out, bytes)
+	}
+	return out, nil
 }
 
 // extractErrorCode maps the sentinel errors returned by ExtractTemplate to

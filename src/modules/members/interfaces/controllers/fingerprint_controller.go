@@ -77,9 +77,9 @@ func (c *FingerprintController) handleRegister(ctx *gin.Context) {
 	}
 	out, err := c.Register.Execute(ctx.Request.Context(), memApp.RegisterFingerprintInput{
 		GymID: gymID, ActorUserID: actor, MemberID: memberID,
-		Capture: &biometric.CaptureResult{
+		Captures: []*biometric.CaptureResult{{
 			Bytes: bytes, Format: req.Format, QualityScore: req.QualityScore,
-		},
+		}},
 		ConsentAccepted: req.ConsentAccepted,
 	})
 	if err != nil {
@@ -91,7 +91,7 @@ func (c *FingerprintController) handleRegister(ctx *gin.Context) {
 		return
 	}
 	utils.JsonResponse(ctx, http.StatusCreated, registerFingerprintResp{
-		FingerprintID: out.FingerprintID,
+		FingerprintID: out.FingerprintIDs[0],
 		MemberID:      out.MemberID,
 		QualityScore:  out.QualityScore,
 		RegisteredAt:  out.RegisteredAt.UTC().Format("2006-01-02T15:04:05Z"),

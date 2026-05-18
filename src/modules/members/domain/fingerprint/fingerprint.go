@@ -20,6 +20,13 @@ const FormatDP = "dp_uareu"
 // SDK regression silently lowering quality.
 const QualityScoreFloor = 60
 
+// MaxFingerprintsPerMember caps how many templates one enrollment stores for a
+// member. UC-028 captures the SAME finger this many times and keeps each as a
+// separate template; the checkin matcher (1:N over the gym gallery) then gets
+// that many chances to recognize the member, which cuts false rejects at the
+// door. 3 is the norm for optical readers like the U.are.U 4500.
+const MaxFingerprintsPerMember = 3
+
 // MemberFingerprint is one enrolled biometric template per member. The
 // template bytes are *already encrypted* with the gym's GMK (ADR-006 §2) by
 // the time they reach the constructor — domain never holds plaintext.

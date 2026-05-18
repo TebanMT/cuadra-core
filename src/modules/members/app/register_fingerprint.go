@@ -17,41 +17,46 @@ import (
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 )
 
-// RegisterFingerprintInput backs UC-028. The capture step (talking to the
-// reader, the 3-sample loop) lives in the controller / kiosk loop — by the
-// time we reach the use case we already have the SDK output.
+// RegisterFingerprintInput backs UC-028. The capture step (the multi-sample
+// loop talking to the reader) lives in the controller / FE — by the time we
+// reach the use case we already have the SDK output for each sample.
 type RegisterFingerprintInput struct {
-	GymID           uuid.UUID
-	ActorUserID     uuid.UUID
-	MemberID        uuid.UUID
-	Capture         *biometric.CaptureResult
+	GymID       uuid.UUID
+	ActorUserID uuid.UUID
+	MemberID    uuid.UUID
+	// Captures holds 1..MaxFingerprintsPerMember samples of the SAME finger.
+	// Each is stored as its own template so the checkin matcher gets that
+	// many chances to recognize the member.
+	Captures        []*biometric.CaptureResult
 	ConsentAccepted bool // UC-028 step 1 + ADR-006 §5
 }
 
 // RegisterFingerprintOutput is what the controller turns into the JSON
 // response (UC-028 step 9 — "✓ Huella registrada").
 type RegisterFingerprintOutput struct {
-	FingerprintID uuid.UUID
-	MemberID      uuid.UUID
-	QualityScore  *int
-	RegisteredAt  time.Time
+	FingerprintIDs []uuid.UUID
+	MemberID       uuid.UUID
+	QualityScore   *int // best (highest) self-assessed quality across captures
+	RegisteredAt   time.Time
 }
 
 // RegisterFingerprint implements UC-028. The flow:
 //
-//  1. Validate consent (ADR-006 §5) and capture quality.
+//  1. Validate consent (ADR-006 §5) and every capture's quality.
 //  2. Pre-enrollment 1:N collision check against the rest of the gym (Reader
-//     present): if the capture matches an existing template at the stricter
-//     CollisionThreshold, surface ErrFingerprintCollision with the existing
-//     member's id+name so the operator can investigate. Runs OUTSIDE the
-//     write tx — SDK calls don't belong inside Postgres/SQLite txs.
+//     present): if the first capture matches an existing template at the
+//     stricter CollisionThreshold, surface ErrFingerprintCollision with the
+//     existing member's id+name so the operator can investigate. Runs OUTSIDE
+//     the write tx — SDK calls don't belong inside Postgres/SQLite txs.
 //  3. Confirm the member exists in this gym.
-//  4. Reject if there's already an active fingerprint (DA-28.2).
-//  5. Encrypt the template with the gym GMK (ADR-006 §2.4).
-//  6. Insert + audit + sync queue, all inside one Command tx.
+//  4. Reject if the member already has any active fingerprint — re-enrollment
+//     is delete-first.
+//  5. Encrypt every capture's template with the gym GMK (ADR-006 §2.4).
+//  6. Insert all N templates + audit + sync queue, atomically in one Command
+//     tx — the member gets all N or none.
 //
-// The plaintext capture is zeroed before returning — defense in depth against
-// memory snapshots even though Go's GC may keep copies.
+// The plaintext captures are zeroed before returning — defense in depth
+// against memory snapshots even though Go's GC may keep copies.
 type RegisterFingerprint struct {
 	Members      memRepo.MemberRepository
 	Fingerprints memRepo.FingerprintRepository
@@ -89,11 +94,19 @@ func (uc *RegisterFingerprint) Execute(ctx context.Context, in RegisterFingerpri
 	if !in.ConsentAccepted {
 		return nil, sharedDomain.NewBusinessError(fpDomain.ErrConsentRequired, "")
 	}
-	if in.Capture == nil || len(in.Capture.Bytes) == 0 {
+	if len(in.Captures) == 0 {
 		return nil, sharedDomain.NewValidationError(fpDomain.ErrEmptyTemplate)
 	}
-	if in.Capture.QualityScore != 0 && in.Capture.QualityScore < fpDomain.QualityScoreFloor {
-		return nil, sharedDomain.NewBusinessError(fpDomain.ErrQualityBelowFloor, "")
+	if len(in.Captures) > fpDomain.MaxFingerprintsPerMember {
+		return nil, sharedDomain.NewValidationError(fpDomain.ErrTooManyCaptures)
+	}
+	for _, capture := range in.Captures {
+		if capture == nil || len(capture.Bytes) == 0 {
+			return nil, sharedDomain.NewValidationError(fpDomain.ErrEmptyTemplate)
+		}
+		if capture.QualityScore != 0 && capture.QualityScore < fpDomain.QualityScoreFloor {
+			return nil, sharedDomain.NewBusinessError(fpDomain.ErrQualityBelowFloor, "")
+		}
 	}
 
 	now := time.Now().UTC()
@@ -112,18 +125,16 @@ func (uc *RegisterFingerprint) Execute(ctx context.Context, in RegisterFingerpri
 	}
 	defer bcrypto.Zero(gmk)
 
-	encrypted, err := bcrypto.EncryptTemplate(gmk, in.Capture.Bytes)
-	if err != nil {
-		return nil, sharedDomain.NewUnexpectedError(err)
-	}
-	// Zero the plaintext we received — caller may still hold a reference, but
-	// at least our copy is wiped.
-	defer bcrypto.Zero(in.Capture.Bytes)
-
-	var qualityScore *int
-	if in.Capture.QualityScore > 0 {
-		v := in.Capture.QualityScore
-		qualityScore = &v
+	encrypted := make([][]byte, len(in.Captures))
+	for i, capture := range in.Captures {
+		enc, err := bcrypto.EncryptTemplate(gmk, capture.Bytes)
+		if err != nil {
+			return nil, sharedDomain.NewUnexpectedError(err)
+		}
+		encrypted[i] = enc
+		// Zero the plaintext we received — caller may still hold a reference,
+		// but at least our copy is wiped.
+		defer bcrypto.Zero(capture.Bytes)
 	}
 
 	var out RegisterFingerprintOutput
@@ -136,56 +147,65 @@ func (uc *RegisterFingerprint) Execute(ctx context.Context, in RegisterFingerpri
 			return sharedDomain.NewBusinessError(memErrors.ErrCrossGym, "")
 		}
 
-		existing, err := uc.Fingerprints.GetByMember(tx, in.MemberID)
+		existing, err := uc.Fingerprints.ListByMember(tx, in.MemberID)
 		if err != nil {
 			return sharedDomain.NewUnexpectedError(err)
 		}
-		if existing != nil {
+		if len(existing) > 0 {
 			return sharedDomain.NewBusinessError(fpDomain.ErrFingerprintAlreadySet, "")
 		}
 
-		format := in.Capture.Format
-		if format == "" {
-			format = fpDomain.FormatDP
-		}
+		ids := make([]uuid.UUID, 0, len(in.Captures))
+		for i, capture := range in.Captures {
+			format := capture.Format
+			if format == "" {
+				format = fpDomain.FormatDP
+			}
+			var qualityScore *int
+			if capture.QualityScore > 0 {
+				v := capture.QualityScore
+				qualityScore = &v
+			}
 
-		fp, err := fpDomain.NewMemberFingerprint(
-			uuid.New(), in.GymID, in.MemberID, in.ActorUserID,
-			encrypted, format, qualityScore, now,
-		)
-		if err != nil {
-			return sharedDomain.NewValidationError(err)
-		}
-		if _, err := uc.Fingerprints.Create(tx, fp); err != nil {
-			return sharedDomain.NewUnexpectedError(err)
-		}
+			fp, err := fpDomain.NewMemberFingerprint(
+				uuid.New(), in.GymID, in.MemberID, in.ActorUserID,
+				encrypted[i], format, qualityScore, now,
+			)
+			if err != nil {
+				return sharedDomain.NewValidationError(err)
+			}
+			if _, err := uc.Fingerprints.Create(tx, fp); err != nil {
+				return sharedDomain.NewUnexpectedError(err)
+			}
+			ids = append(ids, fp.ID)
 
-		// Audit. Never put encrypted (let alone plaintext) bytes in changes —
-		// audit_log isn't intended for biometric storage and may sync to the
-		// dashboard for read.
-		_ = uc.Audit.Record(ctx, tx, audit.Entry{
-			GymID:       in.GymID,
-			EntityType:  "member_fingerprints",
-			EntityID:    fp.ID,
-			Action:      audit.ActionCreate,
-			ActorUserID: &in.ActorUserID,
-			Changes: map[string]any{
-				"member_id":         fp.MemberID.String(),
-				"template_format":   fp.TemplateFormat,
-				"quality_score":     fp.QualityScore,
-				"consent_accepted":  in.ConsentAccepted,
-				"template_size_b64": len(fp.TemplateEncrypted), // size only, never bytes
-			},
-			IPAddress: audit.IPFromContext(ctx),
-			UserAgent: audit.UAFromContext(ctx),
-			At:        now,
-		})
+			// Audit. Never put encrypted (let alone plaintext) bytes in
+			// changes — audit_log isn't intended for biometric storage and
+			// may sync to the dashboard for read.
+			_ = uc.Audit.Record(ctx, tx, audit.Entry{
+				GymID:       in.GymID,
+				EntityType:  "member_fingerprints",
+				EntityID:    fp.ID,
+				Action:      audit.ActionCreate,
+				ActorUserID: &in.ActorUserID,
+				Changes: map[string]any{
+					"member_id":         fp.MemberID.String(),
+					"template_format":   fp.TemplateFormat,
+					"quality_score":     fp.QualityScore,
+					"consent_accepted":  in.ConsentAccepted,
+					"template_size_b64": len(fp.TemplateEncrypted), // size only, never bytes
+				},
+				IPAddress: audit.IPFromContext(ctx),
+				UserAgent: audit.UAFromContext(ctx),
+				At:        now,
+			})
+		}
 
 		out = RegisterFingerprintOutput{
-			FingerprintID: fp.ID,
-			MemberID:      fp.MemberID,
-			QualityScore:  fp.QualityScore,
-			RegisteredAt:  fp.CreatedAt,
+			FingerprintIDs: ids,
+			MemberID:       in.MemberID,
+			QualityScore:   bestQuality(in.Captures),
+			RegisteredAt:   now,
 		}
 		return nil
 	})
@@ -193,6 +213,21 @@ func (uc *RegisterFingerprint) Execute(ctx context.Context, in RegisterFingerpri
 		return nil, err
 	}
 	return &out, nil
+}
+
+// bestQuality returns the highest self-assessed quality across the captures,
+// or nil when none of them carried a score.
+func bestQuality(captures []*biometric.CaptureResult) *int {
+	best := 0
+	for _, c := range captures {
+		if c.QualityScore > best {
+			best = c.QualityScore
+		}
+	}
+	if best == 0 {
+		return nil
+	}
+	return &best
 }
 
 // checkCollision runs the 1:N pre-enrollment match. Returns nil when there
@@ -237,7 +272,9 @@ func (uc *RegisterFingerprint) checkCollision(ctx context.Context, in RegisterFi
 		return nil
 	}
 
-	match, err := uc.Reader.Identify(ctx, in.Capture, enrolled, fpDomain.CollisionThreshold)
+	// All captures are the same finger — the first is a fine representative
+	// for the 1:N collision probe.
+	match, err := uc.Reader.Identify(ctx, in.Captures[0], enrolled, fpDomain.CollisionThreshold)
 	if err != nil {
 		if errors.Is(err, biometric.ErrNoMatch) {
 			return nil

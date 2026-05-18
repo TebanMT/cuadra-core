@@ -129,10 +129,11 @@ type FingerprintRepository interface {
 	Create(tx sharedDomain.Transaction, fp *fpDomain.MemberFingerprint) (*fpDomain.MemberFingerprint, error)
 	// Update bumps version + persists soft-delete or re-enrollment.
 	Update(tx sharedDomain.Transaction, fp *fpDomain.MemberFingerprint) (*fpDomain.MemberFingerprint, error)
-	// GetByMember returns the active fingerprint for a member, or (nil, nil)
-	// if there is none. UC-028 uses this to reject duplicate registrations
-	// (DA-28.2 — 1 huella por socio en MVP).
-	GetByMember(tx sharedDomain.Transaction, memberID uuid.UUID) (*fpDomain.MemberFingerprint, error)
+	// ListByMember returns every active (deleted_at IS NULL) fingerprint
+	// enrolled for a member — up to MaxFingerprintsPerMember templates of the
+	// same finger (UC-028). Empty slice when none are enrolled. UC-028 uses it
+	// to reject duplicate registrations.
+	ListByMember(tx sharedDomain.Transaction, memberID uuid.UUID) ([]*fpDomain.MemberFingerprint, error)
 	// ListByGym returns every active (deleted_at IS NULL) fingerprint in the
 	// gym. The kiosko loads this once at boot and again whenever a new
 	// enrollment fires (UC-029 step 4 needs the full candidate set in memory).
