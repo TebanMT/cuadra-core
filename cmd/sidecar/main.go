@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -116,6 +117,20 @@ func main() {
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 		log.Fatalf("create db dir: %v", err)
 	}
+
+	// Mirror the standard logger to a file next to the DB. The desktop
+	// captures the sidecar's stdout but routes it through env_logger to
+	// stderr, which is invisible in a packaged GUI app — a file is the only
+	// way to read [biometric] match scores and other diagnostics in the
+	// field. Truncated each start so it stays bounded (one session per file).
+	logPath := filepath.Join(filepath.Dir(dbPath), "sidecar.log")
+	if logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644); err == nil {
+		log.SetOutput(io.MultiWriter(os.Stdout, logFile))
+	} else {
+		log.Printf("could not open sidecar log file %q: %v", logPath, err)
+	}
+	log.Printf("sidecar log file: %s", logPath)
+
 	db := infraDB.InitSQLite(dbPath)
 	defer infraDB.CloseSQLite()
 
