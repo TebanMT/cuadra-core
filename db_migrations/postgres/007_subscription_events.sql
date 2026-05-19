@@ -30,3 +30,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_sub_event_external
 
 CREATE INDEX IF NOT EXISTS ix_sub_event_gym_occurred
     ON subscription_events (gym_id, occurred_at DESC);
+
+INSERT INTO _migrations (version, name) VALUES (7, '007_subscription_events')
+ON CONFLICT (version) DO NOTHING;

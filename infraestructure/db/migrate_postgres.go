@@ -19,6 +19,12 @@ import (
 // `_migrations` table and skips files whose version is already recorded; that
 // covers the cases where individual statements (e.g. ALTER TABLE) are not
 // natively idempotent. Files with a non-numeric prefix are always run.
+//
+// After a file runs, the runner records its version itself. Migration files
+// are still expected to self-record with their own INSERT INTO _migrations,
+// but a file that forgets it (007 historically did) would otherwise re-run on
+// every boot — so the runner backstops it. The INSERT is ON CONFLICT so it
+// stays a no-op for the files that do self-record.
 func ApplyPostgresMigrations(db *gorm.DB, dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -52,6 +58,15 @@ func ApplyPostgresMigrations(db *gorm.DB, dir string) error {
 		}
 		if err := db.Exec(string(raw)).Error; err != nil {
 			return fmt.Errorf("apply %q: %w", f, err)
+		}
+		if ok {
+			name := strings.TrimSuffix(filepath.Base(f), ".sql")
+			if err := db.Exec(
+				"INSERT INTO _migrations (version, name) VALUES (?, ?) ON CONFLICT (version) DO NOTHING",
+				v, name,
+			).Error; err != nil {
+				return fmt.Errorf("record migration %q: %w", f, err)
+			}
 		}
 	}
 	return nil
