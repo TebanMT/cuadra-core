@@ -18,6 +18,7 @@ import (
 	gymDomain "github.com/cuadra/cuadra-core/src/modules/gyms/domain/gym"
 	gymRepo "github.com/cuadra/cuadra-core/src/modules/gyms/domain/repository"
 	usersApp "github.com/cuadra/cuadra-core/src/modules/users/app"
+	userErrors "github.com/cuadra/cuadra-core/src/modules/users/domain/errors"
 	usersRepo "github.com/cuadra/cuadra-core/src/modules/users/domain/repository"
 	"github.com/cuadra/cuadra-core/src/shared/auth"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
@@ -505,7 +506,7 @@ func (ctrl *AuthController) handleLogin(c *gin.Context) {
 	}
 	out, err := ctrl.Login.Execute(c.Request.Context(), usersApp.LoginInput{Email: req.Email, Password: req.Password})
 	if err != nil {
-		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		utils.ErrorResponse(c, loginErrorStatus(err), err)
 		return
 	}
 	utils.JsonResponse(c, http.StatusOK, loginResp{
@@ -526,6 +527,23 @@ func (ctrl *AuthController) handleLogin(c *gin.Context) {
 		HasPIN:             out.HasPIN,
 		PinHash:            out.PinHash,
 	})
+}
+
+// loginErrorStatus maps UC-002's auth failures to their HTTP-standard codes:
+// invalid credentials -> 401, disabled account -> 403. Both are domain
+// BusinessErrors, which DomainErrorToHttpCode otherwise blanket-maps to 422 —
+// a code the dashboard's login screen does not recognise, so it falls back to
+// a generic "algo salió mal" message instead of telling the owner the email
+// or password is wrong. Anything else keeps the default mapping.
+func loginErrorStatus(err error) int {
+	switch {
+	case errors.Is(err, userErrors.ErrInvalidCredentials):
+		return http.StatusUnauthorized
+	case errors.Is(err, userErrors.ErrAccountInactive):
+		return http.StatusForbidden
+	default:
+		return utils.DomainErrorToHttpCode(err)
+	}
 }
 
 // maybeMintSidecarToken inspects X-Cuadra-Client-ID and (when present) calls
