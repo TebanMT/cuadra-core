@@ -32,7 +32,7 @@ func (c *EmailChannel) Send(ctx context.Context, p Payload) (DeliveryResult, err
 		// log a leaky message.
 		return DeliveryResult{}, nil
 	}
-	link := p.LinkBaseURL + "/reset-password?token=" + p.Token
+	link := p.LinkBaseURL + "/auth/reset-password?token=" + p.Token
 	return DeliveryResult{Hint: maskEmail(p.Recipient)}, c.Sender.Send(ctx, email.Message{
 		To:      p.Recipient,
 		Subject: "Recupera tu contraseña de Tinta",

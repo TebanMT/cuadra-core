@@ -131,6 +131,10 @@ func main() {
 	recoveryChannels := recovery.NewEmailOnlyRegistry(recovery.NewEmailChannel(emailSender))
 	trialDays := envInt("TRIAL_DURATION_DAYS", 30)
 	baseURL := envOrDefault("PUBLIC_BASE_URL", "https://api.entinta.app")
+	// dashboardURL is the public origin of the React dashboard — distinct
+	// from baseURL (the API host). The password-reset email links the owner
+	// to the dashboard's /auth/reset-password page, not to the API.
+	dashboardURL := envOrDefault("DASHBOARD_BASE_URL", "http://localhost:5174")
 
 	// ── Notifications providers (Sesión 7 / ADR-007) ─────────────────────
 	whatsappProvider := buildWhatsAppProvider(baseURL)
@@ -166,7 +170,7 @@ func main() {
 	signup := usersApp.NewSignupOwner(userRepo, gymRepo, uow, tokens, recorder, trialDays)
 	login := usersApp.NewLogin(userRepo, gymRepo, uow, tokens, recorder)
 	logout := usersApp.NewLogout(blRepo, uow, tokens, recorder)
-	requestReset := usersApp.NewRequestPasswordReset(userRepo, resetRepo, uow, recoveryChannels, recorder, baseURL)
+	requestReset := usersApp.NewRequestPasswordReset(userRepo, resetRepo, uow, recoveryChannels, recorder, dashboardURL)
 	confirmReset := usersApp.NewConfirmPasswordReset(userRepo, resetRepo, blRepo, uow, recorder)
 	updateBasic := gymApp.NewUpdateBasicInfo(gymRepo, uow, recorder)
 	updatePay := gymApp.NewUpdatePaymentMethods(gymRepo, uow, recorder)
