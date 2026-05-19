@@ -17,21 +17,23 @@ import (
 	"github.com/cuadra/cuadra-core/src/shared/utils"
 )
 
-// FingerprintController handles UC-028 — POST /api/v1/members/:id/fingerprint.
+// FingerprintController handles UC-028 — POST /api/v1/members/:id/fingerprint
+// and UC-028b — DELETE /api/v1/members/:id/fingerprint.
 // Lives separately from MemberController so the route can be wired with the
-// register-fingerprint use case without having to bloat that constructor.
+// fingerprint use cases without having to bloat that constructor.
 //
-// Cloud + sidecar both expose the route: cloud needs it for dashboard
-// "manage fingerprint" actions (read/delete), sidecar needs it for the
-// kiosko enroll flow. The use case is the same; the GMK provider on each
+// Cloud + sidecar both expose the routes: cloud needs them for dashboard
+// "manage fingerprint" actions (read/delete), sidecar needs them for the
+// kiosko enroll flow. The use cases are the same; the GMK provider on each
 // side decides where the encryption key comes from.
 type FingerprintController struct {
 	Register *memApp.RegisterFingerprint
+	Delete   *memApp.DeleteFingerprint
 	Tokens   auth.TokenService
 }
 
-func NewFingerprintController(register *memApp.RegisterFingerprint, tokens auth.TokenService) *FingerprintController {
-	return &FingerprintController{Register: register, Tokens: tokens}
+func NewFingerprintController(register *memApp.RegisterFingerprint, deleteUC *memApp.DeleteFingerprint, tokens auth.TokenService) *FingerprintController {
+	return &FingerprintController{Register: register, Delete: deleteUC, Tokens: tokens}
 }
 
 func (c *FingerprintController) RegisterRoutes(r *gin.Engine) {
@@ -39,6 +41,7 @@ func (c *FingerprintController) RegisterRoutes(r *gin.Engine) {
 	api.Use(middleware.AuthMiddleware(c.Tokens))
 	{
 		api.POST("/members/:id/fingerprint", c.handleRegister)
+		api.DELETE("/members/:id/fingerprint", c.handleDelete)
 	}
 }
 
@@ -97,6 +100,27 @@ func (c *FingerprintController) handleRegister(ctx *gin.Context) {
 		RegisteredAt:  out.RegisteredAt.UTC().Format("2006-01-02T15:04:05Z"),
 		Status:        "success",
 	})
+}
+
+func (c *FingerprintController) handleDelete(ctx *gin.Context) {
+	gymID, _ := middleware.GetGymID(ctx)
+	actor, _ := middleware.GetUserID(ctx)
+	memberID, ok := parseUUIDParam(ctx, "id")
+	if !ok {
+		return
+	}
+	err := c.Delete.Execute(ctx.Request.Context(), memApp.DeleteFingerprintInput{
+		GymID: gymID, ActorUserID: actor, MemberID: memberID,
+	})
+	if err != nil {
+		if errors.Is(err, fpDomain.ErrFingerprintNotFound) {
+			utils.ErrorResponse(ctx, http.StatusNotFound, err)
+			return
+		}
+		utils.ErrorResponse(ctx, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	ctx.Status(http.StatusNoContent)
 }
 
 // writeCollision emits the flat 409 body the desktop hook reads. The shape

@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	fpDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/fingerprint"
+	memberDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/member"
 	"github.com/cuadra/cuadra-core/src/modules/members/infraestructure/db/models"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 )
@@ -56,8 +57,14 @@ func (r *FingerprintPostgresRepository) ListByMember(tx sharedDomain.Transaction
 func (r *FingerprintPostgresRepository) ListByGym(tx sharedDomain.Transaction, gymID uuid.UUID) ([]*fpDomain.MemberFingerprint, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	var rows []models.MemberFingerprintModel
-	if err := gormTx.Where("gym_id = ? AND deleted_at IS NULL", gymID).
-		Order("created_at ASC").Find(&rows).Error; err != nil {
+	// Exclude fingerprints whose member is inactive or lost — those socios should
+	// not be recognized at the door. A member with an *expired* membership but
+	// status='active' is still included so the kiosk can surface "renueva tu
+	// membresía" instead of silently rejecting them.
+	if err := gormTx.
+		Joins("JOIN members ON members.id = member_fingerprints.member_id AND members.deleted_at IS NULL AND members.status = ?", memberDomain.StatusActive).
+		Where("member_fingerprints.gym_id = ? AND member_fingerprints.deleted_at IS NULL", gymID).
+		Order("member_fingerprints.created_at ASC").Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	out := make([]*fpDomain.MemberFingerprint, 0, len(rows))

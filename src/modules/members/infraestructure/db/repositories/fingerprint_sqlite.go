@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	fpDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/fingerprint"
+	memberDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/member"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 )
 
@@ -98,13 +99,18 @@ func (r *FingerprintSQLiteRepository) ListByMember(tx sharedDomain.Transaction, 
 func (r *FingerprintSQLiteRepository) ListByGym(tx sharedDomain.Transaction, gymID uuid.UUID) ([]*fpDomain.MemberFingerprint, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	var rows []sqliteFingerprintRow
+	// Exclude fingerprints whose member is inactive or lost — those socios should
+	// not be recognized at the door. A member with an *expired* membership but
+	// status='active' is still included so the kiosk can surface "renueva tu
+	// membresía" instead of silently rejecting them.
 	err := stx.Select(context.Background(), &rows,
-		`SELECT id, gym_id, version, created_at, updated_at, deleted_at, synced_at,
-		        member_id, template_encrypted, template_format, quality_score, registered_by
-		 FROM member_fingerprints
-		 WHERE gym_id = ? AND deleted_at IS NULL
-		 ORDER BY created_at ASC`,
-		gymID.String())
+		`SELECT mf.id, mf.gym_id, mf.version, mf.created_at, mf.updated_at, mf.deleted_at, mf.synced_at,
+		        mf.member_id, mf.template_encrypted, mf.template_format, mf.quality_score, mf.registered_by
+		 FROM member_fingerprints mf
+		 JOIN members m ON m.id = mf.member_id AND m.deleted_at IS NULL AND m.status = ?
+		 WHERE mf.gym_id = ? AND mf.deleted_at IS NULL
+		 ORDER BY mf.created_at ASC`,
+		memberDomain.StatusActive, gymID.String())
 	if err != nil {
 		return nil, err
 	}
