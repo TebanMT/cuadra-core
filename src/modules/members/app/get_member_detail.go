@@ -23,15 +23,17 @@ type GetMemberDetailOutput struct {
 	Member            *memberDomain.Member
 	CurrentMembership *membershipDomain.Membership
 	AccessStatus      access.AccessStatus
+	HasFingerprint    bool
 }
 
 type GetMemberDetail struct {
-	Members memRepo.MemberRepository
-	UoW     sharedDomain.UnitOfWork
+	Members      memRepo.MemberRepository
+	Fingerprints memRepo.FingerprintRepository
+	UoW          sharedDomain.UnitOfWork
 }
 
-func NewGetMemberDetail(members memRepo.MemberRepository, uow sharedDomain.UnitOfWork) *GetMemberDetail {
-	return &GetMemberDetail{Members: members, UoW: uow}
+func NewGetMemberDetail(members memRepo.MemberRepository, fingerprints memRepo.FingerprintRepository, uow sharedDomain.UnitOfWork) *GetMemberDetail {
+	return &GetMemberDetail{Members: members, Fingerprints: fingerprints, UoW: uow}
 }
 
 func (uc *GetMemberDetail) Execute(ctx context.Context, in GetMemberDetailInput) (*GetMemberDetailOutput, error) {
@@ -46,6 +48,12 @@ func (uc *GetMemberDetail) Execute(ctx context.Context, in GetMemberDetailInput)
 	if mw.Member == nil {
 		return nil, sharedDomain.NewBusinessError(memErrors.ErrMemberNotFound, "")
 	}
+
+	fps, err := uc.Fingerprints.ListByMember(tx, in.MemberID)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
+
 	now := time.Now().UTC()
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 	st := access.New().Evaluate(mw.Member, mw.CurrentMembership, today)
@@ -53,5 +61,6 @@ func (uc *GetMemberDetail) Execute(ctx context.Context, in GetMemberDetailInput)
 		Member:            mw.Member,
 		CurrentMembership: mw.CurrentMembership,
 		AccessStatus:      st,
+		HasFingerprint:    len(fps) > 0,
 	}, nil
 }

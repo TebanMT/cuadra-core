@@ -190,7 +190,7 @@ func main() {
 	createMember := memApp.NewCreateMemberWithBilling(memberRepo, membershipRepo, mtRepo, paymentRepo, folios, uow, recorder)
 	updateMember := memApp.NewUpdateMember(memberRepo, uow, recorder)
 	listMembers := memApp.NewListMembers(memberRepo, uow)
-	memberDetail := memApp.NewGetMemberDetail(memberRepo, uow)
+	memberDetail := memApp.NewGetMemberDetail(memberRepo, fingerprintRepo, uow)
 	toggleMember := memApp.NewToggleMemberStatus(memberRepo, uow, recorder)
 	lockExpiry := memApp.NewLockMembershipExpiry(membershipRepo, adjustmentRepo, uow, recorder)
 	assignPin := memApp.NewAssignPin(memberRepo, uow, recorder)
@@ -204,6 +204,7 @@ func main() {
 	// integration tests / dashboard read-only flows.
 	gmkProvider := bcrypto.NewInMemoryGMKProvider()
 	registerFingerprint := memApp.NewRegisterFingerprint(memberRepo, fingerprintRepo, gmkProvider, uow, recorder)
+	deleteFingerprint := memApp.NewDeleteFingerprint(memberRepo, fingerprintRepo, uow, recorder)
 	checkinManual := chkApp.NewCheckinManual(memberSvc, checkinRepo, uow, recorder)
 	checkinPin := chkApp.NewCheckinByPin(memberSvc, memberRepo, checkinRepo, uow, recorder, nil)
 	checkinOverride := chkApp.NewOverrideCheckin(memberSvc, checkinRepo, uow, recorder)
@@ -320,7 +321,7 @@ func main() {
 	mtCtrl := memCtrl.NewMembershipTypeController(createMT, updateMT, deactivateMT, listMT, tokens)
 	memberCtrl := memCtrl.NewMemberController(createMember, updateMember, listMembers, memberDetail, toggleMember, lockExpiry, assignPin, tokens).
 		WithImportCSV(importCSV)
-	fingerprintCtrl := memCtrl.NewFingerprintController(registerFingerprint, tokens)
+	fingerprintCtrl := memCtrl.NewFingerprintController(registerFingerprint, deleteFingerprint, tokens)
 	paymentCtrl := billingCtrl.NewPaymentController(registerPayment, settlePayment, receiptPayment, sendReceipt, listMemberPayments, listGymPayments, refundPayment, registerSale, refundSale, cashClose, tokens)
 	paymentCtrl.PlanGate = plusGate
 	productCtrl := prodCtrl.NewProductController(createProduct, updateProduct, deactivateProduct, listProducts, adjustStock, tokens)

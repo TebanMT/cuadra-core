@@ -213,6 +213,7 @@ type memberResp struct {
 	EnrollmentPaid      bool      `json:"enrollment_paid"`
 	LastMaintenancePaid *string   `json:"last_maintenance_paid,omitempty"`
 	HasPin              bool      `json:"has_pin"`
+	HasFingerprint      bool      `json:"has_fingerprint"`
 	// Pin: el código de 4 dígitos visible para el operador (mismo
 	// rationale que la migración 012 — texto plano, no es un secreto).
 	// Vacío sólo cuando el socio no tiene PIN aún (caso histórico
@@ -436,8 +437,10 @@ func (ctrl *MemberController) handleDetail(c *gin.Context) {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
 		return
 	}
+	memberR := toMemberResp(out.Member)
+	memberR.HasFingerprint = out.HasFingerprint
 	utils.JsonResponse(c, http.StatusOK, memberDetailResp{
-		Member:            toMemberResp(out.Member),
+		Member:            memberR,
 		CurrentMembership: toMembershipResp(out.CurrentMembership),
 		AccessStatus:      string(out.AccessStatus),
 	})

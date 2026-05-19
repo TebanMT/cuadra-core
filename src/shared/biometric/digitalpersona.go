@@ -9,9 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"image/color"
 	"image/jpeg"
 	_ "image/png" // register PNG decoder for ExtractTemplate
 	"log"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -76,8 +78,12 @@ type DigitalPersonaReader struct {
 // return ErrNotAvailable so the kiosk falls back to PIN/manual cleanly
 // instead of crashing the whole sidecar at boot.
 func NewDigitalPersonaReader() *DigitalPersonaReader {
+	workDir := os.Getenv("TINTA_BIO_WORKDIR")
+	if workDir == "" {
+		workDir = filepath.Join(os.TempDir(), "tinta-bio")
+	}
 	r := &DigitalPersonaReader{
-		WorkDir: filepath.Join(os.TempDir(), "tinta-bio"),
+		WorkDir: workDir,
 	}
 	r.resolveBinaries()
 	if r.MindtctPath == "" || r.Bozorth3Path == "" {
@@ -201,6 +207,7 @@ func (r *DigitalPersonaReader) ExtractTemplate(ctx context.Context, imageBytes [
 	if err != nil {
 		return nil, fmt.Errorf("biometric: decode image: %w", err)
 	}
+	gray = equalizeHistogram(gray)
 
 	job, err := newJob(r.WorkDir, "extract")
 	if err != nil {
@@ -337,11 +344,15 @@ func (r *DigitalPersonaReader) Identify(
 		return nil, err
 	}
 	if float64(bestScore) < threshold {
+		log.Printf("[biometric] identify: no match probe_quality=%d best_score=%d threshold=%.1f",
+			probe.QualityScore, bestScore, threshold)
 		return nil, ErrNoMatch
 	}
 	if bestIdx < 0 || bestIdx >= len(memberOrder) {
 		return nil, errors.New("biometric: bozorth3 returned out-of-range index")
 	}
+	log.Printf("[biometric] identify: match member=%s probe_quality=%d score=%d",
+		memberOrder[bestIdx], probe.QualityScore, bestScore)
 	return &MatchResult{
 		MemberID: memberOrder[bestIdx],
 		Score:    float64(bestScore),
@@ -357,9 +368,11 @@ const (
 	FormatXYTM1 = "xyt_m1"
 
 	// minMinutiaeForUsableTemplate is the floor below which we refuse the
-	// extraction — UC-028 fails fast on poor captures. NIST docs note ≥20
-	// minutiae are needed for reliable 1:N matching with bozorth3.
-	minMinutiaeForUsableTemplate = 20
+	// extraction — UC-028 fails fast on poor captures. Raised to 25 to
+	// improve 1:N matching reliability; NIST minimum for bozorth3 is 20 but
+	// 25 reduces false matches on borderline captures without impacting the
+	// U.are.U 4500 which routinely produces 30+ minutiae on valid placements.
+	minMinutiaeForUsableTemplate = 25
 )
 
 type job struct {
@@ -407,6 +420,63 @@ func writeGrayJPEG(path string, gray *image.Gray) error {
 	}
 	defer f.Close()
 	return jpeg.Encode(f, gray, &jpeg.Options{Quality: 95})
+}
+
+// equalizeHistogram applies global histogram equalization to improve mindtct's
+// minutiae extraction on low-contrast scans (dry/sweaty fingers, uneven
+// lighting). Uses only stdlib — no CGO, no external dependencies. ~1-2 ms for
+// a typical 500×500 px U.are.U 4500 image. Applied before writing the JPEG so
+// the enhanced image is what mindtct sees.
+func equalizeHistogram(g *image.Gray) *image.Gray {
+	bounds := g.Bounds()
+	total := (bounds.Max.X - bounds.Min.X) * (bounds.Max.Y - bounds.Min.Y)
+	if total == 0 {
+		return g
+	}
+
+	var hist [256]int
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			hist[g.GrayAt(x, y).Y]++
+		}
+	}
+
+	var cdf [256]int
+	cdf[0] = hist[0]
+	for i := 1; i < 256; i++ {
+		cdf[i] = cdf[i-1] + hist[i]
+	}
+	cdfMin := 0
+	for i := 0; i < 256; i++ {
+		if cdf[i] > 0 {
+			cdfMin = cdf[i]
+			break
+		}
+	}
+
+	var lut [256]uint8
+	denom := total - cdfMin
+	for i := 0; i < 256; i++ {
+		if denom <= 0 {
+			lut[i] = uint8(i)
+			continue
+		}
+		v := math.Round(float64(cdf[i]-cdfMin) / float64(denom) * 255.0)
+		if v < 0 {
+			v = 0
+		} else if v > 255 {
+			v = 255
+		}
+		lut[i] = uint8(v)
+	}
+
+	out := image.NewGray(bounds)
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			out.SetGray(x, y, color.Gray{Y: lut[g.GrayAt(x, y).Y]})
+		}
+	}
+	return out
 }
 
 func isWindows() bool { return runtime.GOOS == "windows" }
