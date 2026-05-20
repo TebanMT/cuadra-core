@@ -30,6 +30,8 @@ const (
 	ActionAssignPIN          = "assign_pin"
 	ActionClearPIN           = "clear_pin"
 	ActionRotateOperatorPIN  = "rotate_operator_pin"
+	ActionEmailVerifyReq     = "email_verify_requested"
+	ActionEmailVerified      = "email_verified"
 )
 
 // Entry is the value the use case hands to Recorder.Record. Changes is an

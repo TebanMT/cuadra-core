@@ -23,7 +23,11 @@ var (
 	ErrAccountInactive       = errors.New("tu cuenta está desactivada. Contacta al dueño del gimnasio")
 	ErrInvalidResetToken     = errors.New("este link ya no es válido")
 	ErrResetTokenExpired     = errors.New("este link expiró. Solicita uno nuevo")
-	ErrInvalidRole           = errors.New("rol no soportado")
+	// UC-013 — verificación de correo.
+	ErrInvalidVerifyToken   = errors.New("este link de verificación ya no es válido")
+	ErrVerifyTokenExpired   = errors.New("este link de verificación expiró. Solicita uno nuevo")
+	ErrEmailAlreadyVerified = errors.New("este correo ya está verificado")
+	ErrInvalidRole          = errors.New("rol no soportado")
 	ErrSelfDeactivate        = errors.New("no puedes desactivar tu propia cuenta")
 	ErrCannotDeactivateOwner = errors.New("no puedes desactivar al dueño del gimnasio")
 	ErrCrossGym              = errors.New("ese usuario no pertenece a tu gimnasio")

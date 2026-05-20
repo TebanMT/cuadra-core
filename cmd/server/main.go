@@ -98,6 +98,7 @@ func main() {
 	otpRepo := gymRepoPg.NewTransferOTPPostgresRepository()
 	userRepo := usersRepoPg.NewUserPostgresRepository()
 	resetRepo := usersRepoPg.NewPasswordResetPostgresRepository()
+	emailVerifyRepo := usersRepoPg.NewEmailVerificationPostgresRepository()
 	blRepo := usersRepoPg.NewRefreshTokenBlacklistPostgresRepository()
 	mtRepo := memRepoPg.NewMembershipTypePostgresRepository()
 	memberRepo := memRepoPg.NewMemberPostgresRepository()
@@ -124,7 +125,11 @@ func main() {
 	// ── Shared services ────────────────────────────────────────────────────
 	tokens := auth.NewJWTService(mustEnv("JWT_SECRET"))
 	recorder := audit.NewPostgresRecorder()
-	emailSender := email.NewStdoutSender()
+	// emailSender (transactional, used by auth/recovery/transfer/email
+	// verification) and notiEmailProvider (notifications BC) share the
+	// same configured backend so prod doesn't quietly drop auth mail to
+	// stdout while notifications go through Resend.
+	emailSender, notiEmailProvider := buildEmailProviders()
 	// Recovery registry (ADR-014 pending). MVP routes all recoveries through
 	// email; fase 2 swaps this for recovery.TieredRegistry to enable
 	// WhatsApp recovery on Plus gyms without touching the use case.
@@ -138,7 +143,6 @@ func main() {
 
 	// ── Notifications providers (Sesión 7 / ADR-007) ─────────────────────
 	whatsappProvider := buildWhatsAppProvider(baseURL)
-	notiEmailProvider := buildEmailProvider()
 
 	// ── Use cases ──────────────────────────────────────────────────────────
 	sidecarStore := sidecartoken.NewPostgresStore(db)
@@ -172,6 +176,8 @@ func main() {
 	logout := usersApp.NewLogout(blRepo, uow, tokens, recorder)
 	requestReset := usersApp.NewRequestPasswordReset(userRepo, resetRepo, uow, recoveryChannels, recorder, dashboardURL)
 	confirmReset := usersApp.NewConfirmPasswordReset(userRepo, resetRepo, blRepo, uow, recorder)
+	requestEmailVerify := usersApp.NewRequestEmailVerification(userRepo, emailVerifyRepo, uow, emailSender, recorder, dashboardURL)
+	confirmEmailVerify := usersApp.NewConfirmEmailVerification(userRepo, emailVerifyRepo, uow, recorder)
 	updateBasic := gymApp.NewUpdateBasicInfo(gymRepo, uow, recorder)
 	updatePay := gymApp.NewUpdatePaymentMethods(gymRepo, uow, recorder)
 	completeSetup := gymApp.NewCompleteSetup(gymRepo, uow, recorder)
@@ -291,6 +297,8 @@ func main() {
 		Logout:             logout,
 		RequestReset:       requestReset,
 		ConfirmReset:       confirmReset,
+		RequestEmailVerify: requestEmailVerify,
+		ConfirmEmailVerify: confirmEmailVerify,
 		UpdateBasicInfo:    updateBasic,
 		UpdatePayMethods:   updatePay,
 		CompleteSetup:      completeSetup,
@@ -575,27 +583,40 @@ func buildWhatsAppProvider(baseURL string) notiDomain.WhatsAppProvider {
 	return notiWhatsApp.NewStdoutProvider()
 }
 
-// buildEmailProvider wires the configured email provider for cross-BC use
-// (notifications-side EmailProvider, separate from the legacy
-// shared/email.Sender used by users/auth flows).
-func buildEmailProvider() notiDomain.EmailProvider {
+// resendAuthSender adapts a notifications-side ResendProvider to
+// shared/email.Sender so the auth flows (recovery, transfer OTP, email
+// verification) hit the same Resend account as the notifications BC.
+// Without it, EMAIL_PROVIDER=resend only routed notification mail and
+// every auth email silently fell back to stdout in production.
+type resendAuthSender struct{ p *notiEmail.ResendProvider }
+
+func (s resendAuthSender) Send(ctx context.Context, m email.Message) error {
+	_, err := s.p.SendTransactional(ctx, m.To, m.Subject, m.Body, m.Tag)
+	return err
+}
+
+// buildEmailProviders wires the configured email backend for BOTH the
+// shared/email.Sender (auth flows) and the notifications-side
+// EmailProvider, so prod can't end up with one going to Resend and the
+// other silently logging to stdout.
+func buildEmailProviders() (email.Sender, notiDomain.EmailProvider) {
 	provider := strings.ToLower(envOrDefault("EMAIL_PROVIDER", "stdout"))
 	if provider == "resend" {
 		key := os.Getenv("RESEND_API_KEY")
-		from := envOrDefault("EMAIL_FROM", "noreply@entinta.mx")
+		from := envOrDefault("EMAIL_FROM", "non-reply@entinta.mx")
 		if key == "" {
-			log.Printf("[notifications] RESEND_API_KEY missing — falling back to stdout email provider")
-			return notiEmail.NewStdoutProvider()
+			log.Printf("[email] RESEND_API_KEY missing — falling back to stdout for all email")
+			return email.NewStdoutSender(), notiEmail.NewStdoutProvider()
 		}
 		p, err := notiEmail.NewResendProvider(notiEmail.ResendOptions{APIKey: key, From: from})
 		if err != nil {
-			log.Printf("[notifications] resend init failed: %v — using stdout fallback", err)
-			return notiEmail.NewStdoutProvider()
+			log.Printf("[email] resend init failed: %v — using stdout fallback", err)
+			return email.NewStdoutSender(), notiEmail.NewStdoutProvider()
 		}
-		return p
+		return resendAuthSender{p: p}, p
 	}
 	if provider == "mock" {
-		return notiEmail.NewMockProvider()
+		return email.NewStdoutSender(), notiEmail.NewMockProvider()
 	}
-	return notiEmail.NewStdoutProvider()
+	return email.NewStdoutSender(), notiEmail.NewStdoutProvider()
 }

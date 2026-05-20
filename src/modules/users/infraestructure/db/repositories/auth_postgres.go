@@ -55,6 +55,45 @@ func (r *PasswordResetPostgresRepository) Consume(tx sharedDomain.Transaction, p
 	return m.UserID, nil
 }
 
+type EmailVerificationPostgresRepository struct{}
+
+func NewEmailVerificationPostgresRepository() *EmailVerificationPostgresRepository {
+	return &EmailVerificationPostgresRepository{}
+}
+
+func (r *EmailVerificationPostgresRepository) Save(tx sharedDomain.Transaction, rec userRepo.EmailVerificationRecord) error {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	hash := sha256.Sum256([]byte(rec.PlainToken))
+	m := models.EmailVerificationTokenModel{
+		ID:        rec.ID,
+		UserID:    rec.UserID,
+		TokenHash: hash[:],
+		ExpiresAt: rec.ExpiresAt,
+		CreatedAt: time.Now().UTC(),
+	}
+	return gormTx.Create(&m).Error
+}
+
+func (r *EmailVerificationPostgresRepository) Consume(tx sharedDomain.Transaction, plainToken string, now time.Time) (uuid.UUID, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	hash := sha256.Sum256([]byte(plainToken))
+	var m models.EmailVerificationTokenModel
+	err := gormTx.Where("token_hash = ? AND used_at IS NULL", hash[:]).First(&m).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return uuid.Nil, sharedDomain.NewBusinessError(userErrors.ErrInvalidVerifyToken, "")
+	}
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if m.ExpiresAt.Before(now) {
+		return uuid.Nil, sharedDomain.NewBusinessError(userErrors.ErrVerifyTokenExpired, "")
+	}
+	if err := gormTx.Model(&m).Update("used_at", now).Error; err != nil {
+		return uuid.Nil, err
+	}
+	return m.UserID, nil
+}
+
 type RefreshTokenBlacklistPostgresRepository struct{}
 
 func NewRefreshTokenBlacklistPostgresRepository() *RefreshTokenBlacklistPostgresRepository {

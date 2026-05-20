@@ -56,12 +56,13 @@ var (
 // ---------------------------------------------------------------------------
 
 type meUserWire struct {
-	UserID   uuid.UUID `json:"user_id"`
-	FullName string    `json:"full_name"`
-	Email    string    `json:"email"`
-	Phone    *string   `json:"phone"`
-	Role     string    `json:"role"`
-	HasPIN   bool      `json:"has_pin"`
+	UserID          uuid.UUID  `json:"user_id"`
+	FullName        string     `json:"full_name"`
+	Email           string     `json:"email"`
+	Phone           *string    `json:"phone"`
+	Role            string     `json:"role"`
+	HasPIN          bool       `json:"has_pin"`
+	EmailVerifiedAt *time.Time `json:"email_verified_at"`
 }
 
 type meGymWire struct {
@@ -189,12 +190,13 @@ func (ctrl *AuthController) handleGetMe(c *gin.Context) {
 	}
 	utils.JsonResponse(c, http.StatusOK, meResponse{
 		User: meUserWire{
-			UserID:   user.ID,
-			FullName: user.FullName,
-			Email:    user.Email,
-			Phone:    user.Phone,
-			Role:     user.Role,
-			HasPIN:   user.HasPIN(),
+			UserID:          user.ID,
+			FullName:        user.FullName,
+			Email:           user.Email,
+			Phone:           user.Phone,
+			Role:            user.Role,
+			HasPIN:          user.HasPIN(),
+			EmailVerifiedAt: user.EmailVerifiedAt,
 		},
 		Gym: meGymWire{
 			GymID:              gym.ID,

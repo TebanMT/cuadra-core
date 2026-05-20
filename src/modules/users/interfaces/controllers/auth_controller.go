@@ -78,6 +78,13 @@ type AuthController struct {
 	// (operator JWTs + sidecar credential). Optional — when nil the
 	// endpoint 501s.
 	RedeemInstaller *usersApp.RedeemInstallerBootstrap
+	// RequestEmailVerify mints + sends the verification email. Optional —
+	// when nil, signup skips the verification email and the resend
+	// endpoint returns 501.
+	RequestEmailVerify *usersApp.RequestEmailVerification
+	// ConfirmEmailVerify consumes a verification token. Optional — when
+	// nil, /auth/verify-email returns 501.
+	ConfirmEmailVerify *usersApp.ConfirmEmailVerification
 	// SidecarTokens reads the sidecar_credentials table for the
 	// "dispositivos vinculados" listing surfaced by GET /auth/devices. The
 	// model already supports N desktops per gym (unique idx is on
@@ -134,6 +141,7 @@ func (ctrl *AuthController) RegisterRoutes(r *gin.Engine) {
 		authGrp.POST("/forgot-password", ctrl.handleForgotPassword)
 		authGrp.POST("/reset-password", ctrl.handleResetPassword)
 		authGrp.POST("/redeem-installer", ctrl.handleRedeemInstaller)
+		authGrp.POST("/verify-email", ctrl.handleVerifyEmail)
 	}
 
 	authedAuth := api.Group("/auth")
@@ -142,6 +150,7 @@ func (ctrl *AuthController) RegisterRoutes(r *gin.Engine) {
 	authedAuth.POST("/me/pin", ctrl.handleAssignSelfPIN)
 	authedAuth.DELETE("/me/pin", ctrl.handleClearSelfPIN)
 	authedAuth.POST("/installer-token", ctrl.handleIssueInstaller)
+	authedAuth.POST("/resend-verification", ctrl.handleResendVerification)
 	authedAuth.GET("/devices", middleware.RequireOwner(), ctrl.handleListDevices)
 
 	// /uploads/presign — acepta JWT (dashboard, futuro) y sk_live_*
@@ -328,7 +337,8 @@ type loginResp struct {
 	// sidecar lo mirroree en su sqlite local — el flujo login-pin offline
 	// del kiosko depende de tener el hash localmente. Mismo tier de
 	// sensibilidad que password_hash que ya se almacenaba (bcrypt local).
-	PinHash string `json:"pin_hash,omitempty"`
+	PinHash         string     `json:"pin_hash,omitempty"`
+	EmailVerifiedAt *time.Time `json:"email_verified_at"`
 }
 
 type logoutReq struct {
@@ -440,6 +450,10 @@ type redeemInstallerReq struct {
 	Token string `json:"token" validate:"required"`
 }
 
+type verifyEmailReq struct {
+	Token string `json:"token" validate:"required"`
+}
+
 type assignPinReq struct {
 	PIN string `json:"pin" validate:"required"`
 }
@@ -486,6 +500,12 @@ func (ctrl *AuthController) handleSignup(c *gin.Context) {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
 		return
 	}
+	// Fire the verification email asynchronously of signup's outcome — a
+	// transient outbound-email failure should never block account
+	// creation. The dashboard's "Reenviar" button covers retries.
+	if ctrl.RequestEmailVerify != nil {
+		_ = ctrl.RequestEmailVerify.Execute(c.Request.Context(), out.UserID)
+	}
 	utils.JsonResponse(c, http.StatusCreated, signupResp{
 		UserID:         out.UserID,
 		GymID:          out.GymID,
@@ -526,6 +546,7 @@ func (ctrl *AuthController) handleLogin(c *gin.Context) {
 		SidecarToken:       ctrl.maybeMintSidecarToken(c, out.UserID, out.GymID),
 		HasPIN:             out.HasPIN,
 		PinHash:            out.PinHash,
+		EmailVerifiedAt:    out.EmailVerifiedAt,
 	})
 }
 
@@ -693,6 +714,7 @@ var (
 	errPINNotConfigured           = errors.New("pin assignment not configured on this server")
 	errDevicesNotConfigured       = errors.New("devices listing not configured on this server")
 	errR2NotConfigured            = errors.New("R2 storage not configured on this server")
+	errEmailVerifyDisabled        = errors.New("email verification not configured on this server")
 )
 
 // uploadPresignReq — body que el sidecar manda al cloud. `kind` es para
@@ -1013,6 +1035,48 @@ func (ctrl *AuthController) handleClearSelfPIN(c *gin.Context) {
 		return
 	}
 	utils.JsonResponse(c, http.StatusOK, pinResp{HasPIN: false})
+}
+
+// handleVerifyEmail — POST /api/v1/auth/verify-email (no auth).
+// Consumes a one-time token from the verification email. Idempotent on
+// success: a token that's already been used returns 422
+// ErrInvalidVerifyToken, but landing on the page with a still-valid
+// token a second time (re-click after success) is a no-op success.
+func (ctrl *AuthController) handleVerifyEmail(c *gin.Context) {
+	if ctrl.ConfirmEmailVerify == nil {
+		utils.ErrorResponse(c, http.StatusNotImplemented, errEmailVerifyDisabled)
+		return
+	}
+	var req verifyEmailReq
+	if !bind(c, &req) {
+		return
+	}
+	if err := ctrl.ConfirmEmailVerify.Execute(c.Request.Context(), req.Token); err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	utils.JsonResponse(c, http.StatusOK, gin.H{"ok": true})
+}
+
+// handleResendVerification — POST /api/v1/auth/resend-verification
+// (authed). Re-mints a verification token + email for the calling user.
+// Returns 422 ErrEmailAlreadyVerified if the address is already
+// verified so the dashboard can hide the banner consistently.
+func (ctrl *AuthController) handleResendVerification(c *gin.Context) {
+	if ctrl.RequestEmailVerify == nil {
+		utils.ErrorResponse(c, http.StatusNotImplemented, errEmailVerifyDisabled)
+		return
+	}
+	userID, ok := middleware.GetUserID(c)
+	if !ok || userID == uuid.Nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, errBadAuth)
+		return
+	}
+	if err := ctrl.RequestEmailVerify.Execute(c.Request.Context(), userID); err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	utils.JsonResponse(c, http.StatusOK, gin.H{"sent": true})
 }
 
 func (ctrl *AuthController) handleUpdateSetup(c *gin.Context) {

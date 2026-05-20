@@ -26,6 +26,7 @@ type UserModel struct {
 	CreatedBy          *uuid.UUID `gorm:"type:uuid;column:created_by"`
 	PinHash            *string    `gorm:"column:pin_hash"`
 	PinAssignedAt      *time.Time `gorm:"column:pin_assigned_at"`
+	EmailVerifiedAt    *time.Time `gorm:"column:email_verified_at"`
 }
 
 func (UserModel) TableName() string { return "users" }
@@ -49,3 +50,14 @@ type RefreshTokenBlacklistModel struct {
 }
 
 func (RefreshTokenBlacklistModel) TableName() string { return "refresh_token_blacklist" }
+
+type EmailVerificationTokenModel struct {
+	ID        uuid.UUID  `gorm:"type:uuid;primaryKey;column:id"`
+	UserID    uuid.UUID  `gorm:"type:uuid;not null;column:user_id"`
+	TokenHash []byte     `gorm:"not null;column:token_hash"`
+	ExpiresAt time.Time  `gorm:"not null;column:expires_at"`
+	UsedAt    *time.Time `gorm:"column:used_at"`
+	CreatedAt time.Time  `gorm:"not null;column:created_at"`
+}
+
+func (EmailVerificationTokenModel) TableName() string { return "email_verification_tokens" }

@@ -146,6 +146,7 @@ func userToModel(u *userDomain.User) models.UserModel {
 		CreatedBy:          u.CreatedBy,
 		PinHash:            u.PinHash,
 		PinAssignedAt:      u.PinAssignedAt,
+		EmailVerifiedAt:    u.EmailVerifiedAt,
 	}
 }
 
@@ -168,5 +169,6 @@ func userToDomain(m *models.UserModel) *userDomain.User {
 		DeletedAt:          m.DeletedAt,
 		PinHash:            m.PinHash,
 		PinAssignedAt:      m.PinAssignedAt,
+		EmailVerifiedAt:    m.EmailVerifiedAt,
 	}
 }

@@ -43,6 +43,23 @@ type PasswordResetRecord struct {
 	ExpiresAt  time.Time
 }
 
+// EmailVerificationRepository persists single-use verification tokens
+// (UC-013). Same shape as PasswordResetRepository — separate table so a
+// pending password-reset can't be redeemed as a verification or vice
+// versa, even if a token string somehow collided.
+type EmailVerificationRepository interface {
+	Save(tx sharedDomain.Transaction, rec EmailVerificationRecord) error
+	Consume(tx sharedDomain.Transaction, plainToken string, now time.Time) (uuid.UUID, error)
+}
+
+type EmailVerificationRecord struct {
+	ID         uuid.UUID
+	UserID     uuid.UUID
+	PlainToken string // only present when issuing — the repo hashes it
+	TokenHash  []byte
+	ExpiresAt  time.Time
+}
+
 // RefreshTokenBlacklist tracks revoked refresh tokens (UC-003 logout, UC-004
 // invalidate-all-sessions).
 type RefreshTokenBlacklist interface {

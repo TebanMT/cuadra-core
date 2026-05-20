@@ -51,6 +51,10 @@ type User struct {
 	// or revoke independently of the operator's web password.
 	PinHash       *string
 	PinAssignedAt *time.Time
+	// EmailVerifiedAt is non-nil once the owner has clicked the
+	// verification link sent to their inbox. The dashboard nags
+	// unverified owners with a banner; nothing is hard-blocked.
+	EmailVerifiedAt *time.Time
 }
 
 // NewUser constructs a User with role + canonicalised email. Caller is
@@ -205,6 +209,23 @@ func (u *User) MarkLoggedIn(now time.Time) {
 	u.UpdatedAt = now
 }
 
+// IsEmailVerified reports whether the owner has confirmed the email
+// address. Operators always read as unverified (they typically have no
+// email); callers should gate the dashboard banner on role + this flag.
+func (u *User) IsEmailVerified() bool { return u.EmailVerifiedAt != nil }
+
+// MarkEmailVerified is called from UC-013 after the one-time verification
+// token is consumed. Idempotent — once verified, repeated calls keep the
+// original timestamp so audit trails don't gain noise.
+func (u *User) MarkEmailVerified(now time.Time) {
+	if u.EmailVerifiedAt != nil {
+		return
+	}
+	u.EmailVerifiedAt = &now
+	u.Version++
+	u.UpdatedAt = now
+}
+
 // ApplyPassword hashes & assigns. Use shared/auth.HashPassword + this together.
 func (u *User) ApplyPassword(hash string, mustChange bool, now time.Time) {
 	u.PasswordHash = hash
@@ -270,10 +291,17 @@ func (u *User) UpdateProfile(name *string, email *string, phone *string, now tim
 			if u.IsOwner() {
 				return userErrors.ErrInvalidEmail
 			}
+			if u.Email != "" {
+				u.EmailVerifiedAt = nil
+			}
 			u.Email = ""
 		} else {
 			if !ValidateEmail(v) {
 				return userErrors.ErrInvalidEmail
+			}
+			if v != u.Email {
+				// New address — old verification doesn't transfer.
+				u.EmailVerifiedAt = nil
 			}
 			u.Email = v
 		}

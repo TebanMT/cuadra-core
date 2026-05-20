@@ -47,6 +47,9 @@ type LoginOutput struct {
 	// sync pull. Mismo tier de sensibilidad que password_hash, que ya
 	// viajaba en el cached_login.
 	PinHash string
+	// EmailVerifiedAt lets the dashboard render the "verifica tu correo"
+	// banner without an extra /auth/me round trip after login.
+	EmailVerifiedAt *time.Time
 }
 
 type Login struct {
@@ -86,6 +89,7 @@ func (uc *Login) Execute(ctx context.Context, in LoginInput) (LoginOutput, error
 		mustChange bool
 		hasPIN     bool
 		pinHash    string
+		verifiedAt *time.Time
 	)
 	err := uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
 		user, err := uc.Users.GetByEmail(tx, in.Email)
@@ -135,6 +139,7 @@ func (uc *Login) Execute(ctx context.Context, in LoginInput) (LoginOutput, error
 		if user.PinHash != nil {
 			pinHash = *user.PinHash
 		}
+		verifiedAt = user.EmailVerifiedAt
 		return nil
 	})
 	if err != nil {
@@ -166,5 +171,6 @@ func (uc *Login) Execute(ctx context.Context, in LoginInput) (LoginOutput, error
 		MustChangePassword: mustChange,
 		HasPIN:             hasPIN,
 		PinHash:            pinHash,
+		EmailVerifiedAt:    verifiedAt,
 	}, nil
 }
