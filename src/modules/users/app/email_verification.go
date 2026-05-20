@@ -40,7 +40,7 @@ type RequestEmailVerification struct {
 	// BaseURL is the dashboard origin (DASHBOARD_BASE_URL). The link in
 	// the email is built as BaseURL + /auth/verify-email?token=...
 	BaseURL string
-	// From is the transactional sender address (e.g. non-reply@entinta.mx).
+	// From is the transactional sender address (e.g. noreply@entinta.mx).
 	// Used only when the Sender impl ignores its own configured From — the
 	// Resend sender uses its constructor value and ignores this. Kept as a
 	// constructor knob so the canonical From lives in main.go.

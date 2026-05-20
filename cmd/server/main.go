@@ -603,7 +603,7 @@ func buildEmailProviders() (email.Sender, notiDomain.EmailProvider) {
 	provider := strings.ToLower(envOrDefault("EMAIL_PROVIDER", "stdout"))
 	if provider == "resend" {
 		key := os.Getenv("RESEND_API_KEY")
-		from := envOrDefault("EMAIL_FROM", "non-reply@entinta.mx")
+		from := envOrDefault("EMAIL_FROM", "noreply@entinta.mx")
 		if key == "" {
 			log.Printf("[email] RESEND_API_KEY missing — falling back to stdout for all email")
 			return email.NewStdoutSender(), notiEmail.NewStdoutProvider()
