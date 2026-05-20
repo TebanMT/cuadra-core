@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"log"
 	"strings"
 	"time"
 
@@ -121,13 +122,16 @@ func (uc *RequestEmailVerification) Execute(ctx context.Context, userID uuid.UUI
 	body := buildVerifyEmailBody(fullName, link)
 	// Send is best-effort once the token is persisted: the dashboard's
 	// "Reenviar" button gives the user a clean retry path if delivery
-	// failed for a transient reason.
-	_ = uc.Sender.Send(ctx, email.Message{
+	// failed for a transient reason. We log the underlying cause so ops
+	// can tell a real outbound failure from a successful queue.
+	if err := uc.Sender.Send(ctx, email.Message{
 		To:      sendTo,
 		Subject: subject,
 		Body:    body,
 		Tag:     "email_verification",
-	})
+	}); err != nil {
+		log.Printf("[verify] send to %s failed: %v", sendTo, err)
+	}
 	return nil
 }
 
@@ -167,12 +171,19 @@ func NewConfirmEmailVerification(
 	}
 }
 
-func (uc *ConfirmEmailVerification) Execute(ctx context.Context, token string) error {
+// Execute consumes the verification token and returns the verified
+// user's ID. Callers (handleVerifyEmail) use the ID to mint a fresh
+// session so the owner doesn't have to log in again right after
+// clicking the link from their email client. uuid.Nil is never
+// returned alongside a nil error — a successful verify always yields
+// an ID, including the idempotent already-verified branch.
+func (uc *ConfirmEmailVerification) Execute(ctx context.Context, token string) (uuid.UUID, error) {
 	if strings.TrimSpace(token) == "" {
-		return sharedDomain.NewBusinessError(userErrors.ErrInvalidVerifyToken, "")
+		return uuid.Nil, sharedDomain.NewBusinessError(userErrors.ErrInvalidVerifyToken, "")
 	}
 	now := uc.NowFunc()
-	return uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
+	var verifiedID uuid.UUID
+	err := uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
 		userID, err := uc.Tokens.Consume(tx, token, now)
 		if err != nil {
 			return err
@@ -181,6 +192,7 @@ func (uc *ConfirmEmailVerification) Execute(ctx context.Context, token string) e
 		if err != nil {
 			return err
 		}
+		verifiedID = u.ID
 		if u.IsEmailVerified() {
 			// Token was valid but the user is already verified — treat
 			// as idempotent success so a double-click on the email link
@@ -203,6 +215,10 @@ func (uc *ConfirmEmailVerification) Execute(ctx context.Context, token string) e
 		})
 		return nil
 	})
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return verifiedID, nil
 }
 
 // generateVerifyToken returns a 32-char hex string (128 bits of

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -96,16 +97,24 @@ func (uc *RequestPasswordReset) Execute(ctx context.Context, emailAddr string) e
 		return err
 	}
 	if sendTo != "" && uc.Channels != nil {
-		channel, err := uc.Channels.Pick(ctx, gymID, userID, "password_reset")
-		if err == nil && channel != nil {
-			_, _ = channel.Send(ctx, recovery.Payload{
+		channel, pickErr := uc.Channels.Pick(ctx, gymID, userID, "password_reset")
+		if pickErr != nil {
+			log.Printf("[recovery] pick channel for user=%s: %v", userID, pickErr)
+		} else if channel != nil {
+			if _, sendErr := channel.Send(ctx, recovery.Payload{
 				UserID:      userID,
 				GymID:       gymID,
 				Token:       plain,
 				Reason:      "password_reset",
 				Recipient:   sendTo,
 				LinkBaseURL: uc.BaseURL,
-			})
+			}); sendErr != nil {
+				// Surface the real cause (SMTP auth, From-alias rejection,
+				// recipient bounce, …). The wire response is still neutral
+				// {sent:true} so the UI stays non-enumerable, but ops needs
+				// to know when delivery actually failed.
+				log.Printf("[recovery] password_reset send to %s failed: %v", sendTo, sendErr)
+			}
 		}
 	}
 	return nil

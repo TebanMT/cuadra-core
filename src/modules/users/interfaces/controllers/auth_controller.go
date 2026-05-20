@@ -454,6 +454,32 @@ type verifyEmailReq struct {
 	Token string `json:"token" validate:"required"`
 }
 
+// verifyEmailResp doubles as a session bundle. The owner usually clicks
+// the link from their inbox client (often in a different browser or
+// tab without an active session), so the dashboard had no way to keep
+// them signed in after redemption. Issuing fresh access + refresh
+// tokens here turns the verification link itself into a session
+// bootstrap — same security posture as the password-reset flow, where
+// possession of the one-time emailed token already grants the ability
+// to set a new password.
+type verifyEmailResp struct {
+	OK               bool       `json:"ok"`
+	UserID           uuid.UUID  `json:"user_id"`
+	GymID            uuid.UUID  `json:"gym_id"`
+	FullName         string     `json:"full_name"`
+	Email            string     `json:"email"`
+	Phone            string     `json:"phone,omitempty"`
+	Role             string     `json:"role"`
+	GymName          *string    `json:"gym_name"`
+	AccessToken      string     `json:"access_token"`
+	RefreshToken     string     `json:"refresh_token"`
+	SetupCompleted   bool       `json:"setup_completed"`
+	TrialEndsAt      *time.Time `json:"trial_ends_at,omitempty"`
+	SubscriptionPlan string     `json:"subscription_plan"`
+	HasPIN           bool       `json:"has_pin"`
+	EmailVerifiedAt  *time.Time `json:"email_verified_at"`
+}
+
 type assignPinReq struct {
 	PIN string `json:"pin" validate:"required"`
 }
@@ -1042,6 +1068,10 @@ func (ctrl *AuthController) handleClearSelfPIN(c *gin.Context) {
 // success: a token that's already been used returns 422
 // ErrInvalidVerifyToken, but landing on the page with a still-valid
 // token a second time (re-click after success) is a no-op success.
+//
+// Issues a fresh access + refresh token so the dashboard can drop the
+// owner straight into a logged-in state, even when the link was opened
+// from an email client in a browser that didn't have the session.
 func (ctrl *AuthController) handleVerifyEmail(c *gin.Context) {
 	if ctrl.ConfirmEmailVerify == nil {
 		utils.ErrorResponse(c, http.StatusNotImplemented, errEmailVerifyDisabled)
@@ -1051,11 +1081,63 @@ func (ctrl *AuthController) handleVerifyEmail(c *gin.Context) {
 	if !bind(c, &req) {
 		return
 	}
-	if err := ctrl.ConfirmEmailVerify.Execute(c.Request.Context(), req.Token); err != nil {
+	userID, err := ctrl.ConfirmEmailVerify.Execute(c.Request.Context(), req.Token)
+	if err != nil {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
 		return
 	}
-	utils.JsonResponse(c, http.StatusOK, gin.H{"ok": true})
+	// Look up user + gym to assemble the session bundle. Falls back to
+	// the bare {ok:true} shape if the read deps weren't wired (e.g. a
+	// minimal binary that only has the use case dependencies); the FE
+	// then keeps its existing "redirect to /auth/login" behaviour.
+	if ctrl.Users == nil || ctrl.Gyms == nil || ctrl.UoW == nil || ctrl.Tokens == nil {
+		utils.JsonResponse(c, http.StatusOK, gin.H{"ok": true})
+		return
+	}
+	tx, err := ctrl.UoW.Query(c.Request.Context())
+	if err != nil {
+		utils.JsonResponse(c, http.StatusOK, gin.H{"ok": true})
+		return
+	}
+	user, err := ctrl.Users.GetByID(tx, userID)
+	if err != nil {
+		utils.JsonResponse(c, http.StatusOK, gin.H{"ok": true})
+		return
+	}
+	gym, err := ctrl.Gyms.GetByID(tx, user.GymID)
+	if err != nil {
+		utils.JsonResponse(c, http.StatusOK, gin.H{"ok": true})
+		return
+	}
+	access, accErr := ctrl.Tokens.GenerateAccessToken(user.ID, user.GymID, user.Role)
+	refresh, refErr := ctrl.Tokens.GenerateRefreshToken(user.ID, user.GymID, user.Role)
+	if accErr != nil || refErr != nil {
+		// Don't fail the verification — verification already succeeded
+		// at the DB level. Worst case the owner re-logs in once.
+		utils.JsonResponse(c, http.StatusOK, gin.H{"ok": true})
+		return
+	}
+	phone := ""
+	if user.Phone != nil {
+		phone = *user.Phone
+	}
+	utils.JsonResponse(c, http.StatusOK, verifyEmailResp{
+		OK:               true,
+		UserID:           user.ID,
+		GymID:            user.GymID,
+		FullName:         user.FullName,
+		Email:            user.Email,
+		Phone:            phone,
+		Role:             user.Role,
+		GymName:          gym.Name,
+		AccessToken:      access,
+		RefreshToken:     refresh,
+		SetupCompleted:   gym.IsSetupComplete(),
+		TrialEndsAt:      gym.TrialEndsAt,
+		SubscriptionPlan: gym.SubscriptionPlan,
+		HasPIN:           user.HasPIN(),
+		EmailVerifiedAt:  user.EmailVerifiedAt,
+	})
 }
 
 // handleResendVerification — POST /api/v1/auth/resend-verification
