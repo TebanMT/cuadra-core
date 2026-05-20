@@ -597,13 +597,14 @@ func (s resendAuthSender) Send(ctx context.Context, m email.Message) error {
 
 // buildEmailProviders wires the configured email backend for BOTH the
 // shared/email.Sender (auth flows) and the notifications-side
-// EmailProvider, so prod can't end up with one going to Resend and the
-// other silently logging to stdout.
+// EmailProvider, so prod can't end up with one going to Resend/SMTP and
+// the other silently logging to stdout. The same concrete sender backs
+// both interfaces.
 func buildEmailProviders() (email.Sender, notiDomain.EmailProvider) {
 	provider := strings.ToLower(envOrDefault("EMAIL_PROVIDER", "stdout"))
+	from := envOrDefault("EMAIL_FROM", "noreply@entinta.mx")
 	if provider == "resend" {
 		key := os.Getenv("RESEND_API_KEY")
-		from := envOrDefault("EMAIL_FROM", "noreply@entinta.mx")
 		if key == "" {
 			log.Printf("[email] RESEND_API_KEY missing — falling back to stdout for all email")
 			return email.NewStdoutSender(), notiEmail.NewStdoutProvider()
@@ -614,6 +615,22 @@ func buildEmailProviders() (email.Sender, notiDomain.EmailProvider) {
 			return email.NewStdoutSender(), notiEmail.NewStdoutProvider()
 		}
 		return resendAuthSender{p: p}, p
+	}
+	if provider == "smtp" {
+		s, err := email.NewSMTPSender(email.SMTPOptions{
+			Host:     envOrDefault("SMTP_HOST", "smtp.zoho.com"),
+			Port:     envOrDefault("SMTP_PORT", "587"),
+			Username: os.Getenv("SMTP_USER"),
+			Password: os.Getenv("SMTP_PASSWORD"),
+			From:     from,
+		})
+		if err != nil {
+			log.Printf("[email] smtp init failed: %v — using stdout fallback", err)
+			return email.NewStdoutSender(), notiEmail.NewStdoutProvider()
+		}
+		// SMTPSender satisfies notiDomain.EmailProvider too — single
+		// connection pool, single set of credentials.
+		return s, s
 	}
 	if provider == "mock" {
 		return email.NewStdoutSender(), notiEmail.NewMockProvider()
