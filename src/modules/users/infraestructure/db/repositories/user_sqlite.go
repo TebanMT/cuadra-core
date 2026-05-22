@@ -277,6 +277,9 @@ func enqueueUser(stx *sharedDomain.SqlxTransaction, u *userDomain.User) error {
 	if stx.Queue == nil {
 		return nil
 	}
+	// All NOT NULL columns must be in the payload — the cloud projector's
+	// UPSERT only emits columns present in the map, and a missing required
+	// column on first-sight INSERT triggers a 23502 NOT NULL violation.
 	payload, err := json.Marshal(map[string]any{
 		"id":                   u.ID.String(),
 		"gym_id":               u.GymID.String(),
@@ -290,6 +293,7 @@ func enqueueUser(stx *sharedDomain.SqlxTransaction, u *userDomain.User) error {
 		"must_change_password": u.MustChangePassword,
 		"pin_hash":             u.PinHash,
 		"pin_assigned_at":      pinAssignedAtMs(u.PinAssignedAt),
+		"created_at":           u.CreatedAt.UnixMilli(),
 		"updated_at":           u.UpdatedAt.UnixMilli(),
 	})
 	if err != nil {

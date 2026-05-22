@@ -24,6 +24,13 @@ import (
 // We let the founder configure the recurring price per gym plan (in MXN). The
 // alternative — sending a `preapproval_plan_id` — is fine but harder to
 // preview during testing, so we keep it inline.
+//
+// Plan anual + MP: BLOQUEADO. La doc pública de MP no expone soporte claro
+// para `auto_recurring.frequency_type=years` (los ejemplos sólo muestran
+// `months` y `days`). Antes que inventar un flow que falle en producción,
+// devolvemos ErrUnsupportedPlan para `standard_annual` en este gateway. El
+// dueño que quiera anual usa Stripe (que sí lo soporta de forma nativa con
+// recurring yearly prices).
 type MercadoPagoConfig struct {
 	AccessToken    string
 	AmountStandard float64 // MXN per month for "standard_monthly"

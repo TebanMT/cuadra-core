@@ -147,3 +147,95 @@ func TestValidatorChain(t *testing.T) {
 func errorIs(err, target error) bool {
 	return err == target || (err != nil && err.Error() == target.Error())
 }
+
+// ---------------------------------------------------------------------------
+// Gender (DA-012.7)
+// ---------------------------------------------------------------------------
+
+func TestValidateGender(t *testing.T) {
+	// "" pasa porque el contrato es "no se capturó" (NULL en BD).
+	for _, ok := range []string{"", member.GenderMale, member.GenderFemale, member.GenderUnspecified} {
+		if err := member.ValidateGender(ok); err != nil {
+			t.Errorf("ValidateGender(%q) = %v, want nil", ok, err)
+		}
+	}
+	// Cualquier otro string debe ser ErrInvalidGender — incluye "otro",
+	// "H", "Hombre" (con mayúsculas — el caller normaliza si quiere).
+	for _, bad := range []string{"otro", "H", "Hombre", "MUJER", "no especificado", "x"} {
+		err := member.ValidateGender(bad)
+		if !errorIs(err, memErrors.ErrInvalidGender) {
+			t.Errorf("ValidateGender(%q) = %v, want ErrInvalidGender", bad, err)
+		}
+	}
+}
+
+func TestSetGender(t *testing.T) {
+	m := mustNewMember(t)
+	now := time.Now().UTC()
+	v0 := m.Version
+
+	// Set válido bump versión.
+	if err := m.SetGender(member.GenderFemale, now); err != nil {
+		t.Fatalf("set mujer: %v", err)
+	}
+	if m.Gender == nil || *m.Gender != member.GenderFemale {
+		t.Errorf("Gender = %v, want mujer", m.Gender)
+	}
+	if m.Version != v0+1 {
+		t.Errorf("version = %d, want %d", m.Version, v0+1)
+	}
+
+	// Idempotente: mismo valor no bump.
+	v1 := m.Version
+	if err := m.SetGender(member.GenderFemale, now); err != nil {
+		t.Fatalf("idempotent: %v", err)
+	}
+	if m.Version != v1 {
+		t.Errorf("version bumped on idempotent: %d -> %d", v1, m.Version)
+	}
+
+	// "" limpia y bump.
+	if err := m.SetGender("", now); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if m.Gender != nil {
+		t.Errorf("Gender = %v, want nil after clear", *m.Gender)
+	}
+	if m.Version != v1+1 {
+		t.Errorf("version = %d, want %d after clear", m.Version, v1+1)
+	}
+
+	// Inválido devuelve error sin tocar el campo.
+	v2 := m.Version
+	if err := m.SetGender("otro", now); err == nil {
+		t.Errorf("SetGender(otro) should fail")
+	}
+	if m.Version != v2 {
+		t.Errorf("invalid bump version: %d -> %d", v2, m.Version)
+	}
+}
+
+func TestApplyProfileUpdate_Gender(t *testing.T) {
+	m := mustNewMember(t)
+	now := time.Now().UTC()
+	hombre := member.GenderMale
+	if err := m.ApplyProfileUpdate(member.ProfileUpdate{Gender: &hombre}, now); err != nil {
+		t.Fatalf("update gender: %v", err)
+	}
+	if m.Gender == nil || *m.Gender != member.GenderMale {
+		t.Errorf("Gender = %v, want hombre", m.Gender)
+	}
+	// Update con "" debe limpiar.
+	empty := ""
+	if err := m.ApplyProfileUpdate(member.ProfileUpdate{Gender: &empty}, now); err != nil {
+		t.Fatalf("clear via empty: %v", err)
+	}
+	if m.Gender != nil {
+		t.Errorf("Gender should be nil after empty update, got %v", *m.Gender)
+	}
+	// Update inválido rechaza.
+	bad := "otro"
+	if err := m.ApplyProfileUpdate(member.ProfileUpdate{Gender: &bad}, now); err == nil {
+		t.Errorf("invalid gender via ProfileUpdate should fail")
+	}
+}

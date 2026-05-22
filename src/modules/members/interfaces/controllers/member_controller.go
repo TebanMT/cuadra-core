@@ -114,12 +114,16 @@ func (ctrl *MemberController) RegisterRoutes(r *gin.Engine) {
 // ---------------------------------------------------------------------------
 
 type createMemberReq struct {
-	FullName            string  `json:"full_name" validate:"required,min=3,max=100"`
-	Phone               string  `json:"phone" validate:"required"`
-	Email               *string `json:"email,omitempty"`
-	Birthdate           *string `json:"birthdate,omitempty"` // YYYY-MM-DD
-	PhotoURL            *string `json:"photo_url,omitempty"`
-	Notes               *string `json:"notes,omitempty"`
+	FullName  string  `json:"full_name" validate:"required,min=3,max=100"`
+	Phone     string  `json:"phone" validate:"required"`
+	Email     *string `json:"email,omitempty"`
+	Birthdate *string `json:"birthdate,omitempty"` // YYYY-MM-DD
+	PhotoURL  *string `json:"photo_url,omitempty"`
+	Notes     *string `json:"notes,omitempty"`
+	// Gender opcional. omitempty + ptr para distinguir "campo no enviado"
+	// (FE lo dejó vacío) de "se eligió Prefiero no decir". Valores válidos:
+	// hombre, mujer, no_especificado. El handler valida via dominio.
+	Gender              *string `json:"gender,omitempty"`
 	MembershipTypeID    string  `json:"membership_type_id" validate:"required,uuid"`
 	StartDate           string  `json:"start_date,omitempty"` // YYYY-MM-DD; defaults to today
 	AllowDuplicatePhone bool    `json:"allow_duplicate_phone,omitempty"`
@@ -181,6 +185,8 @@ type updateMemberReq struct {
 	Birthdate *string `json:"birthdate,omitempty"`
 	PhotoURL  *string `json:"photo_url,omitempty"`
 	Notes     *string `json:"notes,omitempty"`
+	// Gender — nil = no change. ""  = limpiar (vuelve a NULL).
+	Gender    *string `json:"gender,omitempty"`
 }
 
 type toggleStatusReq struct {
@@ -220,7 +226,12 @@ type memberResp struct {
 	// pre-auto-assign o saturación de PINs en gym).
 	Pin                  string     `json:"pin,omitempty"`
 	LastContactAttemptAt *time.Time `json:"last_contact_attempt_at,omitempty"`
-	CreatedAt            time.Time  `json:"created_at"`
+	// Gender siempre se envía (sin omitempty) para que el FE pueda
+	// diferenciar entre "no cargado del backend" y "vacío". null en JSON
+	// cuando el socio no tiene captura. NO se incluye en webhooks ni en
+	// CSV export salvo opt-in explícito del dueño (LFPDPPP — dato personal).
+	Gender    *string   `json:"gender"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type membershipResp struct {
@@ -301,6 +312,7 @@ func (ctrl *MemberController) handleCreate(c *gin.Context) {
 		Birthdate:           birthdate,
 		PhotoURL:            req.PhotoURL,
 		Notes:               req.Notes,
+		Gender:              req.Gender,
 		MembershipTypeID:    typeID,
 		StartDate:           startDate,
 		AllowDuplicatePhone: req.AllowDuplicatePhone,
@@ -373,6 +385,7 @@ func (ctrl *MemberController) handleUpdate(c *gin.Context) {
 		GymID: gymID, ActorUserID: userID, MemberID: id,
 		FullName: req.FullName, Phone: req.Phone, Email: req.Email,
 		Birthdate: birthdate, PhotoURL: req.PhotoURL, Notes: req.Notes,
+		Gender: req.Gender,
 	})
 	if err != nil {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
@@ -657,6 +670,7 @@ func toMemberResp(m *memberDomain.Member) memberResp {
 		EnrollmentPaid:       m.EnrollmentPaid,
 		HasPin:               m.PinHash != nil,
 		LastContactAttemptAt: m.LastContactAttemptAt,
+		Gender:               m.Gender,
 		CreatedAt:            m.CreatedAt,
 	}
 	if m.PinPlain != nil {

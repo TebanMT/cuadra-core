@@ -49,6 +49,7 @@ type sqliteMemberRow struct {
 	PinPlain             sql.NullString `db:"pin_plain"`
 	PinAssignedAt        sql.NullInt64  `db:"pin_assigned_at"`
 	LastContactAttemptAt sql.NullInt64  `db:"last_contact_attempt_at"`
+	Gender               sql.NullString `db:"gender"`
 	CreatedBy            string         `db:"created_by"`
 }
 
@@ -81,12 +82,12 @@ func (r *MemberSQLiteRepository) Create(tx sharedDomain.Transaction, m *memberDo
 		    id, gym_id, version, created_at, updated_at, deleted_at,
 		    folio, full_name, phone, email, birthdate, photo_url, notes, status,
 		    enrollment_paid, last_maintenance_paid,
-		    pin_hash, pin_plain, pin_assigned_at, last_contact_attempt_at, created_by
+		    pin_hash, pin_plain, pin_assigned_at, last_contact_attempt_at, gender, created_by
 		) VALUES (
 		    :id, :gym_id, :version, :created_at, :updated_at, :deleted_at,
 		    :folio, :full_name, :phone, :email, :birthdate, :photo_url, :notes, :status,
 		    :enrollment_paid, :last_maintenance_paid,
-		    :pin_hash, :pin_plain, :pin_assigned_at, :last_contact_attempt_at, :created_by
+		    :pin_hash, :pin_plain, :pin_assigned_at, :last_contact_attempt_at, :gender, :created_by
 		)`
 	if _, err := stx.NamedExec(context.Background(), stmt, row); err != nil {
 		return nil, err
@@ -108,7 +109,7 @@ func (r *MemberSQLiteRepository) Update(tx sharedDomain.Transaction, m *memberDo
 		    photo_url = :photo_url, notes = :notes, status = :status,
 		    enrollment_paid = :enrollment_paid, last_maintenance_paid = :last_maintenance_paid,
 		    pin_hash = :pin_hash, pin_plain = :pin_plain, pin_assigned_at = :pin_assigned_at,
-		    last_contact_attempt_at = :last_contact_attempt_at
+		    last_contact_attempt_at = :last_contact_attempt_at, gender = :gender
 		WHERE id = :id`
 	if _, err := stx.NamedExec(context.Background(), stmt, row); err != nil {
 		return nil, err
@@ -312,7 +313,7 @@ func (r *MemberSQLiteRepository) List(tx sharedDomain.Transaction, q memRepo.Lis
 		    m.id, m.gym_id, m.version, m.created_at, m.updated_at, m.deleted_at, m.synced_at,
 		    m.folio, m.full_name, m.phone, m.email, m.birthdate, m.photo_url, m.notes, m.status,
 		    m.enrollment_paid, m.last_maintenance_paid,
-		    m.pin_hash, m.pin_assigned_at, m.last_contact_attempt_at, m.created_by,
+		    m.pin_hash, m.pin_assigned_at, m.last_contact_attempt_at, m.gender, m.created_by,
 		    ms.id AS ms_id, ms.gym_id AS ms_gym_id, ms.version AS ms_version,
 		    ms.created_at AS ms_created_at, ms.updated_at AS ms_updated_at, ms.deleted_at AS ms_deleted_at,
 		    ms.member_id AS ms_member_id, ms.membership_type_id AS ms_membership_type_id,
@@ -446,6 +447,9 @@ func memberToRow(m *memberDomain.Member) sqliteMemberRow {
 	if m.LastContactAttemptAt != nil {
 		row.LastContactAttemptAt = sql.NullInt64{Int64: m.LastContactAttemptAt.UnixMilli(), Valid: true}
 	}
+	if m.Gender != nil {
+		row.Gender = sql.NullString{String: *m.Gender, Valid: true}
+	}
 	return row
 }
 
@@ -504,6 +508,10 @@ func memberFromRow(r *sqliteMemberRow) *memberDomain.Member {
 		t := time.UnixMilli(r.LastContactAttemptAt.Int64).UTC()
 		m.LastContactAttemptAt = &t
 	}
+	if r.Gender.Valid {
+		v := r.Gender.String
+		m.Gender = &v
+	}
 	if r.DeletedAt.Valid {
 		t := time.UnixMilli(r.DeletedAt.Int64).UTC()
 		m.DeletedAt = &t
@@ -537,6 +545,7 @@ func enqueueMember(stx *sharedDomain.SqlxTransaction, m *memberDomain.Member) er
 		"email":           strPtrOrNil(m.Email),
 		"status":          m.Status,
 		"enrollment_paid": m.EnrollmentPaid,
+		"gender":          strPtrOrNil(m.Gender),
 		"created_by":      m.CreatedBy.String(),
 	})
 	if err != nil {

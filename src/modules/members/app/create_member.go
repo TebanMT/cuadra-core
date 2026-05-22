@@ -41,6 +41,10 @@ type CreateMemberInput struct {
 	Birthdate           *time.Time
 	PhotoURL            *string
 	Notes               *string
+	// Gender opcional (DA-012.7). nil o "" = no se captura; valor válido se
+	// persiste tras pasar por memberDomain.ValidateGender. NO se infiere
+	// del nombre.
+	Gender              *string
 	MembershipTypeID    uuid.UUID
 	StartDate           time.Time
 	AllowDuplicatePhone bool
@@ -200,6 +204,7 @@ func (uc *CreateMember) Execute(ctx context.Context, in CreateMemberInput) (*Cre
 			Birthdate: in.Birthdate,
 			PhotoURL:  in.PhotoURL,
 			Notes:     in.Notes,
+			Gender:    in.Gender,
 		}, now); err != nil {
 			return sharedDomain.NewValidationError(err)
 		}

@@ -138,7 +138,13 @@ func (ctrl *AuthController) RegisterRoutes(r *gin.Engine) {
 		authGrp.POST("/signup", ctrl.handleSignup)
 		authGrp.POST("/login", ctrl.handleLogin)
 		authGrp.POST("/logout", ctrl.handleLogout)
-		authGrp.POST("/forgot-password", ctrl.handleForgotPassword)
+		// Forgot-password manda email. Sin throttle, un atacante podría
+		// drenar la cuota diaria SMTP de Zoho con un loop. burst=3 con
+		// refill cada 60s por (IP, email): un usuario humano olvidando su
+		// password 3 veces seguidas sigue pasando; un loop a 1/seg se
+		// bloquea al cuarto.
+		forgotLimiter := middleware.NewRateLimit(3, 1.0/60.0, middleware.IPEmailKey())
+		authGrp.POST("/forgot-password", forgotLimiter.Handler(), ctrl.handleForgotPassword)
 		authGrp.POST("/reset-password", ctrl.handleResetPassword)
 		authGrp.POST("/redeem-installer", ctrl.handleRedeemInstaller)
 		authGrp.POST("/verify-email", ctrl.handleVerifyEmail)
@@ -150,7 +156,10 @@ func (ctrl *AuthController) RegisterRoutes(r *gin.Engine) {
 	authedAuth.POST("/me/pin", ctrl.handleAssignSelfPIN)
 	authedAuth.DELETE("/me/pin", ctrl.handleClearSelfPIN)
 	authedAuth.POST("/installer-token", ctrl.handleIssueInstaller)
-	authedAuth.POST("/resend-verification", ctrl.handleResendVerification)
+	// Resend-verification también manda email; con autenticación es menos
+	// peligroso (un user por gym) pero igual cap a 3 con refill cada 60s.
+	resendLimiter := middleware.NewRateLimit(3, 1.0/60.0, middleware.IPKey())
+	authedAuth.POST("/resend-verification", resendLimiter.Handler(), ctrl.handleResendVerification)
 	authedAuth.GET("/devices", middleware.RequireOwner(), ctrl.handleListDevices)
 
 	// /uploads/presign — acepta JWT (dashboard, futuro) y sk_live_*
@@ -237,9 +246,19 @@ func (ctrl *AuthController) RegisterAccountRoutes(r *gin.Engine) {
 		// guard no rompe el flujo normal. Existe como defensa en
 		// profundidad para que un operador no pueda re-disparar el wizard
 		// y pisar configuración del gym vía API.
-		gyms.PATCH("/me/setup", middleware.RequireOwner(), ctrl.handleUpdateSetup)                  // step 2
-		gyms.POST("/me/setup/complete", middleware.RequireOwner(), ctrl.handleCompleteSetup)        // step 5
-		gyms.PATCH("/me/payment-methods", middleware.RequireOwner(), ctrl.handleUpdatePaymentMeths) // step 4
+		//
+		// Step 2 (datos del gym) y step 5 (cerrar el setup) tienen además
+		// RequireEmailVerified: el FE bloquea visualmente el wizard hasta
+		// que se confirme el correo, pero el BE no se queda dependiendo
+		// del FE. Si llega el PATCH sin email_verified_at, devolvemos 403
+		// con error="email_not_verified". Step 3 (membership-types) y
+		// step 4 (payment-methods) NO tienen el gate porque son endpoints
+		// genéricos que el dueño usa también post-setup; gatearlos ahí
+		// rompería flujos no relacionados con el wizard.
+		emailVerified := middleware.RequireEmailVerified(ctrl.Users, ctrl.UoW)
+		gyms.PATCH("/me/setup", middleware.RequireOwner(), emailVerified, ctrl.handleUpdateSetup)         // step 2
+		gyms.POST("/me/setup/complete", middleware.RequireOwner(), emailVerified, ctrl.handleCompleteSetup) // step 5
+		gyms.PATCH("/me/payment-methods", middleware.RequireOwner(), ctrl.handleUpdatePaymentMeths)        // step 4
 		// PATCH /me uses the FE-driven shape (whatsapp_number, legal_name,
 		// kiosk_volume, …). The legacy handleUpdateProfile is dead code kept
 		// around for direct test callers; the wire handler is the active path.
@@ -354,10 +373,11 @@ type resetPasswordReq struct {
 	NewPassword string `json:"new_password" validate:"required,min=8"`
 }
 
+// updateSetupReq es UC-001 step 2. WhatsApp se quitó del wizard (ADR-009);
+// el dueño Plus conecta el número desde Settings → WhatsApp via PATCH /me.
 type updateSetupReq struct {
-	Name     string `json:"name" validate:"required,min=1,max=100"`
-	City     string `json:"city"`
-	WhatsApp string `json:"whatsapp"`
+	Name string `json:"name" validate:"required,min=1,max=100"`
+	City string `json:"city"`
 }
 
 type updatePaymentMethodsReq struct {
@@ -1174,7 +1194,7 @@ func (ctrl *AuthController) handleUpdateSetup(c *gin.Context) {
 	}
 	out, err := ctrl.UpdateBasicInfo.Execute(c.Request.Context(), gymApp.UpdateBasicInfoInput{
 		GymID: gymID, ActorUserID: userID,
-		Name: req.Name, City: req.City, WhatsApp: req.WhatsApp,
+		Name: req.Name, City: req.City,
 	})
 	if err != nil {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)

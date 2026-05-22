@@ -100,6 +100,41 @@ type Reader interface {
 	// expense_date DESC (más reciente arriba). Alimenta la tabla
 	// "Gastos del período" en reportes.
 	ListExpensesBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time, limit int) ([]ExpenseRow, error)
+
+	// GenderComposition cuenta socios activos por bucket de género. NULL
+	// en members.gender se proyecta a no_especificado para que el FE
+	// pueda graficar 3 segmentos sin tener que merge-ear "null" en cliente.
+	// Activos = m.status='active' AND membership activa con expiry >=
+	// today (mismo criterio que CountActiveMembers).
+	GenderComposition(tx sharedDomain.Transaction, gymID uuid.UUID, today time.Time) (GenderCompositionRow, error)
+
+	// AttendanceByGenderHour devuelve, para los últimos `daysBack` días,
+	// el conteo de check-ins exitosos por hora del día (0-23) cruzado con
+	// género del socio. NULL → no_especificado. Cada hora del día aparece
+	// exactamente una vez en la salida (24 filas) aunque no haya tráfico
+	// (zeros explícitos), para que el FE renderee la grilla completa sin
+	// reconciliar gaps.
+	AttendanceByGenderHour(tx sharedDomain.Transaction, gymID uuid.UUID, daysBack int, now time.Time) ([]AttendanceByGenderHourRow, error)
+}
+
+// GenderCompositionRow es el agregado total + 3 buckets para el donut. El
+// FE calcula porcentajes (Total puede ser 0 y queremos evitar division
+// silenciosa en el server).
+type GenderCompositionRow struct {
+	Hombre         int `json:"hombre"`
+	Mujer          int `json:"mujer"`
+	NoEspecificado int `json:"no_especificado"`
+	Total          int `json:"total"`
+}
+
+// AttendanceByGenderHourRow — una fila por hora (0..23) con conteos por
+// bucket. JSON tags para emitir tal cual desde el controller sin DTO
+// adicional (mismo patrón que DailyIncome).
+type AttendanceByGenderHourRow struct {
+	Hour           int `json:"hour"`
+	Hombre         int `json:"hombre"`
+	Mujer          int `json:"mujer"`
+	NoEspecificado int `json:"no_especificado"`
 }
 
 // ExpenseRow — una fila de la tabla "Gastos del período". Refleja la

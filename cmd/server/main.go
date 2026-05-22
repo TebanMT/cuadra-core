@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -75,12 +76,16 @@ import (
 	"github.com/cuadra/cuadra-core/src/shared/middleware"
 	"github.com/cuadra/cuadra-core/src/shared/r2"
 	"github.com/cuadra/cuadra-core/src/shared/recovery"
+	"github.com/cuadra/cuadra-core/src/shared/runtime"
 	"github.com/cuadra/cuadra-core/src/shared/sidecartoken"
 	syncShared "github.com/cuadra/cuadra-core/src/shared/sync"
 )
 
 func main() {
 	_ = godotenv.Load()
+
+	logRuntimeMode()
+	guardDevAgainstProd()
 
 	dsn := mustEnv("DATABASE_URL")
 	db := infraDB.InitPostgres(dsn)
@@ -245,6 +250,7 @@ func main() {
 	updateOwnerAlert := notiApp.NewUpdateOwnerAlert(alertConfigRepo, templateRepo, uow, recorder)
 	broadcast := notiApp.NewBroadcast(notificationRepo, memberRepo, gymRepo, uow, recorder)
 	listNotifications := notiApp.NewListNotifications(notificationRepo, uow)
+	retryNotification := notiApp.NewRetryNotification(notificationRepo, uow, recorder)
 	processWebhook := notiApp.NewProcessWebhook(notificationRepo, whatsappEventRepo, uow)
 	billingSubscriber := notiApp.NewBillingEventSubscriber(enqueueReceipt)
 
@@ -282,6 +288,7 @@ func main() {
 	attentionRequired := reportsApp.NewAttentionRequired(reportsReader, uow)
 	rangeReport := reportsApp.NewRangeReport(reportsReader, uow)
 	exportReport := reportsApp.NewExportReport(reportsReader, gymRepo, uow, attentionRequired, rangeReport)
+	genderReport := reportsApp.NewGenderReport(reportsReader, uow)
 	markContacted := memApp.NewMarkContacted(memberRepo, contactAttemptRepo, uow, recorder)
 	markLost := memApp.NewMarkLost(memberRepo, uow, recorder)
 	// PIN use cases for cloud-side POST/DELETE /auth/me/pin. The dashboard
@@ -341,9 +348,10 @@ func main() {
 	expenseController.PlanGate = plusGate
 	// Cloud has no biometric reader — fingerprint flows live on the sidecar.
 	checkinCtrl := chkCtrl.NewCheckinController(checkinManual, checkinPin, checkinOverride, checkinRepo, uow, nil, tokens)
-	reportsController := reportsCtrl.NewReportsController(dashboard, attentionRequired, rangeReport, exportReport, markContacted, markLost, tokens)
+	reportsController := reportsCtrl.NewReportsController(dashboard, attentionRequired, rangeReport, exportReport, markContacted, markLost, tokens).
+		WithGenderReport(genderReport)
 	reportsController.PlanGate = plusGate
-	notificationsCtrl := notiCtrl.NewController(connectWhatsApp, disconnectWhatsApp, whatsappStatus, listTemplates, updateTemplate, broadcast, listNotifications, listOwnerAlerts, updateOwnerAlert, whatsappProvider, tokens)
+	notificationsCtrl := notiCtrl.NewController(connectWhatsApp, disconnectWhatsApp, whatsappStatus, listTemplates, updateTemplate, broadcast, listNotifications, retryNotification, listOwnerAlerts, updateOwnerAlert, whatsappProvider, tokens)
 	notificationsCtrl.PlanGate = plusGate
 
 	// ── Challenges (retos) ────────────────────────────────────────────────
@@ -397,6 +405,7 @@ func main() {
 
 	// ── Subscriptions (Fase 1: cobranza al dueño) ─────────────────────────
 	subEventRepo := subDB.NewEventPostgresRepository()
+	oxxoRenewalReader := subDB.NewOXXORenewalPostgresReader()
 	recordSubEvent := subApp.NewRecordEvent(subEventRepo, gymRepo, uow, recorder)
 	getSubscription := subApp.NewGetSubscription(subEventRepo, gymRepo, uow)
 	subVerifier := subCtrl.NewWebhookVerifier(
@@ -405,10 +414,26 @@ func main() {
 		os.Getenv("ENVIRONMENT") == "production",
 	)
 	subGateways := buildSubscriptionGateways()
-	billingSuccessURL := envOrDefault("BILLING_SUCCESS_URL", baseURL+"/settings/billing?status=success")
-	billingCancelURL := envOrDefault("BILLING_CANCEL_URL", baseURL+"/settings/billing?status=cancelled")
+	// Stripe nos redirige al success/cancel URL al cerrar Checkout, así que
+	// estas URLs son del DASHBOARD (no del API). El path es /settings/subscription
+	// — donde vive SubscriptionPage, que lee ?status=success|cancelled para
+	// pintar el toast post-checkout. Antes hardcodeaba baseURL (API host) +
+	// /settings/billing (ruta inexistente en el router), dando 404 al volver
+	// del Checkout.
+	billingSuccessURL := envOrDefault("BILLING_SUCCESS_URL", dashboardURL+"/settings/subscription?status=success")
+	billingCancelURL := envOrDefault("BILLING_CANCEL_URL", dashboardURL+"/settings/subscription?status=cancelled")
 	startCheckout := subApp.NewStartCheckout(subGateways, gymRepo, userRepo, uow, billingSuccessURL, billingCancelURL)
-	subscriptionsCtrl := subCtrl.NewSubscriptionController(recordSubEvent, getSubscription, startCheckout, subVerifier, tokens)
+	// Billing portal: sólo Stripe lo expone. Si MP es el único gateway
+	// configurado (MP_ACCESS_TOKEN set + STRIPE_SECRET_KEY ausente), el
+	// portal sigue siendo nil y el endpoint devuelve 503. Aceptable en
+	// MVP — MP no tiene equivalente al Customer Portal hosted.
+	var billingPortalGateway subDomain.BillingPortalGateway
+	if g, ok := subGateways[subDomain.ProviderStripe].(subDomain.BillingPortalGateway); ok {
+		billingPortalGateway = g
+	}
+	billingPortalReturnURL := envOrDefault("BILLING_PORTAL_RETURN_URL", dashboardURL+"/settings/subscription")
+	startBillingPortal := subApp.NewStartBillingPortal(billingPortalGateway, gymRepo, uow, billingPortalReturnURL)
+	subscriptionsCtrl := subCtrl.NewSubscriptionController(recordSubEvent, getSubscription, startCheckout, startBillingPortal, subVerifier, tokens)
 	twilioWebhookURL := envOrDefault("TWILIO_WEBHOOK_URL", baseURL+"/api/v1/webhooks/twilio")
 	notiWebhookCtrl := notiCtrl.NewWebhookController(processWebhook, envOrDefault("TWILIO_AUTH_TOKEN", ""), twilioWebhookURL)
 
@@ -463,6 +488,16 @@ func main() {
 	go dispatchWorker.Start(bgCtx)
 	go expiryScheduler.Start(bgCtx)
 
+	// Renovación OXXO anual: el plan OXXO no es subscription en Stripe (no
+	// renueva sola), así que el cloud manda recordatorios + link de re-checkout
+	// a 30/14/3/0 días del vencimiento, y tras 7 días de gracia post-vencimiento
+	// dispara EventCancelled. Una sola goroutine que corre diaria (default 24h).
+	oxxoReminderUC := subApp.NewRunOXXORenewalReminders(oxxoRenewalReader, notificationRepo, gymRepo, userRepo, startCheckout, uow)
+	oxxoCancelUC := subApp.NewCancelExpiredOXXO(oxxoRenewalReader, recordSubEvent, uow)
+	oxxoInterval := time.Duration(envInt("OXXO_RENEWAL_REMINDER_INTERVAL_H", 24)) * time.Hour
+	oxxoWorker := subApp.NewOXXORenewalWorker(oxxoReminderUC, oxxoCancelUC, oxxoInterval)
+	go oxxoWorker.Start(bgCtx)
+
 	port := envOrDefault("PORT", "8080")
 	log.Printf("tinta-server starting on :%s", port)
 	if err := r.Run(":" + port); err != nil {
@@ -492,6 +527,35 @@ func parseOrigins(raw string) []string {
 		if s := strings.TrimSpace(p); s != "" {
 			out = append(out, s)
 		}
+	}
+	return out
+}
+
+// parseTwilioContentSIDs decodifica un mapa template_key→Content SID
+// desde una env var con formato `expiry_reminder_3d=HXabc...,receipt=HXdef...`.
+// Vacío o malformado devuelve un mapa nulo; el provider degradará a
+// freeform y Twilio rechazará fuera de la ventana 24h (lo que es
+// preferible a enviar un mensaje "raw" no-aprobado por Meta y arriesgar
+// suspensión del número WhatsApp Business).
+func parseTwilioContentSIDs(raw string) map[string]string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	out := map[string]string{}
+	for _, pair := range strings.Split(raw, ",") {
+		kv := strings.SplitN(strings.TrimSpace(pair), "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		k := strings.TrimSpace(kv[0])
+		v := strings.TrimSpace(kv[1])
+		if k == "" || v == "" {
+			continue
+		}
+		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
@@ -531,9 +595,11 @@ func envFloat(key string, fallback float64) float64 {
 func buildSubscriptionGateways() map[subDomain.Provider]subDomain.CheckoutGateway {
 	out := map[subDomain.Provider]subDomain.CheckoutGateway{}
 	if g := subPay.NewStripeGateway(subPay.StripeConfig{
-		SecretKey:     os.Getenv("STRIPE_SECRET_KEY"),
-		PriceStandard: os.Getenv("STRIPE_PRICE_STANDARD"),
-		PricePlus:     os.Getenv("STRIPE_PRICE_PLUS"),
+		SecretKey:               os.Getenv("STRIPE_SECRET_KEY"),
+		PriceStandard:           os.Getenv("STRIPE_PRICE_STANDARD"),
+		PriceStandardAnnual:     os.Getenv("STRIPE_PRICE_STANDARD_ANNUAL"),
+		PriceStandardAnnualOXXO: os.Getenv("STRIPE_PRICE_STANDARD_ANNUAL_OXXO"),
+		PricePlus:               os.Getenv("STRIPE_PRICE_PLUS"),
 	}); g != nil {
 		out[subDomain.ProviderStripe] = g
 	} else {
@@ -565,10 +631,11 @@ func buildWhatsAppProvider(baseURL string) notiDomain.WhatsAppProvider {
 			return notiWhatsApp.NewStdoutProvider()
 		}
 		opts := notiWhatsApp.TwilioOptions{
-			AccountSID:        sid,
-			AuthToken:         token,
-			StatusCallbackURL: envOrDefault("TWILIO_WEBHOOK_URL", baseURL+"/api/v1/webhooks/twilio"),
-			OTPFromNumber:     envOrDefault("TWILIO_OTP_FROM", ""),
+			AccountSID:          sid,
+			AuthToken:           token,
+			StatusCallbackURL:   envOrDefault("TWILIO_WEBHOOK_URL", baseURL+"/api/v1/webhooks/twilio"),
+			OTPFromNumber:       envOrDefault("TWILIO_OTP_FROM", ""),
+			TemplateContentSIDs: parseTwilioContentSIDs(os.Getenv("TWILIO_CONTENT_SIDS")),
 		}
 		p, err := notiWhatsApp.NewTwilioProvider(opts)
 		if err != nil {
@@ -636,4 +703,42 @@ func buildEmailProviders() (email.Sender, notiDomain.EmailProvider) {
 		return email.NewStdoutSender(), notiEmail.NewMockProvider()
 	}
 	return email.NewStdoutSender(), notiEmail.NewStdoutProvider()
+}
+
+// logRuntimeMode imprime el modo activo al boot. En production guarda
+// silencio (es el default); en test emite un INFO; en dev grita un WARN
+// para que sea imposible no notar que los gates Plus están relajados.
+func logRuntimeMode() {
+	switch runtime.Current() {
+	case runtime.ModeDev:
+		log.Printf("WARN ⚠️ TINTA_MODE=dev — Plus gates DISABLED — no apuntar a cloud de prod")
+	case runtime.ModeTest:
+		log.Printf("INFO TINTA_MODE=test — Plus gates respected")
+	}
+}
+
+// prodHostRegexp detecta hosts de producción dentro de URLs de DB o cloud.
+// Match contra entinta.app (con subdominios api., db., etc.) y cualquier
+// host que contenga literalmente "prod" — los staging/CI typically usan
+// "staging" o "dev" así que el cruce de patrones es aceptable.
+var prodHostRegexp = regexp.MustCompile(`(?i)(api\.)?entinta\.app|prod`)
+
+// guardDevAgainstProd aborta el arranque si TINTA_MODE=dev coincide con
+// DATABASE_URL o TINTA_CLOUD_URL apuntando a infra de producción. El
+// riesgo es accidentalmente desbloquear features Plus contra la base
+// real — el bypass es deliberadamente process-wide, así que mejor que
+// el binario no levante a que sirva tráfico con gates abiertos.
+func guardDevAgainstProd() {
+	if !runtime.IsDev() {
+		return
+	}
+	for _, key := range []string{"DATABASE_URL", "TINTA_CLOUD_URL"} {
+		v := os.Getenv(key)
+		if v == "" {
+			continue
+		}
+		if prodHostRegexp.MatchString(v) {
+			log.Fatalf("TINTA_MODE=dev con %s apuntando a prod — abortando para evitar bypass de gates Plus en producción", key)
+		}
+	}
 }

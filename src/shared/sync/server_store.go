@@ -71,9 +71,20 @@ func DecodeCursor(s string) (FullCursor, error) {
 // PostgresStore implements Store against the cloud `sync_entities` table.
 // All work runs inside a caller-provided GORM transaction (ADR-001 §3.3:
 // serializable Postgres transaction per push item).
-type PostgresStore struct{}
+type PostgresStore struct {
+	// MaxClockSkew caps how far the sidecar's payload.updated_at may sit
+	// from the server's wall clock before we reject. Zero disables the
+	// check (legacy behaviour). 5 minutes is generous enough for any
+	// reasonable NTP drift but tight enough that a BIOS several hours off
+	// can't win LWW against legitimate cloud writes.
+	MaxClockSkew time.Duration
+}
 
-func NewPostgresStore() *PostgresStore { return &PostgresStore{} }
+const defaultMaxClockSkew = 5 * time.Minute
+
+func NewPostgresStore() *PostgresStore {
+	return &PostgresStore{MaxClockSkew: defaultMaxClockSkew}
+}
 
 // UpsertOne applies one push item with LWW semantics. Returns an
 // UpsertResult describing what happened (accepted / conflict_*) so the
@@ -99,6 +110,25 @@ func (s *PostgresStore) UpsertOne(
 	}
 	if v, ok := pl["gym_id"].(string); !ok || v != gymID.String() {
 		return UpsertResult{Status: StatusRejectedUnauthorized}, nil
+	}
+
+	// Clock skew check. The LWW algorithm uses payload.updated_at as the
+	// authoritative client timestamp; if the sidecar's reloj está fuera de
+	// rango (BIOS desincronizado, batería CMOS muerta) ese cliente ganaría
+	// todos los conflictos contra cambios cloud legítimos. Rechazamos
+	// permanente y dejamos que el operador alinee NTP — la alternativa
+	// (silent-clamp-to-now) corrompe el orden de operaciones del propio
+	// sidecar.
+	if s.MaxClockSkew > 0 {
+		if ct := extractUpdatedAt(pl); !ct.IsZero() {
+			drift := ct.Sub(time.Now().UTC())
+			if drift < 0 {
+				drift = -drift
+			}
+			if drift > s.MaxClockSkew {
+				return UpsertResult{Status: StatusRejectedClockSkew}, nil
+			}
+		}
 	}
 
 	// Lock the row (or absence) for the duration of this transaction.

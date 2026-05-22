@@ -47,6 +47,7 @@ type sqliteGymRow struct {
 	TrialEndsAt              sql.NullInt64  `db:"trial_ends_at"`
 	SubscriptionEndsAt       sql.NullInt64  `db:"subscription_ends_at"`
 	SubscriptionStatus       string         `db:"subscription_status"`
+	StripeCustomerID         sql.NullString `db:"stripe_customer_id"`
 	SetupCompletedAt         sql.NullInt64  `db:"setup_completed_at"`
 	WhatsAppBusinessPhone    sql.NullString `db:"whatsapp_business_phone"`
 	WhatsAppBusinessTokenEnc []byte         `db:"whatsapp_business_token_enc"`
@@ -89,6 +90,7 @@ func gymToRow(g *gymDomain.Gym) sqliteGymRow {
 		TrialEndsAt:              nullableMs(g.TrialEndsAt),
 		SubscriptionEndsAt:       nullableMs(g.SubscriptionEndsAt),
 		SubscriptionStatus:       g.SubscriptionStatus,
+		StripeCustomerID:         nullableString(g.StripeCustomerID),
 		SetupCompletedAt:         nullableMs(g.SetupCompletedAt),
 		WhatsAppBusinessPhone:    nullableString(g.WhatsAppBusinessPhone),
 		WhatsAppBusinessTokenEnc: g.WhatsAppBusinessTokenEnc,
@@ -141,6 +143,7 @@ func gymFromRow(r *sqliteGymRow) *gymDomain.Gym {
 	g.OpenTime = nullToPtr(r.OpenTime)
 	g.CloseTime = nullToPtr(r.CloseTime)
 	g.WhatsAppBusinessPhone = nullToPtr(r.WhatsAppBusinessPhone)
+	g.StripeCustomerID = nullToPtr(r.StripeCustomerID)
 	g.TrialEndsAt = nullMsToTime(r.TrialEndsAt)
 	g.SubscriptionEndsAt = nullMsToTime(r.SubscriptionEndsAt)
 	g.SetupCompletedAt = nullMsToTime(r.SetupCompletedAt)
@@ -159,7 +162,7 @@ func (r *GymSQLiteRepository) Create(tx sharedDomain.Transaction, g *gymDomain.G
 		    rfc, razon_social, codigo_postal, regimen_fiscal,
 		    logo_url, primary_color, secondary_color,
 		    payment_methods, open_time, close_time,
-		    subscription_plan, trial_ends_at, subscription_ends_at, subscription_status, setup_completed_at,
+		    subscription_plan, trial_ends_at, subscription_ends_at, subscription_status, stripe_customer_id, setup_completed_at,
 		    whatsapp_business_phone, whatsapp_business_token_enc, whatsapp_connected_at,
 		    kiosk_settings, charge_settings
 		) VALUES (
@@ -168,7 +171,7 @@ func (r *GymSQLiteRepository) Create(tx sharedDomain.Transaction, g *gymDomain.G
 		    :rfc, :razon_social, :codigo_postal, :regimen_fiscal,
 		    :logo_url, :primary_color, :secondary_color,
 		    :payment_methods, :open_time, :close_time,
-		    :subscription_plan, :trial_ends_at, :subscription_ends_at, :subscription_status, :setup_completed_at,
+		    :subscription_plan, :trial_ends_at, :subscription_ends_at, :subscription_status, :stripe_customer_id, :setup_completed_at,
 		    :whatsapp_business_phone, :whatsapp_business_token_enc, :whatsapp_connected_at,
 		    :kiosk_settings, :charge_settings
 		)`
@@ -208,6 +211,7 @@ func (r *GymSQLiteRepository) Update(tx sharedDomain.Transaction, g *gymDomain.G
 		    payment_methods = :payment_methods, open_time = :open_time, close_time = :close_time,
 		    subscription_plan = :subscription_plan, trial_ends_at = :trial_ends_at,
 		    subscription_ends_at = :subscription_ends_at, subscription_status = :subscription_status,
+		    stripe_customer_id = :stripe_customer_id,
 		    setup_completed_at = :setup_completed_at,
 		    whatsapp_business_phone = :whatsapp_business_phone,
 		    whatsapp_business_token_enc = :whatsapp_business_token_enc,
@@ -263,6 +267,23 @@ func (r *GymSQLiteRepository) HasMembershipType(tx sharedDomain.Transaction, gym
 	return n > 0, nil
 }
 
+// enqueueGym arma el payload que el sidecar va a empujar al cloud para el
+// row de `gyms`. NO incluye campos de billing — el cloud es source of truth
+// para todo lo que viene de Stripe / Mercado Pago (subscription_plan,
+// subscription_status, subscription_ends_at, trial_ends_at, stripe_customer_id).
+//
+// Por qué importa: el proyector del cloud (`projectGeneric` en
+// shared/sync/projector.go) hace ON CONFLICT DO UPDATE columna-por-columna
+// sólo sobre las llaves presentes en el payload. Si el sidecar incluye
+// `subscription_plan` con un valor stale, sobreescribe la decisión que el
+// webhook de Stripe ya había aplicado al aggregate (`gym.ActivateSubscription`).
+// Eso pasó en producción: un push del sidecar después de un checkout
+// exitoso dejaba subscription_ends_at correcto (no estaba en el payload)
+// pero subscription_plan rebotaba a "trial" (sí estaba).
+//
+// Si en algún momento el sidecar necesita propagar info de billing al
+// cloud (improbable — el cloud siempre se entera primero por webhook),
+// hay que rediseñar este contrato, no agregar campos aquí.
 func enqueueGym(stx *sharedDomain.SqlxTransaction, g *gymDomain.Gym) error {
 	if stx.Queue == nil {
 		return nil
@@ -272,21 +293,18 @@ func enqueueGym(stx *sharedDomain.SqlxTransaction, g *gymDomain.Gym) error {
 		chargeSettings = map[string]any{}
 	}
 	payload, err := json.Marshal(map[string]any{
-		"id":                  g.ID.String(),
-		"gym_id":              g.ID.String(),
-		"version":             g.Version,
-		"name":                g.Name,
-		"city":                g.City,
-		"whatsapp":            g.WhatsApp,
-		"country":             g.Country,
-		"timezone":            g.Timezone,
-		"payment_methods":     g.PaymentMethods,
-		"subscription_plan":   g.SubscriptionPlan,
-		"subscription_status": g.SubscriptionStatus,
-		"trial_ends_at":       g.TrialEndsAt,
-		"setup_completed_at":  g.SetupCompletedAt,
-		"charge_settings":     chargeSettings,
-		"updated_at":          g.UpdatedAt.UnixMilli(),
+		"id":                 g.ID.String(),
+		"gym_id":             g.ID.String(),
+		"version":            g.Version,
+		"name":               g.Name,
+		"city":               g.City,
+		"whatsapp":           g.WhatsApp,
+		"country":            g.Country,
+		"timezone":           g.Timezone,
+		"payment_methods":    g.PaymentMethods,
+		"setup_completed_at": g.SetupCompletedAt,
+		"charge_settings":    chargeSettings,
+		"updated_at":         g.UpdatedAt.UnixMilli(),
 	})
 	if err != nil {
 		return err

@@ -78,6 +78,7 @@ import (
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 	"github.com/cuadra/cuadra-core/src/shared/email"
 	"github.com/cuadra/cuadra-core/src/shared/middleware"
+	"github.com/cuadra/cuadra-core/src/shared/runtime"
 	syncShared "github.com/cuadra/cuadra-core/src/shared/sync"
 )
 
@@ -130,6 +131,8 @@ func main() {
 		log.Printf("could not open sidecar log file %q: %v", logPath, err)
 	}
 	log.Printf("sidecar log file: %s", logPath)
+
+	logRuntimeMode()
 
 	db := infraDB.InitSQLite(dbPath)
 	defer infraDB.CloseSQLite()
@@ -293,6 +296,7 @@ func main() {
 	updateOwnerAlert := notiApp.NewUpdateOwnerAlert(alertConfigRepo, templateRepo, uow, recorder)
 	broadcast := notiApp.NewBroadcast(notificationRepo, memberRepo, gymRepo, uow, recorder)
 	listNotifications := notiApp.NewListNotifications(notificationRepo, uow)
+	retryNotification := notiApp.NewRetryNotification(notificationRepo, uow, recorder)
 	billingSubscriber := notiApp.NewBillingEventSubscriber(enqueueReceipt)
 	_ = emailMock
 
@@ -332,6 +336,7 @@ func main() {
 	attentionRequired := reportsApp.NewAttentionRequired(reportsReader, uow)
 	rangeReport := reportsApp.NewRangeReport(reportsReader, uow)
 	exportReport := reportsApp.NewExportReport(reportsReader, gymRepo, uow, attentionRequired, rangeReport)
+	genderReport := reportsApp.NewGenderReport(reportsReader, uow)
 	markContacted := memApp.NewMarkContacted(memberRepo, contactAttemptRepo, uow, recorder)
 	markLost := memApp.NewMarkLost(memberRepo, uow, recorder)
 
@@ -421,7 +426,7 @@ func main() {
 	// fingerprintCtrl + kioskCtrl stay for kiosk-loop and test callers.
 	biometricCtrl := chkCtrl.NewBiometricController(bioReader, registerFingerprint, checkinFingerprint, tokens).
 		WithSibling(checkinCtrl)
-	notificationsCtrl := notiCtrl.NewController(connectWhatsApp, disconnectWhatsApp, whatsappStatus, listTemplates, updateTemplate, broadcast, listNotifications, listOwnerAlerts, updateOwnerAlert, whatsappMock, tokens)
+	notificationsCtrl := notiCtrl.NewController(connectWhatsApp, disconnectWhatsApp, whatsappStatus, listTemplates, updateTemplate, broadcast, listNotifications, retryNotification, listOwnerAlerts, updateOwnerAlert, whatsappMock, tokens)
 	notificationsCtrl.PlanGate = plusGate
 
 	// Suscripción — sidecar sólo expone el GET. El historial ahora SÍ vive
@@ -432,14 +437,15 @@ func main() {
 	// proxy-ear sólo agregaría complejidad sin ganancia de UX).
 	subEvents := subRepoLite.NewEventSQLiteRepository()
 	getSubscription := subApp.NewGetSubscription(subEvents, gymRepo, uow)
-	subscriptionCtrl := subCtrl.NewSubscriptionController(nil, getSubscription, nil, nil, tokens)
+	subscriptionCtrl := subCtrl.NewSubscriptionController(nil, getSubscription, nil, nil, nil, tokens)
 
 	// Bitácora (item 9) — owner-only. El sidecar lee del audit_log local
 	// (recordado por cada use case en cada gym). El reader concreto lo
 	// elige el build tag (NewSQLiteReader sólo compila bajo //go:build sidecar).
 	auditCtrl := audithttp.NewController(audit.NewSQLiteReader(), userRepo, uow, tokens)
 	auditCtrl.PlanGate = plusGate
-	reportsController := reportsCtrl.NewReportsController(dashboard, attentionRequired, rangeReport, exportReport, markContacted, markLost, tokens)
+	reportsController := reportsCtrl.NewReportsController(dashboard, attentionRequired, rangeReport, exportReport, markContacted, markLost, tokens).
+		WithGenderReport(genderReport)
 	reportsController.PlanGate = plusGate
 	challengeCtrl := challengesCtrl.NewChallengeController(challengesCtrl.ChallengeController{
 		CreateChallenge:        createChallenge,
@@ -743,4 +749,17 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+// logRuntimeMode imprime el modo activo al boot. En production guarda
+// silencio; en test emite un INFO; en dev grita un WARN. NO hay guardrail
+// contra prod-DSN acá: el sidecar corre en la PC del cliente y nunca
+// apunta a la base cloud — esa protección vive en cmd/server.
+func logRuntimeMode() {
+	switch runtime.Current() {
+	case runtime.ModeDev:
+		log.Printf("WARN ⚠️ TINTA_MODE=dev — Plus gates DISABLED")
+	case runtime.ModeTest:
+		log.Printf("INFO TINTA_MODE=test — Plus gates respected")
+	}
 }

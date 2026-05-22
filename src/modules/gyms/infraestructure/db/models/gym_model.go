@@ -41,6 +41,7 @@ type GymModel struct {
 	TrialEndsAt        *time.Time `gorm:"column:trial_ends_at"`
 	SubscriptionEndsAt *time.Time `gorm:"column:subscription_ends_at"`
 	SubscriptionStatus string     `gorm:"not null;default:'active';column:subscription_status"`
+	StripeCustomerID   *string    `gorm:"column:stripe_customer_id"`
 	SetupCompletedAt   *time.Time `gorm:"column:setup_completed_at"`
 
 	WhatsAppBusinessPhone    *string    `gorm:"column:whatsapp_business_phone"`

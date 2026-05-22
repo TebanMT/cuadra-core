@@ -54,6 +54,13 @@ func (r *EventSQLiteRepository) ExistsByExternalID(_ sharedDomain.Transaction, _
 	return false, nil
 }
 
+// LatestOccurredAtForGym — el sidecar no procesa webhooks; el ordering por
+// OccurredAt es responsabilidad del cloud (RecordEvent). Devolvemos nil para
+// que cualquier caller inocente vea "sin eventos previos" y avance.
+func (r *EventSQLiteRepository) LatestOccurredAtForGym(_ sharedDomain.Transaction, _ uuid.UUID) (*time.Time, error) {
+	return nil, nil
+}
+
 // ListByGym devuelve los últimos `limit` eventos del gym ordenados por
 // occurred_at desc. Es lo que la página Suscripción del desktop renderea
 // como "historial de pagos".

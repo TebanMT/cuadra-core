@@ -17,11 +17,17 @@ import (
 // SuccessURL / CancelURL are server-side defaults (PUBLIC_BASE_URL +
 // "/settings/billing?…") — the FE doesn't get to override them, so a malicious
 // redirect can't be smuggled in.
+//
+// PaymentMethod: "" o "card" = comportamiento default. "oxxo" sólo es válido
+// con Provider=stripe y Plan=standard_annual (ver gateway.go para el por qué
+// — Stripe no soporta OXXO en mode=subscription, así que sólo lo ofrecemos
+// como pago one-time del plan anual).
 type StartCheckoutInput struct {
-	GymID    uuid.UUID
-	UserID   uuid.UUID
-	Provider subDomain.Provider
-	Plan     string
+	GymID         uuid.UUID
+	UserID        uuid.UUID
+	Provider      subDomain.Provider
+	Plan          string
+	PaymentMethod string
 }
 
 // StartCheckoutOutput is the redirect URL the FE opens in the browser.
@@ -67,6 +73,21 @@ func (uc *StartCheckout) Execute(ctx context.Context, in StartCheckoutInput) (St
 	if !gymDomain.IsPaidPlan(in.Plan) {
 		return StartCheckoutOutput{}, sharedDomain.NewValidationError(errors.New("plan must be standard_monthly, standard_annual, plus_monthly or plus_annual"))
 	}
+	// Normaliza método de pago. Cliente puede mandar "" o "card" para
+	// flujo default; "oxxo" sólo aplica al combo Stripe + Standard anual.
+	switch in.PaymentMethod {
+	case "", "card", "oxxo":
+	default:
+		return StartCheckoutOutput{}, sharedDomain.NewValidationError(errors.New("payment_method must be empty, card, or oxxo"))
+	}
+	if in.PaymentMethod == "oxxo" {
+		if in.Provider != subDomain.ProviderStripe {
+			return StartCheckoutOutput{}, sharedDomain.NewValidationError(errors.New("oxxo only available via stripe"))
+		}
+		if in.Plan != gymDomain.PlanStandardAnnual {
+			return StartCheckoutOutput{}, sharedDomain.NewValidationError(errors.New("oxxo only available for standard_annual"))
+		}
+	}
 	gateway, ok := uc.Gateways[in.Provider]
 	if !ok || gateway == nil {
 		return StartCheckoutOutput{}, sharedDomain.NewBusinessError(subDomain.ErrGatewayUnavailable, "Esta forma de pago no está disponible. Intenta con la otra.")
@@ -96,6 +117,7 @@ func (uc *StartCheckout) Execute(ctx context.Context, in StartCheckoutInput) (St
 		CustomerEmail: user.Email,
 		SuccessURL:    uc.SuccessURL,
 		CancelURL:     uc.CancelURL,
+		PaymentMethod: in.PaymentMethod,
 	})
 	if err != nil {
 		if errors.Is(err, subDomain.ErrUnsupportedPlan) {

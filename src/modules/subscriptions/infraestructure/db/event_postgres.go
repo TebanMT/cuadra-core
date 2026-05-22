@@ -14,13 +14,20 @@ import (
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 )
 
-// SubscriptionEventModel is the GORM row.
+// SubscriptionEventModel is the GORM row. El uniqueIndex `ux_sub_event_external`
+// es compuesto `(provider, external_id)` — declarado con el mismo nombre en
+// ambas columnas (que GORM compone como índice multi-col al matchear el name).
+// Esto se alinea con `CREATE UNIQUE INDEX ux_sub_event_external (provider,
+// external_id)` en migration 007. Sin la parte de provider, dos providers que
+// usaran el mismo id numérico colisionarían (hoy MP prefijea `mp-` y Stripe
+// usa UUID, pero el tag debe casar el schema para evitar drift si alguien
+// corriera autoMigrate).
 type SubscriptionEventModel struct {
 	ID           uuid.UUID  `gorm:"primaryKey;column:id"`
 	GymID        uuid.UUID  `gorm:"not null;column:gym_id;index"`
-	Provider     string     `gorm:"not null;column:provider"`
+	Provider     string     `gorm:"not null;column:provider;uniqueIndex:ux_sub_event_external,priority:1"`
 	Type         string     `gorm:"not null;column:type"`
-	ExternalID   string     `gorm:"not null;column:external_id;uniqueIndex:ux_sub_event_external"`
+	ExternalID   string     `gorm:"not null;column:external_id;uniqueIndex:ux_sub_event_external,priority:2"`
 	Plan         string     `gorm:"not null;column:plan"`
 	Amount       *float64   `gorm:"column:amount"`
 	Currency     *string    `gorm:"column:currency"`
@@ -77,6 +84,22 @@ func (r *EventPostgresRepository) ExistsByExternalID(tx sharedDomain.Transaction
 		Where("provider = ? AND external_id = ?", string(provider), externalID).
 		Count(&n).Error
 	return n > 0, err
+}
+
+func (r *EventPostgresRepository) LatestOccurredAtForGym(tx sharedDomain.Transaction, gymID uuid.UUID) (*time.Time, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	var t time.Time
+	err := gormTx.Model(&SubscriptionEventModel{}).
+		Select("COALESCE(MAX(occurred_at), 'epoch'::timestamptz)").
+		Where("gym_id = ?", gymID).
+		Scan(&t).Error
+	if err != nil {
+		return nil, err
+	}
+	if t.IsZero() || t.Unix() <= 0 {
+		return nil, nil
+	}
+	return &t, nil
 }
 
 func (r *EventPostgresRepository) ListByGym(tx sharedDomain.Transaction, gymID uuid.UUID, limit int) ([]*subDomain.Event, error) {

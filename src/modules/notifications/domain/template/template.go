@@ -172,6 +172,41 @@ func DefaultLibrary() []Definition {
 			Variables: []string{"code"},
 			Body:      "Tu código de verificación de Cuadra es {code}. Vence en 10 minutos.",
 		},
+		// ── Renovación OXXO anual ────────────────────────────────────────
+		// Cuatro variantes (30/14/3/día-0) porque Meta aprueba el cuerpo
+		// completo del template, no admite variar "urgencia" por variable.
+		// El cron de subscriptions/app/oxxo_renewal_reminder.go elige una
+		// según los días restantes a SubscriptionEndsAt. Variables
+		// compartidas: gym_name, voucher_url (link al Checkout Session que
+		// genera la ficha nueva), expires_on (fecha legible de vencimiento).
+		{
+			Key:       "oxxo_renewal_reminder_30d",
+			Channel:   ChannelWhatsApp,
+			Category:  CategoryUtility,
+			Variables: []string{"gym_name", "voucher_url", "expires_on"},
+			Body:      "Hola {gym_name} 👋 Tu plan anual de Tinta vence el {expires_on}. Te dejamos tu link para pagar la próxima ficha en OXXO cuando puedas: {voucher_url}",
+		},
+		{
+			Key:       "oxxo_renewal_reminder_14d",
+			Channel:   ChannelWhatsApp,
+			Category:  CategoryUtility,
+			Variables: []string{"gym_name", "voucher_url", "expires_on"},
+			Body:      "Hola {gym_name}, recordatorio: tu plan anual de Tinta vence el {expires_on}. Aquí tu ficha para pagar en OXXO: {voucher_url}",
+		},
+		{
+			Key:       "oxxo_renewal_reminder_3d",
+			Channel:   ChannelWhatsApp,
+			Category:  CategoryUtility,
+			Variables: []string{"gym_name", "voucher_url", "expires_on"},
+			Body:      "Hola {gym_name}, tu plan vence el {expires_on} (en 3 días). Paga tu ficha en OXXO para no interrumpir el servicio: {voucher_url}",
+		},
+		{
+			Key:       "oxxo_renewal_reminder_today",
+			Channel:   ChannelWhatsApp,
+			Category:  CategoryUtility,
+			Variables: []string{"gym_name", "voucher_url", "expires_on"},
+			Body:      "Hola {gym_name}, tu plan vence HOY. Paga tu ficha en OXXO cuanto antes para no perder el servicio: {voucher_url}",
+		},
 	}
 }
 

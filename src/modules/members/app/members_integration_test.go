@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	billingRepoLite "github.com/cuadra/cuadra-core/src/modules/billing/infraestructure/db/repositories"
 	gymRepoLite "github.com/cuadra/cuadra-core/src/modules/gyms/infraestructure/db/repositories"
 	memApp "github.com/cuadra/cuadra-core/src/modules/members/app"
+	memberDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/member"
 	memRepoLite "github.com/cuadra/cuadra-core/src/modules/members/infraestructure/db/repositories"
 	usersApp "github.com/cuadra/cuadra-core/src/modules/users/app"
 	usersRepoLite "github.com/cuadra/cuadra-core/src/modules/users/infraestructure/db/repositories"
@@ -388,7 +390,10 @@ func TestUC015_MemberDetail_IncludesCurrentMembership(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	uc := memApp.NewGetMemberDetail(f.memberRepo, f.uow)
+	// FingerprintRepository real para que GetMemberDetail pueda
+	// resolver has_fingerprint (devuelve false cuando no hay rows, que
+	// es justo el estado de este socio recién creado).
+	uc := memApp.NewGetMemberDetail(f.memberRepo, memRepoLite.NewFingerprintSQLiteRepository(), f.uow)
 	out, err := uc.Execute(context.Background(), memApp.GetMemberDetailInput{GymID: f.gymID, MemberID: created.MemberID})
 	if err != nil {
 		t.Fatalf("detail: %v", err)
@@ -543,4 +548,105 @@ func TestAssignPin_GeneratesUnique(t *testing.T) {
 
 func phoneFor(i int) string {
 	return "+5244400000" + []string{"01", "02", "03", "04", "05", "06"}[i%6]
+}
+
+// ---------------------------------------------------------------------------
+// UC-012 / UC-013 — gender (DA-012.7)
+// ---------------------------------------------------------------------------
+
+// TestUC012_CreateMember_WithGender — happy path con género válido +
+// round-trip por el repo SQLite + edición que limpia el campo.
+func TestUC012_CreateMember_WithGender(t *testing.T) {
+	f := setupMembersFixture(t)
+	typeID := f.createMembershipType(t, "Mensual")
+	create := memApp.NewCreateMember(f.memberRepo, f.membershipR, f.mtRepo, f.uow, f.recorder)
+	mujer := memberDomain.GenderFemale
+	out, err := create.Execute(context.Background(), memApp.CreateMemberInput{
+		GymID: f.gymID, ActorUserID: f.ownerID,
+		FullName: "María", Phone: "+524421234567",
+		MembershipTypeID: typeID, StartDate: time.Now().UTC(),
+		Gender: &mujer,
+	})
+	if err != nil {
+		t.Fatalf("create with mujer: %v", err)
+	}
+	// Round-trip: leer del repo y validar.
+	tx, err := f.uow.Query(context.Background())
+	if err != nil {
+		t.Fatalf("query tx: %v", err)
+	}
+	got, err := f.memberRepo.GetByID(tx, out.MemberID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Gender == nil || *got.Gender != memberDomain.GenderFemale {
+		t.Errorf("Gender persisted = %v, want mujer", got.Gender)
+	}
+
+	// Update con "" debe limpiar.
+	update := memApp.NewUpdateMember(f.memberRepo, f.uow, f.recorder)
+	clear := ""
+	if _, err := update.Execute(context.Background(), memApp.UpdateMemberInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: out.MemberID,
+		Gender: &clear,
+	}); err != nil {
+		t.Fatalf("clear gender: %v", err)
+	}
+	tx2, _ := f.uow.Query(context.Background())
+	got2, _ := f.memberRepo.GetByID(tx2, out.MemberID)
+	if got2.Gender != nil {
+		t.Errorf("Gender after clear = %v, want nil", *got2.Gender)
+	}
+}
+
+// TestUC012_CreateMember_InvalidGender — un valor fuera del enum debe
+// rechazar el alta entera con ErrInvalidGender envuelto en ValidationError.
+func TestUC012_CreateMember_InvalidGender(t *testing.T) {
+	f := setupMembersFixture(t)
+	typeID := f.createMembershipType(t, "Mensual")
+	create := memApp.NewCreateMember(f.memberRepo, f.membershipR, f.mtRepo, f.uow, f.recorder)
+	bad := "otro"
+	_, err := create.Execute(context.Background(), memApp.CreateMemberInput{
+		GymID: f.gymID, ActorUserID: f.ownerID,
+		FullName: "Test", Phone: "+524421231111",
+		MembershipTypeID: typeID, StartDate: time.Now().UTC(),
+		Gender: &bad,
+	})
+	if err == nil {
+		t.Fatalf("invalid gender should fail")
+	}
+	if !strings.Contains(err.Error(), "género") {
+		t.Errorf("expected ErrInvalidGender, got %v", err)
+	}
+}
+
+// TestUC013_UpdateMember_GenderNotProvided_DoesNotTouch — semántica
+// "no enviado = no tocar" para el PATCH (consistente con el resto del struct).
+func TestUC013_UpdateMember_GenderNotProvided_DoesNotTouch(t *testing.T) {
+	f := setupMembersFixture(t)
+	typeID := f.createMembershipType(t, "Mensual")
+	create := memApp.NewCreateMember(f.memberRepo, f.membershipR, f.mtRepo, f.uow, f.recorder)
+	hombre := memberDomain.GenderMale
+	out, err := create.Execute(context.Background(), memApp.CreateMemberInput{
+		GymID: f.gymID, ActorUserID: f.ownerID,
+		FullName: "Pedro", Phone: "+524421232222",
+		MembershipTypeID: typeID, StartDate: time.Now().UTC(),
+		Gender: &hombre,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	update := memApp.NewUpdateMember(f.memberRepo, f.uow, f.recorder)
+	newName := "Pedro García"
+	if _, err := update.Execute(context.Background(), memApp.UpdateMemberInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: out.MemberID,
+		FullName: &newName, // Gender intencionalmente nil
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	tx, _ := f.uow.Query(context.Background())
+	got, _ := f.memberRepo.GetByID(tx, out.MemberID)
+	if got.Gender == nil || *got.Gender != memberDomain.GenderMale {
+		t.Errorf("Gender mutated when not provided: %v", got.Gender)
+	}
 }

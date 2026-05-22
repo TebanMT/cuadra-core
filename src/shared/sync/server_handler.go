@@ -50,7 +50,53 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/push", h.Push)
 	api.GET("/pull", h.Pull)
 	api.GET("/full", h.FullSync)
+	api.GET("/last-update", h.LastUpdate)
 	r.GET("/_internal/metrics", h.MetricsHandler)
+}
+
+// LastUpdate handles GET /api/v1/sync/last-update. Devuelve la última vez
+// que un sidecar del gym tocó el cloud (push, pull, o cualquier request) —
+// el dashboard lo pinta como "tu equipo lleva X sin sincronizar".
+//
+// Fuente: sidecar_credentials.last_seen_at, que el middleware actualiza en
+// CADA request del sidecar (no sólo en push). Antes leíamos
+// sync_entities.MAX(server_updated_at), pero ese timestamp sólo se mueve
+// con pushes — un sidecar conectado SIN actividad nueva (sin altas, sin
+// pagos) parecía "stale" aunque estuviera vivo y sincronizando vía pull.
+//
+// Cuando un gym tiene varios sidecars (multi-device), tomamos el más
+// reciente: si AL MENOS un equipo está conectado, el banner se silencia.
+func (h *Handler) LastUpdate(c *gin.Context) {
+	gymID, ok := middleware.GetGymID(c)
+	if !ok {
+		c.AbortWithStatus(http.StatusUnauthorized)
+		return
+	}
+	if h.SidecarStore == nil {
+		// Cluster sin sidecar store wired — devolver null en lugar de 500
+		// para que el banner se silencie en lugar de loguear errores.
+		c.JSON(http.StatusOK, gin.H{"last_synced_at": nil})
+		return
+	}
+	creds, err := h.SidecarStore.ListActiveByGym(c.Request.Context(), gymID)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	var lastAt *time.Time
+	for i := range creds {
+		t := creds[i].LastSeenAt
+		if t.IsZero() {
+			continue
+		}
+		if lastAt == nil || t.After(*lastAt) {
+			tt := t
+			lastAt = &tt
+		}
+	}
+	// Shape exacta que el dashboard espera (useSyncStatus.ts:CloudSyncStatus).
+	// last_synced_at = null cuando el gym no tiene sidecar pareado todavía.
+	c.JSON(http.StatusOK, gin.H{"last_synced_at": lastAt})
 }
 
 // Push handles POST /api/v1/sync/push. Each item is processed in its own

@@ -43,6 +43,7 @@ type Controller struct {
 	UpdateTemplate   *notiApp.UpdateTemplate
 	Broadcast        *notiApp.Broadcast
 	List             *notiApp.ListNotifications
+	Retry            *notiApp.RetryNotification
 	ListOwnerAlerts  *notiApp.ListOwnerAlerts
 	UpdateOwnerAlert *notiApp.UpdateOwnerAlert
 	WhatsApp         notifications.WhatsAppProvider
@@ -62,6 +63,7 @@ func NewController(
 	updateTemplate *notiApp.UpdateTemplate,
 	broadcast *notiApp.Broadcast,
 	list *notiApp.ListNotifications,
+	retry *notiApp.RetryNotification,
 	listOwnerAlerts *notiApp.ListOwnerAlerts,
 	updateOwnerAlert *notiApp.UpdateOwnerAlert,
 	whatsapp notifications.WhatsAppProvider,
@@ -75,6 +77,7 @@ func NewController(
 		UpdateTemplate:   updateTemplate,
 		Broadcast:        broadcast,
 		List:             list,
+		Retry:            retry,
 		ListOwnerAlerts:  listOwnerAlerts,
 		UpdateOwnerAlert: updateOwnerAlert,
 		WhatsApp:         whatsapp,
@@ -109,6 +112,10 @@ func (ctrl *Controller) RegisterRoutes(r *gin.Engine) {
 		}
 		plus.POST("/broadcasts", middleware.RequireOwner(), ctrl.handleBroadcast)
 		api.GET("/notifications", ctrl.handleList)
+		// Dead-letter retry — owner-only. Re-encola un row failed para que
+		// el dispatcher lo procese en la próxima vuelta. Sin esto los rows
+		// failed se acumulan indefinidamente sin canal de recuperación.
+		api.POST("/notifications/:id/retry", middleware.RequireOwner(), ctrl.handleRetry)
 
 		// Owner-alerts (UC-040 DA-40.1). Defaults live in
 		// alertconfig.Defaults; only owner-flipped rows persist. The PATCH
@@ -436,6 +443,44 @@ func (ctrl *Controller) handleList(c *gin.Context) {
 	utils.JsonResponse(c, http.StatusOK, listNotificationsResp{
 		Items: items, Total: out.Total, Page: out.Page, PageSize: out.PageSize,
 	})
+}
+
+func (ctrl *Controller) handleRetry(c *gin.Context) {
+	if ctrl.Retry == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, errors.New("retry not configured"))
+		return
+	}
+	gymID, ok := middleware.GetGymID(c)
+	if !ok {
+		utils.ErrorResponse(c, http.StatusUnauthorized, errBadAuth)
+		return
+	}
+	userID, ok := middleware.GetUserID(c)
+	if !ok {
+		utils.ErrorResponse(c, http.StatusUnauthorized, errBadAuth)
+		return
+	}
+	notifID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, errors.New("invalid notification id"))
+		return
+	}
+	err = ctrl.Retry.Execute(c.Request.Context(), notiApp.RetryNotificationInput{
+		GymID:          gymID,
+		NotificationID: notifID,
+		ActorUserID:    userID,
+	})
+	if err != nil {
+		// ErrNotificationNotFailed → 409 (con copy claro al usuario);
+		// resto sale por el mapper genérico.
+		if errors.Is(err, notiApp.ErrNotificationNotFailed) {
+			utils.ErrorResponse(c, http.StatusConflict, err)
+			return
+		}
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	utils.JsonResponse(c, http.StatusOK, gin.H{"status": "queued"})
 }
 
 func toNotificationResp(n *notiDomain.Notification) notificationResp {

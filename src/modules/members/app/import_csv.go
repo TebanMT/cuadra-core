@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"errors"
 	"io"
+	"log"
 	"strings"
 	"time"
 
@@ -112,9 +113,18 @@ const (
 
 // Header esperado en el CSV. Si crece, sumar al final — el parser tolera
 // columnas extra al final ignorándolas, pero falla si faltan obligatorias.
+// Las primeras 5 son obligatorias (validateHeader exige sus nombres en
+// orden); de la 6 en adelante son opcionales y se evalúan posicionalmente,
+// así que añadir una nueva columna AL FINAL es backwards-compatible.
+//
+// `gender` (o el alias en español `genero`) es opcional. Aliases aceptados
+// case-insensitive: H/hombre → hombre, M/mujer → mujer; cualquier otro
+// string cae a no_especificado con warning en el log (no rechazamos la
+// fila completa por un género mal tipeado).
 var expectedHeader = []string{
 	"full_name", "phone", "email", "birthdate", "notes",
 	"membership_type_name", "membership_start_date", "membership_expiry_date",
+	"gender",
 }
 
 // utf8BOM es el marcador U+FEFF que Excel agrega al inicio de los CSV
@@ -135,6 +145,10 @@ type parsedRow struct {
 	startDate     *time.Time
 	expiryDate    *time.Time
 	hasMembership bool // las 3 cols vinieron completas y válidas
+	gender        *string
+	// genderWarning queda no-vacío cuando el raw del CSV no coincidió con
+	// ninguno de los aliases; el caller loggea sin abortar la fila.
+	genderWarning string
 	preParseError error
 }
 
@@ -307,12 +321,17 @@ func (uc *ImportMembersFromCSV) Execute(ctx context.Context, in ImportMembersFro
 				Email:     r.email,
 				Birthdate: r.birthdate,
 				Notes:     r.notes,
+				Gender:    r.gender,
 			}, now); perr != nil {
 				out.Errors = append(out.Errors, ErrorRow{
 					RowNumber: r.rowNumber, FullName: r.fullName, Phone: r.phone,
 					Message: perr.Error(),
 				})
 				continue
+			}
+			if r.genderWarning != "" {
+				log.Printf("[import-csv] row %d gym=%s: género %q no reconocido; usando no_especificado",
+					r.rowNumber, in.GymID, r.genderWarning)
 			}
 
 			// Membresía importada se asume "ya al día" — el socio venía con
@@ -434,20 +453,28 @@ func validateHeader(h []string) error {
 			break
 		}
 		got := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(h[i], "\ufeff")))
-		if got != want {
-			return memErrors.ErrCSVHeaderMismatch
+		if got == want {
+			continue
 		}
+		// gender admite alias en espa\u00f1ol `genero` para que el due\u00f1o pueda
+		// mantener el CSV en su idioma. No abrimos esto a otras columnas
+		// salvo que producto lo pida.
+		if want == "gender" && got == "genero" {
+			continue
+		}
+		return memErrors.ErrCSVHeaderMismatch
 	}
 	return nil
 }
 
 func parseCSVRow(rec []string, rowNum int) parsedRow {
 	r := parsedRow{rowNumber: rowNum}
-	// Tolerancia: si la fila viene con menos columnas que las 8 esperadas,
-	// rellenamos con strings vacíos en vez de explotar. Cualquier campo
-	// vacío que tenía que venir lo cazan las validaciones de dominio.
-	cells := make([]string, 8)
-	for i := 0; i < 8 && i < len(rec); i++ {
+	// Tolerancia: si la fila viene con menos columnas que las 9 esperadas
+	// (8 base + gender), rellenamos con strings vacíos en vez de explotar.
+	// Cualquier campo vacío que tenía que venir lo cazan las validaciones
+	// de dominio.
+	cells := make([]string, 9)
+	for i := 0; i < 9 && i < len(rec); i++ {
 		cells[i] = strings.TrimSpace(strings.TrimPrefix(rec[i], "\ufeff"))
 	}
 	r.fullName = cells[0]
@@ -495,7 +522,43 @@ func parseCSVRow(rec []string, rowNum int) parsedRow {
 		r.expiryDate = &ex
 		r.hasMembership = true
 	}
+
+	// Col 8: gender (opcional). Aliases case-insensitive:
+	//   H, h, hombre, Hombre → GenderMale
+	//   M, m, mujer, Mujer   → GenderFemale
+	// Cualquier otro string no vacío cae a GenderUnspecified con warning
+	// en el log — preferimos importar el row con género ambiguo a botarlo
+	// completo por un typo. Vacío significa "no se capturó" (NULL en DB).
+	if v := cells[8]; v != "" {
+		g, warn := csvGenderFromAlias(v)
+		gv := g
+		r.gender = &gv
+		if warn {
+			r.genderWarning = v
+		}
+	}
 	return r
+}
+
+// csvGenderFromAlias mapea el raw del CSV al enum del dominio. Devuelve
+// (valor, warning) — warning=true cuando no matcheó ningún alias y se cayó
+// a GenderUnspecified. Documenta el comportamiento del parser: el CSV no
+// es la superficie de captura primaria, así que "X" o "otro" no aborta la
+// fila completa; el dueño lo corrige después desde el perfil del socio.
+func csvGenderFromAlias(raw string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "h", "hombre", "m_hombre", "masculino":
+		return memberDomain.GenderMale, false
+	case "m", "mujer", "femenino", "f":
+		// "f" (femenino) lo aceptamos por simetría con "m"; en MX el form
+		// usa M=mujer (acepta lo mismo el operador) pero si la libreta vieja
+		// usaba F lo seguimos resolviendo.
+		return memberDomain.GenderFemale, false
+	case "no_especificado", "no especificado", "prefiero no decir", "n/a", "na":
+		return memberDomain.GenderUnspecified, false
+	default:
+		return memberDomain.GenderUnspecified, true
+	}
 }
 
 // sanitizePhoneRaw replica la limpieza que hace memberDomain.NewMember

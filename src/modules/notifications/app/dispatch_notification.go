@@ -146,8 +146,16 @@ func (uc *DispatchNotification) dispatchWhatsApp(ctx context.Context, n *notific
 		return nil
 	})
 	if queryErr != nil {
-		// gym-not-connected is final; everything else retryable.
+		// gym-not-connected is final; everything else retryable. Si el
+		// caller incluyó `fallback_email` en el payload, intentamos enviar
+		// el mismo template por correo antes de descartar — esto da a los
+		// gyms que aún no conectan WhatsApp un canal mínimo de
+		// notificación (recordatorios de vencimiento, alertas) en lugar
+		// de perder el mensaje en silencio.
 		if errors.Is(queryErr, notiErrors.ErrNotConnected) {
+			if uc.tryEmailFallback(ctx, n, now) {
+				return true
+			}
 			uc.markFailed(ctx, n, "gym sin WhatsApp conectado", now, false)
 		} else {
 			uc.markFailed(ctx, n, queryErr.Error(), now, true)
@@ -174,6 +182,53 @@ func (uc *DispatchNotification) dispatchWhatsApp(ctx context.Context, n *notific
 	}
 
 	return uc.markSent(ctx, n, providerMsgID, now)
+}
+
+// tryEmailFallback intenta enviar `n` por correo cuando el path WhatsApp
+// no aplica (gym sin número conectado). El caller indica intención por
+// payload["fallback_email"]: si está ausente, no hay fallback y el row
+// se marca failed final como antes.
+//
+// Reusa el body del template WhatsApp como cuerpo del email — la mayoría
+// de los templates son ChannelWhatsApp y duplicar la copy en una
+// definición Email separada es ruido a esta escala. Cuando exista un
+// volumen de gyms email-only suficiente para justificarlo, migrar a
+// templates dedicados con Subject/Body distintos.
+//
+// Devuelve true si el email se envió (markSent ya invocado); false si
+// no hay fallback o el envío falló (el caller marcará failed final).
+func (uc *DispatchNotification) tryEmailFallback(ctx context.Context, n *notification.Notification, now time.Time) bool {
+	if uc.Email == nil {
+		return false
+	}
+	email := strings.TrimSpace(n.Payload["fallback_email"])
+	if email == "" {
+		return false
+	}
+	def := tplDomain.LookupDefault(n.TemplateKey)
+	if def == nil {
+		return false
+	}
+	body := def.Body
+	if override := uc.lookupOverride(ctx, n.GymID, n.TemplateKey); override != nil {
+		if !override.Enabled {
+			return false
+		}
+		body = override.Body
+	}
+	rendered, err := tplDomain.Render(body, n.Payload)
+	if err != nil {
+		return false
+	}
+	subject := def.Subject
+	if subject == "" {
+		subject = humanise(n.TemplateKey)
+	}
+	providerMsgID, sendErr := uc.Email.SendTransactional(ctx, email, subject, rendered, n.TemplateKey)
+	if sendErr != nil {
+		return false
+	}
+	return uc.markSent(ctx, n, "email_fallback:"+providerMsgID, now)
 }
 
 func (uc *DispatchNotification) dispatchEmail(ctx context.Context, n *notification.Notification, now time.Time) bool {

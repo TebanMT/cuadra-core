@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -100,7 +101,9 @@ func (uc *Login) Execute(ctx context.Context, in LoginInput) (LoginOutput, error
 		if !user.Active {
 			return sharedDomain.NewBusinessError(userErrors.ErrAccountInactive, "")
 		}
+		log.Printf("user hash=%q len=%d input=%q len=%d bytes=%v", user.PasswordHash, len(user.PasswordHash), in.Password, len(in.Password), []byte(in.Password))
 		if err := auth.VerifyPassword(user.PasswordHash, in.Password); err != nil {
+			log.Println("err", err)
 			return sharedDomain.NewBusinessError(userErrors.ErrInvalidCredentials, "")
 		}
 		gym, err := uc.Gyms.GetByID(tx, user.GymID)

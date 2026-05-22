@@ -41,6 +41,7 @@ func applySQLiteMigrations(t *testing.T, dir string, db *sqlx.DB) {
 		"005_users_pin.sql",
 		"008_gym_charge_settings.sql",
 		"016_operators_pin_first.sql",
+		"018_gyms_stripe_customer.sql",
 	} {
 		raw, err := os.ReadFile(filepath.Join(dir, m))
 		if err != nil {

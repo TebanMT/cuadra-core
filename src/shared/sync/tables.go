@@ -45,7 +45,7 @@ var SyncedTables = []EntityTable{
 			"logo_url", "primary_color", "secondary_color",
 			"payment_methods", "open_time", "close_time",
 			"subscription_plan", "trial_ends_at", "subscription_ends_at",
-			"subscription_status", "setup_completed_at",
+			"subscription_status", "stripe_customer_id", "setup_completed_at",
 			"whatsapp_business_phone", "whatsapp_business_token_enc", "whatsapp_connected_at",
 			"kiosk_settings", "charge_settings",
 		},
@@ -94,7 +94,7 @@ var SyncedTables = []EntityTable{
 			// surfaces it in the member detail page (4-digit convenience
 			// code, not a secret — see migration 012 rationale).
 			"pin_hash", "pin_plain", "pin_assigned_at",
-			"last_contact_attempt_at", "created_by",
+			"last_contact_attempt_at", "gender", "created_by",
 		},
 	},
 	{

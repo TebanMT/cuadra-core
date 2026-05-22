@@ -22,9 +22,9 @@ type PlanGateResponse struct {
 }
 
 // RequirePlusPlan corre DESPUÉS de AuthMiddleware (lee gym_id de las claims
-// stash-eadas) y aborta con 402 si el gym no está en Plus o Trial. El trial
-// pasa el gate (estrategia: el trial debe poder probar lo que vende Plus —
-// ver gymDomain.CanAccessPlusFeatures). Standard NO pasa.
+// stash-eadas) y aborta con 402 si el gym no está en Plus. Trial y Standard
+// NO pasan mientras Plus no se libere (ver gymDomain.CanAccessPlusFeatures
+// para el WHY y cuándo revertir).
 //
 // Fail-open: si el repo/UoW son nil (tests que no montan dominio) o el
 // lookup falla, dejamos pasar — preferimos un riesgo de "operó con Plus

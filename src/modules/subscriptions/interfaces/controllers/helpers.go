@@ -39,6 +39,16 @@ func NewWebhookVerifier(stripe, mp string, strictDev bool) *WebhookVerifier {
 // handled there. The parsed event is intentionally discarded: the controller
 // re-decodes the body into our own envelope (see parseStripeEvent) so the
 // shape we depend on lives in our code, not the SDK.
+//
+// IgnoreAPIVersionMismatch=true: Stripe genera webhooks con la API version
+// default de la cuenta (e.g. 2026-04-22.dahlia para cuentas nuevas), mientras
+// stripe-go v82 está pinned a 2025-08-27.basil. El SDK rechaza por default ese
+// mismatch con un 401, lo que rompe webhooks en cuentas frescas sin que el
+// dueño tenga que pinear el endpoint a la version "vieja" en el dashboard.
+// Es seguro ignorar porque NO usamos el stripe.Event parseado — sólo lo
+// usamos para validar firma; el body se re-decodifica en parseStripeEvent
+// contra nuestro propio struct (stripeEnvelope) que sólo lee campos estables
+// entre versiones (event type, id, metadata, oxxo_display_details).
 func (v *WebhookVerifier) VerifyStripe(body []byte, header string) error {
 	if v.StripeSecret == "" {
 		if v.StrictDev {
@@ -49,7 +59,9 @@ func (v *WebhookVerifier) VerifyStripe(body []byte, header string) error {
 	if header == "" {
 		return errors.New("missing stripe-signature header")
 	}
-	if _, err := stripewebhook.ConstructEvent(body, header, v.StripeSecret); err != nil {
+	if _, err := stripewebhook.ConstructEventWithOptions(body, header, v.StripeSecret, stripewebhook.ConstructEventOptions{
+		IgnoreAPIVersionMismatch: true,
+	}); err != nil {
 		return fmt.Errorf("stripe webhook verification: %w", err)
 	}
 	return nil

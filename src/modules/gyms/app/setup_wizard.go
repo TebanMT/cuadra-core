@@ -15,12 +15,14 @@ import (
 )
 
 // UpdateBasicInfoInput is UC-001 step 2 (PATCH /api/v1/gyms/me/setup).
+// El campo WhatsApp se eliminó del paso 2 (ADR-009): el wizard sólo captura
+// nombre + ciudad ahora. El número del gym se conecta desde Settings →
+// WhatsApp post-suscripción a Plus via UpdateProfile.
 type UpdateBasicInfoInput struct {
 	GymID       uuid.UUID
 	ActorUserID uuid.UUID
 	Name        string
 	City        string
-	WhatsApp    string
 }
 
 type UpdateBasicInfo struct {
@@ -40,21 +42,7 @@ func (uc *UpdateBasicInfo) Execute(ctx context.Context, in UpdateBasicInfoInput)
 		if err != nil {
 			return err
 		}
-		// Chequeo de duplicado ANTES de mutar el agregado — si el número
-		// ya está en otro gym vivo, devolvemos un error de negocio claro
-		// para que el wizard del dashboard lo muestre bajo el campo.
-		// Excluimos el propio gym del lookup: re-guardar el mismo número
-		// (idempotencia del PATCH) no debe colisionar.
-		if in.WhatsApp != "" {
-			taken, err := uc.Gyms.ExistsByWhatsApp(tx, in.WhatsApp, in.GymID)
-			if err != nil {
-				return sharedDomain.NewUnexpectedError(err)
-			}
-			if taken {
-				return sharedDomain.NewBusinessError(gymErrors.ErrWhatsAppAlreadyTaken, "")
-			}
-		}
-		if err := g.UpdateBasicInfo(in.Name, in.City, in.WhatsApp); err != nil {
+		if err := g.UpdateBasicInfo(in.Name, in.City); err != nil {
 			return sharedDomain.NewValidationError(err)
 		}
 		updated, err := uc.Gyms.Update(tx, g)
@@ -67,7 +55,7 @@ func (uc *UpdateBasicInfo) Execute(ctx context.Context, in UpdateBasicInfoInput)
 			EntityID:    g.ID,
 			Action:      audit.ActionUpdate,
 			ActorUserID: &in.ActorUserID,
-			Changes:     map[string]any{"name": in.Name, "city": in.City, "whatsapp": in.WhatsApp},
+			Changes:     map[string]any{"name": in.Name, "city": in.City},
 			IPAddress:   audit.IPFromContext(ctx),
 			UserAgent:   audit.UAFromContext(ctx),
 			At:          time.Now().UTC(),

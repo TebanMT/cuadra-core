@@ -54,6 +54,7 @@ func setupExpenses(t *testing.T) *expensesFixture {
 		"../../../../db_migrations/sqlite/005_users_pin.sql",
 		"../../../../db_migrations/sqlite/008_gym_charge_settings.sql",
 		"../../../../db_migrations/sqlite/012_expenses.sql",
+		"../../../../db_migrations/sqlite/018_gyms_stripe_customer.sql",
 	} {
 		schema, err := os.ReadFile(m)
 		if err != nil {

@@ -62,6 +62,7 @@ func setupMeFixture(t *testing.T) *meFixture {
 		"../../../../../db_migrations/sqlite/004_owner_alert_configs.sql",
 		"../../../../../db_migrations/sqlite/005_users_pin.sql",
 		"../../../../../db_migrations/sqlite/008_gym_charge_settings.sql",
+		"../../../../../db_migrations/sqlite/018_gyms_stripe_customer.sql",
 	} {
 		b, err := os.ReadFile(m)
 		if err != nil {

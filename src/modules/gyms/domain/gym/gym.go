@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	gymErrors "github.com/cuadra/cuadra-core/src/modules/gyms/domain/errors"
+	"github.com/cuadra/cuadra-core/src/shared/runtime"
 )
 
 // SubscriptionPlan and SubscriptionStatus mirror the chk_ constraints in
@@ -44,15 +45,35 @@ func IsPlusPlan(plan string) bool {
 	return plan == PlanPlusMonthly || plan == PlanPlusAnnual
 }
 
-// CanAccessPlusFeatures incluye trial deliberadamente: el trial otorga
-// "full Plus" por 30 días para que el dueño pruebe rutinas, broadcast,
-// retos, etc. — ese es el gancho que lo convierte. Si el trial sólo viera
-// Standard, no tendría con qué evaluar el upgrade.
+// CanAccessPlusFeatures decide si un gym debe ver las features Plus.
 //
-// Use este helper en los gates de feature; usa IsPlusPlan SOLO cuando el
-// punto de la decisión es el SKU comprado (no el acceso a la feature).
+// HOY (Plus aún no se vende — landing dice "Próximamente"): trial NO pasa.
+// Mientras el bundle Plus no esté completo (faltan rutinas + app del socio
+// según el roadmap), enseñarle al dueño en trial features que no se venden
+// es prometer algo que no existe. Trial opera como Standard hasta que se
+// libere Plus.
+//
+// CUANDO PLUS SE LIBERE (rutinas + app del socio + tap-to-sell + broadcast
+// completo en prod), añadir `plan == PlanTrial` aquí. El trial debe poder
+// probar Plus para evaluar el upgrade — ese era el plan original del ADR-009.
+// Buscar este comentario al hacer el cambio.
+//
+// Usa IsPlusPlan SOLO cuando el punto de la decisión es el SKU comprado
+// (facturación, reporting interno) — esa función nunca incluyó trial.
+//
+// DEV-MODE BYPASS: cuando TINTA_MODE=dev, este helper devuelve true para
+// cualquier plan, desbloqueando todas las features Plus localmente sin
+// tocar la BD. La dep del domain layer sobre shared/runtime es deliberada
+// y excepcional: runtime es un paquete sin estado, sólo lee env vars
+// (equivalente a llamar os.Getenv inline), y centralizar el switch acá
+// hace cascade automático a todos los call-sites (sidebar, middleware,
+// inline gates, deep-link locks) sin duplicar la condición. IsPlusPlan
+// e IsPaidPlan NO se tocan — el SKU real sigue siendo honesto.
 func CanAccessPlusFeatures(plan string) bool {
-	return plan == PlanTrial || plan == PlanPlusMonthly || plan == PlanPlusAnnual
+	if runtime.IsDev() {
+		return true
+	}
+	return plan == PlanPlusMonthly || plan == PlanPlusAnnual
 }
 
 // IsPaidPlan reports whether the gym is on any paid SKU (Standard or Plus,
@@ -89,6 +110,12 @@ type Gym struct {
 	TrialEndsAt              *time.Time
 	SubscriptionEndsAt       *time.Time
 	SubscriptionStatus       string
+	// StripeCustomerID — capturado del primer webhook que trae customer
+	// (checkout.session.completed o customer.subscription.created). Lo
+	// usamos para abrir Stripe Billing Portal sin volver a pedir al usuario
+	// que ingrese su tarjeta (UC: ver facturas / actualizar método de pago).
+	// Nullable: gyms en trial sin checkout aún, o gyms cobrados sólo por MP.
+	StripeCustomerID *string
 	SetupCompletedAt         *time.Time
 	WhatsAppBusinessPhone    *string
 	WhatsAppBusinessTokenEnc []byte
@@ -292,9 +319,12 @@ func (g *Gym) NextSetupStep(hasMembershipType bool) int {
 	return 5
 }
 
-// UpdateBasicInfo applies wizard step 2. Empty strings are normalised to nil
-// so the column stays NULL until something is provided.
-func (g *Gym) UpdateBasicInfo(name, city, whatsapp string) error {
+// UpdateBasicInfo applies wizard step 2. El paso captura sólo nombre +
+// ciudad — el WhatsApp del gym se conecta post-suscripción a Plus desde
+// Settings → WhatsApp via UpdateProfile (ADR-009). City vacía queda NULL.
+// WhatsApp NO se toca acá; queda como estaba (intencionalmente nil para
+// gyms recién creados, o un valor existente si el dueño ya lo conectó).
+func (g *Gym) UpdateBasicInfo(name, city string) error {
 	name = strings.TrimSpace(name)
 	if name == "" || len(name) > 100 {
 		return gymErrors.ErrInvalidGymName
@@ -304,14 +334,6 @@ func (g *Gym) UpdateBasicInfo(name, city, whatsapp string) error {
 		g.City = &c
 	} else {
 		g.City = nil
-	}
-	if w := strings.TrimSpace(whatsapp); w != "" {
-		if !whatsappRegex.MatchString(w) {
-			return gymErrors.ErrInvalidWhatsApp
-		}
-		g.WhatsApp = &w
-	} else {
-		g.WhatsApp = nil
 	}
 	g.Version++
 	g.UpdatedAt = time.Now().UTC()

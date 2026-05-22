@@ -287,3 +287,111 @@ var _ = func(f *membersFixture) *memApp.ImportMembersFromCSV { return newImportU
 // silenciamos imports no usados cuando los tests evolucionan.
 var _ = memErrors.ErrCSVHeaderMismatch
 var _ = memberDomain.StatusActive
+
+// ---------------------------------------------------------------------------
+// UC-046 — gender column (DA-012.7)
+// ---------------------------------------------------------------------------
+
+const csvHeaderWithGender = csvHeader + ",gender"
+const csvHeaderWithGenderEs = csvHeader + ",genero"
+
+// TestUC046_Gender_Aliases — cubre los aliases documentados:
+//   - "H" y "hombre" → hombre
+//   - "Mujer" y "MUJER" → mujer (case-insensitive)
+//   - "X" → no_especificado (fallback con warning, NO bloquea el row)
+//   - vacío → NULL
+func TestUC046_Gender_Aliases(t *testing.T) {
+	f := setupMembersFixture(t)
+	body := csvHeaderWithGender + "\n" +
+		"Hombre Uno,5512300001,,,,,,,H\n" +
+		"Hombre Dos,5512300002,,,,,,,hombre\n" +
+		"Mujer Una,5512300003,,,,,,,Mujer\n" +
+		"Mujer Dos,5512300004,,,,,,,MUJER\n" +
+		"Inválido,5512300005,,,,,,,X\n" +
+		"Vacío,5512300006,,,,,,,\n"
+	out := runImport(t, f, body, false)
+	if out.ImportedCount != 6 {
+		t.Fatalf("imported=%d, want 6 (out=%+v)", out.ImportedCount, out)
+	}
+	if out.ErrorsCount != 0 {
+		t.Errorf("errors=%d, want 0 — la fila X NO debe abortar", out.ErrorsCount)
+	}
+
+	// Leer cada uno del repo y validar el bucket asignado.
+	type expect struct {
+		fullName string
+		want     *string
+	}
+	hombre, mujer, unspec := memberDomain.GenderMale, memberDomain.GenderFemale, memberDomain.GenderUnspecified
+	expects := []expect{
+		{"Hombre Uno", &hombre},
+		{"Hombre Dos", &hombre},
+		{"Mujer Una", &mujer},
+		{"Mujer Dos", &mujer},
+		{"Inválido", &unspec}, // alias desconocido cae a no_especificado
+		{"Vacío", nil},        // vacío queda NULL
+	}
+	byName := map[string]memApp.ImportedRow{}
+	for _, r := range out.Imported {
+		byName[r.FullName] = r
+	}
+	tx, err := f.uow.Query(context.Background())
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	for _, e := range expects {
+		row, ok := byName[e.fullName]
+		if !ok {
+			t.Errorf("missing imported row for %q", e.fullName)
+			continue
+		}
+		m, gerr := f.memberRepo.GetByID(tx, row.MemberID)
+		if gerr != nil {
+			t.Errorf("get %q: %v", e.fullName, gerr)
+			continue
+		}
+		if e.want == nil {
+			if m.Gender != nil {
+				t.Errorf("%q gender = %v, want nil", e.fullName, *m.Gender)
+			}
+			continue
+		}
+		if m.Gender == nil || *m.Gender != *e.want {
+			t.Errorf("%q gender = %v, want %v", e.fullName, m.Gender, *e.want)
+		}
+	}
+}
+
+// TestUC046_Gender_SpanishAlias — el header en español `genero` debe
+// aceptarse igual que `gender`, para que el dueño pueda mantener el CSV en
+// su idioma sin renombrar columnas.
+func TestUC046_Gender_SpanishAlias(t *testing.T) {
+	f := setupMembersFixture(t)
+	body := csvHeaderWithGenderEs + "\n" +
+		"Test Genero,5512300010,,,,,,,M\n"
+	out := runImport(t, f, body, false)
+	if out.ImportedCount != 1 {
+		t.Fatalf("imported=%d, want 1 (out=%+v)", out.ImportedCount, out)
+	}
+	tx, _ := f.uow.Query(context.Background())
+	m, _ := f.memberRepo.GetByID(tx, out.Imported[0].MemberID)
+	if m.Gender == nil || *m.Gender != memberDomain.GenderFemale {
+		t.Errorf("gender = %v, want mujer", m.Gender)
+	}
+}
+
+// TestUC046_Gender_HeaderMissingStillWorks — un CSV pre-feature (8 cols
+// sin gender) debe seguir importando sin error.
+func TestUC046_Gender_HeaderMissingStillWorks(t *testing.T) {
+	f := setupMembersFixture(t)
+	body := csvHeader + "\n" + "Sin Genero,5512300020,,,,,,\n"
+	out := runImport(t, f, body, false)
+	if out.ImportedCount != 1 {
+		t.Fatalf("imported=%d, want 1 (out=%+v)", out.ImportedCount, out)
+	}
+	tx, _ := f.uow.Query(context.Background())
+	m, _ := f.memberRepo.GetByID(tx, out.Imported[0].MemberID)
+	if m.Gender != nil {
+		t.Errorf("gender should stay nil for missing column, got %v", *m.Gender)
+	}
+}

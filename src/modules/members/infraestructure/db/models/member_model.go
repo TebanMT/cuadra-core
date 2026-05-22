@@ -31,6 +31,7 @@ type MemberModel struct {
 	PinPlain             *string    `gorm:"column:pin_plain"`
 	PinAssignedAt        *time.Time `gorm:"column:pin_assigned_at"`
 	LastContactAttemptAt *time.Time `gorm:"column:last_contact_attempt_at"`
+	Gender               *string    `gorm:"type:varchar(20);column:gender"`
 	CreatedBy            uuid.UUID  `gorm:"type:uuid;not null;column:created_by"`
 }
 

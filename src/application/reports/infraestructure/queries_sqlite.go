@@ -1079,6 +1079,90 @@ func (r *SQLiteReader) CountCriticalStock(tx sharedDomain.Transaction, gymID uui
 	return reports.CriticalStockCounts{OutCount: out.OutCount, LowCount: out.LowCount}, err
 }
 
+// ---------------------------------------------------------------------------
+// Gender reports
+// ---------------------------------------------------------------------------
+
+// GenderComposition — espeja la versión postgres. SQLite no tiene
+// FILTER (WHERE …), así que usamos SUM(CASE WHEN …) que produce el
+// mismo resultado. Activos = misma definición que CountActiveMembers
+// (members.status='active' + membership activa con expiry_date vigente).
+func (r *SQLiteReader) GenderComposition(tx sharedDomain.Transaction, gymID uuid.UUID, today time.Time) (reports.GenderCompositionRow, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	var row struct {
+		Hombre         int `db:"hombre"`
+		Mujer          int `db:"mujer"`
+		NoEspecificado int `db:"no_especificado"`
+		Total          int `db:"total"`
+	}
+	err := stx.Get(context.Background(), &row, `
+		SELECT
+		    SUM(CASE WHEN m.gender = 'hombre' THEN 1 ELSE 0 END)                                AS hombre,
+		    SUM(CASE WHEN m.gender = 'mujer' THEN 1 ELSE 0 END)                                 AS mujer,
+		    SUM(CASE WHEN m.gender IS NULL OR m.gender = 'no_especificado' THEN 1 ELSE 0 END)   AS no_especificado,
+		    COUNT(*)                                                                            AS total
+		FROM members m
+		JOIN memberships ms ON ms.member_id = m.id
+		    AND ms.status = 'active' AND ms.deleted_at IS NULL
+		WHERE m.gym_id = ?
+		  AND m.status = 'active'
+		  AND m.deleted_at IS NULL
+		  AND ms.expiry_date >= ?`,
+		gymID.String(), today.Format(sqliteDateFmt))
+	return reports.GenderCompositionRow{
+		Hombre: row.Hombre, Mujer: row.Mujer,
+		NoEspecificado: row.NoEspecificado, Total: row.Total,
+	}, err
+}
+
+// AttendanceByGenderHour — checkin_at en SQLite es INTEGER unix milliseconds.
+// Convertimos a HH via strftime('%H', checkin_at/1000, 'unixepoch'). El
+// resultado es UTC (igual que en postgres) — la TZ-local del gym queda para
+// una mejora futura. result LIKE 'allowed_%' filtra denied_*.
+func (r *SQLiteReader) AttendanceByGenderHour(tx sharedDomain.Transaction, gymID uuid.UUID, daysBack int, now time.Time) ([]reports.AttendanceByGenderHourRow, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	cutoffMs := now.Add(-time.Duration(daysBack)*24*time.Hour).UnixMilli()
+	nowMs := now.UnixMilli()
+	type sqliteRow struct {
+		HourStr        string `db:"hour"`
+		Hombre         int    `db:"hombre"`
+		Mujer          int    `db:"mujer"`
+		NoEspecificado int    `db:"no_especificado"`
+	}
+	var rows []sqliteRow
+	err := stx.Select(context.Background(), &rows, `
+		SELECT
+		    strftime('%H', c.checkin_at/1000, 'unixepoch')                                       AS hour,
+		    SUM(CASE WHEN m.gender = 'hombre' THEN 1 ELSE 0 END)                                 AS hombre,
+		    SUM(CASE WHEN m.gender = 'mujer' THEN 1 ELSE 0 END)                                  AS mujer,
+		    SUM(CASE WHEN m.gender IS NULL OR m.gender = 'no_especificado' THEN 1 ELSE 0 END)    AS no_especificado
+		FROM checkins c
+		JOIN members m ON m.id = c.member_id AND m.deleted_at IS NULL
+		WHERE c.gym_id = ?
+		  AND c.deleted_at IS NULL
+		  AND c.result LIKE 'allowed_%'
+		  AND c.checkin_at >= ? AND c.checkin_at <= ?
+		GROUP BY strftime('%H', c.checkin_at/1000, 'unixepoch')`,
+		gymID.String(), cutoffMs, nowMs)
+	if err != nil {
+		return nil, err
+	}
+	// strftime('%H', …) devuelve "00".."23"; parseamos a int para
+	// reusar el grid builder shared.
+	converted := make([]hourBucketRow, 0, len(rows))
+	for _, r := range rows {
+		var h int
+		// fmt.Sscanf maneja el zero-pad sin problema.
+		if _, perr := fmt.Sscanf(r.HourStr, "%d", &h); perr != nil {
+			continue
+		}
+		converted = append(converted, hourBucketRow{
+			Hour: h, Hombre: r.Hombre, Mujer: r.Mujer, NoEspecificado: r.NoEspecificado,
+		})
+	}
+	return fillHourlyGenderGrid(converted), nil
+}
+
 // sortDailyAmountSqlite — insertion sort por fecha ascendente. Series cortas
 // (≤365 entradas), no vale la pena pull-in de sort.Slice acá.
 func sortDailyAmountSqlite(s []reports.DailyAmount) {

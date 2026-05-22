@@ -104,6 +104,7 @@ func newWhatsappRouter(t *testing.T, provider *whatsapp.MockProvider) (*gin.Engi
 		(*notiApp.UpdateTemplate)(nil),
 		(*notiApp.Broadcast)(nil),
 		(*notiApp.ListNotifications)(nil),
+		(*notiApp.RetryNotification)(nil),
 		(*notiApp.ListOwnerAlerts)(nil),
 		(*notiApp.UpdateOwnerAlert)(nil),
 		provider,

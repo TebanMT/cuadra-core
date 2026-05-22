@@ -33,6 +33,7 @@ var (
 	ErrCrossGym            = errors.New("ese socio no pertenece a tu gimnasio")
 	ErrInvalidNotesTooLong = errors.New("las notas son demasiado largas")
 	ErrInvalidBirthdate    = errors.New("fecha de nacimiento inválida")
+	ErrInvalidGender       = errors.New("género inválido (usa hombre, mujer o no_especificado)")
 
 	// Membership
 	ErrMembershipNotFound = errors.New("membresía no encontrada")

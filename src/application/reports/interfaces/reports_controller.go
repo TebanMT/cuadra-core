@@ -31,6 +31,7 @@ type ReportsController struct {
 	AttentionRequired *reportsApp.AttentionRequired
 	Range             *reportsApp.RangeReport
 	Export            *reportsApp.ExportReport
+	Gender            *reportsApp.GenderReport
 	MarkContacted     *memApp.MarkContacted
 	MarkLost          *memApp.MarkLost
 	Tokens            auth.TokenService
@@ -55,6 +56,14 @@ func NewReportsController(
 	}
 }
 
+// WithGenderReport cablea el use case de reportes de género. Se inyecta por
+// chain para no romper la signature de NewReportsController; tests que no
+// exercisan reportes de género no necesitan tocarlo.
+func (ctrl *ReportsController) WithGenderReport(uc *reportsApp.GenderReport) *ReportsController {
+	ctrl.Gender = uc
+	return ctrl
+}
+
 func (ctrl *ReportsController) RegisterRoutes(r *gin.Engine) {
 	api := r.Group("/api/v1")
 	api.Use(middleware.AuthMiddleware(ctrl.Tokens))
@@ -62,6 +71,7 @@ func (ctrl *ReportsController) RegisterRoutes(r *gin.Engine) {
 		api.GET("/dashboard", ctrl.handleDashboard)
 		api.GET("/attention-required", ctrl.handleAttentionRequired)
 		api.GET("/reports", ctrl.handleRange)
+		api.GET("/reports/gender", ctrl.handleGenderReport)
 		api.POST("/members/:id/contact-attempts", ctrl.handleMarkContacted)
 		api.POST("/members/:id/mark-lost", ctrl.handleMarkLost)
 		// Export de reportes (CSV/Excel) es Plus.
@@ -712,6 +722,34 @@ func (ctrl *ReportsController) handleMarkLost(c *gin.Context) {
 		"member_id": out.ID,
 		"status":    out.Status,
 	})
+}
+
+// handleGenderReport — DA-012.7 reportes operativos del dueño. Devuelve
+// composición + heatmap en un solo response (el FE renderea dos cards en la
+// misma página). 503 cuando el use case no está cableado, mismo patrón que
+// importación masiva.
+func (ctrl *ReportsController) handleGenderReport(c *gin.Context) {
+	if ctrl.Gender == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, errors.New("reportes de género no configurados"))
+		return
+	}
+	gymID, ok := middleware.GetGymID(c)
+	if !ok {
+		utils.ErrorResponse(c, http.StatusUnauthorized, errBadAuth)
+		return
+	}
+	in := reportsApp.GenderReportInput{GymID: gymID}
+	if v := c.Query("days_back"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 365 {
+			in.DaysBack = n
+		}
+	}
+	out, err := ctrl.Gender.Execute(c.Request.Context(), in)
+	if err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	utils.JsonResponse(c, http.StatusOK, out)
 }
 
 func parseUUIDParam(c *gin.Context, name string) (uuid.UUID, bool) {

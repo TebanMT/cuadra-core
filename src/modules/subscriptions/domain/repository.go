@@ -2,6 +2,7 @@ package domain
 
 import (
 	"errors"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -26,4 +27,10 @@ type EventRepository interface {
 	// ExistsByExternalID is the idempotency check the webhook controller
 	// performs before applying the mutation.
 	ExistsByExternalID(tx sharedDomain.Transaction, provider Provider, externalID string) (bool, error)
+	// LatestOccurredAtForGym returns the highest occurred_at among events
+	// previously applied to this gym. nil if the gym has no events yet.
+	// RecordEvent uses this to reject out-of-order webhooks (a retry of an
+	// older event arriving after a newer state transition would otherwise
+	// regress the gym to a stale state).
+	LatestOccurredAtForGym(tx sharedDomain.Transaction, gymID uuid.UUID) (*time.Time, error)
 }

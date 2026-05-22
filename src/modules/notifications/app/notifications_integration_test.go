@@ -16,6 +16,7 @@ import (
 	billingApp "github.com/cuadra/cuadra-core/src/modules/billing/app"
 	folioSvc "github.com/cuadra/cuadra-core/src/modules/billing/domain/folio"
 	billingRepoLite "github.com/cuadra/cuadra-core/src/modules/billing/infraestructure/db/repositories"
+	gymDomain "github.com/cuadra/cuadra-core/src/modules/gyms/domain/gym"
 	gymRepoLite "github.com/cuadra/cuadra-core/src/modules/gyms/infraestructure/db/repositories"
 	memApp "github.com/cuadra/cuadra-core/src/modules/members/app"
 	memRepoLite "github.com/cuadra/cuadra-core/src/modules/members/infraestructure/db/repositories"
@@ -112,7 +113,14 @@ func newFixture(t *testing.T) *fixture {
 			if err != nil {
 				return err
 			}
-			if err := g.UpdateBasicInfo("Gym Bros", "Querétaro", "+524421234567"); err != nil {
+			if err := g.UpdateBasicInfo("Gym Bros", "Querétaro"); err != nil {
+				return err
+			}
+			// WhatsApp se conecta vía ProfileUpdate (post-Plus en producción),
+			// pero el test de envío de notifications necesita un número
+			// configurado en el gym para usar SendTemplate.
+			wa := "+524421234567"
+			if err := g.ApplyProfileUpdate(gymDomain.ProfileUpdate{WhatsApp: &wa}); err != nil {
 				return err
 			}
 			_, err = gymRepo.Update(tx, g)

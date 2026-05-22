@@ -355,6 +355,7 @@ func memberToModel(m *memberDomain.Member) models.MemberModel {
 		PinPlain:             m.PinPlain,
 		PinAssignedAt:        m.PinAssignedAt,
 		LastContactAttemptAt: m.LastContactAttemptAt,
+		Gender:               m.Gender,
 		CreatedBy:            m.CreatedBy,
 	}
 }
@@ -378,6 +379,7 @@ func memberFromModel(r *models.MemberModel) *memberDomain.Member {
 		PinPlain:             r.PinPlain,
 		PinAssignedAt:        r.PinAssignedAt,
 		LastContactAttemptAt: r.LastContactAttemptAt,
+		Gender:               r.Gender,
 		CreatedBy:            r.CreatedBy,
 		CreatedAt:            r.CreatedAt,
 		UpdatedAt:            r.UpdatedAt,

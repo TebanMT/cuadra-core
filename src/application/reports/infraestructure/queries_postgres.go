@@ -894,6 +894,72 @@ func (r *PostgresReader) CountCriticalStock(tx sharedDomain.Transaction, gymID u
 	return reports.CriticalStockCounts{OutCount: out.OutCount, LowCount: out.LowCount}, err
 }
 
+// ---------------------------------------------------------------------------
+// Gender reports
+// ---------------------------------------------------------------------------
+
+// GenderComposition — un solo round-trip que cuenta activos por bucket. NULL
+// y los valores fuera del enum (no debería pasar por el CHECK constraint, pero
+// nos defendemos) caen a no_especificado. Activos = mismo criterio que
+// CountActiveMembers para mantener coherencia con el KPI de la página principal.
+func (r *PostgresReader) GenderComposition(tx sharedDomain.Transaction, gymID uuid.UUID, today time.Time) (reports.GenderCompositionRow, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	var row struct {
+		Hombre         int
+		Mujer          int
+		NoEspecificado int
+		Total          int
+	}
+	err := gormTx.Raw(`
+		SELECT
+		    COUNT(*) FILTER (WHERE m.gender = 'hombre')                                AS hombre,
+		    COUNT(*) FILTER (WHERE m.gender = 'mujer')                                 AS mujer,
+		    COUNT(*) FILTER (WHERE m.gender IS NULL OR m.gender = 'no_especificado')   AS no_especificado,
+		    COUNT(*)                                                                   AS total
+		FROM members m
+		JOIN memberships ms ON ms.member_id = m.id
+		    AND ms.status = 'active' AND ms.deleted_at IS NULL
+		WHERE m.gym_id = ?
+		  AND m.status = 'active'
+		  AND m.deleted_at IS NULL
+		  AND ms.expiry_date >= ?`,
+		gymID, today.Format(dateFmt)).Scan(&row).Error
+	return reports.GenderCompositionRow{
+		Hombre: row.Hombre, Mujer: row.Mujer,
+		NoEspecificado: row.NoEspecificado, Total: row.Total,
+	}, err
+}
+
+// AttendanceByGenderHour — heatmap de check-ins exitosos × hora × género.
+// "Exitoso" = result LIKE 'allowed_%' (allowed_active / expiring_soon /
+// override). Filtramos denied_* para que el reporte refleje uso real del gym,
+// no intentos fallidos. La ventana corre [now - daysBack, now] sobre
+// checkin_at (que es TIMESTAMPTZ — la conversión a hora local del gym
+// queda para una mejora futura; hoy usamos UTC para simplificar).
+func (r *PostgresReader) AttendanceByGenderHour(tx sharedDomain.Transaction, gymID uuid.UUID, daysBack int, now time.Time) ([]reports.AttendanceByGenderHourRow, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	cutoff := now.Add(-time.Duration(daysBack) * 24 * time.Hour)
+	var rows []hourBucketRow
+	err := gormTx.Raw(`
+		SELECT
+		    EXTRACT(HOUR FROM c.checkin_at)::int                                     AS hour,
+		    COUNT(*) FILTER (WHERE m.gender = 'hombre')                              AS hombre,
+		    COUNT(*) FILTER (WHERE m.gender = 'mujer')                               AS mujer,
+		    COUNT(*) FILTER (WHERE m.gender IS NULL OR m.gender = 'no_especificado') AS no_especificado
+		FROM checkins c
+		JOIN members m ON m.id = c.member_id AND m.deleted_at IS NULL
+		WHERE c.gym_id = ?
+		  AND c.deleted_at IS NULL
+		  AND c.result LIKE 'allowed_%'
+		  AND c.checkin_at >= ? AND c.checkin_at <= ?
+		GROUP BY EXTRACT(HOUR FROM c.checkin_at)`,
+		gymID, cutoff, now).Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	return fillHourlyGenderGrid(rows), nil
+}
+
 // daysBetween returns floor((to - from) in days). Negative when `to` is before
 // `from`. Both arguments are interpreted at day granularity.
 func daysBetween(from, to time.Time) int {

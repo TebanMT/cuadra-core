@@ -28,6 +28,13 @@ const (
 	StatusRejectedSchema       = "rejected_schema_version"
 	StatusRejectedUnknownType  = "rejected_unknown_entity_type"
 	StatusRejectedInternal     = "rejected_internal_error"
+	// StatusRejectedClockSkew — el payload.updated_at del sidecar está
+	// fuera del rango aceptable comparado contra el reloj del servidor
+	// (default ±5 min, configurable vía MaxClockSkew en PostgresStore).
+	// El sidecar lo trata como permanent: el operador debe sincronizar su
+	// reloj con NTP. Sin esta validación, un BIOS adelantado 6h hace que
+	// el cliente gane TODOS los conflictos contra cambios cloud legítimos.
+	StatusRejectedClockSkew = "rejected_clock_skew"
 )
 
 // PushItem is one entry of a push batch. Payload is kept as raw JSON so the

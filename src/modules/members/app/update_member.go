@@ -24,6 +24,10 @@ type UpdateMemberInput struct {
 	Birthdate   *time.Time
 	PhotoURL    *string
 	Notes       *string
+	// Gender — nil = no change (consistente con el resto del struct). El
+	// valor "" limpia la captura (vuelve a NULL). Cualquier valor válido se
+	// persiste tras ValidateGender.
+	Gender *string
 }
 
 type UpdateMember struct {
@@ -75,6 +79,7 @@ func (uc *UpdateMember) Execute(ctx context.Context, in UpdateMemberInput) (*mem
 			Birthdate: in.Birthdate,
 			PhotoURL:  in.PhotoURL,
 			Notes:     in.Notes,
+			Gender:    in.Gender,
 		}, now); err != nil {
 			return sharedDomain.NewValidationError(err)
 		}

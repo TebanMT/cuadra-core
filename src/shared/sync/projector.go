@@ -71,6 +71,22 @@ var timestamptzColumns = map[string]map[string]bool{
 	"subscription_events": {"period_ends_at": true, "occurred_at": true, "recorded_at": true},
 }
 
+// notNullStringColumns lists columns declared NOT NULL in Postgres whose
+// dominio semántico trata "" como ausencia válida (ej. users.email tras la
+// migración 019: "el operador PIN-only no lleva email; '' = sin correo").
+// Sin esta lista, nullifyEmptyString colapsa "" → NULL y Postgres rechaza
+// con `null value in column "email" violates not-null constraint` (23502).
+//
+// Discover new entries with:
+//
+//	grep -E 'TEXT NOT NULL|VARCHAR\([0-9]+\) NOT NULL' db_migrations/postgres/*.sql
+//
+// y verificar contra el enqueue helper de cada repo SQLite: si la columna se
+// envía como `""` cuando es opcional en el dominio, debe vivir aquí.
+var notNullStringColumns = map[string]map[string]bool{
+	"users": {"email": true},
+}
+
 // projectors is the dispatch table. Every entry in SyncedTables must have a
 // projector registered or push fails with `missing_projector` (ADR-008 §3.1
 // — fail loud, do not degrade silently). Today every projector delegates to
@@ -313,6 +329,11 @@ func buildProjectorUpsert(
 			arg = b
 		case isTimestampColumn(table.Table, c):
 			arg = coerceTimestamp(v)
+		case notNullStringColumns[table.Table][c]:
+			// NOT NULL column whose dominio acepta "" como ausencia válida —
+			// preservamos el string vacío en lugar de colapsarlo a NULL (que
+			// la constraint rechazaría). Ver notNullStringColumns arriba.
+			arg = v
 		default:
 			arg = nullifyEmptyString(v)
 		}

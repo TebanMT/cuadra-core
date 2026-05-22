@@ -29,8 +29,13 @@ type RecordEventInput struct {
 	Amount       *float64
 	Currency     *string
 	PeriodEndsAt *time.Time
-	RawPayload   map[string]any
-	OccurredAt   time.Time
+	// StripeCustomerID — capturado del webhook Stripe (customer.subscription.*,
+	// invoice.*, checkout.session.completed). El use case lo asigna al gym
+	// SÓLO si está vacío; no pisamos un id existente (defense contra
+	// re-key accidental por cambio manual en Stripe dashboard).
+	StripeCustomerID string
+	RawPayload       map[string]any
+	OccurredAt       time.Time
 }
 
 // RecordEventOutput is what the controller sends back to the processor.
@@ -90,6 +95,24 @@ func (uc *RecordEvent) Execute(ctx context.Context, in RecordEventInput) (Record
 			return err
 		}
 		now := uc.NowFunc()
+
+		// Reject out-of-order webhooks. Stripe/MP retry on non-2xx and can
+		// re-deliver older events after a newer state transition; the
+		// (provider, external_id) idempotency only catches exact duplicates,
+		// not the case where a retry of an older `invoice.paid` arrives
+		// AFTER a `customer.subscription.deleted` was applied. Compare
+		// against the max occurred_at previously applied to this gym and
+		// drop anything strictly older. We allow equality so that ties at
+		// the same wall-clock instant still apply (rare but possible).
+		latest, err := uc.Events.LatestOccurredAtForGym(tx, in.GymID)
+		if err != nil {
+			return sharedDomain.NewUnexpectedError(err)
+		}
+		if latest != nil && in.OccurredAt.Before(*latest) {
+			out.Applied = false
+			return nil
+		}
+
 		switch in.Type {
 		case subDomain.EventActivated, subDomain.EventRenewed:
 			plan := in.Plan
@@ -117,8 +140,28 @@ func (uc *RecordEvent) Execute(ctx context.Context, in RecordEventInput) (Record
 				}
 			}
 			gym.ExtendTrial(days, now)
+		case subDomain.EventVoucherEmitted, subDomain.EventVoucherExpired:
+			// No-op sobre el gym a propósito. Estos eventos sólo dejan
+			// rastro en subscription_events para que el dashboard pueda
+			// derivar "tienes ficha pendiente" / "tu ficha venció".
+			//   - voucher_emitted: el dueño todavía no paga. No cambiamos
+			//     status — si estaba trial, sigue trial; si estaba active,
+			//     sigue active hasta SubscriptionEndsAt natural.
+			//   - voucher_expired: tampoco regresamos a past_due. Past_due
+			//     fue diseñado para "tarjeta falló N veces"; un voucher
+			//     vencido es un signal distinto (cliente nunca fue a OXXO).
+			//     Si el voucher era para renovar un anual activo, el cron
+			//     que vigila SubscriptionEndsAt decidirá cancelar cuando
+			//     la fecha pase, no este branch.
 		default:
 			return sharedDomain.NewValidationError(errors.New("unknown event type"))
+		}
+		// Captura del customer Stripe en el primer evento que lo trae. Sólo
+		// asignamos si no había uno previo — re-key manual en Stripe dashboard
+		// (raro pero posible) no debe romper el portal del gym actual.
+		if in.StripeCustomerID != "" && (gym.StripeCustomerID == nil || *gym.StripeCustomerID == "") {
+			id := in.StripeCustomerID
+			gym.StripeCustomerID = &id
 		}
 		if _, err := uc.Gyms.Update(tx, gym); err != nil {
 			return sharedDomain.NewUnexpectedError(err)

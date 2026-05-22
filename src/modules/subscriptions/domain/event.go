@@ -36,6 +36,17 @@ const (
 	EventCancelled EventType = "cancelled"
 	// EventTrialExtended — manual sales action; not a processor event.
 	EventTrialExtended EventType = "trial_extended"
+	// EventVoucherEmitted — voucher OXXO emitido (Stripe Checkout
+	// mode=payment con payment_status=unpaid). NO muta el gym; sólo deja
+	// rastro en subscription_events para que el dashboard pueda mostrar
+	// "tienes una ficha pendiente, pagala antes del X". Si el cliente
+	// paga, llegará luego un EventActivated; si vence, un EventVoucherExpired.
+	EventVoucherEmitted EventType = "voucher_emitted"
+	// EventVoucherExpired — voucher OXXO venció sin pagarse. Tampoco muta
+	// el gym (un voucher vencido en trial no debe acabar el trial; un
+	// voucher vencido renovando un anual activo se maneja por
+	// SubscriptionEndsAt + cron, no por past_due). Sólo es visibilidad.
+	EventVoucherExpired EventType = "voucher_expired"
 )
 
 // Event is one row in `subscription_events`. We store the raw provider payload
