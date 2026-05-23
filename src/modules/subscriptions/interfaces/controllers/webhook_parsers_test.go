@@ -257,9 +257,9 @@ func TestParseStripe_SubscriptionUpdated_CancelScheduled(t *testing.T) {
 		"type": "customer.subscription.updated",
 		"data": map[string]any{
 			"object": map[string]any{
-				"metadata":                map[string]any{"gym_id": gymID.String()},
-				"cancel_at_period_end":    true,
-				"current_period_end":      float64(1747742400),
+				"metadata":             map[string]any{"gym_id": gymID.String()},
+				"cancel_at_period_end": true,
+				"current_period_end":   float64(1747742400),
 			},
 			"previous_attributes": map[string]any{
 				"cancel_at_period_end": false,
@@ -318,9 +318,9 @@ func TestParseStripe_SubscriptionUpdated_UnrelatedChangeIgnored(t *testing.T) {
 		"type": "customer.subscription.updated",
 		"data": map[string]any{
 			"object": map[string]any{
-				"metadata":                 map[string]any{"gym_id": uuid.NewString()},
-				"default_payment_method":   "pm_new",
-				"cancel_at_period_end":     false,
+				"metadata":               map[string]any{"gym_id": uuid.NewString()},
+				"default_payment_method": "pm_new",
+				"cancel_at_period_end":   false,
 			},
 			"previous_attributes": map[string]any{
 				"default_payment_method": "pm_old",

@@ -16,8 +16,8 @@ import (
 	notiDomain "github.com/cuadra/cuadra-core/src/modules/notifications/domain/notification"
 	notiRepo "github.com/cuadra/cuadra-core/src/modules/notifications/domain/repository"
 	subDomain "github.com/cuadra/cuadra-core/src/modules/subscriptions/domain"
-	userDomain "github.com/cuadra/cuadra-core/src/modules/users/domain/user"
 	usersRepo "github.com/cuadra/cuadra-core/src/modules/users/domain/repository"
+	userDomain "github.com/cuadra/cuadra-core/src/modules/users/domain/user"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 )
 

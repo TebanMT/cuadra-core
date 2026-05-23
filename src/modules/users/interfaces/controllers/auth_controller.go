@@ -256,9 +256,9 @@ func (ctrl *AuthController) RegisterAccountRoutes(r *gin.Engine) {
 		// genéricos que el dueño usa también post-setup; gatearlos ahí
 		// rompería flujos no relacionados con el wizard.
 		emailVerified := middleware.RequireEmailVerified(ctrl.Users, ctrl.UoW)
-		gyms.PATCH("/me/setup", middleware.RequireOwner(), emailVerified, ctrl.handleUpdateSetup)         // step 2
+		gyms.PATCH("/me/setup", middleware.RequireOwner(), emailVerified, ctrl.handleUpdateSetup)           // step 2
 		gyms.POST("/me/setup/complete", middleware.RequireOwner(), emailVerified, ctrl.handleCompleteSetup) // step 5
-		gyms.PATCH("/me/payment-methods", middleware.RequireOwner(), ctrl.handleUpdatePaymentMeths)        // step 4
+		gyms.PATCH("/me/payment-methods", middleware.RequireOwner(), ctrl.handleUpdatePaymentMeths)         // step 4
 		// PATCH /me uses the FE-driven shape (whatsapp_number, legal_name,
 		// kiosk_volume, …). The legacy handleUpdateProfile is dead code kept
 		// around for direct test callers; the wire handler is the active path.

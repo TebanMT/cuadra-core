@@ -73,7 +73,7 @@ var timestamptzColumns = map[string]map[string]bool{
 
 // notNullStringColumns lists columns declared NOT NULL in Postgres whose
 // dominio semántico trata "" como ausencia válida (ej. users.email tras la
-// migración 019: "el operador PIN-only no lleva email; '' = sin correo").
+// migración 019: el operador PIN-only no lleva email; "" = sin correo).
 // Sin esta lista, nullifyEmptyString colapsa "" → NULL y Postgres rechaza
 // con `null value in column "email" violates not-null constraint` (23502).
 //

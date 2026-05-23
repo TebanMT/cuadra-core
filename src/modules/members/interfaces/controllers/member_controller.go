@@ -186,7 +186,7 @@ type updateMemberReq struct {
 	PhotoURL  *string `json:"photo_url,omitempty"`
 	Notes     *string `json:"notes,omitempty"`
 	// Gender — nil = no change. ""  = limpiar (vuelve a NULL).
-	Gender    *string `json:"gender,omitempty"`
+	Gender *string `json:"gender,omitempty"`
 }
 
 type toggleStatusReq struct {

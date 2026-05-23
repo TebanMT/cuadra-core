@@ -33,14 +33,14 @@ var ErrBillingNotWired = errors.New("create-member: billing dependencies missing
 // exists the use case returns a BusinessError; the front-end can re-call with
 // AllowDuplicatePhone=true to confirm (DA-12.3).
 type CreateMemberInput struct {
-	GymID               uuid.UUID
-	ActorUserID         uuid.UUID
-	FullName            string
-	Phone               string
-	Email               *string
-	Birthdate           *time.Time
-	PhotoURL            *string
-	Notes               *string
+	GymID       uuid.UUID
+	ActorUserID uuid.UUID
+	FullName    string
+	Phone       string
+	Email       *string
+	Birthdate   *time.Time
+	PhotoURL    *string
+	Notes       *string
 	// Gender opcional (DA-012.7). nil o "" = no se captura; valor válido se
 	// persiste tras pasar por memberDomain.ValidateGender. NO se infiere
 	// del nombre.

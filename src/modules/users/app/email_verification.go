@@ -70,7 +70,7 @@ func (uc *RequestEmailVerification) Execute(ctx context.Context, userID uuid.UUI
 		return sharedDomain.NewUnexpectedError(err)
 	}
 	var (
-		sendTo  string
+		sendTo   string
 		fullName string
 	)
 	err = uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {

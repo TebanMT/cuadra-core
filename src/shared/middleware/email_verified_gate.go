@@ -14,7 +14,7 @@ import (
 // en lugar del genérico "no tienes permisos". Mismo shape que PlanGateResponse
 // (error code + mensaje legible) para que el manejo en api.ts sea consistente.
 type EmailVerifiedGateResponse struct {
-	Error   string `json:"error"`   // siempre "email_not_verified"
+	Error   string `json:"error"` // siempre "email_not_verified"
 	Message string `json:"message"`
 }
 

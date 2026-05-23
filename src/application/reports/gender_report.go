@@ -2,9 +2,9 @@
 // consulta desde la página de reportes para decidir horarios dedicados —
 // caso clásico "horario de mujeres" en gyms MX:
 //
-//   1. GenderComposition — % por bucket sobre el padrón activo.
-//   2. AttendanceByGenderHour — checkins × hora × género (últimos 30 días)
-//      para detectar bandas horarias donde una demografía concreta domina.
+//  1. GenderComposition — % por bucket sobre el padrón activo.
+//  2. AttendanceByGenderHour — checkins × hora × género (últimos 30 días)
+//     para detectar bandas horarias donde una demografía concreta domina.
 //
 // Read-only (UoW.Query), single round-trip por agregado. Sin cache propio —
 // el FE no consulta esto en hot path; si en algún momento lo metemos en el

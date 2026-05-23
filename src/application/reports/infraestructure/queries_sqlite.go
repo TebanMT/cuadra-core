@@ -1121,7 +1121,7 @@ func (r *SQLiteReader) GenderComposition(tx sharedDomain.Transaction, gymID uuid
 // una mejora futura. result LIKE 'allowed_%' filtra denied_*.
 func (r *SQLiteReader) AttendanceByGenderHour(tx sharedDomain.Transaction, gymID uuid.UUID, daysBack int, now time.Time) ([]reports.AttendanceByGenderHourRow, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
-	cutoffMs := now.Add(-time.Duration(daysBack)*24*time.Hour).UnixMilli()
+	cutoffMs := now.Add(-time.Duration(daysBack) * 24 * time.Hour).UnixMilli()
 	nowMs := now.UnixMilli()
 	type sqliteRow struct {
 		HourStr        string `db:"hour"`

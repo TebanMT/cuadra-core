@@ -154,12 +154,12 @@ func (g *StripeGateway) startCheckoutOXXO(ctx context.Context, in subDomain.Chec
 		"payment_method": "oxxo",
 	}
 	params := &stripe.CheckoutSessionCreateParams{
-		Mode:                stripe.String("payment"),
-		SuccessURL:          stripe.String(in.SuccessURL),
-		CancelURL:           stripe.String(in.CancelURL),
-		ClientReferenceID:   stripe.String(gymRef),
-		Locale:              stripe.String("es-419"),
-		PaymentMethodTypes:  stripe.StringSlice([]string{"oxxo"}),
+		Mode:               stripe.String("payment"),
+		SuccessURL:         stripe.String(in.SuccessURL),
+		CancelURL:          stripe.String(in.CancelURL),
+		ClientReferenceID:  stripe.String(gymRef),
+		Locale:             stripe.String("es-419"),
+		PaymentMethodTypes: stripe.StringSlice([]string{"oxxo"}),
 		LineItems: []*stripe.CheckoutSessionCreateLineItemParams{
 			{
 				Price:    stripe.String(g.oxxoAnnualPriceID),

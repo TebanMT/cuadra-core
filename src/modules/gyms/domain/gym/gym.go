@@ -89,33 +89,33 @@ func IsPaidPlan(plan string) bool {
 // Gym is the multi-tenant root. Every other entity in the system carries the
 // gym's id; for the gym itself the gym_id column equals id (ADR-002 §3.1).
 type Gym struct {
-	ID                       uuid.UUID
-	Version                  int
-	Name                     *string
-	City                     *string
-	WhatsApp                 *string
-	Country                  string
-	Timezone                 string
-	RFC                      *string
-	RazonSocial              *string
-	CodigoPostal             *string
-	RegimenFiscal            *string
-	LogoURL                  *string
-	PrimaryColor             *string
-	SecondaryColor           *string
-	PaymentMethods           []string
-	OpenTime                 *string // "HH:MM:SS"
-	CloseTime                *string
-	SubscriptionPlan         string
-	TrialEndsAt              *time.Time
-	SubscriptionEndsAt       *time.Time
-	SubscriptionStatus       string
+	ID                 uuid.UUID
+	Version            int
+	Name               *string
+	City               *string
+	WhatsApp           *string
+	Country            string
+	Timezone           string
+	RFC                *string
+	RazonSocial        *string
+	CodigoPostal       *string
+	RegimenFiscal      *string
+	LogoURL            *string
+	PrimaryColor       *string
+	SecondaryColor     *string
+	PaymentMethods     []string
+	OpenTime           *string // "HH:MM:SS"
+	CloseTime          *string
+	SubscriptionPlan   string
+	TrialEndsAt        *time.Time
+	SubscriptionEndsAt *time.Time
+	SubscriptionStatus string
 	// StripeCustomerID — capturado del primer webhook que trae customer
 	// (checkout.session.completed o customer.subscription.created). Lo
 	// usamos para abrir Stripe Billing Portal sin volver a pedir al usuario
 	// que ingrese su tarjeta (UC: ver facturas / actualizar método de pago).
 	// Nullable: gyms en trial sin checkout aún, o gyms cobrados sólo por MP.
-	StripeCustomerID *string
+	StripeCustomerID         *string
 	SetupCompletedAt         *time.Time
 	WhatsAppBusinessPhone    *string
 	WhatsAppBusinessTokenEnc []byte

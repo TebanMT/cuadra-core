@@ -245,14 +245,14 @@ func TestMigration015_GymsWhatsAppUnique(t *testing.T) {
 // POST /api/v1/members en sidecars que habían aplicado 011.
 //
 // Cadena del bug:
-//   1. 011 crea memberships_new con `replaced_by REFERENCES memberships_new(id)`.
-//   2. 011 corre con PRAGMA foreign_keys=OFF (necesario para el DROP).
-//   3. Bajo foreign_keys=OFF, ALTER TABLE RENAME no reescribe FK refs
-//      (SQLite docs: "modification of foreign-key-constraints only
-//      happens when the foreign_keys pragma is enabled").
-//   4. Tras RENAME memberships_new → memberships, el schema literal en
-//      sqlite_schema sigue diciendo REFERENCES memberships_new(id).
-//   5. Cualquier INSERT que dispare validación de FK rompe.
+//  1. 011 crea memberships_new con `replaced_by REFERENCES memberships_new(id)`.
+//  2. 011 corre con PRAGMA foreign_keys=OFF (necesario para el DROP).
+//  3. Bajo foreign_keys=OFF, ALTER TABLE RENAME no reescribe FK refs
+//     (SQLite docs: "modification of foreign-key-constraints only
+//     happens when the foreign_keys pragma is enabled").
+//  4. Tras RENAME memberships_new → memberships, el schema literal en
+//     sqlite_schema sigue diciendo REFERENCES memberships_new(id).
+//  5. Cualquier INSERT que dispare validación de FK rompe.
 //
 // La 021 rebuildea memberships con la self-FK escrita como
 // REFERENCES memberships(id) (nombre canónico final). Como SQLite busca
