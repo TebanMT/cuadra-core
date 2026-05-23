@@ -239,3 +239,184 @@ func TestMigration015_GymsWhatsAppUnique(t *testing.T) {
 		t.Errorf("INSERT con whatsapp NULL debió pasar (gym placeholder): %v", err)
 	}
 }
+
+// TestMigration021_FixMembershipsSelfFK reproduce el bug runtime
+// "no such table: main.memberships_new" que aparecía al hacer
+// POST /api/v1/members en sidecars que habían aplicado 011.
+//
+// Cadena del bug:
+//   1. 011 crea memberships_new con `replaced_by REFERENCES memberships_new(id)`.
+//   2. 011 corre con PRAGMA foreign_keys=OFF (necesario para el DROP).
+//   3. Bajo foreign_keys=OFF, ALTER TABLE RENAME no reescribe FK refs
+//      (SQLite docs: "modification of foreign-key-constraints only
+//      happens when the foreign_keys pragma is enabled").
+//   4. Tras RENAME memberships_new → memberships, el schema literal en
+//      sqlite_schema sigue diciendo REFERENCES memberships_new(id).
+//   5. Cualquier INSERT que dispare validación de FK rompe.
+//
+// La 021 rebuildea memberships con la self-FK escrita como
+// REFERENCES memberships(id) (nombre canónico final). Como SQLite busca
+// el token de la tabla TEMPORAL durante el rename, y el body no
+// contiene ese token, la self-FK queda intacta apuntando al nombre
+// correcto.
+func TestMigration021_FixMembershipsSelfFK(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := sqlx.Open("sqlite3", dbPath+"?_foreign_keys=on&_journal_mode=WAL")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+
+	// Sólo cargamos las migraciones necesarias para reproducir el bug:
+	// 001 (crea gyms, members, membership_types, memberships con
+	// self-FK correcta), 011 (rebuildea memberships con la self-FK
+	// rota), 021 (el fix).
+	for _, m := range []string{
+		"../../db_migrations/sqlite/001_init_schema.sql",
+		"../../db_migrations/sqlite/011_membership_pending_payment.sql",
+	} {
+		b, err := os.ReadFile(m)
+		if err != nil {
+			t.Fatalf("read %s: %v", m, err)
+		}
+		if _, err := db.Exec(string(b)); err != nil {
+			t.Fatalf("apply %s: %v", m, err)
+		}
+	}
+
+	// Sanity informativa: el bug runtime "no such table:
+	// main.memberships_new" depende de la versión de SQLite embebida en
+	// el binario del cliente. SQLite >= 3.25 con legacy_alter_table=OFF
+	// reescribe la self-FK durante el RENAME y NO reproduce el bug;
+	// SQLite más viejo (o con la flag legacy_alter_table=ON) sí lo
+	// reproduce. Logueamos el estado para diagnóstico pero no fallamos
+	// el test si el schema ya quedó limpio aquí — la 021 es defensiva
+	// y arregla cualquiera de los dos casos.
+	var post011SQL string
+	if err := db.Get(&post011SQL,
+		`SELECT sql FROM sqlite_schema WHERE type='table' AND name='memberships'`); err != nil {
+		t.Fatalf("read sqlite_schema post-011: %v", err)
+	}
+	t.Logf("post-011 memberships schema (SQLite local rewrote=%v):\n%s",
+		!contains(post011SQL, "memberships_new"), post011SQL)
+
+	// Aplicar 021 — el fix.
+	b021, err := os.ReadFile("../../db_migrations/sqlite/021_fix_memberships_self_fk.sql")
+	if err != nil {
+		t.Fatalf("read 021: %v", err)
+	}
+	if _, err := db.Exec(string(b021)); err != nil {
+		t.Fatalf("apply 021: %v", err)
+	}
+
+	// El schema post-021 NO debe mencionar memberships_new ni la tabla
+	// temporal del fix (memberships_canon) — sólo la canónica.
+	var fixedSQL string
+	if err := db.Get(&fixedSQL,
+		`SELECT sql FROM sqlite_schema WHERE type='table' AND name='memberships'`); err != nil {
+		t.Fatalf("read sqlite_schema post-021: %v", err)
+	}
+	if contains(fixedSQL, "memberships_new") {
+		t.Errorf("post-021 schema still references memberships_new:\n%s", fixedSQL)
+	}
+	if contains(fixedSQL, "memberships_canon") {
+		t.Errorf("post-021 schema leaked memberships_canon (temp table):\n%s", fixedSQL)
+	}
+
+	// Seed mínimo para insertar memberships: necesitamos gym, member,
+	// membership_type vivos.
+	now := "1715000000000"
+	gymID := "30000000-0000-0000-0000-000000000001"
+	userID := "30000000-0000-0000-0000-000000000099"
+	memberID := "30000000-0000-0000-0000-000000000002"
+	typeID := "30000000-0000-0000-0000-000000000003"
+	if _, err := db.Exec(`
+		INSERT INTO gyms (id, gym_id, name, subscription_plan, subscription_status, created_at, updated_at)
+		VALUES (?, ?, 'T', 'trial', 'active', `+now+`, `+now+`)`, gymID, gymID); err != nil {
+		t.Fatalf("seed gym: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO users (id, gym_id, email, password_hash, full_name, role, active, created_at, updated_at)
+		VALUES (?, ?, 'owner@t.mx', 'hash', 'Owner', 'owner', 1, `+now+`, `+now+`)`,
+		userID, gymID); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO members (id, gym_id, full_name, phone, folio, status, enrollment_paid, created_by, created_at, updated_at)
+		VALUES (?, ?, 'Test Member', '+5215555555555', 'F001', 'active', 1, ?, `+now+`, `+now+`)`,
+		memberID, gymID, userID); err != nil {
+		t.Fatalf("seed member: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO membership_types (id, gym_id, name, price, duration_days, active, created_at, updated_at)
+		VALUES (?, ?, 'Mensual', 50000, 30, 1, `+now+`, `+now+`)`,
+		typeID, gymID); err != nil {
+		t.Fatalf("seed membership_type: %v", err)
+	}
+
+	// El INSERT que rompía antes: nueva membresía con replaced_by NULL.
+	// Bajo el bug pre-021, esto reventaba con "no such table:
+	// main.memberships_new" porque SQLite valida el schema al primer
+	// write.
+	membershipID := "30000000-0000-0000-0000-000000000010"
+	_, err = db.Exec(`
+		INSERT INTO memberships
+		    (id, gym_id, member_id, membership_type_id,
+		     type_name_snapshot, price_snapshot, duration_days_snapshot,
+		     start_date, expiry_date, status,
+		     created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'Mensual', 50000, 30, '2026-05-22', '2026-06-21', 'active', `+now+`, `+now+`)`,
+		membershipID, gymID, memberID, typeID)
+	if err != nil {
+		t.Fatalf("INSERT memberships post-021 con replaced_by NULL falló: %v", err)
+	}
+
+	// Marcamos la primera membresía como replaced para liberar el slot
+	// del UNIQUE partial index (uq_memberships_member_active) — mismo
+	// dance que hace el dominio en una renovación real.
+	if _, err := db.Exec(
+		`UPDATE memberships SET status='replaced' WHERE id=?`, membershipID); err != nil {
+		t.Fatalf("demote first membership: %v", err)
+	}
+
+	// INSERT con replaced_by apuntando a una fila existente — ejercita
+	// la self-FK que estaba rota antes.
+	replacementID := "30000000-0000-0000-0000-000000000011"
+	_, err = db.Exec(`
+		INSERT INTO memberships
+		    (id, gym_id, member_id, membership_type_id,
+		     type_name_snapshot, price_snapshot, duration_days_snapshot,
+		     start_date, expiry_date, status, replaced_by,
+		     created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'Mensual', 50000, 30, '2026-06-22', '2026-07-21', 'active', ?, `+now+`, `+now+`)`,
+		replacementID, gymID, memberID, typeID, membershipID)
+	if err != nil {
+		t.Fatalf("INSERT memberships con replaced_by apuntando a fila viva falló: %v", err)
+	}
+
+	// FK enforcement quedó re-encendido.
+	var fk int
+	if err := db.Get(&fk, "PRAGMA foreign_keys"); err != nil {
+		t.Fatalf("pragma foreign_keys: %v", err)
+	}
+	if fk != 1 {
+		t.Errorf("foreign_keys = %d post-021, want 1", fk)
+	}
+}
+
+// contains es un helper inline (strings.Contains aliased) para mantener
+// el test compacto sin agregar imports.
+func contains(s, sub string) bool {
+	return len(s) >= len(sub) && indexOf(s, sub) >= 0
+}
+
+func indexOf(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+	return -1
+}

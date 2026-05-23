@@ -4,6 +4,20 @@
 -- SQLite no soporta DROP CONSTRAINT en CHECKs, así que recreamos las
 -- tablas memberships y checkins manteniendo todos los índices.
 --
+-- ⚠️ BUG CONOCIDO (arreglado por 021): la self-FK
+-- `replaced_by TEXT REFERENCES memberships_new(id)` queda colgante tras
+-- el RENAME porque SQLite NO reescribe FK refs durante un ALTER TABLE
+-- RENAME cuando foreign_keys=OFF (ver SQLite docs sobre ALTER TABLE).
+-- La tabla `memberships` post-011 dice literalmente
+-- `REFERENCES memberships_new(id)` en sqlite_schema, y cualquier INSERT
+-- que dispare validación de FK rompe con "no such table:
+-- main.memberships_new". La migración 021 rebuildea la tabla con la
+-- self-FK escrita como `REFERENCES memberships(id)` (nombre final, no
+-- el de la tabla temporal), evitando el bug. NO repetir este patrón en
+-- futuras migraciones: cuando una self-FK necesita preservarse en un
+-- rebuild, escribirla con el NOMBRE FINAL de la tabla, no con el
+-- temporal.
+--
 -- Patrón de rebuild: create-new → copy → drop-old → rename-new (igual
 -- que las migraciones 007 y 016). NO rename-first: el `ALTER TABLE ...
 -- RENAME TO` del SQLite moderno reescribe las FK refs de las tablas
