@@ -3,6 +3,7 @@ package app
 
 import (
 	"context"
+	"log"
 	"strings"
 	"time"
 
@@ -66,6 +67,14 @@ type SignupOwner struct {
 	Audit     audit.Recorder
 	TrialDays int
 	NowFunc   func() time.Time // injectable for tests
+	// EmailVerifier is the UC-013 step-1 use case that mints + emails the
+	// initial verification link. Optional: if nil (tests, or before
+	// main.go wires it), signup completes silently and the owner has to
+	// hit the dashboard's "Reenviar" button to receive the email.
+	// Cuando está set, lo disparamos best-effort después de que la
+	// transacción del signup commitea — un fallo de entrega (Resend caído,
+	// timeout) NO debe revertir la creación de la cuenta.
+	EmailVerifier *RequestEmailVerification
 }
 
 func NewSignupOwner(users userRepo.UserRepository, gyms gymRepo.GymRepository,
@@ -79,6 +88,16 @@ func NewSignupOwner(users userRepo.UserRepository, gyms gymRepo.GymRepository,
 		TrialDays: trialDays,
 		NowFunc:   func() time.Time { return time.Now().UTC() },
 	}
+}
+
+// WithEmailVerifier wires the post-signup verification email side-effect.
+// Setter (no constructor arg) porque RequestEmailVerification se construye
+// DESPUÉS de SignupOwner en main.go — agregar otro parámetro al constructor
+// rompía la cadena de inicialización sin beneficio. Mismo patrón que
+// createOp.WithGymRepo en main.go.
+func (s *SignupOwner) WithEmailVerifier(v *RequestEmailVerification) *SignupOwner {
+	s.EmailVerifier = v
+	return s
 }
 
 func (uc *SignupOwner) Execute(ctx context.Context, in SignupOwnerInput) (SignupOwnerOutput, error) {
@@ -162,6 +181,20 @@ func (uc *SignupOwner) Execute(ctx context.Context, in SignupOwnerInput) (Signup
 	})
 	if err != nil {
 		return SignupOwnerOutput{}, err
+	}
+
+	// Dispara el correo de verificación best-effort. La cuenta YA está
+	// committeada — un fallo acá NO retorna error al caller; el dueño podrá
+	// usar el botón "Reenviar" desde el banner del dashboard si no le llegó.
+	// Se hace ANTES de generar tokens (microseg de diferencia) pero DESPUÉS
+	// del commit, para que el audit row + token de verificación queden
+	// asociados al user ya persistido. Usamos el ctx del request para que
+	// audit capture IP/UA — si el cliente desconectó entre el commit y
+	// acá, igual swalleamos el error.
+	if uc.EmailVerifier != nil {
+		if vErr := uc.EmailVerifier.Execute(ctx, userID); vErr != nil {
+			log.Printf("[signup] verification email failed for user=%s: %v", userID, vErr)
+		}
 	}
 
 	access, err := uc.Tokens.GenerateAccessToken(userID, gymID, userDomain.RoleOwner)

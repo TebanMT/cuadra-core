@@ -183,6 +183,13 @@ func main() {
 	confirmReset := usersApp.NewConfirmPasswordReset(userRepo, resetRepo, blRepo, uow, recorder)
 	requestEmailVerify := usersApp.NewRequestEmailVerification(userRepo, emailVerifyRepo, uow, emailSender, recorder, dashboardURL)
 	confirmEmailVerify := usersApp.NewConfirmEmailVerification(userRepo, emailVerifyRepo, uow, recorder)
+	// Wire signup → verification email side-effect. Setter, no constructor
+	// arg, porque signup se construye en línea 179 ANTES que requestEmailVerify
+	// (que necesita emailVerifyRepo + emailSender de unas líneas más arriba).
+	// Sin esto, el dueño hace signup pero el primer correo de verificación
+	// nunca sale — tenía que pinchar "Reenviar" en el dashboard para
+	// recibirlo. Documentado en el comment de RequestEmailVerification.
+	signup.WithEmailVerifier(requestEmailVerify)
 	updateBasic := gymApp.NewUpdateBasicInfo(gymRepo, uow, recorder)
 	updatePay := gymApp.NewUpdatePaymentMethods(gymRepo, uow, recorder)
 	completeSetup := gymApp.NewCompleteSetup(gymRepo, uow, recorder)
