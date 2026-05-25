@@ -13,9 +13,22 @@ import (
 func mustType(t *testing.T, durationDays int) *mtDomain.MembershipType {
 	t.Helper()
 	now := time.Now().UTC()
-	mt, err := mtDomain.New(uuid.New(), uuid.New(), "Mensual", 500, durationDays, 0, 0, "", now)
+	mt, err := mtDomain.New(uuid.New(), uuid.New(), "Mensual", 500, durationDays, nil, 0, 0, "", now)
 	if err != nil {
 		t.Fatalf("type: %v", err)
+	}
+	return mt
+}
+
+// mustTypeMonths construye un plan "mensual natural" (durationMonths>0).
+// Útil para los tests que verifican la nueva semántica de expiry por
+// meses naturales en lugar de días corridos.
+func mustTypeMonths(t *testing.T, months int) *mtDomain.MembershipType {
+	t.Helper()
+	now := time.Now().UTC()
+	mt, err := mtDomain.New(uuid.New(), uuid.New(), "Mensual", 500, months*30, &months, 0, 0, "", now)
+	if err != nil {
+		t.Fatalf("type meses: %v", err)
 	}
 	return mt
 }
@@ -141,6 +154,88 @@ func TestNewAdjustment_ReasonValidation(t *testing.T) {
 	if _, err := membership.NewAdjustment(uuid.New(), uuid.New(), uuid.New(), uuid.New(),
 		"Cortesía COVID", 14, prev, next, now); err != nil {
 		t.Errorf("valid reason failed: %v", err)
+	}
+}
+
+// TestNewMembership_Mensual_UsaMesNatural reproduce el bug que reportó
+// el dueño: una mensual vendida el 25-may debe vencer el 25-jun (1 mes
+// natural), NO el 24-jun (30 días corridos).
+func TestNewMembership_Mensual_UsaMesNatural(t *testing.T) {
+	mt := mustTypeMonths(t, 1)
+	now := time.Now().UTC()
+	start := time.Date(2026, 5, 25, 0, 0, 0, 0, time.UTC)
+	ms := membership.New(uuid.New(), uuid.New(), uuid.New(), mt, start, now)
+	want := time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC)
+	if !ms.ExpiryDate.Equal(want) {
+		t.Errorf("expiry = %v, want %v (1 mes natural)", ms.ExpiryDate, want)
+	}
+	if ms.DurationMonthsSnapshot == nil || *ms.DurationMonthsSnapshot != 1 {
+		t.Errorf("snapshot meses = %v, want 1", ms.DurationMonthsSnapshot)
+	}
+}
+
+// TestNewMembership_Anual_UsaAnoNatural: socio paga 14-feb anual,
+// debe vencer 14-feb del año siguiente, no 14-feb +365d.
+func TestNewMembership_Anual_UsaAnoNatural(t *testing.T) {
+	mt := mustTypeMonths(t, 12)
+	now := time.Now().UTC()
+	start := time.Date(2026, 2, 14, 0, 0, 0, 0, time.UTC)
+	ms := membership.New(uuid.New(), uuid.New(), uuid.New(), mt, start, now)
+	want := time.Date(2027, 2, 14, 0, 0, 0, 0, time.UTC)
+	if !ms.ExpiryDate.Equal(want) {
+		t.Errorf("expiry = %v, want %v (1 año natural)", ms.ExpiryDate, want)
+	}
+}
+
+// TestNewMembership_Mensual_FinDeMes: socio paga el 31-ene mensual,
+// debe vencer el 28-feb (o 29 en bisiesto), NO 3-mar (overflow nativo
+// de Go AddDate).
+func TestNewMembership_Mensual_FinDeMes(t *testing.T) {
+	mt := mustTypeMonths(t, 1)
+	now := time.Now().UTC()
+	// 2026 NO es bisiesto → febrero tiene 28 días.
+	start := time.Date(2026, 1, 31, 0, 0, 0, 0, time.UTC)
+	ms := membership.New(uuid.New(), uuid.New(), uuid.New(), mt, start, now)
+	want := time.Date(2026, 2, 28, 0, 0, 0, 0, time.UTC)
+	if !ms.ExpiryDate.Equal(want) {
+		t.Errorf("expiry = %v, want %v (clamp al último día de feb)", ms.ExpiryDate, want)
+	}
+}
+
+// TestNewMembership_Personalizada_SigueUsandoDias: un plan custom de 45
+// días debe seguir calculando expiry como start + 45 días.
+func TestNewMembership_Personalizada_SigueUsandoDias(t *testing.T) {
+	mt := mustType(t, 45)
+	now := time.Now().UTC()
+	start := time.Date(2026, 5, 25, 0, 0, 0, 0, time.UTC)
+	ms := membership.New(uuid.New(), uuid.New(), uuid.New(), mt, start, now)
+	want := start.AddDate(0, 0, 45)
+	if !ms.ExpiryDate.Equal(want) {
+		t.Errorf("expiry = %v, want %v (45 días corridos)", ms.ExpiryDate, want)
+	}
+	if ms.DurationMonthsSnapshot != nil {
+		t.Errorf("snapshot meses debería ser nil para personalizada, got %v", *ms.DurationMonthsSnapshot)
+	}
+}
+
+// TestRenew_Mensual_AcumulaPorMeses: renovación temprana de mensual,
+// el nuevo expiry debe ser ExpiryDate previo + 1 mes natural (no +30d).
+func TestRenew_Mensual_AcumulaPorMeses(t *testing.T) {
+	mt := mustTypeMonths(t, 1)
+	now := time.Now().UTC()
+	start := time.Date(2026, 5, 25, 0, 0, 0, 0, time.UTC)
+	current := membership.New(uuid.New(), mt.GymID, uuid.New(), mt, start, now)
+	// Pagamos antes del vencimiento (current expira 25-jun).
+	paymentDate := time.Date(2026, 6, 10, 0, 0, 0, 0, time.UTC)
+	next := current.Renew(uuid.New(), mt, paymentDate, now)
+	// newStart = expiry previo = 25-jun. newExpiry = 25-jul.
+	wantStart := time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC)
+	wantExpiry := time.Date(2026, 7, 25, 0, 0, 0, 0, time.UTC)
+	if !next.StartDate.Equal(wantStart) {
+		t.Errorf("renew start = %v, want %v", next.StartDate, wantStart)
+	}
+	if !next.ExpiryDate.Equal(wantExpiry) {
+		t.Errorf("renew expiry = %v, want %v", next.ExpiryDate, wantExpiry)
 	}
 }
 

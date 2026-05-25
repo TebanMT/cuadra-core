@@ -91,6 +91,16 @@ func (ctrl *PaymentController) RegisterRoutes(r *gin.Engine) {
 // DTOs
 // ---------------------------------------------------------------------------
 
+// promotionApplyReq es el sub-objeto opcional para aplicar una promo al
+// cobro. PromotionID y Code son excluyentes — operador eligió de la lista
+// vigente o tecleó un código (case-insensitive).
+type promotionApplyReq struct {
+	PromotionID        *string  `json:"promotion_id,omitempty"`
+	Code               *string  `json:"code,omitempty"`
+	CompanionMemberIDs []string `json:"companion_member_ids,omitempty"`
+	Notes              *string  `json:"notes,omitempty"`
+}
+
 type registerPaymentReq struct {
 	MemberID         string  `json:"member_id" validate:"required,uuid"`
 	MembershipTypeID string  `json:"membership_type_id" validate:"required,uuid"`
@@ -102,10 +112,11 @@ type registerPaymentReq struct {
 	PaidNow          float64 `json:"partial_amount,omitempty"`
 	// Operator overrides — nil/cero = auto-decisión basada en el plan
 	// y el estado del socio.
-	ChargeEnrollment  *bool   `json:"charge_enrollment,omitempty"`
-	ChargeMaintenance *bool   `json:"charge_maintenance,omitempty"`
-	EnrollmentAmount  float64 `json:"enrollment_amount,omitempty"`
-	MaintenanceAmount float64 `json:"maintenance_amount,omitempty"`
+	ChargeEnrollment  *bool              `json:"charge_enrollment,omitempty"`
+	ChargeMaintenance *bool              `json:"charge_maintenance,omitempty"`
+	EnrollmentAmount  float64            `json:"enrollment_amount,omitempty"`
+	MaintenanceAmount float64            `json:"maintenance_amount,omitempty"`
+	Promotion         *promotionApplyReq `json:"promotion,omitempty"`
 }
 
 type registerPaymentResp struct {
@@ -120,6 +131,12 @@ type registerPaymentResp struct {
 	NewExpiry       string    `json:"new_expiry"`
 	EnrollmentChrg  bool      `json:"enrollment_charged"`
 	MaintenanceChrg bool      `json:"maintenance_charged"`
+	// Datos de la promoción aplicada (omitidos cuando no hubo).
+	PromotionAppliedID *uuid.UUID  `json:"promotion_applied_id,omitempty"`
+	PromotionName      string      `json:"promotion_name,omitempty"`
+	PromotionKind      string      `json:"promotion_kind,omitempty"`
+	PromotionExtraDays int         `json:"promotion_extra_days,omitempty"`
+	PromotionGiftedIDs []uuid.UUID `json:"promotion_gifted_membership_ids,omitempty"`
 }
 
 type settleReq struct {
@@ -230,6 +247,11 @@ func (ctrl *PaymentController) handleRegister(c *gin.Context) {
 		}
 		paymentDate = t
 	}
+	promo, err := parsePromotion(req.Promotion)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err)
+		return
+	}
 	out, err := ctrl.Register.Execute(c.Request.Context(), billingApp.RegisterMembershipPaymentInput{
 		GymID:             gymID,
 		ActorUserID:       userID,
@@ -245,24 +267,54 @@ func (ctrl *PaymentController) handleRegister(c *gin.Context) {
 		ChargeMaintenance: req.ChargeMaintenance,
 		EnrollmentAmount:  req.EnrollmentAmount,
 		MaintenanceAmount: req.MaintenanceAmount,
+		Promotion:         promo,
 	})
 	if err != nil {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
 		return
 	}
 	utils.JsonResponse(c, http.StatusCreated, registerPaymentResp{
-		PaymentID:       out.PaymentID,
-		Folio:           out.Folio,
-		Subtotal:        out.Subtotal,
-		Discount:        out.Discount,
-		Total:           out.Total,
-		Paid:            out.Paid,
-		BalancePending:  out.BalancePending,
-		NewMembershipID: out.NewMembershipID,
-		NewExpiry:       out.NewExpiry.Format("2006-01-02"),
-		EnrollmentChrg:  out.EnrollmentChrg,
-		MaintenanceChrg: out.MaintenanceChrg,
+		PaymentID:          out.PaymentID,
+		Folio:              out.Folio,
+		Subtotal:           out.Subtotal,
+		Discount:           out.Discount,
+		Total:              out.Total,
+		Paid:               out.Paid,
+		BalancePending:     out.BalancePending,
+		NewMembershipID:    out.NewMembershipID,
+		NewExpiry:          out.NewExpiry.Format("2006-01-02"),
+		EnrollmentChrg:     out.EnrollmentChrg,
+		MaintenanceChrg:    out.MaintenanceChrg,
+		PromotionAppliedID: out.PromotionAppliedID,
+		PromotionName:      out.PromotionName,
+		PromotionKind:      out.PromotionKind,
+		PromotionExtraDays: out.PromotionExtraDays,
+		PromotionGiftedIDs: out.PromotionGiftedIDs,
 	})
+}
+
+// parsePromotion convierte el sub-DTO HTTP a billingApp.PromotionApply,
+// parseando UUIDs. Devuelve nil cuando el operador no envió el campo.
+func parsePromotion(req *promotionApplyReq) (*billingApp.PromotionApply, error) {
+	if req == nil {
+		return nil, nil
+	}
+	out := &billingApp.PromotionApply{Code: req.Code, Notes: req.Notes}
+	if req.PromotionID != nil && *req.PromotionID != "" {
+		id, err := uuid.Parse(*req.PromotionID)
+		if err != nil {
+			return nil, errBadID
+		}
+		out.PromotionID = &id
+	}
+	for _, s := range req.CompanionMemberIDs {
+		id, err := uuid.Parse(s)
+		if err != nil {
+			return nil, errBadID
+		}
+		out.CompanionMemberIDs = append(out.CompanionMemberIDs, id)
+	}
+	return out, nil
 }
 
 func (ctrl *PaymentController) handleSettle(c *gin.Context) {
@@ -531,13 +583,14 @@ type saleLineReq struct {
 // los abonos a mensualidades). Si se omite, el cobro es completo.
 // Requiere `member_id` — no se fía a un walk-in.
 type registerSaleReq struct {
-	Method      string        `json:"payment_method" validate:"required,oneof=cash transfer card"`
-	MemberID    *string       `json:"member_id,omitempty"`
-	Discount    float64       `json:"discount,omitempty"`
-	Paid        *float64      `json:"paid,omitempty"`
-	PaymentDate string        `json:"payment_date,omitempty"`
-	Notes       *string       `json:"notes,omitempty"`
-	Items       []saleLineReq `json:"line_items" validate:"required,min=1,dive"`
+	Method      string             `json:"payment_method" validate:"required,oneof=cash transfer card"`
+	MemberID    *string            `json:"member_id,omitempty"`
+	Discount    float64            `json:"discount,omitempty"`
+	Paid        *float64           `json:"paid,omitempty"`
+	PaymentDate string             `json:"payment_date,omitempty"`
+	Notes       *string            `json:"notes,omitempty"`
+	Items       []saleLineReq      `json:"line_items" validate:"required,min=1,dive"`
+	Promotion   *promotionApplyReq `json:"promotion,omitempty"`
 }
 
 type saleItemResp struct {
@@ -550,15 +603,18 @@ type saleItemResp struct {
 }
 
 type registerSaleResp struct {
-	SaleID         uuid.UUID      `json:"sale_id"`
-	PaymentID      uuid.UUID      `json:"payment_id"`
-	Folio          string         `json:"folio"`
-	Subtotal       float64        `json:"subtotal"`
-	Discount       float64        `json:"discount"`
-	Total          float64        `json:"total"`
-	Paid           float64        `json:"paid"`
-	BalancePending float64        `json:"balance_pending"`
-	Items          []saleItemResp `json:"items"`
+	SaleID             uuid.UUID      `json:"sale_id"`
+	PaymentID          uuid.UUID      `json:"payment_id"`
+	Folio              string         `json:"folio"`
+	Subtotal           float64        `json:"subtotal"`
+	Discount           float64        `json:"discount"`
+	Total              float64        `json:"total"`
+	Paid               float64        `json:"paid"`
+	BalancePending     float64        `json:"balance_pending"`
+	Items              []saleItemResp `json:"items"`
+	PromotionAppliedID *uuid.UUID     `json:"promotion_applied_id,omitempty"`
+	PromotionName      string         `json:"promotion_name,omitempty"`
+	PromotionKind      string         `json:"promotion_kind,omitempty"`
 }
 
 type refundSaleReq struct {
@@ -668,6 +724,11 @@ func (ctrl *PaymentController) handleRegisterSale(c *gin.Context) {
 		}
 		paymentDate = t
 	}
+	promo, err := parsePromotion(req.Promotion)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err)
+		return
+	}
 	out, err := ctrl.RegisterSale.Execute(c.Request.Context(), billingApp.RegisterSaleInput{
 		GymID:       gymID,
 		ActorUserID: userID,
@@ -678,6 +739,7 @@ func (ctrl *PaymentController) handleRegisterSale(c *gin.Context) {
 		PaymentDate: paymentDate,
 		Notes:       req.Notes,
 		Items:       items,
+		Promotion:   promo,
 	})
 	if err != nil {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
@@ -695,7 +757,10 @@ func (ctrl *PaymentController) handleRegisterSale(c *gin.Context) {
 		SaleID: out.SaleID, PaymentID: out.PaymentID, Folio: out.Folio,
 		Subtotal: out.Subtotal, Discount: out.Discount, Total: out.Total,
 		Paid: out.Paid, BalancePending: out.BalancePending,
-		Items: respItems,
+		Items:              respItems,
+		PromotionAppliedID: out.PromotionAppliedID,
+		PromotionName:      out.PromotionName,
+		PromotionKind:      out.PromotionKind,
 	})
 }
 

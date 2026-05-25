@@ -1,0 +1,74 @@
+# Manifiesto lock-step de migraciones Postgres ↔ SQLite (ADR-002 §5).
+#
+# Toda migración que toca tablas sincronizables (members, payments,
+# memberships, etc.) tiene que vivir en LOS DOS motores en paralelo —
+# sin esto, un sidecar nuevo y un cloud nuevo dejan de hablar el mismo
+# wire format y rompen sync. Este manifiesto materializa el pareo.
+#
+# Formato: una línea por par o por migración cloud-only.
+#
+#   pair: pg=NNN_filename sqlite=MMM_filename   (la migración existe en
+#                                                ambos motores; los
+#                                                números pueden diferir
+#                                                porque postgres y sqlite
+#                                                tienen secuencias
+#                                                independientes)
+#
+#   cloud_only: pg=NNN_filename reason="…"      (la migración NO existe
+#                                                en SQLite porque toca
+#                                                tablas que sólo viven
+#                                                en el cloud — sidecar_
+#                                                credentials, installer_
+#                                                bootstraps, email_
+#                                                verification, etc. El
+#                                                reason: explica por qué)
+#
+# Lockstep check (scripts/check_lockstep.sh, corre en CI) parsea este
+# archivo y valida:
+#
+#   1. Cada archivo en db_migrations/postgres/*.sql está listado acá
+#      como pair: o cloud_only:.
+#   2. Cada archivo en db_migrations/sqlite/*.sql aparece en una línea
+#      pair: (no hay sqlite_only — el cloud SIEMPRE manda).
+#   3. Cada pair: referencia archivos que existen en disco.
+#
+# Si alguien agrega una migración nueva sin actualizar este manifiesto,
+# el CI falla y bloquea el merge. Honor system + safety net.
+
+pair: pg=001_init_schema.sql           sqlite=001_init_schema.sql
+pair: pg=002_notifications.sql         sqlite=002_notifications.sql
+pair: pg=003_sync_entities.sql         sqlite=003_sync_local.sql
+cloud_only: pg=004_sidecar_credentials.sql reason="credenciales sk_live_* del sidecar (ADR-008) — viven sólo en cloud"
+pair: pg=005_owner_alert_configs.sql   sqlite=004_owner_alert_configs.sql
+cloud_only: pg=006_installer_bootstraps.sql reason="bootstrap tokens para canje del installer — uso single-server, no sincronizado"
+pair: pg=007_subscription_events.sql   sqlite=014_subscription_events.sql
+pair: pg=008_users_pin.sql             sqlite=005_users_pin.sql
+pair: pg=009_challenges.sql            sqlite=006_challenges.sql
+pair: pg=010_membership_freq_expand.sql sqlite=007_membership_freq_expand.sql
+pair: pg=011_gym_charge_settings.sql   sqlite=008_gym_charge_settings.sql
+pair: pg=012_member_pin_plain.sql      sqlite=009_member_pin_plain.sql
+pair: pg=013_payment_breakdown.sql     sqlite=010_payment_breakdown.sql
+pair: pg=014_membership_pending_payment.sql sqlite=011_membership_pending_payment.sql
+pair: pg=015_expenses.sql              sqlite=012_expenses.sql
+pair: pg=016_subscription_plans_rename.sql sqlite=013_subscription_plans_rename.sql
+pair: pg=017_subscription_events_sync.sql sqlite=014_subscription_events.sql
+pair: pg=018_gyms_whatsapp_unique.sql  sqlite=015_gyms_whatsapp_unique.sql
+pair: pg=019_operators_pin_first.sql   sqlite=016_operators_pin_first.sql
+pair: pg=020_fingerprints_multi.sql    sqlite=017_fingerprints_multi.sql
+cloud_only: pg=021_fix_uq_users_email.sql reason="fix de unique constraint cloud-side — sqlite ya tiene la forma correcta desde 001"
+cloud_only: pg=022_email_verification.sql reason="email verification tokens — flujo cloud-only (ADR-013)"
+pair: pg=023_gyms_stripe_customer.sql  sqlite=018_gyms_stripe_customer.sql
+pair: pg=024_subscription_events_voucher_types.sql sqlite=019_subscription_events_voucher_types.sql
+pair: pg=025_members_gender.sql        sqlite=020_members_gender.sql
+cloud_only: pg=026_releases.sql        reason="tabla de releases del auto-updater (ADR-005) — sólo el cloud sirve el manifest"
+pair: pg=027_membership_duration_months.sql sqlite=022_membership_duration_months.sql
+pair: pg=028_promotions.sql            sqlite=023_promotions.sql
+# sqlite-only excepciones documentadas (NO usamos sqlite_only: en este
+# formato porque rompe la regla "cloud manda"; en su lugar, comentamos):
+#   sqlite/021_fix_memberships_self_fk.sql — fix idempotente puro de SQLite
+#   donde el motor no soporta DROP CONSTRAINT en línea como Postgres. No
+#   necesita gemelo en cloud porque Postgres permitió la operación al
+#   crear la tabla.
+#   sqlite/022_membership_duration_months.sql — par del pg 027, declarado
+#   arriba en la sección pair:.
+sqlite_fix_only: sqlite=021_fix_memberships_self_fk.sql reason="fix idempotente SQLite-side; Postgres no necesita gemelo porque crea la FK correcta en 001"

@@ -24,9 +24,22 @@ import (
 	memberDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/member"
 	mtDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/membership_type"
 	memRepo "github.com/cuadra/cuadra-core/src/modules/members/domain/repository"
+	promoApp "github.com/cuadra/cuadra-core/src/modules/promotions/app"
+	promoDomain "github.com/cuadra/cuadra-core/src/modules/promotions/domain/promotion"
 	"github.com/cuadra/cuadra-core/src/shared/audit"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 )
+
+// PromotionApply es el sub-input opcional para aplicar una promo al
+// cobro. PromotionID y Code son excluyentes (operador eligió de la
+// lista vigente o escribió un código). CompanionMemberIDs sólo para
+// kind=companion_memberships.
+type PromotionApply struct {
+	PromotionID        *uuid.UUID
+	Code               *string
+	CompanionMemberIDs []uuid.UUID
+	Notes              *string
+}
 
 // RegisterMembershipPaymentInput carries everything UC-018 needs. The use case
 // resolves the MembershipType inside its tx and decides whether to charge the
@@ -67,6 +80,12 @@ type RegisterMembershipPaymentInput struct {
 	// Partial payment: when PaidNow > 0 and < total, BalancePending = total - paid.
 	// When PaidNow == 0 the use case treats it as full payment (paid = total).
 	PaidNow float64
+
+	// Promotion (opcional) — cuando viene, se valida y aplica DENTRO de la
+	// misma tx del cobro. MAX 1 promo por cobro (sin stacking en MVP).
+	// Si la validación falla (expirada, sobre-límite, etc.) el cobro entero
+	// se rollbackea.
+	Promotion *PromotionApply
 }
 
 // RegisterMembershipPaymentOutput is what the controller returns. NewExpiry
@@ -83,6 +102,15 @@ type RegisterMembershipPaymentOutput struct {
 	NewExpiry       time.Time
 	EnrollmentChrg  bool
 	MaintenanceChrg bool
+	// Datos del efecto de la promo aplicada (vacíos cuando no hubo
+	// promo). El controller los expone al FE para que el comprobante
+	// y el toast post-cobro muestren "Aplicamos: <Promo> — $50 off /
+	// +7 días / 2x1".
+	PromotionAppliedID *uuid.UUID
+	PromotionName      string
+	PromotionKind      string
+	PromotionExtraDays int
+	PromotionGiftedIDs []uuid.UUID
 }
 
 type RegisterMembershipPayment struct {
@@ -93,6 +121,9 @@ type RegisterMembershipPayment struct {
 	UoW       sharedDomain.UnitOfWork
 	Audit     audit.Recorder
 	Publisher EventPublisher
+	// Promotions es opcional. Si nil, el use case ignora cualquier
+	// Promotion del input (caso: build legacy sin el BC enganchado).
+	Promotions *promoApp.ApplyPromotion
 }
 
 func NewRegisterMembershipPayment(
@@ -116,6 +147,13 @@ func NewRegisterMembershipPayment(
 		Audit:     recorder,
 		Publisher: publisher,
 	}
+}
+
+// WithPromotions engancha el use case de promociones para que cobros
+// con `Promotion != nil` se validen y apliquen dentro de la misma tx.
+func (uc *RegisterMembershipPayment) WithPromotions(p *promoApp.ApplyPromotion) *RegisterMembershipPayment {
+	uc.Promotions = p
+	return uc
 }
 
 func (uc *RegisterMembershipPayment) Execute(ctx context.Context, in RegisterMembershipPaymentInput) (*RegisterMembershipPaymentOutput, error) {
@@ -188,8 +226,48 @@ func (uc *RegisterMembershipPayment) Execute(ctx context.Context, in RegisterMem
 			subtotal += maintenanceAmt
 		}
 
-		// 4. Resolve paid / balance.
+		// 3.5 Promo: validar (Resolve) + dejar el effect listo para
+		//     persistir después de crear el payment row. Las companion
+		//     memberships y el extra_days se materializan también
+		//     post-payment-create. Si la promo no valida (expirada,
+		//     sobre-límite, target incompatible…), abortamos el cobro
+		//     entero — el rollback de la UoW cubre el caso.
 		discount := in.Discount
+		discountReason := in.DiscountReason
+		paymentID := uuid.New()
+		var promoResult *promoApp.ApplyPromotionResult
+		if in.Promotion != nil && uc.Promotions != nil {
+			if discount > 0 {
+				// Stacking: ni 2 promos ni promo + descuento manual.
+				return sharedDomain.NewBusinessError(billingErrors.ErrDiscountTooLarge, "no puedes combinar descuento manual con promoción")
+			}
+			res, err := uc.Promotions.Resolve(ctx, tx, promoApp.ApplyPromotionInput{
+				GymID:              in.GymID,
+				ActorUserID:        in.ActorUserID,
+				PromotionID:        in.Promotion.PromotionID,
+				Code:               in.Promotion.Code,
+				PaymentID:          paymentID,
+				Target:             promoDomain.AppliesToMembership,
+				Subtotal:           subtotal,
+				EnrollmentFee:      enrollmentAmt,
+				HasEnrollment:      chargeEnrollment,
+				MemberID:           &in.MemberID,
+				CompanionMemberIDs: in.Promotion.CompanionMemberIDs,
+				Notes:              in.Promotion.Notes,
+				Today:              in.PaymentDate,
+			}, now)
+			if err != nil {
+				return err
+			}
+			promoResult = res
+			if res.Discount > 0 {
+				discount = res.Discount
+				reason := res.DiscountReason
+				discountReason = &reason
+			}
+		}
+
+		// 4. Resolve paid / balance.
 		total := subtotal - discount
 		paid := in.PaidNow
 		if paid <= 0 {
@@ -207,11 +285,10 @@ func (uc *RegisterMembershipPayment) Execute(ctx context.Context, in RegisterMem
 		}
 
 		// 6. Build & persist Payment.
-		paymentID := uuid.New()
 		p, err := paymentDomain.NewMembershipPayment(
 			paymentID, in.GymID, in.ActorUserID, in.MemberID, folio,
 			subtotal, discount, paid, balancePending,
-			in.Method, in.PaymentDate, now, in.Notes, in.DiscountReason,
+			in.Method, in.PaymentDate, now, in.Notes, discountReason,
 		)
 		if err != nil {
 			return sharedDomain.NewValidationError(err)
@@ -252,6 +329,41 @@ func (uc *RegisterMembershipPayment) Execute(ctx context.Context, in RegisterMem
 		if dirtyMember {
 			if _, err := uc.Members.Update(tx, member); err != nil {
 				return sharedDomain.NewUnexpectedError(err)
+			}
+		}
+
+		// 7.5 Promo: persistir applied_promotion + ejecutar efectos
+		//     (extra_days adjustment + companion memberships). Hacemos
+		//     esto DESPUÉS de Payments.Create para que el FK al
+		//     payment_id se satisfaga. Si algo falla, el rollback de la
+		//     UoW cubre payment + applied + efectos.
+		giftedIDs := []uuid.UUID(nil)
+		if promoResult != nil {
+			if err := uc.Promotions.Persist(ctx, tx, promoResult, p.ID, now); err != nil {
+				return err
+			}
+			if promoResult.ExtraDays > 0 {
+				if err := uc.MemberSvc.ApplyMembershipAdjustment(ctx, tx, memApp.ApplyMembershipAdjustmentInput{
+					GymID:        in.GymID,
+					MembershipID: renewed.NewMembership.ID,
+					Days:         promoResult.ExtraDays,
+					Reason:       "promo: " + promoResult.Promotion.Name,
+					ActorUserID:  in.ActorUserID,
+				}, now); err != nil {
+					return err
+				}
+			}
+			for _, companionID := range promoResult.CompanionMemberIDs {
+				gifted, err := uc.MemberSvc.GiftMembership(ctx, tx, memApp.GiftMembershipInput{
+					GymID:             in.GymID,
+					CompanionMemberID: companionID,
+					MembershipTypeID:  mt.ID,
+					StartDate:         in.PaymentDate,
+				}, now)
+				if err != nil {
+					return err
+				}
+				giftedIDs = append(giftedIDs, gifted.ID)
 			}
 		}
 
@@ -304,6 +416,19 @@ func (uc *RegisterMembershipPayment) Execute(ctx context.Context, in RegisterMem
 			NewExpiry:       derefTimeOrZero(renewed.NewMembership.ExpiryDate),
 			EnrollmentChrg:  chargeEnrollment,
 			MaintenanceChrg: chargeMaintenance,
+		}
+		if promoResult != nil {
+			id := promoResult.AppliedID
+			out.PromotionAppliedID = &id
+			out.PromotionName = promoResult.Promotion.Name
+			out.PromotionKind = promoResult.Promotion.Kind
+			// El expiry reportado debe reflejar el ajuste de extra_days
+			// si lo hubo (sin re-leer la membership desde la BD).
+			if promoResult.ExtraDays > 0 {
+				out.PromotionExtraDays = promoResult.ExtraDays
+				out.NewExpiry = out.NewExpiry.AddDate(0, 0, promoResult.ExtraDays)
+			}
+			out.PromotionGiftedIDs = giftedIDs
 		}
 		return nil
 	})

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
@@ -16,16 +17,21 @@ import (
 )
 
 // MemberService is the cross-BC seam for `members`. Other BCs (billing in
-// Sesión 3, checkins in Sesión 5) call methods here within their own
-// UnitOfWork transactions.
+// Sesión 3, checkins in Sesión 5, promotions en Sesión 9) call methods
+// here within their own UnitOfWork transactions.
 type MemberService struct {
 	Members         memRepo.MemberRepository
 	Memberships     memRepo.MembershipRepository
 	MembershipTypes memRepo.MembershipTypeRepository
-	// Fingerprints is optional — older callers (billing in Sesión 3) don't
+	// Fingerprints is optional — older callers (billing en Sesión 3) don't
 	// need it. Sesión 5 wires it in for checkins/UC-029. Use the setter
 	// WithFingerprints to attach without breaking existing constructors.
 	Fingerprints memRepo.FingerprintRepository
+	// Adjustments es opcional — habilita ApplyMembershipAdjustment para
+	// que el flujo de promo `extra_days` registre un membership_adjustments
+	// con el motivo dentro de la misma tx del cobro. Sin el setter,
+	// ApplyMembershipAdjustment devuelve un error claro.
+	Adjustments memRepo.MembershipAdjustmentRepository
 }
 
 func NewMemberService(members memRepo.MemberRepository, memberships memRepo.MembershipRepository,
@@ -37,6 +43,13 @@ func NewMemberService(members memRepo.MemberRepository, memberships memRepo.Memb
 // LoadFingerprintsForGym. Returns the same pointer so callers can chain.
 func (s *MemberService) WithFingerprints(fp memRepo.FingerprintRepository) *MemberService {
 	s.Fingerprints = fp
+	return s
+}
+
+// WithAdjustments attaches el adjustment repo (necesario para el flujo
+// de promo `extra_days`).
+func (s *MemberService) WithAdjustments(ar memRepo.MembershipAdjustmentRepository) *MemberService {
+	s.Adjustments = ar
 	return s
 }
 
@@ -263,6 +276,160 @@ func (s *MemberService) LoadFingerprintsForGym(ctx context.Context, tx sharedDom
 		})
 	}
 	return out, nil
+}
+
+// ApplyMembershipAdjustmentInput es lo que el flujo de promo extra_days
+// pasa para extender el expiry de una membresía dentro de la misma tx
+// del cobro. Reason debe ser >= 5 chars (validación del dominio del
+// adjustment).
+type ApplyMembershipAdjustmentInput struct {
+	GymID        uuid.UUID
+	MembershipID uuid.UUID
+	Days         int
+	Reason       string
+	ActorUserID  uuid.UUID
+}
+
+// ApplyMembershipAdjustment extiende el expiry de una membresía + crea
+// el row de adjustment, dentro de la tx del caller. Pensado para que
+// billing/promotions ejecuten el efecto extra_days post-renew sin
+// abrir otra UoW.Command (rollback completo si algo falla aguas
+// abajo).
+func (s *MemberService) ApplyMembershipAdjustment(ctx context.Context, tx sharedDomain.Transaction, in ApplyMembershipAdjustmentInput, now time.Time) error {
+	if s.Adjustments == nil {
+		return sharedDomain.NewUnexpectedError(memErrors.ErrAdjustmentInvalidDays)
+	}
+	ms, err := s.Memberships.GetByID(tx, in.MembershipID)
+	if err != nil {
+		return err
+	}
+	if ms.GymID != in.GymID {
+		return sharedDomain.NewBusinessError(memErrors.ErrMembershipNotFound, "")
+	}
+	prev, next, err := ms.AdjustExpiry(in.Days, now)
+	if err != nil {
+		return sharedDomain.NewValidationError(err)
+	}
+	adj, err := membershipDomain.NewAdjustment(uuid.New(), in.GymID, ms.ID, in.ActorUserID,
+		in.Reason, in.Days, prev, next, now)
+	if err != nil {
+		return sharedDomain.NewValidationError(err)
+	}
+	if _, err := s.Memberships.Update(tx, ms); err != nil {
+		return sharedDomain.NewUnexpectedError(err)
+	}
+	if _, err := s.Adjustments.Create(tx, adj); err != nil {
+		return sharedDomain.NewUnexpectedError(err)
+	}
+	return nil
+}
+
+// GiftMembershipInput es lo que el flujo de promo companion_memberships
+// pasa por cada socio destinatario. CompanionMemberID es del socio que
+// recibe la membresía gratis; MembershipTypeID es el plan referencia
+// (mismo del cobro principal). PriceSnapshot se fuerza a 0.
+type GiftMembershipInput struct {
+	GymID             uuid.UUID
+	CompanionMemberID uuid.UUID
+	MembershipTypeID  uuid.UUID
+	StartDate         time.Time
+}
+
+// GiftMembership materializa una membership de regalo ($0) para un
+// socio destinatario de promo companion_memberships. Maneja los 3
+// estados del companion sin romper el partial unique index
+// `uq_memberships_member_active`:
+//
+//   1. Sin membresía vigente   → crea nueva $0 active.
+//   2. Pending payment         → activa la existing (es regalo, sin
+//                                payment) y deja PriceSnapshot=0.
+//   3. Active (vencida o no)   → renueva $0 con el 3-step dance:
+//                                marca actual replaced → INSERT nueva
+//                                $0 → UPDATE replaced_by. El expiry
+//                                nuevo sigue la regla normal de
+//                                Renew (extiende sobre el existente
+//                                si aún vigente; sino arranca hoy).
+//
+// El caso 3 es el realista en producción: casi cualquier socio activo
+// que el dueño elige para regalo YA tiene una mensualidad. Antes
+// rechazábamos con un error (mensaje raro de "teléfono duplicado") —
+// ahora extendemos como cualquier otra renovación, que es la semántica
+// natural del 2x1 ("le regalo un mes encima").
+func (s *MemberService) GiftMembership(ctx context.Context, tx sharedDomain.Transaction, in GiftMembershipInput, now time.Time) (*membershipDomain.Membership, error) {
+	// Sanity: socio existe + pertenece al gym.
+	comp, err := s.Members.GetByID(tx, in.CompanionMemberID)
+	if err != nil {
+		return nil, err
+	}
+	if comp.GymID != in.GymID {
+		return nil, sharedDomain.NewBusinessError(memErrors.ErrCrossGym, "")
+	}
+	mt, err := s.MembershipTypes.GetByID(tx, in.MembershipTypeID)
+	if err != nil {
+		return nil, err
+	}
+	if mt.GymID != in.GymID {
+		return nil, sharedDomain.NewBusinessError(memErrors.ErrCrossGym, "")
+	}
+
+	current, currErr := s.Memberships.GetCurrentByMember(tx, in.CompanionMemberID)
+
+	// Caso 1: sin membresía vigente — crear nueva $0 active.
+	if currErr != nil {
+		// GetCurrentByMember devuelve BusinessError(ErrNoActiveMembership)
+		// cuando no hay current. Cualquier otro error es infra → propagar.
+		if !errors.Is(currErr, memErrors.ErrNoActiveMembership) {
+			return nil, currErr
+		}
+		newMs := membershipDomain.New(uuid.New(), in.GymID, in.CompanionMemberID, mt, in.StartDate, now)
+		newMs.PriceSnapshot = 0
+		if _, err := s.Memberships.Create(tx, newMs); err != nil {
+			return nil, sharedDomain.NewUnexpectedError(err)
+		}
+		return newMs, nil
+	}
+
+	// Caso 2: pending_payment — activar la existing y dejar snapshot $0.
+	// Es regalo: NO se crea Payment. El operador la "paga" con la promo.
+	if current.Status == membershipDomain.StatusPendingPayment {
+		// Snapshot a $0 + sincronizar plan si el del regalo es distinto.
+		current.PriceSnapshot = 0
+		if current.MembershipTypeID != mt.ID {
+			current.MembershipTypeID = mt.ID
+			current.TypeNameSnapshot = mt.Name
+			current.DurationDaysSnapshot = mt.DurationDays
+		}
+		if err := current.Activate(in.StartDate, now); err != nil {
+			return nil, sharedDomain.NewBusinessError(err, "")
+		}
+		if _, err := s.Memberships.Update(tx, current); err != nil {
+			return nil, sharedDomain.NewUnexpectedError(err)
+		}
+		return current, nil
+	}
+
+	// Caso 3: active — renovar con snapshot $0 vía 3-step dance (mismo
+	// patrón que RenewMembershipForPayment para no romper el partial
+	// unique index uq_memberships_member_active).
+	newID := uuid.New()
+	next := current.Renew(newID, mt, in.StartDate, now)
+	next.PriceSnapshot = 0
+	current.Status = membershipDomain.StatusReplaced
+	current.Version++
+	current.UpdatedAt = now
+	if _, err := s.Memberships.Update(tx, current); err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
+	if _, err := s.Memberships.Create(tx, next); err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
+	current.ReplacedBy = &newID
+	current.Version++
+	current.UpdatedAt = now
+	if _, err := s.Memberships.Update(tx, current); err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
+	return next, nil
 }
 
 // Compile-time assertion: domain types are reachable from this package without

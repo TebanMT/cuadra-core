@@ -98,11 +98,12 @@ func (s *StatusController) Trigger(c *gin.Context) {
 // agent.
 func buildStatusResponse(snap AgentSnapshot, now time.Time) StatusResponse {
 	r := StatusResponse{
-		QueuePendingCount:   snap.PendingCount,
-		LastError:           snap.LastError,
-		ConsecutiveFailures: snap.ConsecutiveFailures,
-		InitialSyncDone:     !snap.InitialSyncCompletedAt.IsZero(),
-		AuthInvalid:         snap.AuthInvalid || snap.WaitingForAuth,
+		QueuePendingCount:     snap.PendingCount,
+		LastError:             snap.LastError,
+		ConsecutiveFailures:   snap.ConsecutiveFailures,
+		InitialSyncDone:       !snap.InitialSyncCompletedAt.IsZero(),
+		AuthInvalid:           snap.AuthInvalid || snap.WaitingForAuth,
+		SchemaUpgradeRequired: snap.SchemaUpgradeRequired,
 	}
 	if !snap.LastSyncedAt.IsZero() {
 		t := snap.LastSyncedAt
@@ -115,6 +116,16 @@ func buildStatusResponse(snap AgentSnapshot, now time.Time) StatusResponse {
 	if !snap.NextRetryAt.IsZero() {
 		t := snap.NextRetryAt
 		r.NextRetryAt = &t
+	}
+
+	// SchemaUpgradeRequired tiene la máxima prioridad: aunque internet
+	// funcione y la credencial sea válida, el cliente está roto hasta que
+	// el binario se actualice. La UI muestra un modal bloqueante (no toast
+	// discreto) — pintarlo como "online" o "offline_*" engañaría al
+	// operador haciéndole pensar que el problema es de red.
+	if snap.SchemaUpgradeRequired {
+		r.State = StateSchemaUpgradeRequired
+		return r
 	}
 
 	// Caso "initial syncing": full-sync corriendo todavía. Spinner.

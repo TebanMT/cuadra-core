@@ -1,0 +1,31 @@
+# Lock-step check de migraciones (ADR-002 §5).
+#
+# Toda migración que toca tablas sincronizables tiene que vivir en
+# postgres/ y sqlite/ en paralelo. db_migrations/lock_step.txt es el
+# manifiesto explícito que parea cada archivo (las numeraciones difieren
+# entre motores porque postgres y sqlite tienen secuencias independientes).
+#
+# Este job corre el script scripts/check_lockstep.sh en cada PR. Si
+# alguien agrega una migración nueva sin declararla en el manifest, el
+# CI bloquea el merge.
+
+name: Lock-step migrations
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "db_migrations/**"
+      - "scripts/check_lockstep.sh"
+      - ".github/workflows/lock-step-check.yml"
+
+jobs:
+  lockstep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run lock-step check
+        run: bash scripts/check_lockstep.sh

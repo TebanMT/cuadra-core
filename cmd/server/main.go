@@ -50,6 +50,10 @@ import (
 	challengesRepoPG "github.com/cuadra/cuadra-core/src/modules/challenges/infraestructure/db/repositories"
 	challengesCtrl "github.com/cuadra/cuadra-core/src/modules/challenges/interfaces/controllers"
 
+	promoApp "github.com/cuadra/cuadra-core/src/modules/promotions/app"
+	promoRepoPg "github.com/cuadra/cuadra-core/src/modules/promotions/infraestructure/db/repositories"
+	promoCtrl "github.com/cuadra/cuadra-core/src/modules/promotions/interfaces/controllers"
+
 	notiApp "github.com/cuadra/cuadra-core/src/modules/notifications/app"
 	notiDomain "github.com/cuadra/cuadra-core/src/modules/notifications/domain"
 	notiRepoPg "github.com/cuadra/cuadra-core/src/modules/notifications/infraestructure/db/repositories"
@@ -63,6 +67,9 @@ import (
 	subPay "github.com/cuadra/cuadra-core/src/modules/subscriptions/infraestructure/payments"
 	subCtrl "github.com/cuadra/cuadra-core/src/modules/subscriptions/interfaces/controllers"
 
+	releasesApp "github.com/cuadra/cuadra-core/src/application/releases"
+	releasesInfra "github.com/cuadra/cuadra-core/src/application/releases/infraestructure"
+	releasesCtrl "github.com/cuadra/cuadra-core/src/application/releases/interfaces"
 	reportsApp "github.com/cuadra/cuadra-core/src/application/reports"
 	reportsInfra "github.com/cuadra/cuadra-core/src/application/reports/infraestructure"
 	reportsCtrl "github.com/cuadra/cuadra-core/src/application/reports/interfaces"
@@ -210,6 +217,9 @@ func main() {
 	// que CreateMember pueda cobrar el primer pago en la misma tx.
 	folios := folioSvc.NewGenerator(paymentRepo)
 	createMember := memApp.NewCreateMemberWithBilling(memberRepo, membershipRepo, mtRepo, paymentRepo, folios, uow, recorder)
+	// Promotions wire — declarado más abajo después de memberSvc, pero el
+	// CreateMember se puede enchufar después con WithPromotions una vez
+	// que applyPromo y memberSvc estén listos (ver línea ~232).
 	updateMember := memApp.NewUpdateMember(memberRepo, uow, recorder)
 	listMembers := memApp.NewListMembers(memberRepo, uow)
 	memberDetail := memApp.NewGetMemberDetail(memberRepo, fingerprintRepo, uow)
@@ -217,7 +227,24 @@ func main() {
 	lockExpiry := memApp.NewLockMembershipExpiry(membershipRepo, adjustmentRepo, uow, recorder)
 	assignPin := memApp.NewAssignPin(memberRepo, uow, recorder)
 	importCSV := memApp.NewImportMembersFromCSV(memberRepo, membershipRepo, mtRepo, uow, recorder)
-	memberSvc := memApp.NewMemberService(memberRepo, membershipRepo, mtRepo).WithFingerprints(fingerprintRepo)
+	memberSvc := memApp.NewMemberService(memberRepo, membershipRepo, mtRepo).
+		WithFingerprints(fingerprintRepo).
+		WithAdjustments(adjustmentRepo)
+
+	// ── Promotions (Standard) ─────────────────────────────────────────────
+	promotionRepo := promoRepoPg.NewPromotionPostgresRepository()
+	appliedPromoRepo := promoRepoPg.NewAppliedPromotionPostgresRepository()
+	createPromo := promoApp.NewCreatePromotion(promotionRepo, uow, recorder)
+	updatePromo := promoApp.NewUpdatePromotion(promotionRepo, uow, recorder)
+	deactivatePromo := promoApp.NewDeactivatePromotion(promotionRepo, uow, recorder)
+	reactivatePromo := promoApp.NewReactivatePromotion(promotionRepo, uow, recorder)
+	listPromos := promoApp.NewListPromotions(promotionRepo, uow)
+	getPromoByCode := promoApp.NewGetPromotionByCode(promotionRepo, appliedPromoRepo, uow)
+	applyPromo := promoApp.NewApplyPromotion(promotionRepo, appliedPromoRepo)
+	listAppliedByMonth := promoApp.NewListAppliedByMonth(appliedPromoRepo, uow)
+	// Engancha el flujo de primer pago a promociones: el alta de socio
+	// con ChargeFirstPayment puede aplicar una promo en la misma tx.
+	createMember.WithPromotions(applyPromo, memberSvc)
 
 	// ── Biometric (UC-028, UC-029, UC-032) ────────────────────────────────
 	// Cloud uses an in-memory GMK provider seeded from the GYM_DEMO_GMK_SEED
@@ -263,7 +290,8 @@ func main() {
 
 	// ── Billing (Sesión 3) ────────────────────────────────────────────────
 	// `folios` se construyó arriba (lo reusa createMember). Mismo generator.
-	registerPayment := billingApp.NewRegisterMembershipPayment(paymentRepo, folios, memberSvc, memberRepo, uow, recorder, billingSubscriber)
+	registerPayment := billingApp.NewRegisterMembershipPayment(paymentRepo, folios, memberSvc, memberRepo, uow, recorder, billingSubscriber).
+		WithPromotions(applyPromo)
 	settlePayment := billingApp.NewSettlePendingBalance(paymentRepo, folios, uow, recorder)
 	receiptPayment := billingApp.NewGenerateReceipt(paymentRepo, gymRepo, memberRepo, uow)
 	sendReceipt := billingApp.NewSendReceipt(paymentRepo, uow)
@@ -283,7 +311,8 @@ func main() {
 	updateExpense := expApp.NewUpdateExpense(expenseRepo, uow, recorder)
 	deleteExpense := expApp.NewDeleteExpense(expenseRepo, uow, recorder)
 	listExpenses := expApp.NewListExpenses(expenseRepo, uow)
-	registerSale := billingApp.NewRegisterSale(paymentRepo, saleRepo, saleItemRepo, folios, productSvc, memberRepo, uow, recorder, billingSubscriber)
+	registerSale := billingApp.NewRegisterSale(paymentRepo, saleRepo, saleItemRepo, folios, productSvc, memberRepo, uow, recorder, billingSubscriber).
+		WithPromotions(applyPromo)
 	refundSale := billingApp.NewRefundSale(saleRepo, refundPayment, uow)
 	cashClose := reportsApp.NewCashClose(cashCloseReader, cashCloseEventRepo, uow, recorder).
 		WithExpenses(expenseRepo).
@@ -345,6 +374,7 @@ func main() {
 	plusGate := middleware.RequirePlusPlan(gymRepo, uow)
 
 	mtCtrl := memCtrl.NewMembershipTypeController(createMT, updateMT, deactivateMT, listMT, tokens)
+	promotionsCtrl := promoCtrl.NewPromotionController(createPromo, updatePromo, deactivatePromo, reactivatePromo, listPromos, getPromoByCode, listAppliedByMonth, tokens)
 	memberCtrl := memCtrl.NewMemberController(createMember, updateMember, listMembers, memberDetail, toggleMember, lockExpiry, assignPin, tokens).
 		WithImportCSV(importCSV)
 	fingerprintCtrl := memCtrl.NewFingerprintController(registerFingerprint, deleteFingerprint, tokens)
@@ -458,6 +488,7 @@ func main() {
 	authCtrl.RegisterRoutes(r)
 	authCtrl.RegisterUploadsRoute(r)
 	mtCtrl.RegisterRoutes(r)
+	promotionsCtrl.RegisterRoutes(r)
 	memberCtrl.RegisterRoutes(r)
 	fingerprintCtrl.RegisterRoutes(r)
 	paymentCtrl.RegisterRoutes(r)
@@ -484,6 +515,17 @@ func main() {
 	syncConflicts := syncShared.NewConflictLogger()
 	syncHandler := syncShared.NewHandler(uow, syncStore, syncConflicts, tokens, sidecarStore, syncMetrics)
 	syncHandler.RegisterRoutes(r)
+
+	// Releases (ADR-005) — GET público para el Tauri updater + POST admin
+	// con shared secret para el pipeline. RELEASES_ADMIN_TOKEN vacío
+	// deshabilita el POST (devuelve 503) — válido para dev local.
+	releasesStore := releasesInfra.NewPostgresStore()
+	releasesGet := releasesApp.NewGetLatest(releasesStore, uow)
+	releasesRegister := releasesApp.NewRegisterRelease(releasesStore, uow)
+	releasesController := releasesCtrl.NewController(
+		releasesGet, releasesRegister, os.Getenv("RELEASES_ADMIN_TOKEN"),
+	)
+	releasesController.RegisterRoutes(r)
 
 	// Background workers (Sesión 7 §dispatcher + scheduler).
 	bgCtx, cancelBg := context.WithCancel(context.Background())

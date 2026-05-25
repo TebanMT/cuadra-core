@@ -24,7 +24,7 @@ func makeMemberAndMembership(t *testing.T, status string, expiryOffset int) (*me
 	}
 	m.Status = status
 
-	mt, _ := mtDomain.New(uuid.New(), gymID, "Mensual", 500, 30, 0, 0, "", now)
+	mt, _ := mtDomain.New(uuid.New(), gymID, "Mensual", 500, 30, nil, 0, 0, "", now)
 	start := today.AddDate(0, 0, expiryOffset-30)
 	ms := membership.New(uuid.New(), gymID, m.ID, mt, start, now)
 	// Ensure expiry == today + offset.
@@ -44,7 +44,7 @@ func makePendingMember(t *testing.T) (*memberDomain.Member, *membership.Membersh
 	if err != nil {
 		t.Fatalf("member: %v", err)
 	}
-	mt, _ := mtDomain.New(uuid.New(), gymID, "Mensual", 500, 30, 0, 0, "", now)
+	mt, _ := mtDomain.New(uuid.New(), gymID, "Mensual", 500, 30, nil, 0, 0, "", now)
 	ms := membership.NewPendingPayment(uuid.New(), gymID, m.ID, mt, today, now)
 	return m, ms, today
 }

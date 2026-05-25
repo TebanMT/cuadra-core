@@ -14,6 +14,8 @@ import (
 	saleDomain "github.com/cuadra/cuadra-core/src/modules/billing/domain/sale"
 	memRepo "github.com/cuadra/cuadra-core/src/modules/members/domain/repository"
 	prodApp "github.com/cuadra/cuadra-core/src/modules/products/app"
+	promoApp "github.com/cuadra/cuadra-core/src/modules/promotions/app"
+	promoDomain "github.com/cuadra/cuadra-core/src/modules/promotions/domain/promotion"
 	"github.com/cuadra/cuadra-core/src/shared/audit"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 )
@@ -38,6 +40,11 @@ type RegisterSaleInput struct {
 	PaymentDate time.Time
 	Notes       *string
 	Items       []SaleLineInput
+	// Promotion opcional. En ventas sólo aplican percent / fixed_amount.
+	// extra_days y companion_memberships son no-op silencioso (su efecto
+	// no tiene sentido en una venta de producto). free_enrollment también
+	// es no-op (no hay enrollment en ventas).
+	Promotion *PromotionApply
 }
 
 type SaleLineInput struct {
@@ -55,6 +62,10 @@ type RegisterSaleOutput struct {
 	Paid           float64 // monto cobrado (== Total cuando no hay fiado)
 	BalancePending float64 // queda > 0 en ventas a crédito
 	Items          []SaleItemOutput
+	// Datos de promo aplicada — vacíos cuando no hubo promo.
+	PromotionAppliedID *uuid.UUID
+	PromotionName      string
+	PromotionKind      string
 }
 
 type SaleItemOutput struct {
@@ -83,15 +94,22 @@ type SaleItemOutput struct {
 //     id through so consistency holds without a backfill query).
 //  9. Audit + emit SaleCompleted event.
 type RegisterSale struct {
-	Payments  billingRepo.PaymentRepository
-	Sales     billingRepo.SaleRepository
-	SaleItems billingRepo.SaleItemRepository
-	Folios    *folioSvc.Generator
-	Products  *prodApp.ProductService
-	Members   memRepo.MemberRepository
-	UoW       sharedDomain.UnitOfWork
-	Audit     audit.Recorder
-	Publisher EventPublisher
+	Payments   billingRepo.PaymentRepository
+	Sales      billingRepo.SaleRepository
+	SaleItems  billingRepo.SaleItemRepository
+	Folios     *folioSvc.Generator
+	Products   *prodApp.ProductService
+	Members    memRepo.MemberRepository
+	UoW        sharedDomain.UnitOfWork
+	Audit      audit.Recorder
+	Publisher  EventPublisher
+	Promotions *promoApp.ApplyPromotion // opcional; nil → no se aplican promos
+}
+
+// WithPromotions engancha el use case de promociones.
+func (uc *RegisterSale) WithPromotions(p *promoApp.ApplyPromotion) *RegisterSale {
+	uc.Promotions = p
+	return uc
 }
 
 func NewRegisterSale(
@@ -183,6 +201,44 @@ func (uc *RegisterSale) Execute(ctx context.Context, in RegisterSaleInput) (*Reg
 			return sharedDomain.NewUnexpectedError(err)
 		}
 
+		// 4.5 Promo: validar y resolver el discount antes de armar el
+		//     Sale. En ventas sólo aplican percent y fixed_amount; los
+		//     demás kinds son no-op (Calculator devuelve 0). Stacking
+		//     manual+promo prohibido — coherencia con membership.
+		discount := in.Discount
+		paymentIDReserved := uuid.New()
+		var promoResult *promoApp.ApplyPromotionResult
+		if in.Promotion != nil && uc.Promotions != nil {
+			if discount > 0 {
+				return sharedDomain.NewBusinessError(billingErrors.ErrDiscountTooLarge, "no puedes combinar descuento manual con promoción")
+			}
+			// Computar subtotal previo desde snapshots para que el calculator
+			// reciba el monto real (Sale.NewSale lo recalcula igual).
+			var subtotal float64
+			for _, it := range snapshots {
+				subtotal += it.UnitPriceSnapshot * float64(it.Quantity)
+			}
+			res, err := uc.Promotions.Resolve(ctx, tx, promoApp.ApplyPromotionInput{
+				GymID:       in.GymID,
+				ActorUserID: in.ActorUserID,
+				PromotionID: in.Promotion.PromotionID,
+				Code:        in.Promotion.Code,
+				PaymentID:   paymentIDReserved,
+				Target:      promoDomain.AppliesToSale,
+				Subtotal:    subtotal,
+				MemberID:    in.MemberID,
+				Notes:       in.Promotion.Notes,
+				Today:       in.PaymentDate,
+			}, now)
+			if err != nil {
+				return err
+			}
+			promoResult = res
+			if res.Discount > 0 {
+				discount = res.Discount
+			}
+		}
+
 		// 5. Build the Sale aggregate (and its items) so we know the totals.
 		saleID := uuid.New()
 		// Override the items' generated UUIDs with our pre-reserved ids so the
@@ -192,7 +248,7 @@ func (uc *RegisterSale) Execute(ctx context.Context, in RegisterSaleInput) (*Reg
 			GymID:     in.GymID,
 			PaymentID: uuid.Nil, // payment id known after payment insert
 			MemberID:  in.MemberID,
-			Discount:  in.Discount,
+			Discount:  discount,
 			Items:     snapshots,
 		}, now)
 		if err != nil {
@@ -215,7 +271,7 @@ func (uc *RegisterSale) Execute(ctx context.Context, in RegisterSaleInput) (*Reg
 			paid = *in.Paid
 		}
 		p, err := paymentDomain.NewProductSalePayment(
-			uuid.New(), in.GymID, in.ActorUserID, in.MemberID, folio,
+			paymentIDReserved, in.GymID, in.ActorUserID, in.MemberID, folio,
 			s.Total, paid, in.Method, in.PaymentDate, now, in.Notes,
 		)
 		if err != nil {
@@ -253,6 +309,13 @@ func (uc *RegisterSale) Execute(ctx context.Context, in RegisterSaleInput) (*Reg
 		}
 		if err := uc.SaleItems.CreateMany(tx, s.Items); err != nil {
 			return sharedDomain.NewUnexpectedError(err)
+		}
+
+		// 7.5 Promo: persistir applied_promotion ahora que el payment existe.
+		if promoResult != nil {
+			if err := uc.Promotions.Persist(ctx, tx, promoResult, p.ID, now); err != nil {
+				return err
+			}
 		}
 
 		// 8. Audit + event.
@@ -310,6 +373,12 @@ func (uc *RegisterSale) Execute(ctx context.Context, in RegisterSaleInput) (*Reg
 			Paid:           p.Amount,
 			BalancePending: p.BalancePending,
 			Items:          items,
+		}
+		if promoResult != nil {
+			id := promoResult.AppliedID
+			out.PromotionAppliedID = &id
+			out.PromotionName = promoResult.Promotion.Name
+			out.PromotionKind = promoResult.Promotion.Kind
 		}
 		return nil
 	})

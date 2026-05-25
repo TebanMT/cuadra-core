@@ -103,6 +103,30 @@ func TestStatusThresholds(t *testing.T) {
 			snap:      AgentSnapshot{WaitingForAuth: true},
 			wantState: StateInitialSyncing,
 		},
+		{
+			// 426 del cloud: el binario quedó atrás. Máxima prioridad —
+			// pisa cualquier clasificación por gap (aunque acabe de sync).
+			name: "SchemaUpgradeRequired pisa la clasificación por gap",
+			snap: AgentSnapshot{
+				LastSyncedAt:           now.Add(-2 * time.Minute),
+				InitialSyncCompletedAt: now.Add(-time.Hour),
+				SchemaUpgradeRequired:  true,
+				LastError:              "push: schema upgrade required",
+			},
+			wantState: StateSchemaUpgradeRequired,
+		},
+		{
+			// Combinado con AuthInvalid: schema upgrade tiene mayor
+			// prioridad. Si actualizan el binario, la auth puede recuperarse
+			// sola; si dejamos auth_invalid arriba el operador queda
+			// re-logueando contra un binario incompatible y nunca sale.
+			name: "SchemaUpgradeRequired tiene prioridad sobre AuthInvalid",
+			snap: AgentSnapshot{
+				SchemaUpgradeRequired: true,
+				AuthInvalid:           true,
+			},
+			wantState: StateSchemaUpgradeRequired,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

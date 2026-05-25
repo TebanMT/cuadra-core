@@ -70,7 +70,7 @@ var SyncedTables = []EntityTable{
 		Table: "membership_types",
 		Columns: []string{
 			"id", "gym_id", "version", "created_at", "updated_at", "deleted_at",
-			"name", "price", "duration_days", "enrollment_fee",
+			"name", "price", "duration_days", "duration_months", "enrollment_fee",
 			"maintenance_fee", "maintenance_frequency", "active",
 		},
 	},
@@ -103,7 +103,8 @@ var SyncedTables = []EntityTable{
 		Columns: []string{
 			"id", "gym_id", "version", "created_at", "updated_at", "deleted_at",
 			"member_id", "membership_type_id",
-			"type_name_snapshot", "price_snapshot", "duration_days_snapshot",
+			"type_name_snapshot", "price_snapshot",
+			"duration_days_snapshot", "duration_months_snapshot",
 			"start_date", "expiry_date", "status", "replaced_by",
 		},
 	},
@@ -123,6 +124,20 @@ var SyncedTables = []EntityTable{
 			"id", "gym_id", "version", "created_at", "updated_at", "deleted_at",
 			"member_id", "template_encrypted", "template_format",
 			"quality_score", "registered_by",
+		},
+	},
+	{
+		// promotions — catálogo del gym. Topológicamente va después de
+		// membership_types (no FK directa pero "vive en la misma capa"
+		// — el operador las administra desde la misma sección de UI) y
+		// estrictamente ANTES de applied_promotions (que FK a esta tabla).
+		Type:  "promotions",
+		Table: "promotions",
+		Columns: []string{
+			"id", "gym_id", "version", "created_at", "updated_at", "deleted_at",
+			"name", "description", "kind", "value", "buy_n", "companion_count",
+			"applies_to", "code", "valid_from", "valid_until",
+			"max_uses_total", "max_uses_per_member", "active",
 		},
 	},
 	{
@@ -150,6 +165,23 @@ var SyncedTables = []EntityTable{
 			"id", "gym_id", "version", "created_at", "updated_at", "deleted_at",
 			"sale_id", "product_id", "product_name_snapshot",
 			"unit_price_snapshot", "quantity", "line_total",
+		},
+	},
+	{
+		// applied_promotions — FK a promotions, payments, members, users.
+		// Va después de sale_items (último dependiente de payments en el
+		// orden topológico actual) para garantizar que en un full-sync
+		// el cliente reciba primero la promo y el payment, después la
+		// aplicación. El proyector genérico maneja los upserts; FKs
+		// `ON DELETE RESTRICT` impiden borrar la promo si quedaron
+		// aplicaciones.
+		Type:  "applied_promotions",
+		Table: "applied_promotions",
+		Columns: []string{
+			"id", "gym_id", "version", "created_at", "updated_at", "deleted_at",
+			"promotion_id", "payment_id", "member_id", "applied_by_user_id",
+			"promotion_name_snapshot", "kind_snapshot", "value_snapshot",
+			"discount_amount", "extra_days_applied", "notes",
 		},
 	},
 	{

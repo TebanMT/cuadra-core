@@ -30,22 +30,28 @@ const (
 // ExpiryDate is nil when Status == pending_payment (socio inscrito pero sin
 // pago todavía). El primer pago — completo o parcial — activa la membresía
 // y setea ExpiryDate. Para cualquier otro status, ExpiryDate es no-nil.
+//
+// DurationMonthsSnapshot: si !nil, esta membership se vendió como N meses
+// naturales (vs días corridos). Lo usamos en Activate() y para auditar
+// renovaciones que vuelven al mismo plan. Mirror del nuevo
+// `duration_months` en membership_types (migración 027/022).
 type Membership struct {
-	ID                   uuid.UUID
-	GymID                uuid.UUID
-	Version              int
-	MemberID             uuid.UUID
-	MembershipTypeID     uuid.UUID
-	TypeNameSnapshot     string
-	PriceSnapshot        float64
-	DurationDaysSnapshot int
-	StartDate            time.Time
-	ExpiryDate           *time.Time
-	Status               string
-	ReplacedBy           *uuid.UUID
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
-	DeletedAt            *time.Time
+	ID                     uuid.UUID
+	GymID                  uuid.UUID
+	Version                int
+	MemberID               uuid.UUID
+	MembershipTypeID       uuid.UUID
+	TypeNameSnapshot       string
+	PriceSnapshot          float64
+	DurationDaysSnapshot   int
+	DurationMonthsSnapshot *int
+	StartDate              time.Time
+	ExpiryDate             *time.Time
+	Status                 string
+	ReplacedBy             *uuid.UUID
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
+	DeletedAt              *time.Time
 }
 
 // New constructs an ACTIVE Membership with expiry = start + duration. Use
@@ -54,21 +60,22 @@ type Membership struct {
 // this member (the DB unique index will also enforce this).
 func New(id uuid.UUID, gymID, memberID uuid.UUID, mt *mtDomain.MembershipType, startDate time.Time, now time.Time) *Membership {
 	start := truncateDate(startDate)
-	expiry := start.AddDate(0, 0, mt.DurationDays)
+	expiry := computeExpiry(start, mt.DurationDays, mt.DurationMonths)
 	return &Membership{
-		ID:                   id,
-		GymID:                gymID,
-		Version:              1,
-		MemberID:             memberID,
-		MembershipTypeID:     mt.ID,
-		TypeNameSnapshot:     mt.Name,
-		PriceSnapshot:        mt.Price,
-		DurationDaysSnapshot: mt.DurationDays,
-		StartDate:            start,
-		ExpiryDate:           &expiry,
-		Status:               StatusActive,
-		CreatedAt:            now,
-		UpdatedAt:            now,
+		ID:                     id,
+		GymID:                  gymID,
+		Version:                1,
+		MemberID:               memberID,
+		MembershipTypeID:       mt.ID,
+		TypeNameSnapshot:       mt.Name,
+		PriceSnapshot:          mt.Price,
+		DurationDaysSnapshot:   mt.DurationDays,
+		DurationMonthsSnapshot: cloneIntPtr(mt.DurationMonths),
+		StartDate:              start,
+		ExpiryDate:             &expiry,
+		Status:                 StatusActive,
+		CreatedAt:              now,
+		UpdatedAt:              now,
 	}
 }
 
@@ -79,19 +86,20 @@ func New(id uuid.UUID, gymID, memberID uuid.UUID, mt *mtDomain.MembershipType, s
 func NewPendingPayment(id uuid.UUID, gymID, memberID uuid.UUID, mt *mtDomain.MembershipType, startDate time.Time, now time.Time) *Membership {
 	start := truncateDate(startDate)
 	return &Membership{
-		ID:                   id,
-		GymID:                gymID,
-		Version:              1,
-		MemberID:             memberID,
-		MembershipTypeID:     mt.ID,
-		TypeNameSnapshot:     mt.Name,
-		PriceSnapshot:        mt.Price,
-		DurationDaysSnapshot: mt.DurationDays,
-		StartDate:            start,
-		ExpiryDate:           nil,
-		Status:               StatusPendingPayment,
-		CreatedAt:            now,
-		UpdatedAt:            now,
+		ID:                     id,
+		GymID:                  gymID,
+		Version:                1,
+		MemberID:               memberID,
+		MembershipTypeID:       mt.ID,
+		TypeNameSnapshot:       mt.Name,
+		PriceSnapshot:          mt.Price,
+		DurationDaysSnapshot:   mt.DurationDays,
+		DurationMonthsSnapshot: cloneIntPtr(mt.DurationMonths),
+		StartDate:              start,
+		ExpiryDate:             nil,
+		Status:                 StatusPendingPayment,
+		CreatedAt:              now,
+		UpdatedAt:              now,
 	}
 }
 
@@ -119,7 +127,7 @@ func (m *Membership) Activate(paymentDate, now time.Time) error {
 	if start.Before(pay) {
 		start = pay
 	}
-	expiry := start.AddDate(0, 0, m.DurationDaysSnapshot)
+	expiry := computeExpiry(start, m.DurationDaysSnapshot, m.DurationMonthsSnapshot)
 	m.StartDate = start
 	m.ExpiryDate = &expiry
 	m.Status = StatusActive
@@ -151,21 +159,22 @@ func (m *Membership) Renew(newID uuid.UUID, nextType *mtDomain.MembershipType, p
 	} else {
 		newStart = pay
 	}
-	newExpiry := newStart.AddDate(0, 0, nextType.DurationDays)
+	newExpiry := computeExpiry(newStart, nextType.DurationDays, nextType.DurationMonths)
 	return &Membership{
-		ID:                   newID,
-		GymID:                m.GymID,
-		Version:              1,
-		MemberID:             m.MemberID,
-		MembershipTypeID:     nextType.ID,
-		TypeNameSnapshot:     nextType.Name,
-		PriceSnapshot:        nextType.Price,
-		DurationDaysSnapshot: nextType.DurationDays,
-		StartDate:            newStart,
-		ExpiryDate:           &newExpiry,
-		Status:               StatusActive,
-		CreatedAt:            now,
-		UpdatedAt:            now,
+		ID:                     newID,
+		GymID:                  m.GymID,
+		Version:                1,
+		MemberID:               m.MemberID,
+		MembershipTypeID:       nextType.ID,
+		TypeNameSnapshot:       nextType.Name,
+		PriceSnapshot:          nextType.Price,
+		DurationDaysSnapshot:   nextType.DurationDays,
+		DurationMonthsSnapshot: cloneIntPtr(nextType.DurationMonths),
+		StartDate:              newStart,
+		ExpiryDate:             &newExpiry,
+		Status:                 StatusActive,
+		CreatedAt:              now,
+		UpdatedAt:              now,
 	}
 }
 
@@ -252,6 +261,75 @@ func (m *Membership) DaysUntilExpiry(today time.Time) int {
 
 func truncateDate(t time.Time) time.Time {
 	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+// computeExpiry calcula la fecha de vencimiento aplicando la regla del
+// dominio: si durationMonths != nil, expiry = start + N meses naturales
+// (con clamp al último día del mes target si el día no existe); si nil,
+// expiry = start + durationDays.
+//
+// Esta función centraliza la decisión "días vs meses naturales" para
+// que ningún caller pueda olvidar consultar el flag. New, Activate y
+// Renew TODAS pasan por acá.
+func computeExpiry(start time.Time, durationDays int, durationMonths *int) time.Time {
+	if durationMonths != nil && *durationMonths > 0 {
+		return addMonthsNatural(start, *durationMonths)
+	}
+	return start.AddDate(0, 0, durationDays)
+}
+
+// addMonthsNatural suma N meses al date target. A diferencia de
+// time.Time.AddDate(0, N, 0), no "desborda" si el día del mes target no
+// existe — por ejemplo, 31-ene + 1 mes en Go nativo da 3-mar (porque
+// febrero no tiene 31 días, Go agrega los días "que sobran"). El
+// operador del gym espera que el socio que pagó el 31-ene venza el 28
+// o 29 de feb (el último día del mes), no 3-mar.
+//
+// Pasos:
+//  1. Calcular el (year, month) target avanzando N meses.
+//  2. Si start.Day() existe en ese mes → usar Day() tal cual.
+//  3. Si no existe → usar el último día del mes target.
+//
+// Ejemplos (sin DST porque trabajamos en UTC, ver truncateDate):
+//
+//	25-may + 1 mes → 25-jun       (caso típico que motiva esta función)
+//	31-ene + 1 mes → 28-feb        (año no-bisiesto)
+//	31-ene + 1 mes → 29-feb        (año bisiesto)
+//	30-mar + 1 mes → 30-abr
+//	31-dic + 12 mes → 31-dic año+1
+func addMonthsNatural(start time.Time, months int) time.Time {
+	y := start.Year()
+	m := int(start.Month()) + months
+	// Normalizar el "carry": si m > 12, avanzar años; si <= 0, retroceder.
+	for m > 12 {
+		m -= 12
+		y++
+	}
+	for m < 1 {
+		m += 12
+		y--
+	}
+	target := time.Month(m)
+	day := start.Day()
+	last := daysInMonth(y, target)
+	if day > last {
+		day = last
+	}
+	return time.Date(y, target, day, 0, 0, 0, 0, time.UTC)
+}
+
+// daysInMonth devuelve cuántos días tiene (year, month). Vamos al día
+// 0 del mes siguiente (que en time.Date es el último del mes actual).
+func daysInMonth(year int, month time.Month) int {
+	return time.Date(year, month+1, 0, 0, 0, 0, 0, time.UTC).Day()
+}
+
+func cloneIntPtr(p *int) *int {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
 }
 
 // ---------------------------------------------------------------------------

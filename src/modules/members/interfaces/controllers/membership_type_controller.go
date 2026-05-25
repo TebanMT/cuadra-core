@@ -50,9 +50,15 @@ func (ctrl *MembershipTypeController) RegisterRoutes(r *gin.Engine) {
 }
 
 type membershipTypeReq struct {
-	Name                 string  `json:"name" validate:"required,min=3,max=100"`
-	Price                float64 `json:"price" validate:"required,gt=0"`
+	Name  string  `json:"name" validate:"required,min=3,max=100"`
+	Price float64 `json:"price" validate:"required,gt=0"`
+	// DurationDays sigue siendo obligatorio (valor "aproximado" en días
+	// para reportes legacy). DurationMonths es opcional — cuando llega,
+	// el dominio calcula expiry como N meses naturales. Presets ambiguos
+	// (mensual/bimestral/trimestral/semestral/anual) mandan ambos;
+	// personalizada y paso/semana/quincenal mandan sólo DurationDays.
 	DurationDays         int     `json:"duration_days" validate:"required,gt=0"`
+	DurationMonths       *int    `json:"duration_months,omitempty"`
 	EnrollmentFee        float64 `json:"enrollment_fee"`
 	MaintenanceFee       float64 `json:"maintenance_fee"`
 	MaintenanceFrequency string  `json:"maintenance_frequency"`
@@ -63,6 +69,7 @@ type membershipTypeResp struct {
 	Name                 string    `json:"name"`
 	Price                float64   `json:"price"`
 	DurationDays         int       `json:"duration_days"`
+	DurationMonths       *int      `json:"duration_months,omitempty"`
 	EnrollmentFee        float64   `json:"enrollment_fee"`
 	MaintenanceFee       float64   `json:"maintenance_fee"`
 	MaintenanceFrequency *string   `json:"maintenance_frequency"`
@@ -87,6 +94,7 @@ func (ctrl *MembershipTypeController) handleCreate(c *gin.Context) {
 		Name:                 req.Name,
 		Price:                req.Price,
 		DurationDays:         req.DurationDays,
+		DurationMonths:       req.DurationMonths,
 		EnrollmentFee:        req.EnrollmentFee,
 		MaintenanceFee:       req.MaintenanceFee,
 		MaintenanceFrequency: req.MaintenanceFrequency,
@@ -96,7 +104,8 @@ func (ctrl *MembershipTypeController) handleCreate(c *gin.Context) {
 		return
 	}
 	utils.JsonResponse(c, http.StatusCreated, membershipTypeResp{
-		ID: out.ID, Name: out.Name, Price: out.Price, DurationDays: out.DurationDays,
+		ID: out.ID, Name: out.Name, Price: out.Price,
+		DurationDays: out.DurationDays, DurationMonths: out.DurationMonths,
 		EnrollmentFee: out.EnrollmentFee, MaintenanceFee: out.MaintenanceFee,
 		MaintenanceFrequency: out.MaintenanceFrequency, Active: out.Active,
 	})
@@ -118,6 +127,7 @@ func (ctrl *MembershipTypeController) handleUpdate(c *gin.Context) {
 		Name:                 req.Name,
 		Price:                req.Price,
 		DurationDays:         req.DurationDays,
+		DurationMonths:       req.DurationMonths,
 		EnrollmentFee:        req.EnrollmentFee,
 		MaintenanceFee:       req.MaintenanceFee,
 		MaintenanceFrequency: req.MaintenanceFrequency,
@@ -127,7 +137,8 @@ func (ctrl *MembershipTypeController) handleUpdate(c *gin.Context) {
 		return
 	}
 	utils.JsonResponse(c, http.StatusOK, membershipTypeResp{
-		ID: out.ID, Name: out.Name, Price: out.Price, DurationDays: out.DurationDays,
+		ID: out.ID, Name: out.Name, Price: out.Price,
+		DurationDays: out.DurationDays, DurationMonths: out.DurationMonths,
 		EnrollmentFee: out.EnrollmentFee, MaintenanceFee: out.MaintenanceFee,
 		MaintenanceFrequency: out.MaintenanceFrequency, Active: out.Active,
 	})
@@ -148,7 +159,8 @@ func (ctrl *MembershipTypeController) handleDeactivate(c *gin.Context) {
 		return
 	}
 	utils.JsonResponse(c, http.StatusOK, membershipTypeResp{
-		ID: out.ID, Name: out.Name, Price: out.Price, DurationDays: out.DurationDays,
+		ID: out.ID, Name: out.Name, Price: out.Price,
+		DurationDays: out.DurationDays, DurationMonths: out.DurationMonths,
 		EnrollmentFee: out.EnrollmentFee, MaintenanceFee: out.MaintenanceFee,
 		MaintenanceFrequency: out.MaintenanceFrequency, Active: out.Active,
 	})
@@ -167,7 +179,8 @@ func (ctrl *MembershipTypeController) handleList(c *gin.Context) {
 	resp := make([]membershipTypeResp, 0, len(out))
 	for _, mt := range out {
 		resp = append(resp, membershipTypeResp{
-			ID: mt.ID, Name: mt.Name, Price: mt.Price, DurationDays: mt.DurationDays,
+			ID: mt.ID, Name: mt.Name, Price: mt.Price,
+			DurationDays: mt.DurationDays, DurationMonths: mt.DurationMonths,
 			EnrollmentFee: mt.EnrollmentFee, MaintenanceFee: mt.MaintenanceFee,
 			MaintenanceFrequency: mt.MaintenanceFrequency, Active: mt.Active,
 		})

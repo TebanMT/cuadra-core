@@ -24,6 +24,7 @@ type UpdateMembershipTypeInput struct {
 	Name                 string
 	Price                float64
 	DurationDays         int
+	DurationMonths       *int
 	EnrollmentFee        float64
 	MaintenanceFee       float64
 	MaintenanceFrequency string
@@ -61,9 +62,10 @@ func (uc *UpdateMembershipType) Execute(ctx context.Context, in UpdateMembership
 			}
 		}
 		before := map[string]any{
-			"name": mt.Name, "price": mt.Price, "duration_days": mt.DurationDays,
+			"name": mt.Name, "price": mt.Price,
+			"duration_days": mt.DurationDays, "duration_months": mt.DurationMonths,
 		}
-		if err := mt.Update(in.Name, in.Price, in.DurationDays, in.EnrollmentFee, in.MaintenanceFee, in.MaintenanceFrequency, now); err != nil {
+		if err := mt.Update(in.Name, in.Price, in.DurationDays, in.DurationMonths, in.EnrollmentFee, in.MaintenanceFee, in.MaintenanceFrequency, now); err != nil {
 			return sharedDomain.NewValidationError(err)
 		}
 		updated, err := uc.Repo.Update(tx, mt)
@@ -78,7 +80,10 @@ func (uc *UpdateMembershipType) Execute(ctx context.Context, in UpdateMembership
 			ActorUserID: &in.ActorUserID,
 			Changes: map[string]any{
 				"before": before,
-				"after":  map[string]any{"name": updated.Name, "price": updated.Price, "duration_days": updated.DurationDays},
+				"after": map[string]any{
+					"name": updated.Name, "price": updated.Price,
+					"duration_days": updated.DurationDays, "duration_months": updated.DurationMonths,
+				},
 			},
 			IPAddress: audit.IPFromContext(ctx),
 			UserAgent: audit.UAFromContext(ctx),

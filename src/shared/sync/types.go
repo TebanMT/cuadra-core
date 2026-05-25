@@ -115,6 +115,12 @@ type StatusResponse struct {
 	// aún no llamó al login) — desde la perspectiva del operador es el
 	// mismo problema: hace falta autenticar.
 	AuthInvalid bool `json:"auth_invalid,omitempty"`
+	// SchemaUpgradeRequired — el cloud devolvió 426 (ADR-001 §3.8). El
+	// FE muestra un modal bloqueante "Tu versión ya no es compatible.
+	// Actualízala." con CTA que dispara update inmediato (ADR-005 §2.7).
+	// Mayor prioridad que cualquier offline_*: aunque haya internet, el
+	// cliente está roto hasta que actualice.
+	SchemaUpgradeRequired bool `json:"schema_upgrade_required,omitempty"`
 }
 
 // State values returned by /sync/status, per UC-044.
@@ -130,4 +136,8 @@ const (
 	// UI muestra un CTA explícito ("vuelve a iniciar sesión") en lugar de
 	// la genérica "Sin internet" que sólo confundiría.
 	StateAuthInvalid = "auth_invalid"
+	// StateSchemaUpgradeRequired — el cloud devolvió 426 (ADR-001 §3.8).
+	// El binario quedó atrás; ningún retry recupera. UI dispara modal
+	// bloqueante "Tu versión ya no es compatible".
+	StateSchemaUpgradeRequired = "schema_upgrade_required"
 )

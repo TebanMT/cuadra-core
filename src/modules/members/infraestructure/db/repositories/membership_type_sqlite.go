@@ -37,6 +37,7 @@ type sqliteMTRow struct {
 	Name                 string         `db:"name"`
 	Price                int64          `db:"price"`
 	DurationDays         int            `db:"duration_days"`
+	DurationMonths       sql.NullInt64  `db:"duration_months"`
 	EnrollmentFee        int64          `db:"enrollment_fee"`
 	MaintenanceFee       int64          `db:"maintenance_fee"`
 	MaintenanceFrequency sql.NullString `db:"maintenance_frequency"`
@@ -52,10 +53,12 @@ func (r *MembershipTypeSQLiteRepository) Create(tx sharedDomain.Transaction, mt 
 	const stmt = `
 		INSERT INTO membership_types (
 		    id, gym_id, version, created_at, updated_at, deleted_at,
-		    name, price, duration_days, enrollment_fee, maintenance_fee, maintenance_frequency, active
+		    name, price, duration_days, duration_months,
+		    enrollment_fee, maintenance_fee, maintenance_frequency, active
 		) VALUES (
 		    :id, :gym_id, :version, :created_at, :updated_at, :deleted_at,
-		    :name, :price, :duration_days, :enrollment_fee, :maintenance_fee, :maintenance_frequency, :active
+		    :name, :price, :duration_days, :duration_months,
+		    :enrollment_fee, :maintenance_fee, :maintenance_frequency, :active
 		)`
 	if _, err := stx.NamedExec(context.Background(), stmt, row); err != nil {
 		return nil, err
@@ -74,6 +77,7 @@ func (r *MembershipTypeSQLiteRepository) Update(tx sharedDomain.Transaction, mt 
 		UPDATE membership_types SET
 		    version = :version, updated_at = :updated_at, deleted_at = :deleted_at,
 		    name = :name, price = :price, duration_days = :duration_days,
+		    duration_months = :duration_months,
 		    enrollment_fee = :enrollment_fee, maintenance_fee = :maintenance_fee,
 		    maintenance_frequency = :maintenance_frequency, active = :active
 		WHERE id = :id`
@@ -160,6 +164,9 @@ func mtToRow(mt *mtDomain.MembershipType) sqliteMTRow {
 		MaintenanceFee: toCents(mt.MaintenanceFee),
 		Active:         boolToInt(mt.Active),
 	}
+	if mt.DurationMonths != nil {
+		row.DurationMonths = sql.NullInt64{Int64: int64(*mt.DurationMonths), Valid: true}
+	}
 	if mt.DeletedAt != nil {
 		row.DeletedAt = sql.NullInt64{Int64: mt.DeletedAt.UnixMilli(), Valid: true}
 	}
@@ -184,6 +191,10 @@ func mtFromRow(r *sqliteMTRow) *mtDomain.MembershipType {
 		Active:         r.Active != 0,
 		CreatedAt:      time.UnixMilli(r.CreatedAt).UTC(),
 		UpdatedAt:      time.UnixMilli(r.UpdatedAt).UTC(),
+	}
+	if r.DurationMonths.Valid {
+		v := int(r.DurationMonths.Int64)
+		mt.DurationMonths = &v
 	}
 	if r.MaintenanceFrequency.Valid {
 		f := r.MaintenanceFrequency.String
@@ -211,6 +222,7 @@ func enqueueMT(stx *sharedDomain.SqlxTransaction, mt *mtDomain.MembershipType) e
 		"name":                  mt.Name,
 		"price":                 mt.Price,
 		"duration_days":         mt.DurationDays,
+		"duration_months":       mt.DurationMonths,
 		"enrollment_fee":        mt.EnrollmentFee,
 		"maintenance_fee":       mt.MaintenanceFee,
 		"maintenance_frequency": freq,

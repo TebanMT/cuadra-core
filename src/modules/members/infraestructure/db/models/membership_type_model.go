@@ -18,6 +18,7 @@ type MembershipTypeModel struct {
 	Name                 string     `gorm:"not null;column:name"`
 	Price                float64    `gorm:"type:numeric(12,2);not null;column:price"`
 	DurationDays         int        `gorm:"not null;column:duration_days"`
+	DurationMonths       *int       `gorm:"column:duration_months"`
 	EnrollmentFee        float64    `gorm:"type:numeric(12,2);not null;default:0;column:enrollment_fee"`
 	MaintenanceFee       float64    `gorm:"type:numeric(12,2);not null;default:0;column:maintenance_fee"`
 	MaintenanceFrequency *string    `gorm:"column:maintenance_frequency"`

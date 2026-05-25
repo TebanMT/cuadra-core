@@ -56,6 +56,10 @@ import (
 	usersRepoLite "github.com/cuadra/cuadra-core/src/modules/users/infraestructure/db/repositories"
 	usersCtrl "github.com/cuadra/cuadra-core/src/modules/users/interfaces/controllers"
 
+	promoApp "github.com/cuadra/cuadra-core/src/modules/promotions/app"
+	promoRepoLite "github.com/cuadra/cuadra-core/src/modules/promotions/infraestructure/db/repositories"
+	promoCtrl "github.com/cuadra/cuadra-core/src/modules/promotions/interfaces/controllers"
+
 	notiApp "github.com/cuadra/cuadra-core/src/modules/notifications/app"
 	notiRepoLite "github.com/cuadra/cuadra-core/src/modules/notifications/infraestructure/db/repositories"
 	notiEmail "github.com/cuadra/cuadra-core/src/modules/notifications/infraestructure/email"
@@ -252,7 +256,22 @@ func main() {
 	lockExpiry := memApp.NewLockMembershipExpiry(membershipRepo, adjustmentRepo, uow, recorder)
 	assignPin := memApp.NewAssignPin(memberRepo, uow, recorder)
 	importCSV := memApp.NewImportMembersFromCSV(memberRepo, membershipRepo, mtRepo, uow, recorder)
-	memberSvc := memApp.NewMemberService(memberRepo, membershipRepo, mtRepo).WithFingerprints(fingerprintRepo)
+	memberSvc := memApp.NewMemberService(memberRepo, membershipRepo, mtRepo).
+		WithFingerprints(fingerprintRepo).
+		WithAdjustments(adjustmentRepo)
+
+	// ── Promotions (Standard) ─────────────────────────────────────────────
+	promotionRepo := promoRepoLite.NewPromotionSQLiteRepository()
+	appliedPromoRepo := promoRepoLite.NewAppliedPromotionSQLiteRepository()
+	createPromo := promoApp.NewCreatePromotion(promotionRepo, uow, recorder)
+	updatePromo := promoApp.NewUpdatePromotion(promotionRepo, uow, recorder)
+	deactivatePromo := promoApp.NewDeactivatePromotion(promotionRepo, uow, recorder)
+	reactivatePromo := promoApp.NewReactivatePromotion(promotionRepo, uow, recorder)
+	listPromos := promoApp.NewListPromotions(promotionRepo, uow)
+	getPromoByCode := promoApp.NewGetPromotionByCode(promotionRepo, appliedPromoRepo, uow)
+	applyPromo := promoApp.NewApplyPromotion(promotionRepo, appliedPromoRepo)
+	listAppliedByMonth := promoApp.NewListAppliedByMonth(appliedPromoRepo, uow)
+	createMember.WithPromotions(applyPromo, memberSvc)
 
 	// ── Biometric + Checkins (Sesión 5) ───────────────────────────────────
 	// Sidecar wires the real Reader so UC-028's pre-enrollment collision
@@ -302,7 +321,8 @@ func main() {
 
 	// ── Billing (Sesión 3) ────────────────────────────────────────────────
 	// `folios` se construyó arriba (lo reusa createMember). Mismo generator.
-	registerPayment := billingApp.NewRegisterMembershipPayment(paymentRepo, folios, memberSvc, memberRepo, uow, recorder, billingSubscriber)
+	registerPayment := billingApp.NewRegisterMembershipPayment(paymentRepo, folios, memberSvc, memberRepo, uow, recorder, billingSubscriber).
+		WithPromotions(applyPromo)
 	settlePayment := billingApp.NewSettlePendingBalance(paymentRepo, folios, uow, recorder)
 	receiptPayment := billingApp.NewGenerateReceipt(paymentRepo, gymRepo, memberRepo, uow)
 	sendReceipt := billingApp.NewSendReceipt(paymentRepo, uow)
@@ -322,7 +342,8 @@ func main() {
 	updateExpense := expApp.NewUpdateExpense(expenseRepo, uow, recorder)
 	deleteExpense := expApp.NewDeleteExpense(expenseRepo, uow, recorder)
 	listExpenses := expApp.NewListExpenses(expenseRepo, uow)
-	registerSale := billingApp.NewRegisterSale(paymentRepo, saleRepo, saleItemRepo, folios, productSvc, memberRepo, uow, recorder, billingSubscriber)
+	registerSale := billingApp.NewRegisterSale(paymentRepo, saleRepo, saleItemRepo, folios, productSvc, memberRepo, uow, recorder, billingSubscriber).
+		WithPromotions(applyPromo)
 	refundSale := billingApp.NewRefundSale(saleRepo, refundPayment, uow)
 	cashClose := reportsApp.NewCashClose(cashCloseReader, cashCloseEventRepo, uow, recorder).
 		WithExpenses(expenseRepo).
@@ -394,6 +415,7 @@ func main() {
 		UploadsDir:        uploadsDir,
 	})
 	mtCtrl := memCtrl.NewMembershipTypeController(createMT, updateMT, deactivateMT, listMT, tokens)
+	promotionsCtrl := promoCtrl.NewPromotionController(createPromo, updatePromo, deactivatePromo, reactivatePromo, listPromos, getPromoByCode, listAppliedByMonth, tokens)
 	// PlanGate aplica en el sidecar igual que en cloud: el SKU del gym
 	// vive en el mirror local (sync agent lo mantiene fresco), así que el
 	// gate funciona offline.
@@ -538,6 +560,7 @@ func main() {
 	authCtrl.RegisterUploadsRoute(r)
 	authCtrl.RegisterLocalPhotoRoute(r)
 	mtCtrl.RegisterRoutes(r)
+	promotionsCtrl.RegisterRoutes(r)
 	memberCtrl.RegisterRoutes(r)
 	fingerprintCtrl.RegisterRoutes(r)
 	paymentCtrl.RegisterRoutes(r)

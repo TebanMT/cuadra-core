@@ -23,22 +23,23 @@ func NewMembershipSQLiteRepository() *MembershipSQLiteRepository {
 }
 
 type sqliteMembershipRow struct {
-	ID                   string         `db:"id"`
-	GymID                string         `db:"gym_id"`
-	Version              int            `db:"version"`
-	CreatedAt            int64          `db:"created_at"`
-	UpdatedAt            int64          `db:"updated_at"`
-	DeletedAt            sql.NullInt64  `db:"deleted_at"`
-	SyncedAt             sql.NullInt64  `db:"synced_at"`
-	MemberID             string         `db:"member_id"`
-	MembershipTypeID     string         `db:"membership_type_id"`
-	TypeNameSnapshot     string         `db:"type_name_snapshot"`
-	PriceSnapshot        int64          `db:"price_snapshot"`
-	DurationDaysSnapshot int            `db:"duration_days_snapshot"`
-	StartDate            string         `db:"start_date"`
-	ExpiryDate           sql.NullString `db:"expiry_date"`
-	Status               string         `db:"status"`
-	ReplacedBy           sql.NullString `db:"replaced_by"`
+	ID                     string         `db:"id"`
+	GymID                  string         `db:"gym_id"`
+	Version                int            `db:"version"`
+	CreatedAt              int64          `db:"created_at"`
+	UpdatedAt              int64          `db:"updated_at"`
+	DeletedAt              sql.NullInt64  `db:"deleted_at"`
+	SyncedAt               sql.NullInt64  `db:"synced_at"`
+	MemberID               string         `db:"member_id"`
+	MembershipTypeID       string         `db:"membership_type_id"`
+	TypeNameSnapshot       string         `db:"type_name_snapshot"`
+	PriceSnapshot          int64          `db:"price_snapshot"`
+	DurationDaysSnapshot   int            `db:"duration_days_snapshot"`
+	DurationMonthsSnapshot sql.NullInt64  `db:"duration_months_snapshot"`
+	StartDate              string         `db:"start_date"`
+	ExpiryDate             sql.NullString `db:"expiry_date"`
+	Status                 string         `db:"status"`
+	ReplacedBy             sql.NullString `db:"replaced_by"`
 }
 
 func (r *MembershipSQLiteRepository) Create(tx sharedDomain.Transaction, m *membershipDomain.Membership) (*membershipDomain.Membership, error) {
@@ -48,12 +49,12 @@ func (r *MembershipSQLiteRepository) Create(tx sharedDomain.Transaction, m *memb
 		INSERT INTO memberships (
 		    id, gym_id, version, created_at, updated_at, deleted_at,
 		    member_id, membership_type_id,
-		    type_name_snapshot, price_snapshot, duration_days_snapshot,
+		    type_name_snapshot, price_snapshot, duration_days_snapshot, duration_months_snapshot,
 		    start_date, expiry_date, status, replaced_by
 		) VALUES (
 		    :id, :gym_id, :version, :created_at, :updated_at, :deleted_at,
 		    :member_id, :membership_type_id,
-		    :type_name_snapshot, :price_snapshot, :duration_days_snapshot,
+		    :type_name_snapshot, :price_snapshot, :duration_days_snapshot, :duration_months_snapshot,
 		    :start_date, :expiry_date, :status, :replaced_by
 		)`
 	if _, err := stx.NamedExec(context.Background(), stmt, row); err != nil {
@@ -75,6 +76,7 @@ func (r *MembershipSQLiteRepository) Update(tx sharedDomain.Transaction, m *memb
 		    membership_type_id = :membership_type_id,
 		    type_name_snapshot = :type_name_snapshot, price_snapshot = :price_snapshot,
 		    duration_days_snapshot = :duration_days_snapshot,
+		    duration_months_snapshot = :duration_months_snapshot,
 		    start_date = :start_date, expiry_date = :expiry_date,
 		    status = :status, replaced_by = :replaced_by
 		WHERE id = :id`
@@ -214,6 +216,9 @@ func membershipToRow(m *membershipDomain.Membership) sqliteMembershipRow {
 		StartDate:            m.StartDate.UTC().Format(dateLayout),
 		Status:               m.Status,
 	}
+	if m.DurationMonthsSnapshot != nil {
+		row.DurationMonthsSnapshot = sql.NullInt64{Int64: int64(*m.DurationMonthsSnapshot), Valid: true}
+	}
 	if m.ExpiryDate != nil {
 		row.ExpiryDate = sql.NullString{String: m.ExpiryDate.UTC().Format(dateLayout), Valid: true}
 	}
@@ -245,6 +250,10 @@ func membershipFromRow(r *sqliteMembershipRow) *membershipDomain.Membership {
 		Status:               r.Status,
 		CreatedAt:            time.UnixMilli(r.CreatedAt).UTC(),
 		UpdatedAt:            time.UnixMilli(r.UpdatedAt).UTC(),
+	}
+	if r.DurationMonthsSnapshot.Valid {
+		v := int(r.DurationMonthsSnapshot.Int64)
+		ms.DurationMonthsSnapshot = &v
 	}
 	if r.ExpiryDate.Valid && r.ExpiryDate.String != "" {
 		if t, err := time.Parse(dateLayout, r.ExpiryDate.String); err == nil {
@@ -325,20 +334,21 @@ func enqueueMembership(stx *sharedDomain.SqlxTransaction, m *membershipDomain.Me
 		expiryDate = m.ExpiryDate.UTC().Format(dateLayout)
 	}
 	payload, err := json.Marshal(map[string]any{
-		"id":                     m.ID.String(),
-		"gym_id":                 m.GymID.String(),
-		"version":                m.Version,
-		"created_at":             m.CreatedAt.UnixMilli(),
-		"updated_at":             m.UpdatedAt.UnixMilli(),
-		"member_id":              m.MemberID.String(),
-		"membership_type_id":     m.MembershipTypeID.String(),
-		"type_name_snapshot":     m.TypeNameSnapshot,
-		"price_snapshot":         m.PriceSnapshot,
-		"duration_days_snapshot": m.DurationDaysSnapshot,
-		"start_date":             m.StartDate.UTC().Format(dateLayout),
-		"expiry_date":            expiryDate,
-		"status":                 m.Status,
-		"replaced_by":            replacedBy,
+		"id":                       m.ID.String(),
+		"gym_id":                   m.GymID.String(),
+		"version":                  m.Version,
+		"created_at":               m.CreatedAt.UnixMilli(),
+		"updated_at":               m.UpdatedAt.UnixMilli(),
+		"member_id":                m.MemberID.String(),
+		"membership_type_id":       m.MembershipTypeID.String(),
+		"type_name_snapshot":       m.TypeNameSnapshot,
+		"price_snapshot":           m.PriceSnapshot,
+		"duration_days_snapshot":   m.DurationDaysSnapshot,
+		"duration_months_snapshot": m.DurationMonthsSnapshot,
+		"start_date":               m.StartDate.UTC().Format(dateLayout),
+		"expiry_date":              expiryDate,
+		"status":                   m.Status,
+		"replaced_by":              replacedBy,
 	})
 	if err != nil {
 		return err

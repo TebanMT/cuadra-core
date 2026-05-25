@@ -16,10 +16,25 @@ import (
 	memberDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/member"
 	membershipDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/membership"
 	memRepo "github.com/cuadra/cuadra-core/src/modules/members/domain/repository"
+	promoApp "github.com/cuadra/cuadra-core/src/modules/promotions/app"
+	promoDomain "github.com/cuadra/cuadra-core/src/modules/promotions/domain/promotion"
 	"github.com/cuadra/cuadra-core/src/shared/audit"
 	"github.com/cuadra/cuadra-core/src/shared/auth"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 )
+
+// CreateMemberPromotion es el sub-input opcional para aplicar una promo
+// al primer pago. PromotionID y Code son excluyentes. CompanionMemberIDs
+// sólo para kind=companion_memberships. La promo se valida + aplica
+// dentro de la misma tx que la creación del socio + el primer pago — si
+// algo falla, rollback completo (no queda socio sin pago ni pago sin
+// socio).
+type CreateMemberPromotion struct {
+	PromotionID        *uuid.UUID
+	Code               *string
+	CompanionMemberIDs []uuid.UUID
+	Notes              *string
+}
 
 // ErrBillingNotWired se devuelve si el caller pidió cobrar el primer
 // pago pero al construir el use case no se inyectaron las dependencias
@@ -67,6 +82,11 @@ type CreateMemberInput struct {
 	EnrollmentAmount  float64
 	MaintenanceAmount float64
 	PaymentMethod     string
+	// Promotion: si el operador eligió aplicar una promo al primer pago,
+	// viene poblada. Sólo se honra cuando ChargeFirstPayment=true (sin
+	// primer pago no hay nada que descontar). Si falla la validación
+	// (expirada, sobre-límite, etc.), la creación entera rolledback.
+	Promotion *CreateMemberPromotion
 }
 
 // CreateMemberOutput contains the new member's id and folio. Cuando se
@@ -92,6 +112,12 @@ type CreateMemberOutput struct {
 	PaymentID           *uuid.UUID
 	PaymentFolio        string
 	PaymentTotal        float64
+	// Datos de la promo aplicada al primer pago — vacíos cuando no hubo.
+	PromotionAppliedID *uuid.UUID
+	PromotionName      string
+	PromotionKind      string
+	PromotionExtraDays int
+	PromotionGiftedIDs []uuid.UUID
 }
 
 type CreateMember struct {
@@ -106,8 +132,16 @@ type CreateMember struct {
 	// (ver notifications/app/EnqueueWelcomePin). Nil = no se envía
 	// notificación; usado en tests que no exercisan WhatsApp.
 	WelcomePin WelcomePinNotifier
-	UoW        sharedDomain.UnitOfWork
-	Audit      audit.Recorder
+	// Promotions (opcional) habilita aplicar una promo al primer pago.
+	// Nil = ignora cualquier Promotion del input.
+	Promotions *promoApp.ApplyPromotion
+	// MemberSvc (opcional) habilita los efectos secundarios de promos
+	// (extra_days adjustment, companion memberships) en la misma tx del
+	// alta. Nil = sólo se honran promos sin efectos (percent, fixed,
+	// free_enrollment).
+	MemberSvc *MemberService
+	UoW       sharedDomain.UnitOfWork
+	Audit     audit.Recorder
 }
 
 func NewCreateMember(members memRepo.MemberRepository, memberships memRepo.MembershipRepository,
@@ -138,6 +172,15 @@ func NewCreateMemberWithBilling(members memRepo.MemberRepository, memberships me
 // calling it and the use case defaults to noopWelcomePinNotifier.
 func (uc *CreateMember) WithWelcomePinNotifier(n WelcomePinNotifier) *CreateMember {
 	uc.WelcomePin = n
+	return uc
+}
+
+// WithPromotions engancha el use case de promos para que el primer pago
+// del alta pueda aplicar una. Sin este setter el campo Promotion del
+// input se ignora silenciosamente (caso tests / builds sin BC promotions).
+func (uc *CreateMember) WithPromotions(p *promoApp.ApplyPromotion, svc *MemberService) *CreateMember {
+	uc.Promotions = p
+	uc.MemberSvc = svc
 	return uc
 }
 
@@ -332,17 +375,50 @@ func (uc *CreateMember) Execute(ctx context.Context, in CreateMemberInput) (*Cre
 				subtotal += maintenanceAmt
 			}
 
+			// 6.1) Promo opcional. Resolve antes de crear el payment para
+			//      tener el discount listo + el effect a persistir post-create.
+			//      Validación + límites + targeting viven en ApplyPromotion.
+			paymentID := uuid.New()
+			var promoResult *promoApp.ApplyPromotionResult
+			var discount float64
+			var discountReason *string
+			if in.Promotion != nil && uc.Promotions != nil {
+				memID := m.ID
+				res, perr := uc.Promotions.Resolve(ctx, tx, promoApp.ApplyPromotionInput{
+					GymID:              in.GymID,
+					ActorUserID:        in.ActorUserID,
+					PromotionID:        in.Promotion.PromotionID,
+					Code:               in.Promotion.Code,
+					PaymentID:          paymentID,
+					Target:             promoDomain.AppliesToMembership,
+					Subtotal:           subtotal,
+					EnrollmentFee:      enrollmentAmt,
+					HasEnrollment:      chargeEnrollment,
+					MemberID:           &memID,
+					CompanionMemberIDs: in.Promotion.CompanionMemberIDs,
+					Notes:              in.Promotion.Notes,
+					Today:              in.StartDate,
+				}, now)
+				if perr != nil {
+					return perr
+				}
+				promoResult = res
+				if res.Discount > 0 {
+					discount = res.Discount
+					reason := res.DiscountReason
+					discountReason = &reason
+				}
+			}
+
 			folioPay, err := uc.Folios.Next(tx, in.GymID, paymentDomain.ConceptMembership)
 			if err != nil {
 				return sharedDomain.NewUnexpectedError(err)
 			}
-			paymentID := uuid.New()
-			// Sin discount al primer pago — las promos "sin inscripción"
-			// se modelan deseleccionando ChargeEnrollment, no como descuento.
+			paid := subtotal - discount
 			p, err := paymentDomain.NewMembershipPayment(
 				paymentID, in.GymID, in.ActorUserID, m.ID, folioPay,
-				subtotal, 0, subtotal, 0,
-				in.PaymentMethod, in.StartDate, now, nil, nil,
+				subtotal, discount, paid, 0,
+				in.PaymentMethod, in.StartDate, now, nil, discountReason,
 			)
 			if err != nil {
 				return sharedDomain.NewValidationError(err)
@@ -365,6 +441,41 @@ func (uc *CreateMember) Execute(ctx context.Context, in CreateMemberInput) (*Cre
 			p.SetBreakdown(lines)
 			if _, err := uc.Payments.Create(tx, p); err != nil {
 				return sharedDomain.NewUnexpectedError(err)
+			}
+
+			// 6.2) Promo: persistir applied_promotion + efectos. Hacemos
+			//      esto DESPUÉS de Payments.Create para que el FK al
+			//      payment_id se satisfaga.
+			giftedIDs := []uuid.UUID(nil)
+			if promoResult != nil {
+				if err := uc.Promotions.Persist(ctx, tx, promoResult, p.ID, now); err != nil {
+					return err
+				}
+				if promoResult.ExtraDays > 0 && uc.MemberSvc != nil {
+					if err := uc.MemberSvc.ApplyMembershipAdjustment(ctx, tx, ApplyMembershipAdjustmentInput{
+						GymID:        in.GymID,
+						MembershipID: ms.ID,
+						Days:         promoResult.ExtraDays,
+						Reason:       "promo: " + promoResult.Promotion.Name,
+						ActorUserID:  in.ActorUserID,
+					}, now); err != nil {
+						return err
+					}
+				}
+				if len(promoResult.CompanionMemberIDs) > 0 && uc.MemberSvc != nil {
+					for _, companionID := range promoResult.CompanionMemberIDs {
+						gifted, gerr := uc.MemberSvc.GiftMembership(ctx, tx, GiftMembershipInput{
+							GymID:             in.GymID,
+							CompanionMemberID: companionID,
+							MembershipTypeID:  mt.ID,
+							StartDate:         in.StartDate,
+						}, now)
+						if gerr != nil {
+							return gerr
+						}
+						giftedIDs = append(giftedIDs, gifted.ID)
+					}
+				}
 			}
 
 			memberDirty := false
@@ -407,6 +518,21 @@ func (uc *CreateMember) Execute(ctx context.Context, in CreateMemberInput) (*Cre
 			out.PaymentID = &paymentID
 			out.PaymentFolio = p.Folio
 			out.PaymentTotal = p.Amount
+			if promoResult != nil {
+				appliedID := promoResult.AppliedID
+				out.PromotionAppliedID = &appliedID
+				out.PromotionName = promoResult.Promotion.Name
+				out.PromotionKind = promoResult.Promotion.Kind
+				if promoResult.ExtraDays > 0 {
+					out.PromotionExtraDays = promoResult.ExtraDays
+					// El expiry reportado debe reflejar el ajuste.
+					if ms.ExpiryDate != nil {
+						adjusted := ms.ExpiryDate.AddDate(0, 0, promoResult.ExtraDays)
+						out.ExpiryDate = &adjusted
+					}
+				}
+				out.PromotionGiftedIDs = giftedIDs
+			}
 		}
 
 		return nil

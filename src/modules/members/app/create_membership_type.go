@@ -29,11 +29,17 @@ import (
 // ---------------------------------------------------------------------------
 
 type CreateMembershipTypeInput struct {
-	GymID                uuid.UUID
-	ActorUserID          uuid.UUID
-	Name                 string
-	Price                float64
+	GymID       uuid.UUID
+	ActorUserID uuid.UUID
+	Name        string
+	Price       float64
+	// DurationDays es SIEMPRE requerido (= valor aproximado en días,
+	// usado por reportes legacy). DurationMonths es opcional: si llega,
+	// el dominio calcula expiry como N meses naturales en lugar de
+	// DurationDays. Para presets ambiguos {30,60,90,180,365} el FE
+	// manda ambos (días para el snapshot, meses para el cálculo).
 	DurationDays         int
+	DurationMonths       *int
 	EnrollmentFee        float64
 	MaintenanceFee       float64
 	MaintenanceFrequency string
@@ -52,7 +58,7 @@ func NewCreateMembershipType(repo memRepo.MembershipTypeRepository, uow sharedDo
 func (uc *CreateMembershipType) Execute(ctx context.Context, in CreateMembershipTypeInput) (*mtDomain.MembershipType, error) {
 	now := time.Now().UTC()
 	id := uuid.New()
-	mt, err := mtDomain.New(id, in.GymID, in.Name, in.Price, in.DurationDays,
+	mt, err := mtDomain.New(id, in.GymID, in.Name, in.Price, in.DurationDays, in.DurationMonths,
 		in.EnrollmentFee, in.MaintenanceFee, in.MaintenanceFrequency, now)
 	if err != nil {
 		return nil, sharedDomain.NewValidationError(err)
@@ -78,7 +84,8 @@ func (uc *CreateMembershipType) Execute(ctx context.Context, in CreateMembership
 			Action:      audit.ActionCreate,
 			ActorUserID: &in.ActorUserID,
 			Changes: map[string]any{
-				"name": created.Name, "price": created.Price, "duration_days": created.DurationDays,
+				"name": created.Name, "price": created.Price,
+				"duration_days": created.DurationDays, "duration_months": created.DurationMonths,
 				"enrollment_fee": created.EnrollmentFee, "maintenance_fee": created.MaintenanceFee,
 			},
 			IPAddress: audit.IPFromContext(ctx),

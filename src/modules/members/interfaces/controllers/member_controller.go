@@ -113,6 +113,15 @@ func (ctrl *MemberController) RegisterRoutes(r *gin.Engine) {
 // DTOs
 // ---------------------------------------------------------------------------
 
+// createMemberPromoReq es el sub-objeto opcional para aplicar una promo al
+// primer pago. Espeja `promotion` del payment_controller para uniformidad.
+type createMemberPromoReq struct {
+	PromotionID        *string  `json:"promotion_id,omitempty"`
+	Code               *string  `json:"code,omitempty"`
+	CompanionMemberIDs []string `json:"companion_member_ids,omitempty"`
+	Notes              *string  `json:"notes,omitempty"`
+}
+
 type createMemberReq struct {
 	FullName  string  `json:"full_name" validate:"required,min=3,max=100"`
 	Phone     string  `json:"phone" validate:"required"`
@@ -123,16 +132,17 @@ type createMemberReq struct {
 	// Gender opcional. omitempty + ptr para distinguir "campo no enviado"
 	// (FE lo dejó vacío) de "se eligió Prefiero no decir". Valores válidos:
 	// hombre, mujer, no_especificado. El handler valida via dominio.
-	Gender              *string `json:"gender,omitempty"`
-	MembershipTypeID    string  `json:"membership_type_id" validate:"required,uuid"`
-	StartDate           string  `json:"start_date,omitempty"` // YYYY-MM-DD; defaults to today
-	AllowDuplicatePhone bool    `json:"allow_duplicate_phone,omitempty"`
-	ChargeFirstPayment  bool    `json:"charge_first_payment,omitempty"`
-	ChargeEnrollment    bool    `json:"charge_enrollment,omitempty"`
-	ChargeMaintenance   bool    `json:"charge_maintenance,omitempty"`
-	EnrollmentAmount    float64 `json:"enrollment_amount,omitempty"`
-	MaintenanceAmount   float64 `json:"maintenance_amount,omitempty"`
-	PaymentMethod       string  `json:"payment_method,omitempty"`
+	Gender              *string               `json:"gender,omitempty"`
+	MembershipTypeID    string                `json:"membership_type_id" validate:"required,uuid"`
+	StartDate           string                `json:"start_date,omitempty"` // YYYY-MM-DD; defaults to today
+	AllowDuplicatePhone bool                  `json:"allow_duplicate_phone,omitempty"`
+	ChargeFirstPayment  bool                  `json:"charge_first_payment,omitempty"`
+	ChargeEnrollment    bool                  `json:"charge_enrollment,omitempty"`
+	ChargeMaintenance   bool                  `json:"charge_maintenance,omitempty"`
+	EnrollmentAmount    float64               `json:"enrollment_amount,omitempty"`
+	MaintenanceAmount   float64               `json:"maintenance_amount,omitempty"`
+	PaymentMethod       string                `json:"payment_method,omitempty"`
+	Promotion           *createMemberPromoReq `json:"promotion,omitempty"`
 }
 
 type createMemberResp struct {
@@ -152,6 +162,12 @@ type createMemberResp struct {
 	PaymentID    *uuid.UUID   `json:"payment_id,omitempty"`
 	PaymentFolio string       `json:"payment_folio,omitempty"`
 	PaymentTotal float64      `json:"payment_total,omitempty"`
+	// Datos de la promo aplicada al primer pago — vacíos cuando no hubo.
+	PromotionAppliedID *uuid.UUID  `json:"promotion_applied_id,omitempty"`
+	PromotionName      string      `json:"promotion_name,omitempty"`
+	PromotionKind      string      `json:"promotion_kind,omitempty"`
+	PromotionExtraDays int         `json:"promotion_extra_days,omitempty"`
+	PromotionGiftedIDs []uuid.UUID `json:"promotion_gifted_membership_ids,omitempty"`
 }
 
 // pinDispatch surfaces whether the welcome-PIN WhatsApp notification was
@@ -304,6 +320,11 @@ func (ctrl *MemberController) handleCreate(c *gin.Context) {
 		}
 		birthdate = &t
 	}
+	promo, err := parseCreateMemberPromotion(req.Promotion)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err)
+		return
+	}
 	out, err := ctrl.Create.Execute(c.Request.Context(), memApp.CreateMemberInput{
 		GymID: gymID, ActorUserID: userID,
 		FullName:            req.FullName,
@@ -322,6 +343,7 @@ func (ctrl *MemberController) handleCreate(c *gin.Context) {
 		EnrollmentAmount:    req.EnrollmentAmount,
 		MaintenanceAmount:   req.MaintenanceAmount,
 		PaymentMethod:       req.PaymentMethod,
+		Promotion:           promo,
 	})
 	if err != nil {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
@@ -352,7 +374,37 @@ func (ctrl *MemberController) handleCreate(c *gin.Context) {
 		PaymentID:           out.PaymentID,
 		PaymentFolio:        out.PaymentFolio,
 		PaymentTotal:        out.PaymentTotal,
+		PromotionAppliedID:  out.PromotionAppliedID,
+		PromotionName:       out.PromotionName,
+		PromotionKind:       out.PromotionKind,
+		PromotionExtraDays:  out.PromotionExtraDays,
+		PromotionGiftedIDs:  out.PromotionGiftedIDs,
 	})
+}
+
+// parseCreateMemberPromotion convierte el sub-DTO HTTP a CreateMemberPromotion
+// del dominio, parseando UUIDs. Devuelve nil cuando el operador no envió
+// el campo.
+func parseCreateMemberPromotion(req *createMemberPromoReq) (*memApp.CreateMemberPromotion, error) {
+	if req == nil {
+		return nil, nil
+	}
+	out := &memApp.CreateMemberPromotion{Code: req.Code, Notes: req.Notes}
+	if req.PromotionID != nil && *req.PromotionID != "" {
+		id, err := uuid.Parse(*req.PromotionID)
+		if err != nil {
+			return nil, errBadID
+		}
+		out.PromotionID = &id
+	}
+	for _, s := range req.CompanionMemberIDs {
+		id, err := uuid.Parse(s)
+		if err != nil {
+			return nil, errBadID
+		}
+		out.CompanionMemberIDs = append(out.CompanionMemberIDs, id)
+	}
+	return out, nil
 }
 
 func (ctrl *MemberController) handleUpdate(c *gin.Context) {

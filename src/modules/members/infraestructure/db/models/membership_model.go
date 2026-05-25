@@ -11,18 +11,19 @@ import (
 // MembershipModel mirrors `memberships` (ADR-002 §3.6). Snapshot fields are
 // frozen at insert — DA-11.1.
 type MembershipModel struct {
-	ID                   uuid.UUID  `gorm:"type:uuid;primaryKey;column:id"`
-	GymID                uuid.UUID  `gorm:"type:uuid;not null;column:gym_id"`
-	Version              int        `gorm:"not null;default:1;column:version"`
-	CreatedAt            time.Time  `gorm:"not null;column:created_at"`
-	UpdatedAt            time.Time  `gorm:"not null;column:updated_at"`
-	DeletedAt            *time.Time `gorm:"column:deleted_at"`
-	MemberID             uuid.UUID  `gorm:"type:uuid;not null;column:member_id"`
-	MembershipTypeID     uuid.UUID  `gorm:"type:uuid;not null;column:membership_type_id"`
-	TypeNameSnapshot     string     `gorm:"not null;column:type_name_snapshot"`
-	PriceSnapshot        float64    `gorm:"type:numeric(12,2);not null;column:price_snapshot"`
-	DurationDaysSnapshot int        `gorm:"not null;column:duration_days_snapshot"`
-	StartDate            time.Time  `gorm:"type:date;not null;column:start_date"`
+	ID                     uuid.UUID  `gorm:"type:uuid;primaryKey;column:id"`
+	GymID                  uuid.UUID  `gorm:"type:uuid;not null;column:gym_id"`
+	Version                int        `gorm:"not null;default:1;column:version"`
+	CreatedAt              time.Time  `gorm:"not null;column:created_at"`
+	UpdatedAt              time.Time  `gorm:"not null;column:updated_at"`
+	DeletedAt              *time.Time `gorm:"column:deleted_at"`
+	MemberID               uuid.UUID  `gorm:"type:uuid;not null;column:member_id"`
+	MembershipTypeID       uuid.UUID  `gorm:"type:uuid;not null;column:membership_type_id"`
+	TypeNameSnapshot       string     `gorm:"not null;column:type_name_snapshot"`
+	PriceSnapshot          float64    `gorm:"type:numeric(12,2);not null;column:price_snapshot"`
+	DurationDaysSnapshot   int        `gorm:"not null;column:duration_days_snapshot"`
+	DurationMonthsSnapshot *int       `gorm:"column:duration_months_snapshot"`
+	StartDate              time.Time  `gorm:"type:date;not null;column:start_date"`
 	// ExpiryDate es nullable: nil cuando status = pending_payment.
 	ExpiryDate *time.Time `gorm:"type:date;column:expiry_date"`
 	Status     string     `gorm:"not null;default:active;column:status"`

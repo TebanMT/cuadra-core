@@ -140,6 +140,14 @@ type AgentSnapshot struct {
 	// "agente sano sin actividad reciente". Se limpia tan pronto como el
 	// agente recibe credenciales.
 	WaitingForAuth bool
+	// SchemaUpgradeRequired — true cuando el cloud devolvió 426 a un
+	// push/pull/full-sync. Significa que el wire-protocol que habla este
+	// sidecar quedó atrás (ADR-001 §3.8). El usuario tiene que actualizar
+	// el binario; los retries no resuelven nada. La UI muestra un modal
+	// bloqueante con CTA "Actualizar ahora" (ADR-005 §2.7). Se limpia
+	// recién cuando un sync exitoso confirma que la nueva versión sí
+	// negocia el schema (= update aplicado).
+	SchemaUpgradeRequired bool
 }
 
 func NewAgent(cfg AgentConfig, db *sqlx.DB, uow sharedDomain.UnitOfWork) *Agent {
@@ -791,9 +799,12 @@ func (a *Agent) recordSuccess(ctx context.Context) {
 	a.state.ConsecutiveFailures = 0
 	a.state.NextRetryAt = time.Time{}
 	// Un ciclo exitoso invalida cualquier 401 previo — si la credencial
-	// estaba muerta no habría llegado hasta acá.
+	// estaba muerta no habría llegado hasta acá. Lo mismo aplica para el
+	// flag de schema_upgrade_required: si pudimos sincronizar es que el
+	// binario ya está al día.
 	a.state.AuthInvalid = false
 	a.state.WaitingForAuth = false
+	a.state.SchemaUpgradeRequired = false
 	a.mu.Unlock()
 	_ = a.uow.Command(ctx, func(tx sharedDomain.Transaction) error {
 		_ = SetLastSyncedAt(ctx, tx, now)
@@ -807,6 +818,7 @@ func (a *Agent) recordSuccess(ctx context.Context) {
 func (a *Agent) recordFailure(ctx context.Context, phase string, err error) {
 	a.cfg.Logger.Printf("[sync] %s failed: %v", phase, err)
 	authInvalid := isAuthError(err)
+	schemaStale := errors.Is(err, ErrSchemaUpgradeRequired)
 	a.mu.Lock()
 	a.state.ConsecutiveFailures++
 	a.state.LastError = phase + ": " + err.Error()
@@ -818,6 +830,14 @@ func (a *Agent) recordFailure(ctx context.Context, phase string, err error) {
 		// el estado para que la UI muestre "Vuelve a iniciar sesión" en vez
 		// de "Sin internet".
 		a.state.AuthInvalid = true
+		wait = time.Hour
+	}
+	if schemaStale {
+		// El cloud rechazó el schema_version del sidecar. Ningún retry sirve
+		// hasta que el binario se actualice — pisamos el backoff con 1h igual
+		// que con auth invalid, y marcamos el flag para que la UI muestre el
+		// modal bloqueante "Tu versión ya no es compatible" (ADR-005 §2.7).
+		a.state.SchemaUpgradeRequired = true
 		wait = time.Hour
 	}
 	a.state.NextRetryAt = time.Now().Add(wait)

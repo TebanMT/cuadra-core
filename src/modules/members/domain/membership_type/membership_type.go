@@ -37,6 +37,15 @@ var allowedFrequencies = map[string]struct{}{
 
 // MembershipType is a plan offered by the gym. Price is stored as float64 here
 // for simplicity; cents-only is enforced at the SQLite mapper boundary.
+//
+// DurationDays vs DurationMonths: el operador de un gym ve "mensual" como
+// un período de calendario (1 mes natural), no como 30 días corridos. Si
+// DurationMonths != nil, ese campo manda y el expiry se calcula como
+// start + N meses naturales (lo que tiene el mes en la realidad: 28-31
+// días). Si DurationMonths es nil, caemos a DurationDays — usado por
+// presets exactos (paso/semana/quincenal) + duración personalizada.
+// Migración 027/022 hace el backfill de los presets ambiguos
+// {30,60,90,180,365} a sus equivalentes en meses {1,2,3,6,12}.
 type MembershipType struct {
 	ID                   uuid.UUID
 	GymID                uuid.UUID
@@ -44,6 +53,7 @@ type MembershipType struct {
 	Name                 string
 	Price                float64
 	DurationDays         int
+	DurationMonths       *int
 	EnrollmentFee        float64
 	MaintenanceFee       float64
 	MaintenanceFrequency *string
@@ -55,7 +65,13 @@ type MembershipType struct {
 
 // New constructs a MembershipType with consistent maintenance constraints.
 // freq is either "monthly", "annual", or empty when there's no fee.
-func New(id, gymID uuid.UUID, name string, price float64, durationDays int,
+//
+// durationMonths puede ser nil (use cases legacy + presets de días).
+// Si llega NO-nil, manda sobre durationDays para el cálculo de expiry
+// — pero el caller TAMBIÉN debe pasar un durationDays "aproximado" (su
+// valor histórico), porque algunos reportes legacy + el wire DTO lo
+// siguen exponiendo.
+func New(id, gymID uuid.UUID, name string, price float64, durationDays int, durationMonths *int,
 	enrollmentFee, maintenanceFee float64, freq string, now time.Time) (*MembershipType, error) {
 	mt := &MembershipType{
 		ID:        id,
@@ -65,7 +81,7 @@ func New(id, gymID uuid.UUID, name string, price float64, durationDays int,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-	if err := mt.applyFields(name, price, durationDays, enrollmentFee, maintenanceFee, freq); err != nil {
+	if err := mt.applyFields(name, price, durationDays, durationMonths, enrollmentFee, maintenanceFee, freq); err != nil {
 		return nil, err
 	}
 	return mt, nil
@@ -74,9 +90,9 @@ func New(id, gymID uuid.UUID, name string, price float64, durationDays int,
 // Update mutates the MembershipType in-place. Per DA-11.1 the caller is NOT
 // required to update existing memberships — those keep their snapshot. Only
 // future renewals see the new values.
-func (mt *MembershipType) Update(name string, price float64, durationDays int,
+func (mt *MembershipType) Update(name string, price float64, durationDays int, durationMonths *int,
 	enrollmentFee, maintenanceFee float64, freq string, now time.Time) error {
-	if err := mt.applyFields(name, price, durationDays, enrollmentFee, maintenanceFee, freq); err != nil {
+	if err := mt.applyFields(name, price, durationDays, durationMonths, enrollmentFee, maintenanceFee, freq); err != nil {
 		return err
 	}
 	mt.Version++
@@ -105,7 +121,7 @@ func (mt *MembershipType) Reactivate(now time.Time) {
 	mt.UpdatedAt = now
 }
 
-func (mt *MembershipType) applyFields(name string, price float64, durationDays int,
+func (mt *MembershipType) applyFields(name string, price float64, durationDays int, durationMonths *int,
 	enrollmentFee, maintenanceFee float64, freq string) error {
 	name = strings.TrimSpace(name)
 	if len(name) < 3 || len(name) > 100 {
@@ -115,6 +131,9 @@ func (mt *MembershipType) applyFields(name string, price float64, durationDays i
 		return memErrors.ErrInvalidPrice
 	}
 	if durationDays < 1 {
+		return memErrors.ErrInvalidDuration
+	}
+	if durationMonths != nil && (*durationMonths < 1 || *durationMonths > 60) {
 		return memErrors.ErrInvalidDuration
 	}
 	if enrollmentFee < 0 || maintenanceFee < 0 {
@@ -134,6 +153,12 @@ func (mt *MembershipType) applyFields(name string, price float64, durationDays i
 	mt.Name = name
 	mt.Price = price
 	mt.DurationDays = durationDays
+	if durationMonths != nil {
+		v := *durationMonths
+		mt.DurationMonths = &v
+	} else {
+		mt.DurationMonths = nil
+	}
 	mt.EnrollmentFee = enrollmentFee
 	mt.MaintenanceFee = maintenanceFee
 	mt.MaintenanceFrequency = freqPtr
