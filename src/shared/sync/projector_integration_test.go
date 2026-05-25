@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -362,6 +363,210 @@ func TestPushAppliesToProjector_GymJSONB(t *testing.T) {
 	}
 	if !strings.Contains(string(got.PaymentMethods), "cash") || !strings.Contains(string(got.PaymentMethods), "transfer") {
 		t.Errorf("payment_methods JSONB lost: %s", got.PaymentMethods)
+	}
+}
+
+// TestPullAugmentsGymWithCanonicalFields — el sidecar nunca emite los
+// campos cloud-owned en su push (billing). Otros — created_at,
+// kiosk_settings — sí los emite post-fix pero sidecars pre-fix los
+// dejaban afuera del payload, y esos payloads quedaron guardados en
+// sync_entities. Para que un sidecar full-syncing pueda hacer INSERT en
+// su SQLite local (donde subscription_plan, subscription_status,
+// created_at, kiosk_settings son TODOS NOT NULL), el pull cloud-side
+// inyecta esos campos desde el row vivo de gyms — antes el payload se
+// devolvía verbatim y la INSERT rompía con NOT NULL constraint failed.
+//
+// Setup: push de un gym con payload "sidecar pre-fix" (sin billing,
+// sin created_at, sin kiosk_settings). Update directo de gyms con
+// valores canónicos. Pull con since=epoch-cero → el payload devuelto
+// debe traer TODOS los campos canónicos desde gyms.
+func TestPullAugmentsGymWithCanonicalFields(t *testing.T) {
+	db := projectorTestDB(t)
+	gymID, userID := seedGymAndOwner(t, db)
+	r, tokens := newRealHandler(t, db)
+	tok, _ := tokens.GenerateAccessToken(userID, gymID, "owner")
+
+	// Push del gym con payload "sidecar pre-fix" — sin subscription_*,
+	// sin created_at, sin kiosk_settings. Emula exactamente el shape
+	// que sidecars antiguos guardaron en sync_entities.
+	pushBody := map[string]any{
+		"id":         gymID.String(),
+		"gym_id":     gymID.String(),
+		"version":    2,
+		"name":       "Pull Augment Gym",
+		"country":    "MX",
+		"timezone":   "America/Mexico_City",
+		"updated_at": time.Now().UnixMilli(),
+	}
+	pb, _ := json.Marshal(pushBody)
+	pushReq := PushRequest{
+		ClientID: uuid.NewString(), ClientNow: time.Now(), SchemaVersion: 1,
+		Batch: []PushItem{{
+			QueueID: uuid.NewString(), EntityType: "gyms", EntityID: gymID.String(),
+			Operation: OpUpsertStr, ClientVersion: 2, Payload: pb, EnqueuedAt: time.Now(),
+		}},
+	}
+	if rec := doJSONReq(t, r, "POST", "/api/v1/sync/push", tok, pushReq); rec.Code != 200 {
+		t.Fatalf("push status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Bump del gym row con valores canónicos. Simula:
+	//   - billing: webhook de Stripe / RecordEvent.
+	//   - created_at: vino del INSERT inicial via DEFAULT NOW().
+	//   - kiosk_settings: operador cambió audio_volume desde el desktop.
+	trialEnds := time.Now().Add(7 * 24 * time.Hour).UTC().Truncate(time.Second)
+	subEnds := time.Now().Add(30 * 24 * time.Hour).UTC().Truncate(time.Second)
+	createdAt := time.Now().Add(-30 * 24 * time.Hour).UTC().Truncate(time.Second)
+	if err := db.Exec(`
+		UPDATE gyms
+		   SET subscription_plan = 'plus_monthly',
+		       subscription_status = 'active',
+		       stripe_customer_id = 'cus_test_aug_123',
+		       trial_ends_at = ?,
+		       subscription_ends_at = ?,
+		       created_at = ?,
+		       kiosk_settings = '{"audio_volume":42,"auto_close_seconds":7}'::jsonb
+		 WHERE id = ?`, trialEnds, subEnds, createdAt, gymID).Error; err != nil {
+		t.Fatalf("update gym canonical: %v", err)
+	}
+
+	// Pull desde el principio del tiempo — debe devolver al menos el gym.
+	rec := doJSONReq(t, r, "GET",
+		"/api/v1/sync/pull?since="+url.QueryEscape("1970-01-01T00:00:00Z")+"&limit=500",
+		tok, nil)
+	if rec.Code != 200 {
+		t.Fatalf("pull status %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp PullResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode pull: %v", err)
+	}
+
+	var gymChange *PullChange
+	for i := range resp.Changes {
+		if resp.Changes[i].EntityType == "gyms" && resp.Changes[i].EntityID == gymID.String() {
+			gymChange = &resp.Changes[i]
+			break
+		}
+	}
+	if gymChange == nil {
+		t.Fatalf("pull no devolvió el gym: changes=%d", len(resp.Changes))
+	}
+	var pl map[string]any
+	if err := json.Unmarshal(gymChange.Payload, &pl); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+
+	if v, _ := pl["subscription_plan"].(string); v != "plus_monthly" {
+		t.Errorf("subscription_plan = %v, want plus_monthly", pl["subscription_plan"])
+	}
+	if v, _ := pl["subscription_status"].(string); v != "active" {
+		t.Errorf("subscription_status = %v, want active", pl["subscription_status"])
+	}
+	if v, _ := pl["stripe_customer_id"].(string); v != "cus_test_aug_123" {
+		t.Errorf("stripe_customer_id = %v", pl["stripe_customer_id"])
+	}
+	// trial_ends_at debe venir como epoch ms (JSON number), no string ISO.
+	te, ok := pl["trial_ends_at"].(float64)
+	if !ok {
+		t.Errorf("trial_ends_at no es number: %T (%v)", pl["trial_ends_at"], pl["trial_ends_at"])
+	} else if want := trialEnds.UnixMilli(); int64(te) != want {
+		t.Errorf("trial_ends_at = %d, want %d", int64(te), want)
+	}
+	se, ok := pl["subscription_ends_at"].(float64)
+	if !ok {
+		t.Errorf("subscription_ends_at no es number: %T", pl["subscription_ends_at"])
+	} else if want := subEnds.UnixMilli(); int64(se) != want {
+		t.Errorf("subscription_ends_at = %d, want %d", int64(se), want)
+	}
+	// created_at: aunque el payload pre-fix no lo emitió, el augment lo
+	// inyecta desde gyms.created_at — es exactamente el bug del piloto.
+	ca, ok := pl["created_at"].(float64)
+	if !ok {
+		t.Errorf("created_at no es number: %T (%v)", pl["created_at"], pl["created_at"])
+	} else if want := createdAt.UnixMilli(); int64(ca) != want {
+		t.Errorf("created_at = %d, want %d", int64(ca), want)
+	}
+	// kiosk_settings: igual — pre-fix lo omitía y el augment lo inyecta.
+	ks, ok := pl["kiosk_settings"].(map[string]any)
+	if !ok {
+		t.Errorf("kiosk_settings no es objeto: %T (%v)", pl["kiosk_settings"], pl["kiosk_settings"])
+	} else {
+		if v, _ := ks["audio_volume"].(float64); int(v) != 42 {
+			t.Errorf("kiosk_settings.audio_volume = %v, want 42", ks["audio_volume"])
+		}
+	}
+	// Sanity: name del push viejo se preservó (no toda la fila se reemplazó).
+	if v, _ := pl["name"].(string); v != "Pull Augment Gym" {
+		t.Errorf("name = %v, want Pull Augment Gym", pl["name"])
+	}
+}
+
+// TestPullAugmentationLeavesNonGymRowsUntouched — el CASE del SQL sólo
+// debe afectar entity_type='gyms'. Otras entidades (members, payments)
+// vienen verbatim. Si el CASE estuviera mal escrito (ej. olvidamos el
+// ELSE), los payloads de members aparecerían con campos extras del JOIN
+// y la INSERT del sidecar rompería con "no such column".
+func TestPullAugmentationLeavesNonGymRowsUntouched(t *testing.T) {
+	db := projectorTestDB(t)
+	gymID, userID := seedGymAndOwner(t, db)
+	r, tokens := newRealHandler(t, db)
+	tok, _ := tokens.GenerateAccessToken(userID, gymID, "owner")
+
+	// Push de un member para tener al menos una fila non-gym en sync_entities.
+	memberID := uuid.New()
+	mb, _ := json.Marshal(map[string]any{
+		"id": memberID.String(), "gym_id": gymID.String(), "version": 1,
+		"folio": "M-AUG-001", "full_name": "Aug Member", "phone": "555", "status": "active",
+		"enrollment_paid": false, "created_by": userID.String(),
+		"updated_at": time.Now().UnixMilli(),
+	})
+	pushReq := PushRequest{
+		ClientID: uuid.NewString(), ClientNow: time.Now(), SchemaVersion: 1,
+		Batch: []PushItem{{
+			QueueID: uuid.NewString(), EntityType: "members", EntityID: memberID.String(),
+			Operation: OpUpsertStr, ClientVersion: 1, Payload: mb, EnqueuedAt: time.Now(),
+		}},
+	}
+	if rec := doJSONReq(t, r, "POST", "/api/v1/sync/push", tok, pushReq); rec.Code != 200 {
+		t.Fatalf("push status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec := doJSONReq(t, r, "GET",
+		"/api/v1/sync/pull?since="+url.QueryEscape("1970-01-01T00:00:00Z")+"&limit=500",
+		tok, nil)
+	if rec.Code != 200 {
+		t.Fatalf("pull status %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp PullResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode pull: %v", err)
+	}
+
+	var found *PullChange
+	for i := range resp.Changes {
+		if resp.Changes[i].EntityType == "members" && resp.Changes[i].EntityID == memberID.String() {
+			found = &resp.Changes[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("member pull no devuelto")
+	}
+	var pl map[string]any
+	if err := json.Unmarshal(found.Payload, &pl); err != nil {
+		t.Fatalf("decode member payload: %v", err)
+	}
+	for _, leak := range []string{
+		"subscription_plan", "subscription_status", "stripe_customer_id",
+		"trial_ends_at", "subscription_ends_at", "kiosk_settings",
+	} {
+		if _, ok := pl[leak]; ok {
+			t.Errorf("non-gym payload contaminated con %s: %v", leak, pl[leak])
+		}
+	}
+	if v, _ := pl["folio"].(string); v != "M-AUG-001" {
+		t.Errorf("member payload se perdió: folio=%v", pl["folio"])
 	}
 }
 

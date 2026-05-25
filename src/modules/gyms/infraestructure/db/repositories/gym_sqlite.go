@@ -271,6 +271,9 @@ func (r *GymSQLiteRepository) HasMembershipType(tx sharedDomain.Transaction, gym
 // row de `gyms`. NO incluye campos de billing — el cloud es source of truth
 // para todo lo que viene de Stripe / Mercado Pago (subscription_plan,
 // subscription_status, subscription_ends_at, trial_ends_at, stripe_customer_id).
+// El cloud los inyecta a su vez en el payload cuando un sidecar hace pull
+// (server_store.go ListSince/ListForFullSync), así que un sidecar nuevo
+// no necesita que ningún push se los acerque.
 //
 // Por qué importa: el proyector del cloud (`projectGeneric` en
 // shared/sync/projector.go) hace ON CONFLICT DO UPDATE columna-por-columna
@@ -280,6 +283,15 @@ func (r *GymSQLiteRepository) HasMembershipType(tx sharedDomain.Transaction, gym
 // Eso pasó en producción: un push del sidecar después de un checkout
 // exitoso dejaba subscription_ends_at correcto (no estaba en el payload)
 // pero subscription_plan rebotaba a "trial" (sí estaba).
+//
+// `created_at` y `kiosk_settings` SÍ se incluyen: el primero es immutable
+// y derivado del propio sidecar; el segundo es sidecar-owned (el operador
+// lo cambia desde UpdateProfile en el desktop — audio_volume, feedback_ttl_ms,
+// access_webhook). Un sidecar nuevo (full-sync inicial en segundo device,
+// o wipe) que pull-eaba un gym sin alguna de estas dos llaves rompía con
+// `NOT NULL constraint failed: gyms.<col>` — el esquema SQLite no aplica
+// el DEFAULT cuando el INSERT bind-ea NULL explícito. Postgres aguanta
+// porque su columna sí cumple el DEFAULT en ese mismo escenario.
 //
 // Si en algún momento el sidecar necesita propagar info de billing al
 // cloud (improbable — el cloud siempre se entera primero por webhook),
@@ -291,6 +303,10 @@ func enqueueGym(stx *sharedDomain.SqlxTransaction, g *gymDomain.Gym) error {
 	chargeSettings := g.ChargeSettings
 	if chargeSettings == nil {
 		chargeSettings = map[string]any{}
+	}
+	kioskSettings := g.KioskSettings
+	if kioskSettings == nil {
+		kioskSettings = map[string]any{}
 	}
 	payload, err := json.Marshal(map[string]any{
 		"id":                 g.ID.String(),
@@ -304,6 +320,8 @@ func enqueueGym(stx *sharedDomain.SqlxTransaction, g *gymDomain.Gym) error {
 		"payment_methods":    g.PaymentMethods,
 		"setup_completed_at": g.SetupCompletedAt,
 		"charge_settings":    chargeSettings,
+		"kiosk_settings":     kioskSettings,
+		"created_at":         g.CreatedAt.UnixMilli(),
 		"updated_at":         g.UpdatedAt.UnixMilli(),
 	})
 	if err != nil {

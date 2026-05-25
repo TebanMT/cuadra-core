@@ -297,6 +297,58 @@ func (s *PostgresStore) updateRow(
 	return g.WithContext(ctx).Exec(q, version, string(payload), now, deletedAt, gymID, entityType, entityID).Error
 }
 
+// gymCanonicalAugmentExpr — para sync_entities.entity_type='gyms',
+// inyecta cinco grupos de columnas desde el row vivo de `gyms`:
+//
+//  1. Billing (cloud-owned): subscription_plan, subscription_status,
+//     stripe_customer_id, trial_ends_at, subscription_ends_at. El sidecar
+//     nunca emite estos en su push (CLAUDE.md: cloud es source of truth).
+//     Sin la inyección, un sidecar full-syncing rompe NOT NULL al INSERT
+//     porque subscription_plan + subscription_status son NOT NULL en SQLite.
+//
+//  2. created_at: immutable; el row del cloud lo tiene siempre poblado
+//     (DEFAULT NOW() en Postgres). Sidecars antiguos pre-fix no lo
+//     emitían en su enqueueGym, dejando payloads stored con la llave
+//     ausente — la INSERT en SQLite (que sí tiene NOT NULL sin default)
+//     fallaba. Inyectar acá hace innecesaria cualquier backfill manual.
+//
+//  3. kiosk_settings: sidecar-owned, pero proyectado al gym row vivo
+//     en cada push. Leerlo de gyms en lugar del payload garantiza que
+//     pull-eo siempre recibe el último valor reconocido por cloud,
+//     incluso si el payload guardado es viejo.
+//
+// El operador `||` de jsonb concatena objetos con prioridad al lado
+// derecho — entonces el valor del cloud SIEMPRE gana sobre el payload.
+// Para 1 (billing) es la regla; para 2/3 es no-op semántico (gym row =
+// proyección del último push) y arregla cualquier payload pre-fix sin
+// necesidad de tocar sync_entities.
+//
+// Timestamps TIMESTAMPTZ se serializan como epoch ms (bigint) — formato
+// wire del sidecar. NULLs sobreviven: jsonb_build_object emite JSON null
+// donde corresponda (ej. gym recién creado sin trial_ends_at).
+//
+// Para filas non-gym (members, payments, ...) o cuando el JOIN no
+// encuentra el gym (defensa: gym fue hard-deleted o existe sólo en
+// sync_entities), el CASE devuelve el payload original sin tocar.
+const gymCanonicalAugmentExpr = `
+	CASE
+	    WHEN se.entity_type = 'gyms' AND g.id IS NOT NULL THEN
+	        se.payload || jsonb_build_object(
+	            'subscription_plan',    g.subscription_plan,
+	            'subscription_status',  g.subscription_status,
+	            'stripe_customer_id',   g.stripe_customer_id,
+	            'trial_ends_at',
+	                CASE WHEN g.trial_ends_at IS NULL THEN NULL
+	                ELSE (EXTRACT(EPOCH FROM g.trial_ends_at) * 1000)::bigint END,
+	            'subscription_ends_at',
+	                CASE WHEN g.subscription_ends_at IS NULL THEN NULL
+	                ELSE (EXTRACT(EPOCH FROM g.subscription_ends_at) * 1000)::bigint END,
+	            'created_at',     (EXTRACT(EPOCH FROM g.created_at) * 1000)::bigint,
+	            'kiosk_settings', g.kiosk_settings
+	        )
+	    ELSE se.payload
+	END`
+
 // ListSince — incremental pull (GET /sync/pull). Returns up to `limit` rows
 // with `server_updated_at > since`, ordered by (server_updated_at,
 // entity_id) for deterministic resume. hasMore=true means the client
@@ -312,11 +364,14 @@ func (s *PostgresStore) ListSince(
 	if limit <= 0 || limit > 1000 {
 		limit = 500
 	}
-	const q = `
-		SELECT entity_type, entity_id, version, payload, server_updated_at, deleted_at
-		  FROM sync_entities
-		 WHERE gym_id = ? AND server_updated_at > ?
-		 ORDER BY server_updated_at ASC, entity_id ASC
+	q := `
+		SELECT se.entity_type, se.entity_id, se.version,
+		       ` + gymCanonicalAugmentExpr + ` AS payload,
+		       se.server_updated_at, se.deleted_at
+		  FROM sync_entities se
+		  LEFT JOIN gyms g ON se.entity_type = 'gyms' AND se.entity_id = g.id
+		 WHERE se.gym_id = ? AND se.server_updated_at > ?
+		 ORDER BY se.server_updated_at ASC, se.entity_id ASC
 		 LIMIT ?`
 	rows, err := g.WithContext(ctx).Raw(q, gymID, since, limit+1).Rows()
 	if err != nil {
@@ -377,17 +432,23 @@ func (s *PostgresStore) ListForFullSync(
 		if remaining <= 0 {
 			break
 		}
-		// Page within this entity_type.
-		const q = `
-			SELECT entity_type, entity_id, version, payload, server_updated_at, deleted_at
-			  FROM sync_entities
-			 WHERE gym_id = ?
-			   AND entity_type = ?
+		// Page within this entity_type. Misma augmentación cloud-canonical
+		// que ListSince — sin ella un sidecar full-syncing rompe NOT NULL
+		// al INSERT (created_at, subscription_plan, subscription_status,
+		// kiosk_settings son todos NOT NULL en SQLite).
+		q := `
+			SELECT se.entity_type, se.entity_id, se.version,
+			       ` + gymCanonicalAugmentExpr + ` AS payload,
+			       se.server_updated_at, se.deleted_at
+			  FROM sync_entities se
+			  LEFT JOIN gyms g ON se.entity_type = 'gyms' AND se.entity_id = g.id
+			 WHERE se.gym_id = ?
+			   AND se.entity_type = ?
 			   AND (
-			        server_updated_at > ?
-			     OR (server_updated_at = ? AND entity_id > ?)
+			        se.server_updated_at > ?
+			     OR (se.server_updated_at = ? AND se.entity_id > ?)
 			   )
-			 ORDER BY server_updated_at ASC, entity_id ASC
+			 ORDER BY se.server_updated_at ASC, se.entity_id ASC
 			 LIMIT ?`
 		// Postgres rejects "" bound to a uuid column with SQLSTATE 22P02. The
 		// cursor's EntityID is empty on the very first call (no previous row
