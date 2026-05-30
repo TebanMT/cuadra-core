@@ -294,7 +294,11 @@ func main() {
 	// flows and tests usable offline.
 	whatsappMock := notiWhatsApp.NewStdoutProvider()
 	emailMock := notiEmail.NewStdoutProvider()
-	enqueueReceipt := notiApp.NewEnqueueReceipt(notificationRepo, gymRepo, memberRepo, uow)
+	// appBaseURL es la URL pública del frontend (página del comprobante).
+	// En el sidecar el frontend corre localmente en el mismo proceso Tauri;
+	// la URL por defecto cubre tanto el dev server como la app empaquetada.
+	appBaseURL := envOrDefault("APP_BASE_URL", "http://localhost:5173")
+	enqueueReceipt := notiApp.NewEnqueueReceipt(notificationRepo, gymRepo, memberRepo, uow, appBaseURL)
 	enqueueWelcomePin := notiApp.NewEnqueueWelcomePin(notificationRepo, gymRepo, memberRepo)
 	createMember.WithWelcomePinNotifier(enqueueWelcomePin)
 	assignPin.WithWelcomePinNotifier(enqueueWelcomePin)
@@ -325,7 +329,8 @@ func main() {
 		WithPromotions(applyPromo)
 	settlePayment := billingApp.NewSettlePendingBalance(paymentRepo, folios, uow, recorder)
 	receiptPayment := billingApp.NewGenerateReceipt(paymentRepo, gymRepo, memberRepo, uow)
-	sendReceipt := billingApp.NewSendReceipt(paymentRepo, uow)
+	receiptNotifier := notiApp.NewBillingReceiptNotifier(enqueueReceipt)
+	sendReceipt := billingApp.NewSendReceipt(paymentRepo, uow, receiptNotifier)
 	listMemberPayments := billingApp.NewListMemberPayments(paymentRepo, memberRepo, uow)
 	listGymPayments := billingApp.NewListGymPayments(paymentRepo, memberRepo, uow)
 	refundPayment := billingApp.NewRefundPayment(paymentRepo, folios, memberSvc, uow, recorder)

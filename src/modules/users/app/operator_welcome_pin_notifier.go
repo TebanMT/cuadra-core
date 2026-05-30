@@ -39,10 +39,14 @@ type OperatorWelcomePINNotifier interface {
 // OperatorWelcomePINNotifyInput es el payload que users le pasa al
 // notifier. PIN es el plaintext de 4 dígitos (el mismo que se devuelve
 // al FE en la respuesta del 201 / rotate).
+// WelcomeImageURL es la URL pública del banner con el PIN embebido,
+// generado y subido a R2 antes de llamar Notify. Si está vacío, el
+// dispatcher omite el header de imagen (degraded: solo texto).
 type OperatorWelcomePINNotifyInput struct {
-	GymID  uuid.UUID
-	UserID uuid.UUID
-	PIN    string
+	GymID           uuid.UUID
+	UserID          uuid.UUID
+	PIN             string
+	WelcomeImageURL string
 }
 
 // noopOperatorWelcomePINNotifier es el default que usan los constructores

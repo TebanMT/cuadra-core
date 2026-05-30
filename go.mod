@@ -15,6 +15,7 @@ require (
 	github.com/twilio/twilio-go v1.30.5
 	github.com/xuri/excelize/v2 v2.10.1
 	golang.org/x/crypto v0.48.0
+	golang.org/x/image v0.25.0
 	gorm.io/driver/postgres v1.5.11
 	gorm.io/gorm v1.25.12
 )

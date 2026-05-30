@@ -45,54 +45,179 @@ Mientras esperas aprobación, puedes seguir desarrollando con el Twilio Sandbox 
 
 ## Paso 2 — Crear plantillas (HSM templates) en Meta
 
-WhatsApp Business **prohíbe** mandar mensajes outbound iniciados con texto libre. Tenés que usar **plantillas pre-aprobadas** por Meta. Tinta necesita al menos estas:
-
-### Template `tinta_payment_reminder`
-
-```
-Hola {{1}}, te recordamos que tu mensualidad de {{2}} vence el {{3}}. 
-Renuévala desde la app o pasando al gimnasio. ¡Gracias!
-```
-
-Variables:
-- `{{1}}` = nombre del socio
-- `{{2}}` = nombre del plan (ej. "Mensualidad")
-- `{{3}}` = fecha de vencimiento (ej. "5 de mayo")
-
-Categoría: **UTILITY** (es recordatorio operacional, no marketing).
-
-### Template `tinta_birthday_greeting`
-
-```
-¡Feliz cumpleaños, {{1}}! 🎉 De parte del equipo de {{2}}, 
-te deseamos un gran día. Que la rompas en este nuevo año.
-```
-
-Variables: `{{1}}` = nombre, `{{2}}` = nombre del gimnasio. Categoría: **MARKETING**.
-
-### Template `tinta_welcome_member`
-
-```
-Hola {{1}}, ¡bienvenido/a a {{2}}! 
-Tu membresía está activa y vence el {{3}}. 
-Cualquier duda escríbenos por aquí.
-```
-
-Categoría: **UTILITY**.
+WhatsApp Business **prohíbe** mandar mensajes outbound iniciados con texto libre. Tenés que usar **plantillas pre-aprobadas** por Meta. Tinta necesita estas **18 plantillas**:
 
 ### Cómo se crean
+
+Para cada plantilla de abajo:
 
 ```
 Twilio Console → Messaging → Content Template Builder
    → Create new template
-      Friendly Name: tinta_payment_reminder
-      Category: UTILITY
+      Friendly Name: <key de la plantilla>
+      Category: <categoría indicada>
       Language: es_MX (Spanish - Mexico)
-      Body: <pegas el texto con {{1}}, {{2}}, {{3}}>
+      Body: <cuerpo con {{1}}, {{2}}...>
       → Submit for approval
 ```
 
-Meta los aprueba en **1-24h** (utility suele ser rápido, marketing más lento).
+Meta aprueba en **1–24h** (utility suele ser rápido, marketing más lento, authentication casi inmediato).
+
+Una vez aprobada cada plantilla, Twilio te da un **Content SID** (`HXxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`).
+Guárdalos — los necesitas en el Paso 4 para configurar las env vars.
+
+---
+
+### UTILITY (15 plantillas)
+
+#### `expiry_reminder_3d`
+```
+Hola {{1}} 👋 Soy {{2}}. Te aviso que tu mensualidad vence el {{3}}. ¿Te esperamos para renovar?
+```
+`{{1}}`=member_first_name · `{{2}}`=gym_name · `{{3}}`=expiry_date
+
+---
+
+#### `expiry_reminder_today`
+```
+Hola {{1}}, hoy vence tu mensualidad en {{2}}. ¡Pásate cuando puedas!
+```
+`{{1}}`=member_first_name · `{{2}}`=gym_name
+
+---
+
+#### `expiry_reminder_5d_post`
+```
+Hola {{1}}, te extrañamos en {{2}}. Te dejamos esta nota por si quieres regresar.
+```
+`{{1}}`=member_first_name · `{{2}}`=gym_name
+
+---
+
+#### `receipt_membership`
+```
+¡Listo, {{1}}! Recibimos tu pago de ${{2}} por {{3}}. Tu nueva vigencia es hasta el {{4}}. Descarga tu comprobante: {{5}} — {{6}}.
+```
+`{{1}}`=member_first_name · `{{2}}`=amount · `{{3}}`=membership_type · `{{4}}`=expiry_date · `{{5}}`=receipt_url · `{{6}}`=gym_name
+
+---
+
+#### `receipt_product`
+```
+¡Listo, {{1}}! Tu compra de ${{2}} en {{3}} fue registrada. Tu comprobante: {{4}}
+```
+`{{1}}`=member_first_name · `{{2}}`=amount · `{{3}}`=gym_name · `{{4}}`=receipt_url
+
+---
+
+#### `owner_alert_low_stock`
+```
+Alerta de {{1}}: stock bajo de {{2}} ({{3}} unidades).
+```
+`{{1}}`=gym_name · `{{2}}`=product_name · `{{3}}`=stock
+
+---
+
+#### `owner_alert_expired_batch`
+```
+Alerta de {{1}}: {{2}} socios vencidos sin contacto. Persíguelos en Cuadra.
+```
+`{{1}}`=gym_name · `{{2}}`=count
+
+---
+
+#### `owner_alert_cash_close_diff`
+```
+Alerta de {{1}}: cierre de caja con diferencia de ${{2}}. Revisa en Cuadra.
+```
+`{{1}}`=gym_name · `{{2}}`=diff_amount
+
+---
+
+#### `owner_alert_vip_no_visit`
+```
+Alerta de {{1}}: {{2}} (socio VIP) no viene desde hace {{3}} días.
+```
+`{{1}}`=gym_name · `{{2}}`=member_name · `{{3}}`=days_inactive
+
+---
+
+#### `owner_alert_no_payments_today`
+```
+Alerta de {{1}}: no se registraron cobros el {{2}}. Revisa con tu operador.
+```
+`{{1}}`=gym_name · `{{2}}`=date
+
+---
+
+#### `member_welcome_pin`
+```
+Hola {{1}} 👋 Soy {{2}}. Tu PIN de acceso es *{{3}}*. Lo usas en el kiosko del gym para registrar tu entrada. ¡Bienvenido!
+```
+`{{1}}`=member_first_name · `{{2}}`=gym_name · `{{3}}`=pin
+
+---
+
+#### `oxxo_renewal_reminder_30d`
+```
+Hola {{1}} 👋 Tu plan anual de Tinta vence el {{2}}. Te dejamos tu link para pagar la próxima ficha en OXXO cuando puedas: {{3}}
+```
+`{{1}}`=gym_name · `{{2}}`=expires_on · `{{3}}`=voucher_url
+
+---
+
+#### `oxxo_renewal_reminder_14d`
+```
+Hola {{1}}, recordatorio: tu plan anual de Tinta vence el {{2}}. Aquí tu ficha para pagar en OXXO: {{3}}
+```
+`{{1}}`=gym_name · `{{2}}`=expires_on · `{{3}}`=voucher_url
+
+---
+
+#### `oxxo_renewal_reminder_3d`
+```
+Hola {{1}}, tu plan vence el {{2}} (en 3 días). Paga tu ficha en OXXO para no interrumpir el servicio: {{3}}
+```
+`{{1}}`=gym_name · `{{2}}`=expires_on · `{{3}}`=voucher_url
+
+---
+
+#### `oxxo_renewal_reminder_today`
+```
+Hola {{1}}, tu plan vence HOY. Paga tu ficha en OXXO cuanto antes para no perder el servicio: {{2}}
+```
+`{{1}}`=gym_name · `{{2}}`=voucher_url
+
+---
+
+### MARKETING (1 plantilla)
+
+#### `broadcast_freeform`
+```
+Hola {{1}}, {{2}} — {{3}}
+```
+`{{1}}`=member_first_name · `{{2}}`=message · `{{3}}`=gym_name
+
+---
+
+### AUTHENTICATION (2 plantillas)
+
+#### `operator_welcome_pin`
+```
+Hola {{1}} 👋 {{2}} te dio de alta en Tinta. Tu PIN de acceso es *{{3}}*. Lo usas en el sistema del gym para iniciar sesión.
+```
+`{{1}}`=full_name · `{{2}}`=gym_name · `{{3}}`=pin
+
+---
+
+#### `whatsapp_connect_otp`
+```
+Tu código de verificación de Cuadra es {{1}}. Vence en 10 minutos.
+```
+`{{1}}`=code
+
+> ⚠️ Este template se envía desde el **número master de Cuadra** (no desde el número del gym).
+> Crearlo en la cuenta Twilio de Cuadra, no en la del cliente.
 
 ## Paso 3 — Obtener credenciales de Twilio
 
@@ -170,7 +295,7 @@ ssh tinta@204.168.214.238 'sudo journalctl -u tinta-server -f | grep -i twilio'
 Esperas logs tipo:
 
 ```
-twilio: sending template tinta_payment_reminder to whatsapp:+521555...
+twilio: sending template expiry_reminder_3d to whatsapp:+521555...
 twilio: 201 Created sid=SMxxxxxxxx
 twilio: webhook received status=delivered sid=SMxxxxxxxx
 ```

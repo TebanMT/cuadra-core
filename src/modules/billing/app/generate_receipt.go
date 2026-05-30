@@ -76,9 +76,34 @@ func (uc *GenerateReceipt) Execute(ctx context.Context, in GenerateReceiptInput)
 	}, nil
 }
 
-// SendReceiptInput backs the manual UC-020 "Reenviar comprobante" call. In
-// Sesión 3 the actual delivery is a TODO — Sesión 7 (notifications) wires
-// WhatsApp / email. We return a stub success so the frontend can flow.
+// ReceiptNotifyInput es el payload que SendReceipt pasa al notifications BC
+// para encolar (o despachar en cloud) el comprobante.
+type ReceiptNotifyInput struct {
+	GymID          uuid.UUID
+	PaymentID      uuid.UUID
+	MemberID       *uuid.UUID
+	Concept        string
+	Amount         float64
+	Folio          string
+	MembershipType string // nombre del plan; vacío en ventas de producto
+	Channel        string // "whatsapp_member" | "whatsapp_other"
+	Recipient      string // teléfono override para whatsapp_other; vacío = usar el del socio
+}
+
+// ReceiptNotifyOutput es lo que el notifier devuelve a SendReceipt.
+type ReceiptNotifyOutput struct {
+	Status string // "queued" | "skipped"
+	Note   string
+}
+
+// ReceiptNotifier es el seam hacia el BC de notificaciones para el reenvío
+// manual de comprobantes (UC-020). Se define aquí para que billing no importe
+// el paquete notifications.
+type ReceiptNotifier interface {
+	NotifyReceipt(ctx context.Context, in ReceiptNotifyInput) (ReceiptNotifyOutput, error)
+}
+
+// SendReceiptInput backs the manual UC-020 "Reenviar comprobante" call.
 type SendReceiptInput struct {
 	GymID     uuid.UUID
 	PaymentID uuid.UUID
@@ -94,10 +119,13 @@ type SendReceiptOutput struct {
 type SendReceipt struct {
 	Payments billingRepo.PaymentRepository
 	UoW      sharedDomain.UnitOfWork
+	// Notifier es el seam hacia el BC de notificaciones. Nil = modo stub
+	// (útil en tests que no necesitan el flujo de notificaciones completo).
+	Notifier ReceiptNotifier
 }
 
-func NewSendReceipt(payments billingRepo.PaymentRepository, uow sharedDomain.UnitOfWork) *SendReceipt {
-	return &SendReceipt{Payments: payments, UoW: uow}
+func NewSendReceipt(payments billingRepo.PaymentRepository, uow sharedDomain.UnitOfWork, notifier ReceiptNotifier) *SendReceipt {
+	return &SendReceipt{Payments: payments, UoW: uow, Notifier: notifier}
 }
 
 func (uc *SendReceipt) Execute(ctx context.Context, in SendReceiptInput) (*SendReceiptOutput, error) {
@@ -112,11 +140,51 @@ func (uc *SendReceipt) Execute(ctx context.Context, in SendReceiptInput) (*SendR
 	if p.GymID != in.GymID {
 		return nil, sharedDomain.NewBusinessError(billingErrors.ErrCrossGym, "")
 	}
-	// TODO(notifications/Sesión 7): hand off to notifications.SendReceipt.
-	return &SendReceiptOutput{
-		Status: "queued_stub",
-		Note:   "Envío por WhatsApp/email se conectará en Sesión 7 (notifications BC).",
-	}, nil
+
+	// Canales email: aún no implementados en Sesión 7.
+	switch in.Channel {
+	case "email_member", "email_other":
+		return &SendReceiptOutput{
+			Status: "not_supported",
+			Note:   "Envío por email se habilitará en una sesión futura.",
+		}, nil
+	}
+
+	// Canal WhatsApp — delegar al notifications BC.
+	if uc.Notifier == nil {
+		return &SendReceiptOutput{
+			Status: "queued_stub",
+			Note:   "Notifier no configurado (modo stub).",
+		}, nil
+	}
+
+	// Extraer el nombre del plan desde el primer renglón del desglose
+	// (UC-018 lo escribe como Breakdown[0].Label = mt.Name). En ventas
+	// de producto Breakdown tiene el nombre del artículo, no un plan.
+	membershipType := ""
+	if p.Concept == paymentDomain.ConceptMembership && len(p.Breakdown) > 0 {
+		membershipType = p.Breakdown[0].Label
+	}
+
+	notifyOut, err := uc.Notifier.NotifyReceipt(ctx, ReceiptNotifyInput{
+		GymID:          in.GymID,
+		PaymentID:      in.PaymentID,
+		MemberID:       p.MemberID,
+		Concept:        p.Concept,
+		Amount:         p.Amount,
+		Folio:          p.Folio,
+		MembershipType: membershipType,
+		Channel:        in.Channel,
+		Recipient:      in.Recipient,
+	})
+	if err != nil {
+		return nil, err
+	}
+	status := notifyOut.Status
+	if status == "" {
+		status = "queued"
+	}
+	return &SendReceiptOutput{Status: status, Note: notifyOut.Note}, nil
 }
 
 // ---------------------------------------------------------------------------

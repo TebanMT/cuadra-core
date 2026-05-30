@@ -58,6 +58,7 @@ import (
 	notiDomain "github.com/cuadra/cuadra-core/src/modules/notifications/domain"
 	notiRepoPg "github.com/cuadra/cuadra-core/src/modules/notifications/infraestructure/db/repositories"
 	notiEmail "github.com/cuadra/cuadra-core/src/modules/notifications/infraestructure/email"
+	notiImageGen "github.com/cuadra/cuadra-core/src/modules/notifications/infraestructure/imagegen"
 	notiWhatsApp "github.com/cuadra/cuadra-core/src/modules/notifications/infraestructure/whatsapp"
 	notiCtrl "github.com/cuadra/cuadra-core/src/modules/notifications/interfaces/controllers"
 
@@ -183,6 +184,27 @@ func main() {
 		log.Printf("R2 not configured (R2_ACCOUNT_ID / R2_ACCESS_KEY / R2_SECRET_KEY / R2_BUCKET) — member photo uploads will queue locally until env vars are set")
 	}
 
+	// R2 público (public-media-tinta) — para banners de bienvenida con PIN.
+	// Usa las mismas credenciales que el bucket privado pero diferente bucket
+	// y PublicBaseURL para construir URLs permanentes sin firma.
+	r2PublicCfg := r2.Config{
+		AccountID:     envOrDefault("R2_ACCOUNT_ID", ""),
+		AccessKey:     envOrDefault("R2_ACCESS_KEY", ""),
+		SecretKey:     envOrDefault("R2_SECRET_KEY", ""),
+		Bucket:        envOrDefault("R2_PUBLIC_BUCKET", "public-media-tinta"),
+		PublicBaseURL: envOrDefault("R2_PUBLIC_BASE_URL", ""),
+	}
+	var welcomeBannerGen *notiImageGen.WelcomeBannerGen
+	if r2PublicCfg.IsConfigured() && r2PublicCfg.PublicBaseURL != "" {
+		pubClient, err := r2.NewClient(r2PublicCfg)
+		if err != nil {
+			log.Fatalf("init R2 public: %v", err)
+		}
+		welcomeBannerGen = notiImageGen.NewWelcomeBannerGen(pubClient)
+	} else {
+		log.Printf("R2 public not configured (R2_PUBLIC_BUCKET / R2_PUBLIC_BASE_URL) — welcome banners will be skipped (degraded mode)")
+	}
+
 	signup := usersApp.NewSignupOwner(userRepo, gymRepo, uow, tokens, recorder, trialDays)
 	login := usersApp.NewLogin(userRepo, gymRepo, uow, tokens, recorder)
 	logout := usersApp.NewLogout(blRepo, uow, tokens, recorder)
@@ -259,8 +281,12 @@ func main() {
 	checkinOverride := chkApp.NewOverrideCheckin(memberSvc, checkinRepo, uow, recorder)
 
 	// ── Notifications (Sesión 7) ──────────────────────────────────────────
-	enqueueReceipt := notiApp.NewEnqueueReceipt(notificationRepo, gymRepo, memberRepo, uow)
+	enqueueReceipt := notiApp.NewEnqueueReceipt(notificationRepo, gymRepo, memberRepo, uow, dashboardURL)
+	receiptNotifier := notiApp.NewBillingReceiptNotifier(enqueueReceipt)
 	enqueueWelcomePin := notiApp.NewEnqueueWelcomePin(notificationRepo, gymRepo, memberRepo)
+	if welcomeBannerGen != nil {
+		enqueueWelcomePin.WithImageGenerator(welcomeBannerGen)
+	}
 	// Wire la seam de welcome-PIN en los use cases de members que asignan
 	// PIN. La notifications BC implementa el contrato; members lo usa sin
 	// importar el paquete de notificaciones.
@@ -270,6 +296,9 @@ func main() {
 	// WhatsApp al número del operador. Skip silencioso cuando el gym no
 	// tiene WhatsApp conectado — el owner ve el PIN en el response.
 	enqueueOperatorWelcomePIN := notiApp.NewEnqueueOperatorWelcomePIN(notificationRepo, gymRepo, userRepo)
+	if welcomeBannerGen != nil {
+		enqueueOperatorWelcomePIN.WithImageGenerator(welcomeBannerGen)
+	}
 	createOp.WithWelcomePINNotifier(enqueueOperatorWelcomePIN)
 	rotateOpPIN.WithWelcomePINNotifier(enqueueOperatorWelcomePIN)
 	enqueueExpiry := notiApp.NewEnqueueExpiryReminder(notificationRepo, expiryReader, uow)
@@ -294,7 +323,7 @@ func main() {
 		WithPromotions(applyPromo)
 	settlePayment := billingApp.NewSettlePendingBalance(paymentRepo, folios, uow, recorder)
 	receiptPayment := billingApp.NewGenerateReceipt(paymentRepo, gymRepo, memberRepo, uow)
-	sendReceipt := billingApp.NewSendReceipt(paymentRepo, uow)
+	sendReceipt := billingApp.NewSendReceipt(paymentRepo, uow, receiptNotifier)
 	listMemberPayments := billingApp.NewListMemberPayments(paymentRepo, memberRepo, uow)
 	listGymPayments := billingApp.NewListGymPayments(paymentRepo, memberRepo, uow)
 	refundPayment := billingApp.NewRefundPayment(paymentRepo, folios, memberSvc, uow, recorder)

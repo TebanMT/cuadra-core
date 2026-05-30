@@ -17,6 +17,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -51,6 +53,7 @@ func (c Config) IsConfigured() bool {
 // stateful (caches signer state) so we keep it as a field.
 type Client struct {
 	cfg       Config
+	s3c       *s3.Client
 	presigner *s3.PresignClient
 }
 
@@ -79,6 +82,7 @@ func NewClient(c Config) (*Client, error) {
 	})
 	return &Client{
 		cfg:       c,
+		s3c:       s3c,
 		presigner: s3.NewPresignClient(s3c),
 	}, nil
 }
@@ -118,6 +122,34 @@ func (c *Client) PresignUpload(
 		return "", fmt.Errorf("r2 presign put: %w", err)
 	}
 	return req.URL, nil
+}
+
+// PutObject uploads a reader directly to R2 (server-side, no presign).
+// Used for server-generated assets (welcome banners, etc.).
+// Returns the public URL if PublicBaseURL is configured.
+func (c *Client) PutObject(ctx context.Context, key, contentType string, body io.Reader, size int64) error {
+	if c == nil {
+		return errors.New("r2: client nil")
+	}
+	_, err := c.s3c.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:        aws.String(c.cfg.Bucket),
+		Key:           aws.String(key),
+		ContentType:   aws.String(contentType),
+		Body:          body,
+		ContentLength: aws.Int64(size),
+	})
+	if err != nil {
+		return fmt.Errorf("r2 put object: %w", err)
+	}
+	return nil
+}
+
+// PublicURL builds the public URL for a key using PublicBaseURL.
+func (c *Client) PublicURL(key string) string {
+	if c == nil || c.cfg.PublicBaseURL == "" {
+		return ""
+	}
+	return strings.TrimRight(c.cfg.PublicBaseURL, "/") + "/" + key
 }
 
 // PresignDownload mintea una GET firmada para leer un objeto privado.

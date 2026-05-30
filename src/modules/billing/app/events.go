@@ -22,6 +22,9 @@ type PaymentCompletedEvent struct {
 	Folio          string
 	OperatorID     uuid.UUID
 	BalancePending float64
+	// MembershipType es el nombre del plan (e.g. "Mensual Premium") para
+	// el template receipt_membership. Vacío en ventas de producto.
+	MembershipType string
 }
 
 // EventPublisher abstracts the future notifications bus. NoopPublisher is the

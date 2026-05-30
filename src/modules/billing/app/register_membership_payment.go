@@ -402,6 +402,7 @@ func (uc *RegisterMembershipPayment) Execute(ctx context.Context, in RegisterMem
 			Folio:          p.Folio,
 			OperatorID:     in.ActorUserID,
 			BalancePending: p.BalancePending,
+			MembershipType: mt.Name,
 		}
 
 		out = RegisterMembershipPaymentOutput{

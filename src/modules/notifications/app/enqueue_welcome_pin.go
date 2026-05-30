@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -38,6 +39,7 @@ type EnqueueWelcomePin struct {
 	Notifications notiRepo.NotificationRepository
 	Gyms          gymRepo.GymRepository
 	Members       memRepo.MemberRepository
+	ImageGen      WelcomeImageGenerator
 }
 
 func NewEnqueueWelcomePin(
@@ -46,6 +48,12 @@ func NewEnqueueWelcomePin(
 	members memRepo.MemberRepository,
 ) *EnqueueWelcomePin {
 	return &EnqueueWelcomePin{Notifications: notifications, Gyms: gyms, Members: members}
+}
+
+// WithImageGenerator sets the image generator and returns self for chaining.
+func (uc *EnqueueWelcomePin) WithImageGenerator(g WelcomeImageGenerator) *EnqueueWelcomePin {
+	uc.ImageGen = g
+	return uc
 }
 
 // Notify satisfies memApp.WelcomePinNotifier.
@@ -88,10 +96,20 @@ func (uc *EnqueueWelcomePin) Notify(
 	if gym.Name != nil {
 		gymName = *gym.Name
 	}
+
+	imageURL := ""
+	if uc.ImageGen != nil {
+		url, err := uc.ImageGen.Generate(ctx, in.Pin)
+		if err != nil {
+			log.Printf("[notifications/welcome_pin] image gen failed (degraded): %v", err)
+		} else {
+			imageURL = url
+		}
+	}
 	vars := map[string]string{
+		"image_url":         imageURL,
 		"member_first_name": firstName(member.FullName),
 		"gym_name":          gymName,
-		"pin":               in.Pin,
 	}
 
 	// Idempotency: scope by member + pin so that re-generating the PIN
@@ -114,7 +132,7 @@ func (uc *EnqueueWelcomePin) Notify(
 		in.GymID,
 		member.ID,
 		notiDomain.ChannelWhatsApp,
-		"member_welcome_pin",
+		"member_welcome",
 		notiDomain.RecipientMember,
 		phone,
 		vars,

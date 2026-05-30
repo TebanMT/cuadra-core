@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -34,6 +35,7 @@ type EnqueueOperatorWelcomePIN struct {
 	Notifications notiRepo.NotificationRepository
 	Gyms          gymRepo.GymRepository
 	Users         userRepo.UserRepository
+	ImageGen      WelcomeImageGenerator
 }
 
 func NewEnqueueOperatorWelcomePIN(
@@ -46,6 +48,12 @@ func NewEnqueueOperatorWelcomePIN(
 		Gyms:          gyms,
 		Users:         users,
 	}
+}
+
+// WithImageGenerator sets the image generator and returns self for chaining.
+func (uc *EnqueueOperatorWelcomePIN) WithImageGenerator(g WelcomeImageGenerator) *EnqueueOperatorWelcomePIN {
+	uc.ImageGen = g
+	return uc
 }
 
 // Notify satisfies usersApp.OperatorWelcomePINNotifier.
@@ -87,10 +95,20 @@ func (uc *EnqueueOperatorWelcomePIN) Notify(
 	if gym.Name != nil {
 		gymName = *gym.Name
 	}
+
+	imageURL := ""
+	if uc.ImageGen != nil {
+		url, err := uc.ImageGen.Generate(ctx, in.PIN)
+		if err != nil {
+			log.Printf("[notifications/operator_welcome_pin] image gen failed (degraded): %v", err)
+		} else {
+			imageURL = url
+		}
+	}
 	vars := map[string]string{
+		"image_url": imageURL,
 		"full_name": user.FullName,
 		"gym_name":  gymName,
-		"pin":       in.PIN,
 	}
 
 	idempKey := fmt.Sprintf("operator_welcome_pin:%s:%s", in.UserID.String(), in.PIN)
@@ -109,7 +127,7 @@ func (uc *EnqueueOperatorWelcomePIN) Notify(
 		in.GymID,
 		user.ID,
 		notiDomain.ChannelWhatsApp,
-		"operator_welcome_pin",
+		"operator_welcome",
 		notiDomain.RecipientUser,
 		phone,
 		vars,

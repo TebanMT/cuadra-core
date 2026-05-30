@@ -49,10 +49,14 @@ type WelcomePinNotifier interface {
 
 // WelcomePinNotifyInput is the payload members hands to the notifier.
 // Pin is the plaintext 4-digit code (the same one returned to the FE).
+// WelcomeImageURL es la URL pública del banner con el PIN embebido,
+// generado y subido a R2 antes de llamar Notify. Si está vacío, el
+// dispatcher omite el header de imagen (degraded: solo texto).
 type WelcomePinNotifyInput struct {
-	GymID    uuid.UUID
-	MemberID uuid.UUID
-	Pin      string
+	GymID           uuid.UUID
+	MemberID        uuid.UUID
+	Pin             string
+	WelcomeImageURL string
 }
 
 // noopWelcomePinNotifier is the default the constructors use when the

@@ -36,12 +36,13 @@ func (s *BillingEventSubscriber) PublishPaymentCompleted(ctx context.Context, ev
 		return
 	}
 	if _, err := s.enqueueReceipt.Execute(ctx, EnqueueReceiptInput{
-		GymID:     evt.GymID,
-		PaymentID: evt.PaymentID,
-		MemberID:  *evt.MemberID,
-		Concept:   evt.Concept,
-		Amount:    evt.Amount,
-		Folio:     evt.Folio,
+		GymID:          evt.GymID,
+		PaymentID:      evt.PaymentID,
+		MemberID:       *evt.MemberID,
+		Concept:        evt.Concept,
+		Amount:         evt.Amount,
+		Folio:          evt.Folio,
+		MembershipType: evt.MembershipType,
 	}); err != nil {
 		log.Printf("[notifications] enqueue receipt failed: gym=%s payment=%s err=%v",
 			evt.GymID, evt.PaymentID, err)
