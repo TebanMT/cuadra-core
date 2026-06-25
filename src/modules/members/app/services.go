@@ -369,15 +369,15 @@ type GiftMembershipInput struct {
 // estados del companion sin romper el partial unique index
 // `uq_memberships_member_active`:
 //
-//   1. Sin membresía vigente   → crea nueva $0 active.
-//   2. Pending payment         → activa la existing (es regalo, sin
-//                                payment) y deja PriceSnapshot=0.
-//   3. Active (vencida o no)   → renueva $0 con el 3-step dance:
-//                                marca actual replaced → INSERT nueva
-//                                $0 → UPDATE replaced_by. El expiry
-//                                nuevo sigue la regla normal de
-//                                Renew (extiende sobre el existente
-//                                si aún vigente; sino arranca hoy).
+//  1. Sin membresía vigente   → crea nueva $0 active.
+//  2. Pending payment         → activa la existing (es regalo, sin
+//     payment) y deja PriceSnapshot=0.
+//  3. Active (vencida o no)   → renueva $0 con el 3-step dance:
+//     marca actual replaced → INSERT nueva
+//     $0 → UPDATE replaced_by. El expiry
+//     nuevo sigue la regla normal de
+//     Renew (extiende sobre el existente
+//     si aún vigente; sino arranca hoy).
 //
 // El caso 3 es el realista en producción: casi cualquier socio activo
 // que el dueño elige para regalo YA tiene una mensualidad. Antes

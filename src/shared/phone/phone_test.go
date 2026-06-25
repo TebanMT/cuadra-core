@@ -19,8 +19,8 @@ func TestNormalize(t *testing.T) {
 		{"524461057446", "+524461057446"},
 		// Frontera: 11+ dígitos sin '+' se asumen CON código de país (no se
 		// les mete +52). Sólo los de exactamente 10 reciben el default MX.
-		{"15551234567", "+15551234567"},       // 11 díg → +1 (USA), no +52
-		{"5215551234567", "+5215551234567"},   // 13 díg → respeta tal cual
+		{"15551234567", "+15551234567"},     // 11 díg → +1 (USA), no +52
+		{"5215551234567", "+5215551234567"}, // 13 díg → respeta tal cual
 		// Otro país con '+' explícito → respeta su código.
 		{"+1 415 555 1234", "+14155551234"},
 		{"+14155551234", "+14155551234"},
@@ -46,11 +46,11 @@ func TestValid(t *testing.T) {
 		}
 	}
 	invalid := []string{
-		"4461057446",        // sin '+'
-		"+52 446 105 7446",  // con espacios
-		"+0446105744",       // empieza con 0
-		"+52446",            // muy corto
-		"",                  // vacío
+		"4461057446",       // sin '+'
+		"+52 446 105 7446", // con espacios
+		"+0446105744",      // empieza con 0
+		"+52446",           // muy corto
+		"",                 // vacío
 	}
 	for _, v := range invalid {
 		if Valid(v) {
