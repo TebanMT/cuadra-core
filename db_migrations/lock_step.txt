@@ -63,6 +63,9 @@ pair: pg=025_members_gender.sql        sqlite=020_members_gender.sql
 cloud_only: pg=026_releases.sql        reason="tabla de releases del auto-updater (ADR-005) — sólo el cloud sirve el manifest"
 pair: pg=027_membership_duration_months.sql sqlite=022_membership_duration_months.sql
 pair: pg=028_promotions.sql            sqlite=023_promotions.sql
+pair: pg=029_member_number.sql         sqlite=024_member_number.sql
+pair: pg=030_member_pin_purge.sql      sqlite=025_member_pin_purge.sql
+cloud_only: pg=031_whatsapp_opt_outs.sql reason="opt-out de marketing WhatsApp por teléfono (cumplimiento Meta) — el webhook de Twilio y el dispatcher viven sólo en cloud; no se sincroniza al sidecar"
 # sqlite-only excepciones documentadas (NO usamos sqlite_only: en este
 # formato porque rompe la regla "cloud manda"; en su lugar, comentamos):
 #   sqlite/021_fix_memberships_self_fk.sql — fix idempotente puro de SQLite
@@ -71,4 +74,8 @@ pair: pg=028_promotions.sql            sqlite=023_promotions.sql
 #   crear la tabla.
 #   sqlite/022_membership_duration_months.sql — par del pg 027, declarado
 #   arriba en la sección pair:.
+#   sqlite/026_checkin_pin_queue_fix.sql — reescribe payloads 'pin'→'number'
+#   pendientes en sync_queue (tabla que SÓLO existe en el sidecar) tras la
+#   purga 025/030. Postgres no tiene sync_queue, así que no lleva gemelo.
 sqlite_fix_only: sqlite=021_fix_memberships_self_fk.sql reason="fix idempotente SQLite-side; Postgres no necesita gemelo porque crea la FK correcta en 001"
+sqlite_fix_only: sqlite=026_checkin_pin_queue_fix.sql reason="reescribe payloads 'pin'→'number' pendientes en sync_queue (tabla sólo del sidecar) tras la purga 025/030; Postgres no tiene sync_queue"
