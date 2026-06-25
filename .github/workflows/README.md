@@ -1,22 +1,70 @@
 # GitHub Actions — cuadra-core
 
+> **Modelo:** un solo ambiente (prod). Los commits a `main` se validan pero
+> **no** despliegan. Producción solo se actualiza cuando empujas un **tag
+> semver** (`vX.Y.Z`). El tag es la única puerta a prod y te da semantic
+> versioning real — la versión queda visible en `GET /health`.
+
 ## Workflows
 
-### `ci.yml`
-Corre en **cada PR + push a main + workflow_dispatch**.
+### `ci.yml` — checks de calidad
+Corre en **cada PR + push a main + workflow_dispatch**. También es
+**reutilizable** (`workflow_call`): `release.yml` lo invoca antes de
+desplegar.
 
 | Job | Qué hace |
 |---|---|
 | `lint` | `gofmt -l` (debe estar vacío) + `go vet` con tag `server` y `sidecar`. |
-| `test` | Levanta Postgres 16 como service, aplica `db_migrations/postgres/`, y corre `go test -tags "server sidecar" -race -count=1 ./...`. Esto incluye los integration tests que gatean en `DATABASE_URL`. |
-| `build` | Cross-compila `tinta-server` para `linux/amd64` con `CGO_ENABLED=0` y verifica que el sidecar también compile (CGO on, host arch). En `push` a main sube el binario como artifact para que `deploy.yml` lo reuse. |
+| `test` | Levanta Postgres 16 como service, aplica `db_migrations/postgres/`, y corre `go test -tags "server sidecar" -race -count=1 ./...` (incluye los integration tests que gatean en `DATABASE_URL`). |
 
-### `deploy.yml`
-Corre en **push a main (después de CI) y workflow_dispatch manual**.
+`ci.yml` **ya no compila el binario de release ni sube artifacts** — eso
+se mueve a `release.yml`. Un break de compilación igual lo cachan `go vet`
++ `go test` (ambos compilan los dos tags), así que main sigue protegido.
 
-Reusa el binario de CI (no recompila), lo manda al Hetzner CX33 con `scp` atómico, sincroniza `db_migrations/postgres/`, las aplica con `psql -v ON_ERROR_STOP=1`, y reinicia `tinta-server` vía `sudo systemctl`.
+### `release.yml` — build + deploy a prod
+Corre **solo en push de un tag semver** (`v1.4.0`, `v1.4.0-rc.1`) o por
+**workflow_dispatch** manual.
 
-Si `tinta-server` no queda `is-active` en 30s, falla el job y dumpea `journalctl -u tinta-server -n 50`.
+| Job | Qué hace |
+|---|---|
+| `checks` | Reusa `ci.yml` (lint + test) sobre el commit exacto que estás taggeando. Si no pasa, no construye ni despliega. |
+| `build` | Cross-compila `tinta-server` linux/amd64 con `CGO_ENABLED=0`, estampando `-X main.version=$(git describe --tags --always --dirty)`. Sube el binario como artifact del run. |
+| `deploy` | Baja el artifact, `scp` atómico al Hetzner CX33, `rsync` de `db_migrations/postgres/`, las aplica con `psql -v ON_ERROR_STOP=1`, reinicia `tinta-server` vía `sudo systemctl`, y hace smoke test a `/health`. |
+
+> **El gate duro del deploy es el `systemctl is-active`** (si el servicio no
+> queda activo en 30s, el job falla). El smoke test a `/health` es
+> **advisory**: si la versión no coincide o el DNS/TLS aún no está listo,
+> solo emite un `::warning::`, no tumba el release. Tras el primer release,
+> confirma a mano: `curl -s https://api.entinta.app/health`.
+
+Si `tinta-server` no queda `is-active` en 30s, falla el job y dumpea
+`journalctl -u tinta-server -n 50`.
+
+### `lock-step-check.yml` — paridad de migraciones
+Corre en push a main + PR que toquen `db_migrations/**`. Verifica que toda
+migración sincronizable viva en `postgres/` y `sqlite/` en paralelo
+(ADR-002 §5). No cambia con el flujo de tags.
+
+## Cómo cortar un release
+
+```bash
+# 1. Mergeás todos los PRs/commits que quieras a main (CI los valida, no
+#    despliega nada).
+# 2. Cuando quieras publicar, taggeás semver y empujás el tag:
+git tag v1.4.0
+git push origin v1.4.0
+# 3. release.yml arranca:
+#      checks (lint + test) → build (estampa v1.4.0) → deploy
+# 4. Verificás en prod:
+curl -s https://api.entinta.app/health
+#   → {"status":"ok","service":"tinta-server","version":"v1.4.0"}
+```
+
+Total: ~6-8 min desde el push del tag hasta el servicio reiniciado.
+
+> **Semver:** `MAJOR.MINOR.PATCH`. Bump PATCH para fixes, MINOR para
+> features compatibles, MAJOR para cambios que rompan. Prereleases con
+> sufijo: `v1.4.0-rc.1`.
 
 ## Configuración inicial (una sola vez)
 
@@ -63,54 +111,45 @@ Repo → **Settings → Secrets and variables → Actions → New repository sec
 | `DEPLOY_KNOWN_HOSTS` | Contenido completo de `/tmp/known_hosts` |
 | `SMOKE_TEST_URL` | (opcional) `https://api.entinta.app/health`. Default si no se setea. |
 
-### 5. Configurar el environment "production" (opcional)
+### 5. Configurar el environment "production" (opcional pero recomendado)
 
 Repo → **Settings → Environments → New environment** → `production`.
 
 Puedes activar:
-- **Required reviewers**: te exige darle "Approve" antes de cada deploy. Útil si quieres revisar el commit antes de que vaya a prod.
-- **Deployment branches**: solo `main`.
+- **Required reviewers**: te exige darle "Approve" antes de cada deploy.
+  Con el flujo de tags esto es doble red: el tag dispara, pero el deploy
+  espera tu OK. Útil si quieres revisar antes de que el release vaya a prod.
+- **Deployment branches and tags**: restringe qué refs pueden desplegar.
+  ⚠️ **Si lo activas, elige la regla de _tags_ (selected tags) con patrón
+  `v*` — NO una regla de _branches_.** Como el deploy se dispara desde un
+  tag (no desde `main`), una regla solo-branches deja el job `deploy` en
+  estado **`skipped`** y el release nunca llega al server (aunque `checks`
+  y `build` salgan verdes). Tras configurarlo, verifica en el primer release
+  que el job `deploy` aparezca como `waiting`/`success`, no `skipped`.
 
-Si no lo configuras, el workflow corre sin gating manual — el merge a main ya es la aprobación.
+Si no lo configuras, el push del tag corre el release completo sin gating manual.
 
-## Cómo se ve un deploy normal
+## Deploy manual / rollback
 
-```
-1. Mergeás un PR a main.
-2. CI corre (lint + test + build) — ~3-4 min.
-3. Si CI pasa, deploy.yml arranca:
-     - download-artifact (binario de CI)
-     - scp atómico
-     - rsync migraciones
-     - psql -f de cada *.sql
-     - sudo systemctl restart tinta-server
-     - poll is-active hasta 30s
-     - smoke test https://api.entinta.app/health
-4. Ves "✓" en el PR + check verde en Actions.
-```
+Cuando quieres re-desplegar un tag, o desplegar un commit que no taggeaste:
 
-Total: ~5-6 min desde merge hasta servicio reiniciado.
+1. **Actions** tab → **Release tinta-server** → **Run workflow**.
+2. En "Use workflow from" elige el tag/branch, o pásalo en el input `ref`
+   (acepta un tag `v1.3.0` o un SHA).
+3. Re-corre `checks` + `build` + `deploy` desde ese ref.
 
-## Deploy manual (rollback / hotfix)
+Para **rollback rápido a la versión anterior**: dispará el workflow con
+`ref` = el tag bueno previo (ej. `v1.3.0`). El binario se recompila desde
+ese código y `git describe` lo estampa con ese tag.
 
-Cuando quieres deployar un commit que no está en main, o re-correr el último deploy:
+> **Emergencia sin pasar por Actions:** `scripts/deploy/02-deploy-binary.sh`
+> desde tu laptop compila + sube + reinicia directo (también estampa la
+> versión vía `git describe`). Es el bypass de último recurso.
 
-1. **Actions** tab → **Deploy tinta-server** → **Run workflow** → elegir branch/tag.
-2. El workflow recompila desde el código del branch elegido (no usa artifact, porque no hubo CI).
-
-Para rollback rápido:
-
-```bash
-# Encuentra el commit anterior bueno.
-git log --oneline -10
-
-# Crea un branch temporal apuntando ahí.
-git push origin <commit-sha>:refs/heads/rollback
-
-# En GitHub Actions: Run workflow → branch=rollback.
-```
-
-> **Cuidado con migraciones**: las del repo son forward-only. Si el commit anterior tenía menos migraciones, las que ya están aplicadas en Postgres no se revierten — solo se "saltan" las nuevas. Si necesitas revertir schema, hazlo a mano con un `*.sql` de rollback.
+> **Cuidado con migraciones**: las del repo son forward-only. Si el commit
+> anterior tenía menos migraciones, las que ya están aplicadas en Postgres
+> no se revierten — solo se "saltan" las nuevas. Si necesitas revertir
+> schema, hazlo a mano con un `*.sql` de rollback.
 
 ## Rotar el SSH key
 
@@ -139,6 +178,17 @@ mv ~/.ssh/tinta-deploy-new.pub ~/.ssh/tinta-deploy.pub
 ```
 
 ## Troubleshooting
+
+**El push del tag no disparó nada:**
+- El tag no matchea el patrón. Tiene que ser `vMAJOR.MINOR.PATCH`
+  (`v1.4.0`), opcionalmente con sufijo de prerelease (`v1.4.0-rc.1`).
+  `1.4.0` (sin `v`) o `v1.4` (sin patch) **no** disparan.
+- ¿Empujaste el tag? `git push origin v1.4.0` (el `git push` normal no
+  manda tags).
+
+**`/health` no muestra la versión nueva tras el deploy:**
+- El restart no levantó el binario nuevo. Revisa el step "Reiniciar
+  tinta-server" y `journalctl -u tinta-server`.
 
 **`Permission denied (publickey)` al hacer scp:**
 - La pub no quedó en `~/.ssh/authorized_keys` del usuario `tinta`. Verifica con `ssh -i ~/.ssh/tinta-deploy tinta@$DEPLOY_HOST 'cat ~/.ssh/authorized_keys'`.

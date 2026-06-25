@@ -1,13 +1,18 @@
-# CI — corre en cada PR y push a main.
+# CI — checks de calidad en cada PR y push a main.
 #
-# Tres jobs independientes:
+# Dos jobs independientes:
 #   - lint:   gofmt + go vet (servidor + sidecar).
 #   - test:   go test -tags "server sidecar" con Postgres real (las
 #             migraciones se aplican antes de los tests).
-#   - build:  cross-compile tinta-server linux/amd64 — verifica que el
-#             binario que se va a deployar de verdad linkea sin warnings.
 #
-# El job `deploy` vive en deploy.yml y se gatea con éxito de estos tres.
+# Esto NO compila el binario de release ni despliega — solo valida que el
+# código está sano. El build del binario y el deploy a prod viven en
+# release.yml y se disparan SOLO con un tag semver (vX.Y.Z). Así puedes
+# subir todos los commits que quieras a main sin tocar producción.
+#
+# Este workflow también es reutilizable (`workflow_call`): release.yml lo
+# invoca para re-validar el commit exacto que se va a taggear antes de
+# construir y desplegar.
 
 name: CI
 
@@ -16,6 +21,7 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 # Misma versión que en scripts/deploy/00-bootstrap.sh.
 env:
@@ -90,46 +96,3 @@ jobs:
         env:
           CGO_ENABLED: "1"
         run: go test -tags "server sidecar" -race -count=1 ./...
-
-  build:
-    # Solo gastar minutos de runner si lint + test pasan. Si falla
-    # cualquiera de los dos, no tiene sentido cross-compilar — el
-    # binario nunca se va a deployar de todos modos.
-    needs: [lint, test]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
-
-      - name: Cross-compile tinta-server (linux/amd64)
-        env:
-          GOOS: linux
-          GOARCH: amd64
-          CGO_ENABLED: "0"
-        run: |
-          go build -tags server -trimpath -ldflags="-s -w" \
-            -o bin/tinta-server-linux-amd64 ./cmd/server
-          ls -lh bin/tinta-server-linux-amd64
-
-      - name: Build sidecar (host arch, CGO)
-        # Solo verificamos que linkee — el binario que de verdad se
-        # bundlea con Tauri lo construye cuadra-desktop en su propio CI.
-        env:
-          CGO_ENABLED: "1"
-        run: go build -tags sidecar -o bin/tinta-sidecar ./cmd/sidecar
-
-      - name: Subir artefacto (tinta-server linux/amd64)
-        # Lo guardamos para que deploy.yml lo descargue sin recompilar.
-        # Retención corta — solo se usa en el deploy inmediato.
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/upload-artifact@v4
-        with:
-          name: tinta-server-linux-amd64
-          path: bin/tinta-server-linux-amd64
-          retention-days: 7
-          if-no-files-found: error

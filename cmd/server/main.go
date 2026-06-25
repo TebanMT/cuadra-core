@@ -89,6 +89,12 @@ import (
 	syncShared "github.com/cuadra/cuadra-core/src/shared/sync"
 )
 
+// version es la versión del build, estampada al compilar vía
+// -ldflags "-X main.version=<tag>" (ver .github/workflows/release.yml y
+// scripts/deploy/02-deploy-binary.sh). "dev" es el default para builds
+// locales sin estampar. Se expone en GET /health.
+var version = "dev"
+
 func main() {
 	_ = godotenv.Load()
 
@@ -541,7 +547,7 @@ func main() {
 		AllowedOrigins: parseOrigins(envOrDefault("CORS_ALLOWED_ORIGINS", "http://localhost:5174")),
 	}))
 	r.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "tinta-server"})
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "tinta-server", "version": version})
 	})
 	authCtrl.RegisterRoutes(r)
 	authCtrl.RegisterUploadsRoute(r)

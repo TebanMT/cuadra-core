@@ -32,8 +32,14 @@ cd "${REPO_ROOT}"
 
 echo "→ Build linux/amd64 desde ${REPO_ROOT}..."
 mkdir -p bin
+# Estampar la versión igual que release.yml. git describe da el tag
+# (vX.Y.Z) si HEAD está taggeado, "<tag>-<n>-g<sha>" si hay commits encima,
+# o SHA corto si no hay tags. -dirty marca un working tree con cambios.
+VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
+echo "  versión: ${VERSION}"
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
-  go build -tags server -trimpath -ldflags="-s -w" \
+  go build -tags server -trimpath \
+  -ldflags="-s -w -X main.version=${VERSION}" \
   -o bin/tinta-server-linux-amd64 ./cmd/server
 
 # Tamaño para sanity check.

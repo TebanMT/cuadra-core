@@ -86,6 +86,12 @@ import (
 	syncShared "github.com/cuadra/cuadra-core/src/shared/sync"
 )
 
+// version es la versión del build, estampada al compilar vía
+// -ldflags "-X main.version=<tag>". "dev" es el default para builds
+// locales sin estampar. Se expone en GET /health. (El sidecar lo bundlea
+// cuadra-desktop en su propio CI; la inyección de versión allá es futura.)
+var version = "dev"
+
 func main() {
 	_ = godotenv.Load()
 
@@ -534,7 +540,7 @@ func main() {
 	// pueda renderearse y el dueño pueda escapar al dashboard cloud.
 	r.Use(middleware.EnforceActiveSubscription(tokens, gymRepo, uow))
 	r.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "cuadra-sidecar"})
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "cuadra-sidecar", "version": version})
 	})
 	// Auth routing on the sidecar:
 	//   /api/v1/auth/{signup,login,refresh,logout,forgot-password,reset-password,

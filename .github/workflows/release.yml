@@ -1,0 +1,288 @@
+# Release tinta-server → Hetzner CX33.
+#
+# A diferencia del flujo anterior (deploy en cada push a main), prod SOLO
+# se actualiza cuando empujas un tag semver:
+#
+#     git tag v1.4.0 && git push origin v1.4.0
+#
+# Eso dispara, en orden:
+#   1. checks  — re-corre lint + test (reusa ci.yml) sobre el commit
+#                exacto que estás taggeando.
+#   2. build   — cross-compila tinta-server linux/amd64 estampando la
+#                versión (-X main.version=<tag>) y la sube como artifact.
+#   3. deploy  — baja el artifact, scp atómico al server, rsync + psql de
+#                migraciones, restart de systemd y smoke test a /health.
+#
+# Así puedes subir todos los commits que quieras a main sin tocar prod;
+# el tag es la única puerta a producción y te da semantic versioning real
+# (la versión queda visible en GET /health → {"version":"v1.4.0"}).
+#
+# Tags que disparan release:
+#   v1.4.0          (release estable)
+#   v1.4.0-rc.1     (prerelease)
+#
+# Deploy manual / rollback:
+#   Actions → "Release tinta-server" → Run workflow → elige el tag (o un
+#   commit) en "Use workflow from", o pásalo en el input `ref`. Re-corre
+#   checks + build + deploy desde ese ref. Para una emergencia sin pasar
+#   por Actions, usa scripts/deploy/02-deploy-binary.sh desde tu laptop.
+#
+# Secrets requeridos (Settings → Secrets and variables → Actions):
+#   DEPLOY_HOST          IP o hostname del Hetzner (ej. 204.168.214.238).
+#   DEPLOY_SSH_KEY       Private key OpenSSH del par dedicado de deploy.
+#   DEPLOY_KNOWN_HOSTS   Output de `ssh-keyscan -H <DEPLOY_HOST>`.
+#   SMOKE_TEST_URL       (opcional) Default: https://api.entinta.app/health
+
+name: Release tinta-server
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'      # v1.4.0
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'    # v1.4.0-rc.1
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag o commit a desplegar (ej. v1.4.0 o un SHA). Vacío = el ref elegido arriba."
+        required: false
+        default: ""
+
+# Un solo release a la vez. Si empujas otro tag mientras este corre, se
+# encola; no cancelamos in-progress porque a media transferencia el
+# servicio queda en estado raro.
+concurrency:
+  group: release-tinta-server
+  cancel-in-progress: false
+
+env:
+  GO_VERSION: "1.25.3"
+
+jobs:
+  # ── 1. Re-validar el commit taggeado ──────────────────────────────────
+  # Reusa ci.yml (lint + test). Si el commit no pasa, no se construye ni
+  # se despliega nada.
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  # ── 2. Compilar el binario con la versión estampada ───────────────────
+  build:
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read   # checkout (upload-artifact usa el runtime token, no GITHUB_TOKEN)
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          # git describe necesita el historial + los tags, no solo el
+          # último commit. fetch-depth 0 baja todo.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Resolver versión (git describe)
+        id: ver
+        run: |
+          # En un tag exacto → "v1.4.0". En un commit posterior →
+          # "v1.4.0-3-gabc1234". Sin tags → SHA corto. El sufijo -dirty
+          # no debería aparecer en CI (working tree limpio).
+          VERSION="$(git describe --tags --always --dirty)"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "→ Versión de build: ${VERSION}"
+
+      - name: Cross-compile tinta-server (linux/amd64)
+        env:
+          GOOS: linux
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: |
+          go build -tags server -trimpath \
+            -ldflags="-s -w -X main.version=${{ steps.ver.outputs.version }}" \
+            -o bin/tinta-server-linux-amd64 ./cmd/server
+          ls -lh bin/tinta-server-linux-amd64
+
+      - name: Subir artefacto (tinta-server linux/amd64)
+        uses: actions/upload-artifact@v4
+        with:
+          name: tinta-server-linux-amd64
+          path: bin/tinta-server-linux-amd64
+          retention-days: 7
+          if-no-files-found: error
+
+  # ── 3. Desplegar a Hetzner ────────────────────────────────────────────
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      contents: read
+      deployments: write   # marcar el deploy en GitHub Environments
+
+    environment:
+      # Marca el deploy como "production" en GitHub Environments — útil si
+      # activas Required reviewers (aprobación manual antes de cada
+      # release) en Settings → Environments.
+      name: production
+      url: https://api.entinta.app
+
+    steps:
+      - name: Checkout (para migraciones SQL)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Anunciar versión
+        run: echo "→ Desplegando ${{ needs.build.outputs.version }}"
+
+      - name: Descargar binario del job build
+        uses: actions/download-artifact@v4
+        with:
+          name: tinta-server-linux-amd64
+          path: bin/
+
+      - name: Verificar binario
+        # Los artifacts de Actions usan ZIP, que NO preserva el executable
+        # bit Unix. El binario baja con perms 644, así que restauramos +x
+        # antes de probarlo. (En el server el chmod se rehace después del
+        # scp, así que esto solo afecta la verificación local del runner.)
+        run: |
+          chmod +x bin/tinta-server-linux-amd64
+          test -x bin/tinta-server-linux-amd64
+          ls -lh bin/tinta-server-linux-amd64
+          file bin/tinta-server-linux-amd64
+
+      - name: Setup SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+
+      - name: Configurar known_hosts
+        # Estrategia robusta:
+        # 1. Cargar DEPLOY_KNOWN_HOSTS (pinned) si tiene formato válido.
+        # 2. SIEMPRE complementar con ssh-keyscan live — apenda al archivo.
+        #    Las dos acciones son válidas — duplicados no rompen nada y
+        #    nos protegen contra estos casos:
+        #      - secret vacío
+        #      - secret con formato corrupto / sin keys parseables
+        #      - server con keys nuevas (post-reinstall) que el secret no tiene
+        env:
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          # Capa 1: lo que venga del secret (puede estar mal formateado, no
+          # importa — si no parsea, ssh ignora esas líneas).
+          if [ -n "$KNOWN_HOSTS" ]; then
+            echo "→ Cargando DEPLOY_KNOWN_HOSTS (pinned)"
+            echo "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          else
+            : > ~/.ssh/known_hosts
+          fi
+
+          # Capa 2: live scan, append. Esto cubre el caso donde el secret
+          # está vacío o tiene keys distintas a las que el server tiene HOY.
+          echo "→ Complementando con ssh-keyscan live de $DEPLOY_HOST"
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+          chmod 644 ~/.ssh/known_hosts
+
+          # Debug: cuántas líneas de keys reales hay en total
+          KEY_LINES=$(grep -cE 'ssh-(rsa|ed25519|dss)|ecdsa-sha2' ~/.ssh/known_hosts || true)
+          echo "Total host key entries: $KEY_LINES"
+          echo "Total bytes en archivo: $(wc -c < ~/.ssh/known_hosts)"
+
+          # Si aún así está vacío, abortamos con mensaje claro
+          if [ "$KEY_LINES" -eq 0 ]; then
+            echo "::error:: known_hosts no tiene entries válidas después de pinned + live"
+            echo "::error:: DEPLOY_HOST='$DEPLOY_HOST' — ¿resuelve correctamente desde GitHub runners?"
+            echo "::error:: Probá local: ssh-keyscan -H '$DEPLOY_HOST'"
+            exit 1
+          fi
+
+      - name: Subir binario (atómico)
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          REMOTE_BIN=/opt/tinta/bin/tinta-server
+          scp bin/tinta-server-linux-amd64 \
+            tinta@${DEPLOY_HOST}:${REMOTE_BIN}.new
+          ssh tinta@${DEPLOY_HOST} "
+            set -e
+            chmod +x ${REMOTE_BIN}.new
+            mv ${REMOTE_BIN}.new ${REMOTE_BIN}
+          "
+
+      - name: Sincronizar migraciones SQL
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          rsync -avz --delete \
+            db_migrations/postgres/ \
+            tinta@${DEPLOY_HOST}:/opt/tinta/migrations/
+
+      - name: Aplicar migraciones
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          ssh tinta@${DEPLOY_HOST} bash -s <<'EOF'
+          set -euo pipefail
+          source /opt/tinta/tinta-server.env
+          for f in $(ls -1 /opt/tinta/migrations/*.sql | sort); do
+            echo "  applying $(basename "$f")"
+            psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -f "$f" >/dev/null
+          done
+          echo "✓ Migraciones aplicadas"
+          EOF
+
+      - name: Reiniciar tinta-server
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          ssh tinta@${DEPLOY_HOST} 'sudo /bin/systemctl restart tinta-server'
+
+          # Esperamos a que systemd reporte active. Si en 30s no está
+          # corriendo, falla el deploy y nos avisa.
+          for i in $(seq 1 15); do
+            status=$(ssh tinta@${DEPLOY_HOST} 'sudo /bin/systemctl is-active tinta-server' || true)
+            if [ "$status" = "active" ]; then
+              echo "✓ tinta-server activo"
+              exit 0
+            fi
+            echo "(intento $i) status=$status — esperando..."
+            sleep 2
+          done
+
+          echo "::error::tinta-server no quedó activo después del restart"
+          ssh tinta@${DEPLOY_HOST} 'sudo /bin/systemctl status tinta-server --no-pager -l | tail -30'
+          ssh tinta@${DEPLOY_HOST} 'sudo /bin/journalctl -u tinta-server -n 50 --no-pager'
+          exit 1
+
+      - name: Smoke test (público)
+        # No es bloqueante — si DNS o cert TLS aún no están listos, solo
+        # emite warning. La verificación dura es el `is-active` anterior.
+        # Además confirma que /health reporta la versión recién desplegada.
+        continue-on-error: true
+        env:
+          URL: ${{ secrets.SMOKE_TEST_URL || 'https://api.entinta.app/health' }}
+          EXPECTED: ${{ needs.build.outputs.version }}
+        run: |
+          echo "→ GET ${URL} (esperando version=${EXPECTED})"
+          body=$(curl --fail --show-error --silent --max-time 10 "${URL}") || {
+            echo "::warning::Smoke test falló — revisa DNS / cert TLS / endpoint /health"
+            exit 0
+          }
+          echo "${body}"
+          if echo "${body}" | grep -q "\"version\":\"${EXPECTED}\""; then
+            echo "✓ /health reporta la versión desplegada (${EXPECTED})"
+          else
+            echo "::warning::/health respondió pero la versión no coincide con ${EXPECTED} (¿restart incompleto?)"
+          fi
