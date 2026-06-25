@@ -146,11 +146,13 @@ func TestNormalizePhone(t *testing.T) {
 		in   string
 		want string
 	}{
+		// Canónico (src/shared/phone): quita separadores y antepone +52 a los
+		// nacionales de 10 dígitos para que Twilio no los lea con país errado.
 		{"+52 442 123 4567", "+524421234567"},
-		{"(442) 555-1234", "4425551234"},
-		{"442.555.1234", "4425551234"},
-		{"  4425551234  ", "4425551234"},
-		{"+", "+"},
+		{"(442) 555-1234", "+524425551234"},
+		{"442.555.1234", "+524425551234"},
+		{"  4425551234  ", "+524425551234"},
+		{"+", ""}, // sólo '+' sin dígitos → vacío
 		{"", ""},
 		{"abc-def-ghij", ""},
 	}

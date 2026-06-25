@@ -22,23 +22,19 @@ func NewExpiryPostgresReader() *ExpiryPostgresReader { return &ExpiryPostgresRea
 func (r *ExpiryPostgresReader) FindExpiringOn(tx sharedDomain.Transaction, targetDate time.Time) ([]notiApp.ExpiryCandidate, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	type row struct {
-		GymID                 uuid.UUID
-		GymName               *string
-		WhatsAppConnectedAt   *time.Time
-		WhatsAppBusinessPhone *string
-		MemberID              uuid.UUID
-		FullName              string
-		Phone                 string
-		MembershipType        string
-		ExpiryDate            time.Time
+		GymID          uuid.UUID
+		GymName        *string
+		MemberID       uuid.UUID
+		FullName       string
+		Phone          string
+		MembershipType string
+		ExpiryDate     time.Time
 	}
 	var rows []row
 	q := `
 		SELECT
 		    g.id   AS gym_id,
 		    g.name AS gym_name,
-		    g.whatsapp_connected_at,
-		    g.whatsapp_business_phone,
 		    m.id   AS member_id,
 		    m.full_name,
 		    m.phone,
@@ -57,13 +53,12 @@ func (r *ExpiryPostgresReader) FindExpiringOn(tx sharedDomain.Transaction, targe
 	out := make([]notiApp.ExpiryCandidate, 0, len(rows))
 	for _, r := range rows {
 		c := notiApp.ExpiryCandidate{
-			GymID:            r.GymID,
-			MemberID:         r.MemberID,
-			MemberFullName:   r.FullName,
-			MemberPhone:      r.Phone,
-			MembershipType:   r.MembershipType,
-			ExpiryDate:       r.ExpiryDate,
-			GymWhatsAppReady: r.WhatsAppConnectedAt != nil && r.WhatsAppBusinessPhone != nil && *r.WhatsAppBusinessPhone != "",
+			GymID:          r.GymID,
+			MemberID:       r.MemberID,
+			MemberFullName: r.FullName,
+			MemberPhone:    r.Phone,
+			MembershipType: r.MembershipType,
+			ExpiryDate:     r.ExpiryDate,
 		}
 		if r.GymName != nil {
 			c.GymName = *r.GymName

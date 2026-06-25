@@ -18,6 +18,7 @@ import (
 	memRepo "github.com/cuadra/cuadra-core/src/modules/members/domain/repository"
 	"github.com/cuadra/cuadra-core/src/shared/audit"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
+	phonepkg "github.com/cuadra/cuadra-core/src/shared/phone"
 )
 
 // ImportMembersFromCSV — UC-046. Wizard self-serve "Importación masiva de
@@ -561,16 +562,11 @@ func csvGenderFromAlias(raw string) (string, bool) {
 	}
 }
 
-// sanitizePhoneRaw replica la limpieza que hace memberDomain.NewMember
-// (espacios, guiones, parens) pero a nivel de input crudo del CSV para que
-// la dedupe in-file use el valor normalizado.
+// sanitizePhoneRaw usa el normalizador canónico (src/shared/phone) — el MISMO
+// que memberDomain.NewMember — para que la dedupe in-file y lo que se guarda
+// coincidan exactamente (E.164 con código de país, sin separadores).
 func sanitizePhoneRaw(raw string) string {
-	v := strings.TrimSpace(raw)
-	v = strings.ReplaceAll(v, " ", "")
-	v = strings.ReplaceAll(v, "-", "")
-	v = strings.ReplaceAll(v, "(", "")
-	v = strings.ReplaceAll(v, ")", "")
-	return v
+	return phonepkg.Normalize(raw)
 }
 
 func normalizeplanName(s string) string {

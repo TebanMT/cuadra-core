@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	memErrors "github.com/cuadra/cuadra-core/src/modules/members/domain/errors"
+	phonepkg "github.com/cuadra/cuadra-core/src/shared/phone"
 )
 
 // Status mirrors chk_members_status.
@@ -28,10 +29,24 @@ const (
 	GenderUnspecified = "no_especificado"
 )
 
+// Member-number identity (ADR-010). El número de socio es público, entero,
+// único 1:1 por gym, y funciona como credencial de check-in cuando el
+// biométrico no aplica. Reemplaza al antiguo "PIN de acceso" (superseded
+// ADR-002): un solo concepto de identidad, no un secreto.
+const (
+	// DefaultMemberNumberDigits es la longitud inicial del número de socio.
+	// Configurable por gym (sólo crece, monótono); ver gym.MemberNumberDigits.
+	DefaultMemberNumberDigits = 4
+	// MinMemberNumber es el piso del rango inicial [1000, 9999]: nunca se
+	// generan números <1000. Backfills de PINs viejos pueden quedar por
+	// debajo; el piso sólo aplica a la generación, no a la validación.
+	MinMemberNumber = 1000
+)
+
 // Member is the gym client. Created via UC-012 with at least name + phone +
 // gym_id. A Member has 0..1 active Membership at any time (enforced by the
-// uq_memberships_member_active partial index). PIN is optional; assigned via
-// AssignPin (UC-032).
+// uq_memberships_member_active partial index). El número de socio es
+// opcional; se asigna vía AssignMemberNumber (UC-032) o auto al crear.
 type Member struct {
 	ID                  uuid.UUID
 	GymID               uuid.UUID
@@ -46,13 +61,12 @@ type Member struct {
 	Status              string
 	EnrollmentPaid      bool
 	LastMaintenancePaid *time.Time
-	PinHash             *string
-	// PinPlain mirrors PinHash but stores the 4-digit code as-is so the
-	// operator can read it from the member profile (the gym operator's
-	// recurring workflow is "leer el PIN al socio que lo olvidó"). The
-	// hash is still the source of truth at check-in time.
-	PinPlain             *string
-	PinAssignedAt        *time.Time
+	// MemberNumber es el identificador público del socio (ADR-010): entero,
+	// único 1:1 por gym, también credencial de check-in. nil = sin número
+	// asignado todavía (socio histórico o saturación del espacio). Es
+	// público: se muestra en la credencial/banner y viaja por WhatsApp.
+	// Reemplaza al par PinHash/PinPlain del modelo previo.
+	MemberNumber         *int
 	LastContactAttemptAt *time.Time
 	// Gender es opcional y nullable. nil = el operador no capturó el campo
 	// (socio histórico o "skip" deliberado). Si el operador elige
@@ -219,17 +233,13 @@ func (m *Member) UpdateLastMaintenance(paymentDate time.Time, now time.Time) {
 	m.UpdatedAt = now
 }
 
-// SetPin is called after the use case has hashed the PIN and verified
-// gym-uniqueness. Domain doesn't hash; it just stores both the hash (for
-// check-in compare) and the 4-digit plaintext (so the operator can read
-// it from the member profile).
-func (m *Member) SetPin(hash, plain string, now time.Time) {
-	h := hash
-	m.PinHash = &h
-	p := plain
-	m.PinPlain = &p
-	t := now
-	m.PinAssignedAt = &t
+// SetMemberNumber asigna el número de socio (ADR-010). El use case ya
+// verificó la unicidad en el gym antes de llamar; el dominio sólo guarda
+// el valor y bumpea version. El número es público — no se hashea (a
+// diferencia del antiguo PIN).
+func (m *Member) SetMemberNumber(number int, now time.Time) {
+	n := number
+	m.MemberNumber = &n
 	m.Version++
 	m.UpdatedAt = now
 }
@@ -267,18 +277,20 @@ func (m *Member) applyPhone(phone string) error {
 
 var (
 	emailRegex = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
-	// Mexican mobile: 10 digits or +52 + 10 digits.
+	// Teléfono E.164-ish: '+' opcional + 10-15 dígitos. El '+' es opcional a
+	// propósito (tolera leer data legacy sin código de país); en ESCRITURA
+	// todo pasa antes por src/shared/phone.Normalize, que garantiza el '+' y el
+	// código de país. La validación estricta vive en phone.Valid, en el borde
+	// con Twilio (twilio.whatsappAddress).
 	phoneCanonicalRegex = regexp.MustCompile(`^\+?[1-9]\d{9,14}$`)
 )
 
-// normalizePhone strips spaces, dashes, parens. Returns the cleaned value.
+// normalizePhone delega en el normalizador canónico (src/shared/phone): quita
+// todo separador y antepone el código de país (MX) a los nacionales de 10
+// dígitos, devolviendo E.164. Antes sólo quitaba separadores y dejaba pasar
+// 10 dígitos pelados, que Twilio leía con un país equivocado.
 func normalizePhone(raw string) string {
-	v := strings.TrimSpace(raw)
-	v = strings.ReplaceAll(v, " ", "")
-	v = strings.ReplaceAll(v, "-", "")
-	v = strings.ReplaceAll(v, "(", "")
-	v = strings.ReplaceAll(v, ")", "")
-	return v
+	return phonepkg.Normalize(raw)
 }
 
 // ValidatePhone accepts a normalized phone in E.164-ish form.
@@ -306,15 +318,14 @@ func ValidateFullName(name string) error {
 	return nil
 }
 
-// ValidatePin enforces "exactly 4 digits".
-func ValidatePin(plain string) error {
-	if len(plain) != 4 {
-		return memErrors.ErrInvalidPin
-	}
-	for _, c := range plain {
-		if c < '0' || c > '9' {
-			return memErrors.ErrInvalidPin
-		}
+// ValidateMemberNumber enforces "entero positivo". El rango inicial es
+// [1000, 9999] pero crece con el bump de dígitos (ADR-010 §2.2), así que
+// aquí sólo exigimos > 0 — el piso de generación (MinMemberNumber) vive en
+// el asignador, no en la validación de un número entrante (que puede venir
+// de un backfill de PIN viejo <1000).
+func ValidateMemberNumber(n int) error {
+	if n <= 0 {
+		return memErrors.ErrInvalidMemberNumber
 	}
 	return nil
 }

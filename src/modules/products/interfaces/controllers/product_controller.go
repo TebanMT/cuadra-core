@@ -13,6 +13,7 @@ import (
 
 	prodApp "github.com/cuadra/cuadra-core/src/modules/products/app"
 	productDomain "github.com/cuadra/cuadra-core/src/modules/products/domain/product"
+	prodRepo "github.com/cuadra/cuadra-core/src/modules/products/domain/repository"
 	stockMovementDomain "github.com/cuadra/cuadra-core/src/modules/products/domain/stockmovement"
 	"github.com/cuadra/cuadra-core/src/shared/auth"
 	"github.com/cuadra/cuadra-core/src/shared/middleware"
@@ -29,6 +30,7 @@ type ProductController struct {
 	Create     *prodApp.CreateProduct
 	Update     *prodApp.UpdateProduct
 	Deactivate *prodApp.DeactivateProduct
+	Reactivate *prodApp.ReactivateProduct
 	List       *prodApp.ListProducts
 	Adjust     *prodApp.AdjustStock
 	Tokens     auth.TokenService
@@ -38,13 +40,14 @@ func NewProductController(
 	create *prodApp.CreateProduct,
 	update *prodApp.UpdateProduct,
 	deactivate *prodApp.DeactivateProduct,
+	reactivate *prodApp.ReactivateProduct,
 	list *prodApp.ListProducts,
 	adjust *prodApp.AdjustStock,
 	tokens auth.TokenService,
 ) *ProductController {
 	return &ProductController{
 		Create: create, Update: update, Deactivate: deactivate,
-		List: list, Adjust: adjust, Tokens: tokens,
+		Reactivate: reactivate, List: list, Adjust: adjust, Tokens: tokens,
 	}
 }
 
@@ -55,6 +58,7 @@ func (ctrl *ProductController) RegisterRoutes(r *gin.Engine) {
 		api.POST("/products", ctrl.handleCreate)
 		api.PATCH("/products/:id", ctrl.handleUpdate)
 		api.DELETE("/products/:id", ctrl.handleDeactivate)
+		api.POST("/products/:id/reactivate", ctrl.handleReactivate)
 		api.GET("/products", ctrl.handleList)
 		api.POST("/products/:id/adjust-stock", ctrl.handleAdjust)
 	}
@@ -100,6 +104,11 @@ type productResp struct {
 	ImageURL     *string   `json:"image_url,omitempty"`
 	Active       bool      `json:"active"`
 	LowStock     bool      `json:"low_stock"`
+	// AvgUnitCost — costo unitario promedio ponderado (pesos), o ausente
+	// cuando el producto no tiene costo capturado. La ficha lo usa para
+	// "Costo prom · Precio · Margen". Nullable a propósito: el costo es
+	// opcional al crear/resurtir.
+	AvgUnitCost *float64 `json:"avg_unit_cost,omitempty"`
 }
 
 type listProductsResp struct {
@@ -117,6 +126,16 @@ type listProductTotals struct {
 	TotalValue float64 `json:"total_value"`
 	LowCount   int     `json:"low_count"`
 	OutCount   int     `json:"out_count"`
+	// Ganancia potencial sobre el stock (Standard). Todos los montos en
+	// pesos, solo activos con costo capturado. MarginPct es la ganancia
+	// como % del valor de venta de ESOS mismos productos; null cuando
+	// ninguno tiene costo (el FE oculta el chip). ProductsWithCost/Total
+	// es la cobertura honesta para el hint "X de Y con costo".
+	PotentialProfit  float64  `json:"potential_profit"`
+	CostValue        float64  `json:"cost_value"`
+	MarginPct        *float64 `json:"margin_pct,omitempty"`
+	ProductsTotal    int      `json:"products_total"`
+	ProductsWithCost int      `json:"products_with_cost"`
 }
 
 type adjustStockResp struct {
@@ -210,6 +229,22 @@ func (ctrl *ProductController) handleDeactivate(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
+func (ctrl *ProductController) handleReactivate(c *gin.Context) {
+	gymID, _ := middleware.GetGymID(c)
+	userID, _ := middleware.GetUserID(c)
+	id, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	if err := ctrl.Reactivate.Execute(c.Request.Context(), prodApp.ReactivateProductInput{
+		GymID: gymID, ActorUserID: userID, ProductID: id,
+	}); err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
 func (ctrl *ProductController) handleList(c *gin.Context) {
 	gymID, _ := middleware.GetGymID(c)
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
@@ -235,16 +270,38 @@ func (ctrl *ProductController) handleList(c *gin.Context) {
 	}
 	items := make([]productResp, 0, len(out.Items))
 	for _, p := range out.Items {
-		items = append(items, toProductResp(p))
+		item := toProductResp(p)
+		if cost, ok := out.UnitCosts[p.ID]; ok {
+			c := cost
+			item.AvgUnitCost = &c
+		}
+		items = append(items, item)
 	}
 	utils.JsonResponse(c, http.StatusOK, listProductsResp{
 		Items: items, Total: out.Total, Page: out.Page, PageSize: out.PageSize,
 		Totals: listProductTotals{
-			TotalValue: out.Aggregates.TotalValue,
-			LowCount:   out.Aggregates.LowCount,
-			OutCount:   out.Aggregates.OutCount,
+			TotalValue:       out.Aggregates.TotalValue,
+			LowCount:         out.Aggregates.LowCount,
+			OutCount:         out.Aggregates.OutCount,
+			PotentialProfit:  out.Aggregates.PotentialProfit,
+			CostValue:        out.Aggregates.CostValue,
+			MarginPct:        marginPct(out.Aggregates),
+			ProductsTotal:    out.Aggregates.ProductsTotal,
+			ProductsWithCost: out.Aggregates.ProductsWithCost,
 		},
 	})
+}
+
+// marginPct — ganancia potencial como % del valor de venta de los
+// productos CON costo capturado (mismo subconjunto). nil cuando el
+// denominador es 0 (ningún activo con costo) para que el FE no muestre un
+// chip sin sentido — mismo patrón que delta_pct en los KPIs del dashboard.
+func marginPct(a prodRepo.ProductAggregates) *float64 {
+	if a.SaleValueWithCost == 0 {
+		return nil
+	}
+	pct := a.PotentialProfit / a.SaleValueWithCost * 100
+	return &pct
 }
 
 func (ctrl *ProductController) handleAdjust(c *gin.Context) {

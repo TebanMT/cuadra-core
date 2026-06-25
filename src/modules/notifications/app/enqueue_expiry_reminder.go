@@ -78,9 +78,13 @@ func (uc *EnqueueExpiryReminder) tickStage(ctx context.Context, today, target ti
 			return sharedDomain.NewUnexpectedError(err)
 		}
 		for _, c := range candidates {
-			if !c.GymWhatsAppReady {
-				continue
-			}
+			// ADR-009: los recordatorios salen por el MASTER SENDER de Tinta,
+			// NO por el número propio del gym. No gatear por número conectado
+			// del gym (eso es Plus / UC-037): un gym Standard nunca conecta el
+			// suyo, así que gatear aquí mataba el feature en Standard. El
+			// dispatcher resuelve el `from` (master vs propio); aquí sólo
+			// exigimos que el socio tenga teléfono. Mismo criterio que
+			// enqueue_receipt / enqueue_owner_alert.
 			if strings.TrimSpace(c.MemberPhone) == "" {
 				continue
 			}

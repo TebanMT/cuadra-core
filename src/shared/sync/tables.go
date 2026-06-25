@@ -90,10 +90,11 @@ var SyncedTables = []EntityTable{
 			"folio", "full_name", "phone", "email", "birthdate",
 			"photo_url", "notes", "status",
 			"enrollment_paid", "last_maintenance_paid",
-			// pin_plain travels alongside pin_hash because the operator
-			// surfaces it in the member detail page (4-digit convenience
-			// code, not a secret — see migration 012 rationale).
-			"pin_hash", "pin_plain", "pin_assigned_at",
+			// member_number — número de socio público (ADR-010). Viaja
+			// sidecar→cloud para que el projector enforce el índice único y
+			// reconcilie duplicados al sync (ver projectMember). Las columnas
+			// pin_hash/pin_plain/pin_assigned_at se eliminaron (migración 030).
+			"member_number",
 			"last_contact_attempt_at", "gender", "created_by",
 		},
 	},

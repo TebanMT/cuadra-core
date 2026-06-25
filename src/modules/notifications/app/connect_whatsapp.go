@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -13,6 +12,7 @@ import (
 	notiRepo "github.com/cuadra/cuadra-core/src/modules/notifications/domain/repository"
 	"github.com/cuadra/cuadra-core/src/shared/audit"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
+	phonepkg "github.com/cuadra/cuadra-core/src/shared/phone"
 )
 
 // ConnectWhatsAppInput backs UC-037. Phone is the gym's WhatsApp Business
@@ -49,7 +49,7 @@ func NewConnectWhatsApp(gyms gymRepo.GymRepository, provider notiDomain.WhatsApp
 }
 
 func (uc *ConnectWhatsApp) Execute(ctx context.Context, in ConnectWhatsAppInput) (*ConnectWhatsAppOutput, error) {
-	phone := strings.TrimSpace(in.Phone)
+	phone := phonepkg.Normalize(in.Phone)
 	if phone == "" {
 		return nil, sharedDomain.NewValidationError(notiErrors.ErrInvalidPhone)
 	}

@@ -81,3 +81,14 @@ type AlertConfigRepository interface {
 	GetByGymAndKey(tx sharedDomain.Transaction, gymID uuid.UUID, key alertDomain.Key) (*alertDomain.Config, error)
 	ListByGym(tx sharedDomain.Transaction, gymID uuid.UUID) ([]*alertDomain.Config, error)
 }
+
+// OptOutRepository — `whatsapp_opt_outs`. Opt-out de marketing por TELÉFONO
+// (no por gym): aplica al número maestro de Tinta. Cloud-only — el dispatcher
+// lo consulta antes de mandar un template Marketing (broadcast) y el webhook
+// de Twilio lo escribe cuando el socio responde STOP/BAJA. Phone debe venir
+// normalizado (shared/phone.Normalize) por el caller.
+type OptOutRepository interface {
+	IsOptedOut(tx sharedDomain.Transaction, phone string) (bool, error)
+	SetOptedOut(tx sharedDomain.Transaction, phone string, at time.Time) error
+	ClearOptOut(tx sharedDomain.Transaction, phone string) error
+}

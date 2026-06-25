@@ -3,12 +3,15 @@ package app
 import (
 	"context"
 	"errors"
+	"log"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
 	gymRepo "github.com/cuadra/cuadra-core/src/modules/gyms/domain/repository"
 	userRepo "github.com/cuadra/cuadra-core/src/modules/users/domain/repository"
+	userDomain "github.com/cuadra/cuadra-core/src/modules/users/domain/user"
 	"github.com/cuadra/cuadra-core/src/shared/auth"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 	"github.com/cuadra/cuadra-core/src/shared/installerbootstrap"
@@ -73,7 +76,17 @@ type RedeemInstallerBootstrap struct {
 	UoW         sharedDomain.UnitOfWork
 	Tokens      auth.TokenService
 	SidecarBoot *BootstrapSidecarToken
-	NowFunc     func() time.Time
+	// OwnerWelcome (opcional) encola el banner "tu sistema ya está vivo" al
+	// dueño en el primer link del primer dispositivo (ADR-010). Nil = no se
+	// envía (tests / builds sin notificaciones).
+	OwnerWelcome OwnerWelcomeNotifier
+	NowFunc      func() time.Time
+}
+
+// WithOwnerWelcome cablea el notifier del banner de bienvenida del dueño.
+func (uc *RedeemInstallerBootstrap) WithOwnerWelcome(n OwnerWelcomeNotifier) *RedeemInstallerBootstrap {
+	uc.OwnerWelcome = n
+	return uc
 }
 
 func NewRedeemInstallerBootstrap(
@@ -210,5 +223,86 @@ func (uc *RedeemInstallerBootstrap) Execute(ctx context.Context, in RedeemInstal
 			out.SidecarToken = tok
 		}
 	}
+
+	// Primer link del primer dispositivo = el sistema queda "vivo". Si el gym
+	// aún no recibió el banner de bienvenida del dueño, regeneramos su código
+	// de acceso y lo enviamos por WhatsApp (ADR-010, opción A). Best-effort +
+	// fire-once (flag del gym); un fallo NO rompe el redeem. Sólo cuando el
+	// dispositivo realmente quedó vinculado (hay sidecar token).
+	if uc.OwnerWelcome != nil && out.SidecarToken != "" {
+		if newHash, ok := uc.welcomeOwnerOnFirstLink(ctx, bs.GymID, bs.UserID); ok {
+			out.PinHash = newHash
+			out.HasPIN = true
+		}
+	}
 	return out, nil
+}
+
+// welcomeOwnerOnFirstLink regenera el código de acceso del dueño y encola el
+// banner "tu sistema ya está vivo", UNA sola vez por gym (flag
+// gym.OwnerWelcomeSent). Devuelve el nuevo pin_hash para que el desktop lo
+// espeje (login-pin offline) — vacío/false si se saltó o falló.
+func (uc *RedeemInstallerBootstrap) welcomeOwnerOnFirstLink(ctx context.Context, gymID, ownerUserID uuid.UUID) (string, bool) {
+	now := uc.NowFunc()
+	var newHash string
+	var done bool
+	err := uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
+		gym, err := uc.Gyms.GetByID(tx, gymID)
+		if err != nil {
+			return err
+		}
+		if gym.OwnerWelcomeSent() {
+			return nil // fire-once: ya se envió para este gym
+		}
+		user, err := uc.Users.GetByID(tx, ownerUserID)
+		if err != nil {
+			return err
+		}
+		if user.Role != userDomain.RoleOwner {
+			return nil // sólo el dueño recibe este banner (bootstrap = owner)
+		}
+		phone := ""
+		if user.Phone != nil {
+			phone = strings.TrimSpace(*user.Phone)
+		}
+		if phone == "" {
+			// Sin teléfono no hay a quién enviar: NO regeneramos el código
+			// (evita dejar al dueño sin saber su PIN nuevo) ni marcamos el
+			// flag, por si agrega teléfono y re-linkea más adelante.
+			return nil
+		}
+		// Regenerar el código de acceso del dueño (opción A) — el plaintext
+		// se hornea en el banner; en BD sólo queda el hash.
+		pin, err := auth.GenerateTempPIN()
+		if err != nil {
+			return err
+		}
+		h, err := auth.HashPIN(pin)
+		if err != nil {
+			return err
+		}
+		user.AssignPIN(h, now)
+		if _, err := uc.Users.Update(tx, user); err != nil {
+			return err
+		}
+		// Encolar el banner por WhatsApp (atómico con el cambio de PIN).
+		if _, err := uc.OwnerWelcome.Notify(ctx, tx, OwnerWelcomeNotifyInput{
+			GymID: gymID, UserID: ownerUserID, PIN: pin,
+		}, now); err != nil {
+			return err
+		}
+		// Marcar fire-once.
+		gym.MarkOwnerWelcomeSent(now)
+		if _, err := uc.Gyms.Update(tx, gym); err != nil {
+			return err
+		}
+		newHash = h
+		done = true
+		return nil
+	})
+	if err != nil {
+		log.Printf("[redeem] owner welcome failed gym=%s: %v", gymID, err)
+		return "", false
+	}
+	return newHash, done
 }

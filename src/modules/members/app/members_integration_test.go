@@ -498,10 +498,10 @@ func TestUC017_LockExpiry_AtomicAdjustment(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// UC-032 (partial) — AssignPin
+// UC-032 (partial) — AssignMemberNumber (ADR-010)
 // ---------------------------------------------------------------------------
 
-func TestAssignPin_GeneratesUnique(t *testing.T) {
+func TestAssignMemberNumber_GeneratesUnique(t *testing.T) {
 	f := setupMembersFixture(t)
 	typeID := f.createMembershipType(t, "Mensual")
 	create := memApp.NewCreateMember(f.memberRepo, f.membershipR, f.mtRepo, f.uow, f.recorder)
@@ -515,34 +515,34 @@ func TestAssignPin_GeneratesUnique(t *testing.T) {
 		FullName: "Maria", Phone: "+524429876543",
 		MembershipTypeID: typeID, StartDate: time.Now().UTC(),
 	})
-	uc := memApp.NewAssignPin(f.memberRepo, f.uow, f.recorder)
-	a1, err := uc.Execute(context.Background(), memApp.AssignPinInput{
-		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: out1.MemberID, PlainPin: "5839",
+	uc := memApp.NewAssignMemberNumber(f.memberRepo, f.uow, f.recorder)
+	a1, err := uc.Execute(context.Background(), memApp.AssignMemberNumberInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: out1.MemberID, Number: 5839,
 	})
 	if err != nil {
 		t.Fatalf("assign 1: %v", err)
 	}
-	if a1.Pin != "5839" {
-		t.Errorf("pin = %q", a1.Pin)
+	if a1.MemberNumber != 5839 {
+		t.Errorf("number = %d", a1.MemberNumber)
 	}
-	// Second member tries to take the SAME pin -> should fail.
-	if _, err := uc.Execute(context.Background(), memApp.AssignPinInput{
-		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: out2.MemberID, PlainPin: "5839",
+	// Second member tries to take the SAME number -> should fail.
+	if _, err := uc.Execute(context.Background(), memApp.AssignMemberNumberInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: out2.MemberID, Number: 5839,
 	}); err == nil {
-		t.Errorf("duplicate pin should fail")
+		t.Errorf("duplicate number should fail")
 	}
-	// Auto-generated PIN should succeed.
-	a2, err := uc.Execute(context.Background(), memApp.AssignPinInput{
+	// Auto-generated number should succeed and stay in the 4-digit range.
+	a2, err := uc.Execute(context.Background(), memApp.AssignMemberNumberInput{
 		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: out2.MemberID,
 	})
 	if err != nil {
 		t.Fatalf("auto-gen: %v", err)
 	}
-	if a2.Pin == "5839" {
+	if a2.MemberNumber == 5839 {
 		t.Errorf("auto-gen collided")
 	}
-	if len(a2.Pin) != 4 {
-		t.Errorf("auto pin len = %d", len(a2.Pin))
+	if a2.MemberNumber < 1000 || a2.MemberNumber > 9999 {
+		t.Errorf("auto number fuera del rango de 4 dígitos: %d", a2.MemberNumber)
 	}
 }
 

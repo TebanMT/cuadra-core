@@ -197,7 +197,10 @@ func (uc *CashClose) Report(ctx context.Context, in CashCloseReportInput) (*Cash
 		}
 	}
 
-	out.NetTotal = totals.GrandTotal - totals.RefundTotal - out.ExpensesTotal
+	// RefundTotal es NEGATIVO (refunds con amount negativo), así que SUMARLO
+	// resta los reembolsos del neto. El bug anterior `- RefundTotal` los
+	// SUMABA al neto (inflaba el "qué ganó hoy" al doble del reembolso).
+	out.NetTotal = totals.GrandTotal + totals.RefundTotal - out.ExpensesTotal
 
 	// Closed-event lookup. ListByGym ordena por close_date DESC; recorremos
 	// hasta encontrar el de esta fecha. Para volúmenes de gyms (≤1 cierre
@@ -248,9 +251,14 @@ func (uc *CashClose) Close(ctx context.Context, in CashCloseInput) (*CashCloseOu
 		if err != nil {
 			return sharedDomain.NewUnexpectedError(err)
 		}
-		// "Calculated cash" = cash payments (refunds ya excluidos del Aggregate)
-		// menos los gastos pagados en efectivo del día (salieron del cajón).
+		// "Calculated cash" = cobros en efectivo del día (ByMethod excluye
+		// refunds) − gastos pagados en efectivo − reembolsos pagados en
+		// efectivo. Los reembolsos cash sacan dinero físico del cajón pero
+		// estaban fuera de ByMethod y NO se restaban → el corte reportaba un
+		// faltante fantasma y disparaba una falsa alerta al dueño.
 		calculated := totals.ByMethod[paymentDomain.MethodCash]
+		// RefundByMethod[cash] es negativo → sumarlo descuenta los refunds cash.
+		calculated += totals.RefundByMethod[paymentDomain.MethodCash]
 		if uc.Expenses != nil {
 			if gastos, err := uc.Expenses.ListByDate(tx, in.GymID, dayUTC(in.Date)); err == nil {
 				for _, g := range gastos {

@@ -218,7 +218,11 @@ func TestPushAppliesToProjector_UserUpdate(t *testing.T) {
 	tok, _ := tokens.GenerateAccessToken(userID, gymID, "owner")
 
 	// Push at version 2 (greater than the seeded version 1) — projector
-	// must UPDATE the user row in place via ON CONFLICT.
+	// must UPDATE the user row in place via ON CONFLICT. El payload incluye
+	// password_hash="new-hash" a propósito: la guarda de credenciales
+	// (guardUserCredential) debe DESCARTARLO para un owner — el cloud es la
+	// autoridad del password del dashboard — y preservar el hash sembrado
+	// ('unused'), mientras el resto del perfil sí se actualiza.
 	body := map[string]any{
 		"id":            userID.String(),
 		"gym_id":        gymID.String(),
@@ -253,8 +257,13 @@ func TestPushAppliesToProjector_UserUpdate(t *testing.T) {
 	if err := db.Raw(`SELECT full_name, password_hash, version FROM users WHERE id = ?`, userID).Scan(&got).Error; err != nil {
 		t.Fatalf("read user: %v", err)
 	}
-	if got.FullName != "Renamed Owner" || got.PasswordHash != "new-hash" || got.Version != 2 {
-		t.Errorf("user not updated by projector: %+v", got)
+	// full_name y version SÍ se actualizan; password_hash del owner se PRESERVA
+	// ('unused', el sembrado) porque la guarda lo descartó del push.
+	if got.FullName != "Renamed Owner" || got.Version != 2 {
+		t.Errorf("profile no actualizado por el projector: %+v", got)
+	}
+	if got.PasswordHash != "unused" {
+		t.Errorf("password_hash del owner NO debe cambiar por un push (cloud es autoridad); got %q, want %q", got.PasswordHash, "unused")
 	}
 }
 

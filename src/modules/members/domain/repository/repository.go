@@ -36,11 +36,17 @@ type MemberRepository interface {
 	Update(tx sharedDomain.Transaction, m *memberDomain.Member) (*memberDomain.Member, error)
 	GetByID(tx sharedDomain.Transaction, id uuid.UUID) (*memberDomain.Member, error)
 	ExistsByGymAndPhone(tx sharedDomain.Transaction, gymID uuid.UUID, phone string) (bool, error)
-	// ExistsPinHashInGym checks whether any other member in `gymID` already has
-	// the given bcrypt PIN hash stored. NOTE: bcrypt salts make exact-match
-	// detection impossible — this method MUST iterate hashes in the gym and
-	// run bcrypt.Verify against the plain pin. The caller passes plainPin.
-	PinHashCollidesInGym(tx sharedDomain.Transaction, gymID uuid.UUID, plainPin string, excludeMemberID *uuid.UUID) (bool, error)
+	// MemberNumberExistsInGym reports whether ANOTHER non-deleted member in
+	// `gymID` already holds `number` (ADR-010). O(1) — the unique index
+	// `uq_members_gym_number` backs it. Used by AssignMemberNumber to honor
+	// an operator-supplied number and as a defense check before persisting a
+	// generated one. excludeMemberID lets a member re-claim its own number.
+	MemberNumberExistsInGym(tx sharedDomain.Transaction, gymID uuid.UUID, number int, excludeMemberID *uuid.UUID) (bool, error)
+	// ListUsedMemberNumbers returns every member_number currently in use in
+	// `gymID` (non-deleted, non-null). The asignador uses it for the bump
+	// decision (count) and gap-fill (lowest free slot). "Usados" = no
+	// borrados; reuse de inactivos >1 año queda diferido (ADR-010 fase 7).
+	ListUsedMemberNumbers(tx sharedDomain.Transaction, gymID uuid.UUID) ([]int, error)
 	// NextFolio mints the next folio (gym_001, gym_002, ...). Implementations
 	// SHOULD use SELECT ... FOR UPDATE (Postgres) or SQLite's serialised tx
 	// guarantees so concurrent creates don't collide.
@@ -54,6 +60,21 @@ type MemberRepository interface {
 	// cross-context read paths (e.g. billing's gym-wide cobros list) to avoid
 	// the N+1 of GetByID per row.
 	GetNamesByIDs(tx sharedDomain.Transaction, ids []uuid.UUID) (map[uuid.UUID]string, error)
+	// GetContactsByIDs returns id/full_name/phone for the given members WITHIN
+	// the gym. Missing, soft-deleted, or cross-gym IDs are omitted silently —
+	// el filtro por gymID es el cerrojo anti cross-tenant. Lo usa la selección
+	// manual de socios del broadcast (UC-041). Phone puede venir vacío (el
+	// caller lo descarta, igual que en List).
+	GetContactsByIDs(tx sharedDomain.Transaction, gymID uuid.UUID, ids []uuid.UUID) ([]MemberContact, error)
+}
+
+// MemberContact es una proyección liviana (id + nombre + teléfono) para
+// lecturas en bloque, p.ej. resolver destinatarios de un broadcast por IDs
+// seleccionados sin el N+1 de GetByID.
+type MemberContact struct {
+	ID       uuid.UUID
+	FullName string
+	Phone    string
 }
 
 // ListQuery is the input for UC-014.
@@ -95,19 +116,18 @@ type MembershipAdjustmentRepository interface {
 	ListByMembership(tx sharedDomain.Transaction, membershipID uuid.UUID) ([]*membershipDomain.MembershipAdjustment, error)
 }
 
-// PinCandidate is one (member_id, pin_hash) row used by checkins/UC-032's
-// bcrypt scan. Shape mirrors what MemberPinCandidateLister returns; lives
-// here so both the members infra repos and the checkins use case can refer
-// to the same type without an infra→app cycle.
-type PinCandidate struct {
-	MemberID uuid.UUID
-	PinHash  string
-}
-
-// MemberPinCandidateLister is the optional capability the checkins BC asks
-// from MemberRepository. Both Postgres and SQLite member repos implement it.
-type MemberPinCandidateLister interface {
-	ListPinCandidates(tx sharedDomain.Transaction, gymID uuid.UUID) ([]PinCandidate, error)
+// MemberNumberFinder is the optional capability the checkins BC asks from
+// MemberRepository for check-in-by-number (ADR-010). Both Postgres and
+// SQLite member repos implement it. FindByMemberNumber does an O(1) lookup
+// on `uq_members_gym_number` and returns (nil, nil) when no non-deleted
+// member in the gym holds that number — letting checkins distinguish "no
+// such number" from an infra error without importing the members errors.
+//
+// It deliberately does NOT filter by status: an inactive socio entering a
+// valid number must resolve to denied_inactive (with their name) rather
+// than "número incorrecto" — same rationale as the old ListPinCandidates.
+type MemberNumberFinder interface {
+	FindByMemberNumber(tx sharedDomain.Transaction, gymID uuid.UUID, number int) (*memberDomain.Member, error)
 }
 
 // ContactAttemptRepository — UC-035 append-only history of "le hablé".

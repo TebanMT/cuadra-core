@@ -30,6 +30,10 @@ type ListProductsOutput struct {
 	Page       int
 	PageSize   int
 	Aggregates prodRepo.ProductAggregates // stats globales del filtro completo
+	// UnitCosts mapea product_id → costo unitario promedio (pesos) para los
+	// productos con costo capturado. El handler lo adjunta por ítem para que
+	// la ficha del producto muestre "Costo prom · Precio · Margen".
+	UnitCosts map[uuid.UUID]float64
 }
 
 type ListProducts struct {
@@ -73,11 +77,16 @@ func (uc *ListProducts) Execute(ctx context.Context, in ListProductsInput) (*Lis
 	// las StatCards del FE. Si falla, degrada a ceros: prefiero que la
 	// página renderee con stats vacías que romperla porque un SUM falló.
 	aggs, _ := uc.Products.ListAggregates(tx, listQuery)
+	// UnitCosts (costo promedio por producto) sigue la misma política de
+	// degradación: un mapa vacío solo oculta la línea de margen en la
+	// ficha, no rompe el listado.
+	unitCosts, _ := uc.Products.ListUnitCosts(tx, listQuery)
 	return &ListProductsOutput{
 		Items:      rows,
 		Total:      total,
 		Page:       page,
 		PageSize:   pageSize,
 		Aggregates: aggs,
+		UnitCosts:  unitCosts,
 	}, nil
 }

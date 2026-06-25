@@ -54,14 +54,19 @@ func (r *CashCloseSQLiteReader) Aggregate(tx sharedDomain.Transaction, q billing
 		return nil, err
 	}
 
+	// Refunds agrupados por método: el total alimenta RefundTotal y cada
+	// método RefundByMethod (para descontar del cajón los refunds en efectivo,
+	// que sí sacan dinero). amount es negativo → la suma es negativa.
 	type refundRow struct {
-		Total int64 `db:"total"`
-		Cnt   int   `db:"cnt"`
+		PaymentMethod string `db:"payment_method"`
+		Total         int64  `db:"total"`
+		Cnt           int    `db:"cnt"`
 	}
-	var refund refundRow
-	if err := stx.Get(context.Background(), &refund,
-		`SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS cnt FROM payments
-		 WHERE gym_id = ? AND payment_date = ? AND concept = ? AND deleted_at IS NULL`,
+	var refundRows []refundRow
+	if err := stx.Select(context.Background(), &refundRows,
+		`SELECT payment_method, COALESCE(SUM(amount), 0) AS total, COUNT(*) AS cnt FROM payments
+		 WHERE gym_id = ? AND payment_date = ? AND concept = ? AND deleted_at IS NULL
+		 GROUP BY payment_method`,
 		q.GymID.String(), dateStr, paymentDomain.ConceptRefund); err != nil {
 		return nil, err
 	}
@@ -91,11 +96,16 @@ func (r *CashCloseSQLiteReader) Aggregate(tx sharedDomain.Transaction, q billing
 	}
 
 	out := &billingRepo.CashCloseTotals{
-		ByMethod:    map[string]float64{},
-		ByConcept:   map[string]billingRepo.ConceptTotal{},
-		ByOperator:  make([]billingRepo.OperatorTotal, 0, len(opRows)),
-		RefundTotal: fromCents(refund.Total),
-		RefundCount: refund.Cnt,
+		ByMethod:       map[string]float64{},
+		ByConcept:      map[string]billingRepo.ConceptTotal{},
+		ByOperator:     make([]billingRepo.OperatorTotal, 0, len(opRows)),
+		RefundByMethod: map[string]float64{},
+	}
+	for _, rf := range refundRows {
+		v := fromCents(rf.Total) // negativo
+		out.RefundByMethod[rf.PaymentMethod] = v
+		out.RefundTotal += v
+		out.RefundCount += rf.Cnt
 	}
 	for _, m := range methodRows {
 		v := fromCents(m.Total)

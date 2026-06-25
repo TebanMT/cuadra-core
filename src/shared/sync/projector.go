@@ -6,11 +6,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+
+	phonepkg "github.com/cuadra/cuadra-core/src/shared/phone"
 )
 
 // Projector materialises a single sync payload into the domain table that
@@ -95,15 +98,28 @@ var notNullStringColumns = map[string]map[string]bool{
 // without touching the rest.
 var projectors = func() map[string]Projector {
 	m := make(map[string]Projector, len(SyncedTables))
-	var membershipsTable EntityTable
+	var membershipsTable, membersTable, usersTable EntityTable
 	for i := range SyncedTables {
 		t := SyncedTables[i]
 		if t.Type == "memberships" {
 			membershipsTable = t
 		}
+		if t.Type == "members" {
+			membersTable = t
+		}
+		if t.Type == "users" {
+			usersTable = t
+		}
 		m[t.Type] = func(g *gorm.DB, gymID, entityID uuid.UUID, payload []byte) error {
 			return projectGeneric(g, t, gymID, entityID, payload)
 		}
+	}
+	// members necesita reconciliación del número de socio al cruzar la
+	// frontera de sync (ADR-010 §2.3): si la fila entrante reclama un número
+	// que otro socio vivo del gym ya tiene, el que llegó después pierde — se
+	// le reasigna un número nuevo y se re-encola su banner de bienvenida.
+	m["members"] = func(g *gorm.DB, gymID, entityID uuid.UUID, payload []byte) error {
+		return projectMember(g, membersTable, gymID, entityID, payload)
 	}
 	// memberships necesita un pre-step: el índice parcial único
 	// `uq_memberships_member_active` permite UNA sola fila por (gym,member)
@@ -118,8 +134,76 @@ var projectors = func() map[string]Projector {
 	m["memberships"] = func(g *gorm.DB, gymID, entityID uuid.UUID, payload []byte) error {
 		return projectMembership(g, membershipsTable, gymID, entityID, payload)
 	}
+	// users lleva una salvaguarda de credenciales: el CLOUD es la autoridad
+	// del password del dashboard del dueño. Ver projectUser / guardUserCredential.
+	m["users"] = func(g *gorm.DB, gymID, entityID uuid.UUID, payload []byte) error {
+		return projectUser(g, usersTable, gymID, entityID, payload)
+	}
 	return m
 }()
+
+// projectUser envuelve projectGeneric con una salvaguarda de credenciales.
+// IMPORTANTE: esta función sólo corre en el CLOUD, al aplicar un PUSH del
+// sidecar (server_store.go, build tag `server`). El sidecar aplica los pulls
+// por su cuenta (agent_apply.go, build tag `sidecar`), así que la dirección
+// cloud→sidecar del password_hash no pasa por aquí.
+func projectUser(g *gorm.DB, table EntityTable, gymID, entityID uuid.UUID, payload []byte) error {
+	guarded, err := guardUserCredential(payload)
+	if err != nil {
+		return fmt.Errorf("projector users: %w", err)
+	}
+	return projectGeneric(g, table, gymID, entityID, guarded)
+}
+
+// guardUserCredential descarta `password_hash` del payload de un push cuando
+// dejarlo pasar corrompería el login. Invariante: el cloud es la autoridad
+// del password del dashboard del dueño; un push del sidecar NUNCA debe:
+//
+//   - blanquear un password_hash existente. Cuando el sidecar no tiene
+//     `cached_login`, mirrorCloudIdentity siembra la fila local de `users` con
+//     password_hash="" (auth_controller_sidecar.go); enqueueUser lo empuja y,
+//     sin esta guarda, projector.nullifyEmptyString lo colapsa a NULL en el
+//     cloud → el siguiente login del dueño revienta con bcrypt "hashedSecret
+//     too short". Este es el bug de "la contraseña deja de funcionar".
+//   - reescribir el password_hash de un OWNER. El password del dueño sólo se
+//     fija cloud-side (signup / forgot-password / reset). El sidecar nada más
+//     tiene un hash cacheado, potencialmente viejo (stale) o de menor costo
+//     bcrypt; dejarlo ganar el last-write-wins degrada o revierte la credencial.
+//
+// projectGeneric omite del UPSERT las columnas ausentes, así que al quitar
+// password_hash el `ON CONFLICT` preserva el hash que ya tiene el cloud (y en
+// un INSERT de primera vez la columna cae a su default NULL — válido post-019).
+//
+// Para OPERADORES (login offline/PIN; no usan el dashboard cloud) sí dejamos
+// pasar un hash NO vacío: el reset legacy de operador desde recepción (UC-009,
+// cableado en cmd/sidecar) debe propagar al cloud. `pin_hash` nunca se toca:
+// el PIN se asigna en recepción, que es su autoridad.
+func guardUserCredential(payload []byte) ([]byte, error) {
+	var raw map[string]any
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return nil, fmt.Errorf("payload not a JSON object: %w", err)
+	}
+	ph, present := raw["password_hash"]
+	if !present {
+		return payload, nil
+	}
+	hash, _ := ph.(string)
+	// Fail-closed: el ÚNICO caso en que dejamos que un push escriba
+	// password_hash es un reset legacy de operador (rol "operator" + hash no
+	// vacío; UC-009 desde recepción). Todo lo demás —owner, hash vacío, rol
+	// ausente, desconocido o con otra capitalización— se descarta y el cloud
+	// preserva su hash. Así la defensa no depende del CHECK de rol upstream ni
+	// se rompe si aparece un nuevo writer o el backfill público Project().
+	isOperator := false
+	if r, ok := raw["role"].(string); ok {
+		isOperator = strings.EqualFold(strings.TrimSpace(r), "operator")
+	}
+	if hash == "" || !isOperator {
+		delete(raw, "password_hash")
+		return json.Marshal(raw)
+	}
+	return payload, nil
+}
 
 // projectMembership envuelve projectGeneric con un pre-step que libera el
 // slot del partial unique index `uq_memberships_member_active` cuando la
@@ -217,6 +301,199 @@ func vacateActiveMembershipSlot(
 		}
 	}
 	return nil
+}
+
+// projectMember envuelve projectGeneric con la reconciliación del número de
+// socio (ADR-010 §2.3). Si la fila entrante trae un member_number que otro
+// socio vivo del mismo gym ya ocupa (violación del índice único
+// `uq_members_gym_number`), el que llegó después pierde: se le reasigna un
+// número nuevo (max+1 del gym), se proyecta con ese número, se espeja el
+// cambio a sync_entities (para que el sidecar adopte el número corregido en
+// su próximo pull y deje de reenviar el viejo) y se re-encola su banner de
+// bienvenida (ADR-009) en notification_queue para que el cloud lo despache.
+//
+// La mayoría de gyms son single-device → esto casi nunca se dispara; multi-
+// device real implica cadena con internet → asignación efectivamente online.
+func projectMember(
+	g *gorm.DB,
+	table EntityTable,
+	gymID, entityID uuid.UUID,
+	payload []byte,
+) error {
+	var raw map[string]any
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return fmt.Errorf("projector members: payload not a JSON object: %w", err)
+	}
+	number, hasNumber := memberNumberFromPayload(raw["member_number"])
+	deleted := payloadMarksDeleted(raw["deleted_at"])
+
+	reassigned := false
+	if hasNumber && !deleted {
+		var conflicts int64
+		if err := g.Raw(
+			`SELECT COUNT(1) FROM members
+			   WHERE gym_id = ? AND member_number = ? AND deleted_at IS NULL AND id <> ?`,
+			gymID, number, entityID,
+		).Scan(&conflicts).Error; err != nil {
+			return fmt.Errorf("members reconcile collision check: %w", err)
+		}
+		if conflicts > 0 {
+			newNum, err := nextFreeMemberNumber(g, gymID)
+			if err != nil {
+				return fmt.Errorf("members reconcile next number: %w", err)
+			}
+			raw["member_number"] = newNum
+			number = newNum
+			reassigned = true
+			newPayload, err := json.Marshal(raw)
+			if err != nil {
+				return fmt.Errorf("members reconcile re-marshal: %w", err)
+			}
+			payload = newPayload
+		}
+	}
+
+	if err := projectGeneric(g, table, gymID, entityID, payload); err != nil {
+		return err
+	}
+
+	if reassigned {
+		// Espejar a sync_entities (mismo patrón que vacateActiveMembershipSlot):
+		// bump version + payload corregido + server reloj, para que el pull del
+		// sidecar adopte el número nuevo y converja (sin esto reenviaría el
+		// viejo en cada sync y dispararía re-notify en loop).
+		if err := g.Exec(
+			`UPDATE sync_entities
+			    SET payload = payload || jsonb_build_object(
+			                      'member_number', ?::int,
+			                      'version', (version + 1),
+			                      'updated_at', (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint
+			                  ),
+			        version = version + 1,
+			        server_updated_at = NOW()
+			  WHERE gym_id = ? AND entity_type = 'members' AND entity_id = ?`,
+			number, gymID, entityID,
+		).Error; err != nil {
+			return fmt.Errorf("members reconcile sync_entities mirror: %w", err)
+		}
+		if err := enqueueWelcomeRenotify(g, gymID, entityID, number); err != nil {
+			return fmt.Errorf("members reconcile re-notify: %w", err)
+		}
+	}
+	return nil
+}
+
+// memberNumberFromPayload extrae el número de socio del payload (JSON number,
+// json.Number o string). (0, false) si ausente/nulo/no-numérico.
+func memberNumberFromPayload(v any) (int, bool) {
+	switch x := v.(type) {
+	case float64:
+		return int(x), true
+	case int:
+		return x, true
+	case int64:
+		return int(x), true
+	case json.Number:
+		if n, err := x.Int64(); err == nil {
+			return int(n), true
+		}
+	case string:
+		if x == "" {
+			return 0, false
+		}
+		if n, err := strconv.Atoi(x); err == nil {
+			return n, true
+		}
+	}
+	return 0, false
+}
+
+// payloadMarksDeleted replica la heurística de projectMembership: deleted_at
+// presente y no-vacío ⇒ fila borrada.
+func payloadMarksDeleted(v any) bool {
+	if v == nil {
+		return false
+	}
+	if s, isStr := v.(string); isStr {
+		return s != ""
+	}
+	return true
+}
+
+// nextFreeMemberNumber returns max(member_number)+1 for the gym (>= 1000).
+// max+1 garantiza unicidad en el gym sin necesidad de gap-fill — la
+// reconciliación es un evento marginal, no la ruta caliente.
+func nextFreeMemberNumber(g *gorm.DB, gymID uuid.UUID) (int, error) {
+	var maxNum int
+	if err := g.Raw(
+		`SELECT COALESCE(MAX(member_number), 999) FROM members
+		   WHERE gym_id = ? AND member_number IS NOT NULL AND deleted_at IS NULL`,
+		gymID,
+	).Scan(&maxNum).Error; err != nil {
+		return 0, err
+	}
+	return maxNum + 1, nil
+}
+
+// enqueueWelcomeRenotify inserta una fila member_welcome_number en
+// notification_queue para que el cloud despache el banner con el número
+// corregido (ADR-010 §2.3 + ADR-009). Escribe SQL directo en lugar de
+// importar la notifications BC — shared/sync no debe depender de los módulos.
+// Idempotente vía idempotency_key + ON CONFLICT DO NOTHING. Skip silencioso
+// si el socio no tiene teléfono (no hay a quién notificar).
+func enqueueWelcomeRenotify(g *gorm.DB, gymID, memberID uuid.UUID, number int) error {
+	var m struct {
+		FullName string
+		Phone    string
+	}
+	if err := g.Raw(
+		`SELECT full_name, phone FROM members WHERE id = ? AND gym_id = ?`,
+		memberID, gymID,
+	).Scan(&m).Error; err != nil {
+		return err
+	}
+	// Normaliza a E.164 antes de encolar (defensa): garantiza que
+	// recipient_address del notification_queue quede canónico aunque la fila
+	// del socio tenga un valor legacy con espacios/sin código de país.
+	phone := phonepkg.Normalize(m.Phone)
+	if phone == "" {
+		return nil
+	}
+	var gymName string
+	if err := g.Raw(`SELECT COALESCE(name, '') FROM gyms WHERE id = ?`, gymID).Scan(&gymName).Error; err != nil {
+		return err
+	}
+
+	payload, err := json.Marshal(map[string]string{
+		"member_first_name": firstNameOf(m.FullName),
+		"gym_name":          gymName,
+		"member_number":     strconv.Itoa(number),
+	})
+	if err != nil {
+		return err
+	}
+	idempKey := fmt.Sprintf("welcome_number:%s:%d", memberID.String(), number)
+
+	return g.Exec(
+		`INSERT INTO notification_queue
+		    (id, gym_id, version, created_at, updated_at, channel, template_key,
+		     recipient_type, recipient_id, recipient_address, payload, status,
+		     retry_count, scheduled_for, idempotency_key)
+		 VALUES (?, ?, 1, NOW(), NOW(), 'whatsapp', 'member_welcome_number',
+		         'member', ?, ?, ?::jsonb, 'pending', 0, NOW(), ?)
+		 ON CONFLICT DO NOTHING`,
+		uuid.New(), gymID, memberID, phone, string(payload), idempKey,
+	).Error
+}
+
+// firstNameOf returns the first whitespace-delimited token of a full name
+// (mirrors notifications/app.firstName without importing the package).
+func firstNameOf(full string) string {
+	fields := strings.Fields(full)
+	if len(fields) == 0 {
+		return full
+	}
+	return fields[0]
 }
 
 // project dispatches to the registered projector for entityType. Returns a

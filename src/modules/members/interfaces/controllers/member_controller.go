@@ -23,13 +23,13 @@ import (
 
 // MemberController bundles UC-012..UC-017 + UC-032 + UC-046 partial.
 type MemberController struct {
-	Create     *memApp.CreateMember
-	Update     *memApp.UpdateMember
-	List       *memApp.ListMembers
-	Detail     *memApp.GetMemberDetail
-	Toggle     *memApp.ToggleMemberStatus
-	LockExpiry *memApp.LockMembershipExpiry
-	AssignPin  *memApp.AssignPin
+	Create       *memApp.CreateMember
+	Update       *memApp.UpdateMember
+	List         *memApp.ListMembers
+	Detail       *memApp.GetMemberDetail
+	Toggle       *memApp.ToggleMemberStatus
+	LockExpiry   *memApp.LockMembershipExpiry
+	AssignNumber *memApp.AssignMemberNumber
 	// ImportCSV es opcional: el wiring real lo inyecta cmd/server y
 	// cmd/sidecar via WithImportCSV. Si queda nil, el endpoint responde
 	// 503 — útil para tests que no exercisan importación.
@@ -79,12 +79,12 @@ func NewMemberController(
 	detail *memApp.GetMemberDetail,
 	toggle *memApp.ToggleMemberStatus,
 	lockExpiry *memApp.LockMembershipExpiry,
-	assignPin *memApp.AssignPin,
+	assignNumber *memApp.AssignMemberNumber,
 	tokens auth.TokenService,
 ) *MemberController {
 	return &MemberController{
 		Create: create, Update: update, List: list, Detail: detail,
-		Toggle: toggle, LockExpiry: lockExpiry, AssignPin: assignPin, Tokens: tokens,
+		Toggle: toggle, LockExpiry: lockExpiry, AssignNumber: assignNumber, Tokens: tokens,
 	}
 }
 
@@ -98,7 +98,7 @@ func (ctrl *MemberController) RegisterRoutes(r *gin.Engine) {
 		members.GET("/:id", ctrl.handleDetail)
 		members.PATCH("/:id", ctrl.handleUpdate)
 		members.PATCH("/:id/status", ctrl.handleToggleStatus)
-		members.POST("/:id/pin", ctrl.handleAssignPin)
+		members.POST("/:id/number", ctrl.handleAssignNumber)
 
 		// UC-046 — sólo el dueño puede importar masivo (DA-46.2). El gym
 		// completo cambia con un click; ese poder no lo damos a operadores.
@@ -153,15 +153,15 @@ type createMemberResp struct {
 	ExpiryDate          string `json:"expiry_date,omitempty"`
 	MembershipStatus    string `json:"membership_status"`
 	PendingFirstPayment bool   `json:"pending_first_payment"`
-	// Pin del socio recién inscrito (auto-generado 4 dígitos único en el
-	// gym). Siempre se envía para que el operador lo lea / escriba en la
-	// credencial; vacío sólo en el caso muy raro de que el gym esté
-	// saturado de PINs y se haya saltado la auto-asignación.
-	Pin          string       `json:"pin,omitempty"`
-	PinDispatch  *pinDispatch `json:"pin_dispatch,omitempty"`
-	PaymentID    *uuid.UUID   `json:"payment_id,omitempty"`
-	PaymentFolio string       `json:"payment_folio,omitempty"`
-	PaymentTotal float64      `json:"payment_total,omitempty"`
+	// MemberNumber: número de socio público auto-generado (ADR-010). Siempre
+	// se envía para que el operador lo lea / escriba en la credencial; 0 sólo
+	// en el caso muy raro de que el gym esté saturado y se haya saltado la
+	// auto-asignación.
+	MemberNumber int           `json:"member_number,omitempty"`
+	Dispatch     *dispatchInfo `json:"dispatch,omitempty"`
+	PaymentID    *uuid.UUID    `json:"payment_id,omitempty"`
+	PaymentFolio string        `json:"payment_folio,omitempty"`
+	PaymentTotal float64       `json:"payment_total,omitempty"`
 	// Datos de la promo aplicada al primer pago — vacíos cuando no hubo.
 	PromotionAppliedID *uuid.UUID  `json:"promotion_applied_id,omitempty"`
 	PromotionName      string      `json:"promotion_name,omitempty"`
@@ -170,24 +170,25 @@ type createMemberResp struct {
 	PromotionGiftedIDs []uuid.UUID `json:"promotion_gifted_membership_ids,omitempty"`
 }
 
-// pinDispatch surfaces whether the welcome-PIN WhatsApp notification was
-// enqueued. The FE renders one of three copies based on the shape:
-//   - dispatched=true, recipient_phone="+52…"   → "PIN enviado a +52…"
+// dispatchInfo surfaces whether the welcome WhatsApp notification (con el
+// número de socio) was enqueued. The FE renders one of three copies based on
+// the shape:
+//   - dispatched=true, recipient_phone="+52…"   → "Número enviado a +52…"
 //   - dispatched=false, skipped_reason="whatsapp_not_connected" / "no_member_phone"
 //     → "Escríbelo en la credencial"
 //   - dispatched=false, skipped_reason="disabled_by_gym"
 //     → "Escríbelo en la credencial" (silencioso)
-type pinDispatch struct {
+type dispatchInfo struct {
 	Dispatched     bool   `json:"dispatched"`
 	SkippedReason  string `json:"skipped_reason,omitempty"`
 	RecipientPhone string `json:"recipient_phone,omitempty"`
 }
 
-func toPinDispatch(d memApp.WelcomePinDispatchResult) *pinDispatch {
+func toDispatch(d memApp.WelcomeDispatchResult) *dispatchInfo {
 	if !d.Dispatched && d.SkippedReason == "" {
 		return nil
 	}
-	return &pinDispatch{
+	return &dispatchInfo{
 		Dispatched:     d.Dispatched,
 		SkippedReason:  d.SkippedReason,
 		RecipientPhone: d.RecipientPhone,
@@ -217,8 +218,10 @@ type lockExpiryReq struct {
 	Reason    string `json:"reason" validate:"required,min=5,max=500"`
 }
 
-type assignPinReq struct {
-	Pin string `json:"pin,omitempty"` // optional — empty = auto-generate
+// assignNumberReq backs POST /members/:id/number (ADR-010). member_number
+// ausente / 0 = auto-generar uno único en el gym.
+type assignNumberReq struct {
+	MemberNumber *int `json:"member_number,omitempty"`
 }
 
 type memberResp struct {
@@ -234,13 +237,12 @@ type memberResp struct {
 	Status              string    `json:"status"`
 	EnrollmentPaid      bool      `json:"enrollment_paid"`
 	LastMaintenancePaid *string   `json:"last_maintenance_paid,omitempty"`
-	HasPin              bool      `json:"has_pin"`
+	HasMemberNumber     bool      `json:"has_member_number"`
 	HasFingerprint      bool      `json:"has_fingerprint"`
-	// Pin: el código de 4 dígitos visible para el operador (mismo
-	// rationale que la migración 012 — texto plano, no es un secreto).
-	// Vacío sólo cuando el socio no tiene PIN aún (caso histórico
-	// pre-auto-assign o saturación de PINs en gym).
-	Pin                  string     `json:"pin,omitempty"`
+	// MemberNumber: número de socio público (ADR-010), visible para que el
+	// operador lo lea / escriba en la credencial. nil cuando el socio aún no
+	// tiene número.
+	MemberNumber         *int       `json:"member_number,omitempty"`
 	LastContactAttemptAt *time.Time `json:"last_contact_attempt_at,omitempty"`
 	// Gender siempre se envía (sin omitempty) para que el FE pueda
 	// diferenciar entre "no cargado del backend" y "vacío". null en JSON
@@ -369,8 +371,8 @@ func (ctrl *MemberController) handleCreate(c *gin.Context) {
 		ExpiryDate:          formatOptionalDate(out.ExpiryDate),
 		MembershipStatus:    out.MembershipStatus,
 		PendingFirstPayment: out.PendingFirstPayment,
-		Pin:                 out.Pin,
-		PinDispatch:         toPinDispatch(out.PinDispatch),
+		MemberNumber:        out.MemberNumber,
+		Dispatch:            toDispatch(out.Dispatch),
 		PaymentID:           out.PaymentID,
 		PaymentFolio:        out.PaymentFolio,
 		PaymentTotal:        out.PaymentTotal,
@@ -574,25 +576,34 @@ func (ctrl *MemberController) handleLockExpiry(c *gin.Context) {
 	})
 }
 
-func (ctrl *MemberController) handleAssignPin(c *gin.Context) {
+// handleAssignNumber sirve POST /members/:id/number — asigna el NÚMERO DE
+// SOCIO (ADR-010). member_number ausente / 0 ⇒ auto-generar.
+func (ctrl *MemberController) handleAssignNumber(c *gin.Context) {
 	gymID, _ := middleware.GetGymID(c)
 	userID, _ := middleware.GetUserID(c)
 	id, ok := parseUUIDParam(c, "id")
 	if !ok {
 		return
 	}
-	var req assignPinReq
+	var req assignNumberReq
 	_ = c.ShouldBindJSON(&req)
-	out, err := ctrl.AssignPin.Execute(c.Request.Context(), memApp.AssignPinInput{
-		GymID: gymID, ActorUserID: userID, MemberID: id, PlainPin: req.Pin,
+	number := 0
+	if req.MemberNumber != nil {
+		number = *req.MemberNumber
+	}
+	out, err := ctrl.AssignNumber.Execute(c.Request.Context(), memApp.AssignMemberNumberInput{
+		GymID: gymID, ActorUserID: userID, MemberID: id, Number: number,
 	})
 	if err != nil {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
 		return
 	}
-	resp := gin.H{"member_id": out.MemberID, "pin": out.Pin}
-	if d := toPinDispatch(out.PinDispatch); d != nil {
-		resp["pin_dispatch"] = d
+	resp := gin.H{
+		"member_id":     out.MemberID,
+		"member_number": out.MemberNumber,
+	}
+	if d := toDispatch(out.Dispatch); d != nil {
+		resp["dispatch"] = d
 	}
 	utils.JsonResponse(c, http.StatusOK, resp)
 }
@@ -720,13 +731,11 @@ func toMemberResp(m *memberDomain.Member) memberResp {
 		Notes:                m.Notes,
 		Status:               m.Status,
 		EnrollmentPaid:       m.EnrollmentPaid,
-		HasPin:               m.PinHash != nil,
+		HasMemberNumber:      m.MemberNumber != nil,
+		MemberNumber:         m.MemberNumber,
 		LastContactAttemptAt: m.LastContactAttemptAt,
 		Gender:               m.Gender,
 		CreatedAt:            m.CreatedAt,
-	}
-	if m.PinPlain != nil {
-		r.Pin = *m.PinPlain
 	}
 	if m.Birthdate != nil {
 		s := m.Birthdate.Format("2006-01-02")

@@ -73,7 +73,11 @@ func (ctrl *WebhookController) handleStatusCallback(c *gin.Context) {
 		Status:            parsed.Get("MessageStatus"),
 		ErrorCode:         parsed.Get("ErrorCode"),
 		ErrorMessage:      parsed.Get("ErrorMessage"),
-		RawPayload:        body,
+		// Inbound: From viene como "whatsapp:+52..."; Body es el texto del
+		// socio. El use case detecta STOP/BAJA para opt-out de marketing.
+		FromPhone:  parsed.Get("From"),
+		Body:       parsed.Get("Body"),
+		RawPayload: body,
 	}
 	if _, err := ctrl.Process.Execute(c.Request.Context(), in); err != nil {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)

@@ -17,9 +17,9 @@ type CheckinRepository interface {
 	Create(tx sharedDomain.Transaction, c *checkinDomain.Checkin) (*checkinDomain.Checkin, error)
 	GetByID(tx sharedDomain.Transaction, id uuid.UUID) (*checkinDomain.Checkin, error)
 	// CountFailedPinAttemptsSince supports DA-32 lockout. Counts checkins
-	// whose member is unknown — actually we record only successful PIN
+	// whose member is unknown — actually we record only successful number
 	// matches as checkins; failed attempts live in a kiosko-side in-memory
-	// counter (see app/checkin_by_pin.go). Kept here for future "failed
+	// counter (see app/checkin_by_number.go). Kept here for future "failed
 	// attempts" persistence if needed.
 	ListByMember(tx sharedDomain.Transaction, memberID uuid.UUID, since time.Time, limit int) ([]*checkinDomain.Checkin, error)
 	// CountTodayByGym is the count tile that lives at the top of the

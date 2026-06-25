@@ -239,6 +239,134 @@ func TestUC018_HappyPath_FirstPaymentChargesEnrollmentAndRenews(t *testing.T) {
 	}
 }
 
+// Socio huérfano (sin membresía vigente — p.ej. importado con la suya ya
+// vencida, o tras una cancelación): cobrar debe RE-INSCRIBIRLO creando y
+// activando una membresía nueva, en vez de fallar con "el socio no tiene
+// membresía vigente".
+func TestUC018_OrphanMember_PaymentReenrolls(t *testing.T) {
+	f := setup(t)
+	// Dejamos su única membresía en 'expired' → GetCurrentByMember no halla
+	// ninguna active/pending y el socio queda huérfano.
+	if _, err := f.db.Exec("UPDATE memberships SET status='expired' WHERE member_id=?", f.memberID.String()); err != nil {
+		t.Fatalf("orphan setup: %v", err)
+	}
+
+	uc := f.registerPayment()
+	out, err := uc.Execute(context.Background(), billingApp.RegisterMembershipPaymentInput{
+		GymID: f.gymID, ActorUserID: f.ownerID,
+		MemberID: f.memberID, MembershipTypeID: f.planID,
+		Method: "cash",
+	})
+	if err != nil {
+		t.Fatalf("cobro de socio huérfano debió re-inscribir, no fallar: %v", err)
+	}
+	if out.Paid <= 0 {
+		t.Errorf("paid = %v, want > 0", out.Paid)
+	}
+
+	// Exactamente una membresía activa nueva...
+	var nActive int
+	if err := f.db.Get(&nActive, "SELECT COUNT(*) FROM memberships WHERE member_id=? AND status='active'", f.memberID.String()); err != nil {
+		t.Fatalf("count active: %v", err)
+	}
+	if nActive != 1 {
+		t.Errorf("active memberships = %d, want 1 (re-inscripción)", nActive)
+	}
+	// ...y la vieja 'expired' sigue como historial (no se borra).
+	var nExpired int
+	if err := f.db.Get(&nExpired, "SELECT COUNT(*) FROM memberships WHERE member_id=? AND status='expired'", f.memberID.String()); err != nil {
+		t.Fatalf("count expired: %v", err)
+	}
+	if nExpired != 1 {
+		t.Errorf("expired memberships = %d, want 1 (historial preservado)", nExpired)
+	}
+}
+
+// fakeWelcome captura las llamadas al seam de bienvenida.
+type fakeWelcome struct {
+	calls      int
+	lastNumber int
+}
+
+func (w *fakeWelcome) Notify(_ context.Context, _ sharedDomain.Transaction, in memApp.WelcomeNotifyInput, _ time.Time) (memApp.WelcomeDispatchResult, error) {
+	w.calls++
+	w.lastNumber = in.Number
+	return memApp.WelcomeDispatchResult{}, nil
+}
+
+// El WhatsApp de bienvenida se manda cuando el socio queda ACTIVO por primera
+// vez (su primer pago), y NO se repite en renovaciones.
+func TestUC018_WelcomeFiresOnFirstActivationOnly(t *testing.T) {
+	f := setup(t)
+	// Socio con número asignado y su membresía aún sin pagar (pending_payment).
+	if _, err := f.db.Exec("UPDATE members SET member_number=4321 WHERE id=?", f.memberID.String()); err != nil {
+		t.Fatalf("set number: %v", err)
+	}
+	if _, err := f.db.Exec("UPDATE memberships SET status='pending_payment', expiry_date=NULL WHERE member_id=?", f.memberID.String()); err != nil {
+		t.Fatalf("pending: %v", err)
+	}
+
+	welcome := &fakeWelcome{}
+	uc := billingApp.NewRegisterMembershipPayment(
+		f.paymentRepo, f.folios, f.memberSvc, f.memberRepo, f.uow, f.recorder, billingApp.NoopPublisher{},
+	).WithWelcomeNotifier(welcome)
+	in := billingApp.RegisterMembershipPaymentInput{
+		GymID: f.gymID, ActorUserID: f.ownerID,
+		MemberID: f.memberID, MembershipTypeID: f.planID, Method: "cash",
+	}
+
+	// 1er pago → activa por primera vez → welcome 1 vez, con el número.
+	if _, err := uc.Execute(context.Background(), in); err != nil {
+		t.Fatalf("primer pago: %v", err)
+	}
+	if welcome.calls != 1 {
+		t.Fatalf("welcome tras 1ra activación = %d, want 1", welcome.calls)
+	}
+	if welcome.lastNumber != 4321 {
+		t.Errorf("welcome number = %d, want 4321", welcome.lastNumber)
+	}
+
+	// 2do pago → renovación → NO se re-envía.
+	if _, err := uc.Execute(context.Background(), in); err != nil {
+		t.Fatalf("segundo pago: %v", err)
+	}
+	if welcome.calls != 1 {
+		t.Errorf("welcome tras renovación = %d, want 1 (no re-envío)", welcome.calls)
+	}
+}
+
+// El generador de folios debe usar el valor NUMÉRICO del folio, no el orden
+// lexicográfico: "MEM-99999" (5 díg) es lexicográficamente MAYOR que
+// "MEM-100000" (6 díg) aunque sea numéricamente menor. Sin esto, el siguiente
+// folio se recalculaba como MEM-100000 y colisionaba con el ya existente
+// (repro del UNIQUE constraint tras importar pagos con MEM-%05d de IDs legacy
+// que pasan de 99999).
+func TestFolioGenerator_NumericMaxNotLexicographic(t *testing.T) {
+	f := setup(t)
+	for _, folio := range []string{"MEM-99999", "MEM-100000"} {
+		if _, err := f.db.Exec(
+			`INSERT INTO payments
+			   (id, gym_id, version, created_at, updated_at, folio, member_id,
+			    amount, payment_method, concept, balance_pending, payment_date, operator_id)
+			 VALUES (?, ?, 1, 1, 1, ?, ?, 10000, 'cash', 'membership', 0, '2026-01-01', ?)`,
+			uuid.New().String(), f.gymID.String(), folio, f.memberID.String(), f.ownerID.String(),
+		); err != nil {
+			t.Fatalf("insert %s: %v", folio, err)
+		}
+	}
+	tx, err := f.uow.Query(context.Background())
+	if err != nil {
+		t.Fatalf("query tx: %v", err)
+	}
+	next, err := f.folios.Next(tx, f.gymID, "membership")
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if next != "MEM-100001" {
+		t.Errorf("siguiente folio = %q, want MEM-100001 (numérico, no MEM-100000 lexicográfico)", next)
+	}
+}
+
 func TestUC018_PartialPayment_ExtendsAndCarriesBalance(t *testing.T) {
 	f := setup(t)
 	uc := f.registerPayment()

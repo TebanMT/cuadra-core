@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -19,12 +18,12 @@ import (
 
 // EnqueueOperatorWelcomePIN writes the operator_welcome_pin notification.
 //
-// Gating, in order:
+// Gating, in order (ADR-009: sin gate de conexión — el sender se resuelve en
+// el dispatcher; Standard/trial usan el número maestro de Tinta):
 //
-//  1. gym.IsWhatsAppConnected — no point queuing if outbound would fail.
-//  2. user is an operator of the same gym (defense in depth against a
+//  1. user is an operator of the same gym (defense in depth against a
 //     wiring bug from CreateOperator).
-//  3. user has a non-empty phone — sin recipient address no podemos
+//  2. user has a non-empty phone — sin recipient address no podemos
 //     despachar, y NewOperator ya garantiza esto en el happy path; lo
 //     dejamos por si un legacy operator entra al flujo de rotación.
 //
@@ -35,7 +34,6 @@ type EnqueueOperatorWelcomePIN struct {
 	Notifications notiRepo.NotificationRepository
 	Gyms          gymRepo.GymRepository
 	Users         userRepo.UserRepository
-	ImageGen      WelcomeImageGenerator
 }
 
 func NewEnqueueOperatorWelcomePIN(
@@ -48,12 +46,6 @@ func NewEnqueueOperatorWelcomePIN(
 		Gyms:          gyms,
 		Users:         users,
 	}
-}
-
-// WithImageGenerator sets the image generator and returns self for chaining.
-func (uc *EnqueueOperatorWelcomePIN) WithImageGenerator(g WelcomeImageGenerator) *EnqueueOperatorWelcomePIN {
-	uc.ImageGen = g
-	return uc
 }
 
 // Notify satisfies usersApp.OperatorWelcomePINNotifier.
@@ -69,11 +61,6 @@ func (uc *EnqueueOperatorWelcomePIN) Notify(
 	if err != nil {
 		return out, sharedDomain.NewUnexpectedError(err)
 	}
-	if !gym.IsWhatsAppConnected() {
-		out.SkippedReason = "whatsapp_not_connected"
-		return out, nil
-	}
-
 	user, err := uc.Users.GetByID(tx, in.UserID)
 	if err != nil {
 		return out, sharedDomain.NewUnexpectedError(err)
@@ -95,20 +82,10 @@ func (uc *EnqueueOperatorWelcomePIN) Notify(
 	if gym.Name != nil {
 		gymName = *gym.Name
 	}
-
-	imageURL := ""
-	if uc.ImageGen != nil {
-		url, err := uc.ImageGen.Generate(ctx, in.PIN)
-		if err != nil {
-			log.Printf("[notifications/operator_welcome_pin] image gen failed (degraded): %v", err)
-		} else {
-			imageURL = url
-		}
-	}
 	vars := map[string]string{
-		"image_url": imageURL,
 		"full_name": user.FullName,
 		"gym_name":  gymName,
+		"pin":       in.PIN,
 	}
 
 	idempKey := fmt.Sprintf("operator_welcome_pin:%s:%s", in.UserID.String(), in.PIN)
@@ -127,7 +104,7 @@ func (uc *EnqueueOperatorWelcomePIN) Notify(
 		in.GymID,
 		user.ID,
 		notiDomain.ChannelWhatsApp,
-		"operator_welcome",
+		"operator_welcome_pin",
 		notiDomain.RecipientUser,
 		phone,
 		vars,

@@ -103,14 +103,11 @@ func (ctrl *Controller) RegisterRoutes(r *gin.Engine) {
 		api.DELETE("/gyms/me/whatsapp", middleware.RequireOwner(), ctrl.handleDisconnect)
 		api.GET("/notification-templates", ctrl.handleListTemplates)
 		api.PATCH("/notification-templates/:key", middleware.RequireOwner(), ctrl.handleUpdateTemplate)
-		// Broadcast (envío masivo a socios) es Plus: el gym de barrio
-		// arranca con Standard y manda comms 1-a-1; el masivo aplica al
-		// gym más activo que justifica Plus.
-		plus := api.Group("")
-		if ctrl.PlanGate != nil {
-			plus.Use(ctrl.PlanGate)
-		}
-		plus.POST("/broadcasts", middleware.RequireOwner(), ctrl.handleBroadcast)
+		// Broadcast (envío masivo a socios). Ahora disponible en Standard pero
+		// acotado (2 envíos/mes, 100 socios/envío); Plus levanta los topes. El
+		// límite se enforce en el use case por plan, no con un gate de ruta —
+		// por eso ya no va bajo PlanGate.
+		api.POST("/broadcasts", middleware.RequireOwner(), ctrl.handleBroadcast)
 		api.GET("/notifications", ctrl.handleList)
 		// Dead-letter retry — owner-only. Re-encola un row failed para que
 		// el dispatcher lo procese en la próxima vuelta. Sin esto los rows
@@ -198,8 +195,12 @@ type updateTemplateReq struct {
 }
 
 type broadcastReq struct {
-	Filter    string `json:"filter,omitempty"`
-	Message   string `json:"message" validate:"required,min=1,max=600"`
+	Filter string `json:"filter,omitempty"`
+	// MemberIDs — selección manual (opción C); gana sobre Filter. Opcional.
+	MemberIDs []uuid.UUID `json:"member_ids,omitempty"`
+	// Message: omitempty para que el PREVIEW (confirmed:false) corra sin texto;
+	// el use case exige no-vacío sólo al confirmar.
+	Message   string `json:"message" validate:"omitempty,max=600"`
 	Confirmed bool   `json:"confirmed"`
 }
 
@@ -208,6 +209,15 @@ type broadcastResp struct {
 	AudienceN   int       `json:"audience_count"`
 	EnqueuedN   int       `json:"enqueued_count"`
 	BroadcastID uuid.UUID `json:"broadcast_id"`
+	// Límites del plan (2C) para que el FE muestre el aviso y deshabilite
+	// Enviar. monthly_limit == 0 = ilimitado (Plus).
+	IsPlus       bool `json:"is_plus"`
+	AudienceCap  int  `json:"audience_cap"`
+	MonthlyLimit int  `json:"monthly_limit"`
+	MonthlyUsed  int  `json:"monthly_used"`
+	// AudiencePreview — id+nombre de la audiencia (sólo en preview), para que
+	// el FE siembre la selección de socios.
+	AudiencePreview []notiApp.AudienceMemberView `json:"audience_preview,omitempty"`
 }
 
 type notificationResp struct {
@@ -399,6 +409,7 @@ func (ctrl *Controller) handleBroadcast(c *gin.Context) {
 		GymID:       gymID,
 		ActorUserID: userID,
 		Filter:      notiApp.BroadcastFilter(req.Filter),
+		MemberIDs:   req.MemberIDs,
 		Message:     req.Message,
 		Confirmed:   req.Confirmed,
 	})
@@ -411,10 +422,15 @@ func (ctrl *Controller) handleBroadcast(c *gin.Context) {
 		status = http.StatusCreated
 	}
 	utils.JsonResponse(c, status, broadcastResp{
-		Preview:     out.Preview,
-		AudienceN:   out.AudienceN,
-		EnqueuedN:   out.EnqueuedN,
-		BroadcastID: out.BroadcastID,
+		Preview:         out.Preview,
+		AudienceN:       out.AudienceN,
+		EnqueuedN:       out.EnqueuedN,
+		BroadcastID:     out.BroadcastID,
+		IsPlus:          out.IsPlus,
+		AudienceCap:     out.AudienceCap,
+		MonthlyLimit:    out.MonthlyLimit,
+		MonthlyUsed:     out.MonthlyUsed,
+		AudiencePreview: out.AudiencePreview,
 	})
 }
 

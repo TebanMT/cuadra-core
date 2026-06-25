@@ -19,8 +19,8 @@ import (
 	promoApp "github.com/cuadra/cuadra-core/src/modules/promotions/app"
 	promoDomain "github.com/cuadra/cuadra-core/src/modules/promotions/domain/promotion"
 	"github.com/cuadra/cuadra-core/src/shared/audit"
-	"github.com/cuadra/cuadra-core/src/shared/auth"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
+	phonepkg "github.com/cuadra/cuadra-core/src/shared/phone"
 )
 
 // CreateMemberPromotion es el sub-input opcional para aplicar una promo
@@ -92,12 +92,12 @@ type CreateMemberInput struct {
 // CreateMemberOutput contains the new member's id and folio. Cuando se
 // cobra el primer pago, PaymentID / PaymentFolio / PaymentTotal vienen
 // poblados — el FE los puede usar para mostrar recibo o folio en pantalla.
-// Pin viene poblado siempre: la inscripción auto-genera un PIN de 4
-// dígitos único en el gym y lo devuelve para que el operador lo escriba
-// en la credencial. Después se puede consultar / cambiar desde el perfil.
-// PinDispatch refleja si la notificación de WhatsApp con el PIN se
-// encoló — el FE lo usa para decidir entre "enviado a +52…" y "escríbelo
-// en la credencial".
+// MemberNumber viene poblado siempre (>0): la inscripción auto-genera un
+// número de socio único en el gym (ADR-010) y lo devuelve para que el
+// operador lo escriba en la credencial. Después se puede consultar /
+// cambiar desde el perfil. Dispatch refleja si la notificación de WhatsApp
+// con el número se encoló — el FE lo usa para decidir entre "enviado a
+// +52…" y "escríbelo en la credencial".
 type CreateMemberOutput struct {
 	MemberID     uuid.UUID
 	MembershipID uuid.UUID
@@ -107,8 +107,8 @@ type CreateMemberOutput struct {
 	ExpiryDate          *time.Time
 	MembershipStatus    string // "active" | "pending_payment"
 	PendingFirstPayment bool
-	Pin                 string
-	PinDispatch         WelcomePinDispatchResult
+	MemberNumber        int
+	Dispatch            WelcomeDispatchResult
 	PaymentID           *uuid.UUID
 	PaymentFolio        string
 	PaymentTotal        float64
@@ -128,10 +128,13 @@ type CreateMember struct {
 	// tests fixtures que sólo crean socios sin cobro pueden pasar nil.
 	Payments billingRepo.PaymentRepository
 	Folios   *folioSvc.Generator
-	// WelcomePin es la seam cross-BC que la notifications BC implementa
+	// Welcome es la seam cross-BC que la notifications BC implementa
 	// (ver notifications/app/EnqueueWelcomePin). Nil = no se envía
 	// notificación; usado en tests que no exercisan WhatsApp.
-	WelcomePin WelcomePinNotifier
+	Welcome WelcomeNotifier
+	// Digits resuelve/crece la longitud del número de socio por gym
+	// (ADR-010). Nil = default fijo (4 dígitos, sin bump).
+	Digits MemberNumberDigitsStore
 	// Promotions (opcional) habilita aplicar una promo al primer pago.
 	// Nil = ignora cualquier Promotion del input.
 	Promotions *promoApp.ApplyPromotion
@@ -167,11 +170,18 @@ func NewCreateMemberWithBilling(members memRepo.MemberRepository, memberships me
 	return uc
 }
 
-// WithWelcomePinNotifier wires the WhatsApp welcome-PIN seam. Idempotent
-// chaining helper for DI in cmd/server + cmd/sidecar; tests can skip
-// calling it and the use case defaults to noopWelcomePinNotifier.
-func (uc *CreateMember) WithWelcomePinNotifier(n WelcomePinNotifier) *CreateMember {
-	uc.WelcomePin = n
+// WithWelcomeNotifier wires the WhatsApp welcome seam. Idempotent chaining
+// helper for DI in cmd/server + cmd/sidecar; tests can skip calling it and
+// the use case defaults to noopWelcomeNotifier.
+func (uc *CreateMember) WithWelcomeNotifier(n WelcomeNotifier) *CreateMember {
+	uc.Welcome = n
+	return uc
+}
+
+// WithMemberNumberDigits wires the gyms-backed config seam (length + bump)
+// so auto-assignment honors the per-gym member_number_digits (ADR-010).
+func (uc *CreateMember) WithMemberNumberDigits(s MemberNumberDigitsStore) *CreateMember {
+	uc.Digits = s
 	return uc
 }
 
@@ -252,47 +262,51 @@ func (uc *CreateMember) Execute(ctx context.Context, in CreateMemberInput) (*Cre
 			return sharedDomain.NewValidationError(err)
 		}
 
-		// 4.5) Auto-asignar PIN. Históricamente "Asignar PIN" era un paso
-		//      manual post-inscripción; ahora siempre arranca con uno
-		//      generado (visible en el perfil del socio para que el
-		//      operador lo lea cuando se lo olviden). Si la generación
-		//      llegara a agotar reintentos (>9000 PINs activos en el
-		//      gym, irreal en MVP) loguueamos y seguimos: el socio queda
-		//      sin PIN y se puede asignar después manualmente — eso es
+		// 4.5) Auto-asignar número de socio (ADR-010). Históricamente
+		//      "Asignar PIN" era un paso manual post-inscripción; ahora
+		//      siempre arranca con un número generado (público, visible en
+		//      el perfil para que el operador lo lea y lo escriba en la
+		//      credencial). Si la generación llegara a agotar el espacio
+		//      (irreal con el bump-al-50%) loguueamos y seguimos: el socio
+		//      queda sin número y se le asigna después manualmente — eso es
 		//      mejor que abortar toda la inscripción.
-		generated, gerr := generateUniquePin(tx, uc.Members, in.GymID, nil)
+		digits := uc.Digits
+		if digits == nil {
+			digits = defaultMemberNumberDigitsStore{}
+		}
+		generated, gerr := generateUniqueMemberNumber(tx, uc.Members, digits, in.GymID)
 		if gerr == nil {
-			hash, herr := auth.HashPassword(generated)
-			if herr != nil {
-				return sharedDomain.NewUnexpectedError(herr)
-			}
-			m.SetPin(hash, generated, now)
-			out.Pin = generated
+			m.SetMemberNumber(generated, now)
+			out.MemberNumber = generated
 		} else {
-			log.Printf("[create-member] no se pudo auto-asignar PIN (gym=%s member=%s): %v", in.GymID, m.ID, gerr)
+			log.Printf("[create-member] no se pudo auto-asignar número de socio (gym=%s member=%s): %v", in.GymID, m.ID, gerr)
 		}
 
 		if _, err := uc.Members.Create(tx, m); err != nil {
 			return sharedDomain.NewUnexpectedError(err)
 		}
 
-		// 4.6) Encolar la notificación de WhatsApp con el PIN. La seam
-		//      decide solita si saltarse (gym sin WhatsApp, sin teléfono,
-		//      toggle off) — devuelve Dispatched=false con SkippedReason
-		//      estable. Va en la misma tx para que el row de
+		// 4.6) Encolar la notificación de WhatsApp con el número de socio,
+		//      PERO sólo si el socio queda ACTIVO en esta alta (hay primer
+		//      pago). Si se crea en pending_payment, la bienvenida se difiere
+		//      a su primer pago (RegisterMembershipPayment la encola cuando la
+		//      membresía se activa por primera vez). "Quedar activo" = ya pagó.
+		//      La seam decide solita si saltarse (gym sin WhatsApp, sin
+		//      teléfono, toggle off) — devuelve Dispatched=false con
+		//      SkippedReason estable. Va en la misma tx para que el row de
 		//      notification_queue no quede huérfano si después algo falla.
-		if out.Pin != "" {
-			notifier := uc.WelcomePin
+		if out.MemberNumber != 0 && in.ChargeFirstPayment {
+			notifier := uc.Welcome
 			if notifier == nil {
-				notifier = noopWelcomePinNotifier{}
+				notifier = noopWelcomeNotifier{}
 			}
-			res, nerr := notifier.Notify(ctx, tx, WelcomePinNotifyInput{
-				GymID: in.GymID, MemberID: m.ID, Pin: out.Pin,
+			res, nerr := notifier.Notify(ctx, tx, WelcomeNotifyInput{
+				GymID: in.GymID, MemberID: m.ID, Number: out.MemberNumber,
 			}, now)
 			if nerr != nil {
 				return nerr
 			}
-			out.PinDispatch = res
+			out.Dispatch = res
 		}
 
 		// 5) Membership. Si va a haber primer pago en esta misma tx
@@ -318,23 +332,23 @@ func (uc *CreateMember) Execute(ctx context.Context, in CreateMemberInput) (*Cre
 			Action:      audit.ActionCreate,
 			ActorUserID: &in.ActorUserID,
 			Changes: map[string]any{
-				"folio":              m.Folio,
-				"membership_type_id": mt.ID,
-				"membership_id":      ms.ID,
-				"membership_status":  ms.Status,
-				"expiry_date":        formatExpiryForAudit(ms.ExpiryDate),
-				"first_payment":      in.ChargeFirstPayment,
-				"pin_auto_assigned":  out.Pin != "",
+				"folio":                  m.Folio,
+				"membership_type_id":     mt.ID,
+				"membership_id":          ms.ID,
+				"membership_status":      ms.Status,
+				"expiry_date":            formatExpiryForAudit(ms.ExpiryDate),
+				"first_payment":          in.ChargeFirstPayment,
+				"member_number_assigned": out.MemberNumber != 0,
 			},
 			IPAddress: audit.IPFromContext(ctx),
 			UserAgent: audit.UAFromContext(ctx),
 			At:        now,
 		})
 
-		// Preserve auto-asignado PIN + dispatch result (set above in
+		// Preserve auto-asignado número + dispatch result (set above in
 		// steps 4.5 / 4.6) — el reset de `out` mantiene el resto.
-		generatedPin := out.Pin
-		pinDispatch := out.PinDispatch
+		generatedNumber := out.MemberNumber
+		dispatch := out.Dispatch
 		out = CreateMemberOutput{
 			MemberID:            m.ID,
 			MembershipID:        ms.ID,
@@ -342,8 +356,8 @@ func (uc *CreateMember) Execute(ctx context.Context, in CreateMemberInput) (*Cre
 			ExpiryDate:          ms.ExpiryDate,
 			MembershipStatus:    ms.Status,
 			PendingFirstPayment: in.ChargeFirstPayment,
-			Pin:                 generatedPin,
-			PinDispatch:         pinDispatch,
+			MemberNumber:        generatedNumber,
+			Dispatch:            dispatch,
 		}
 
 		// 7) Primer pago (opcional). Mismo tx que la creación: si algo
@@ -553,24 +567,13 @@ func formatExpiryForAudit(e *time.Time) string {
 }
 
 func normalizeAndValidatePhone(raw string) (string, error) {
-	v := raw
-	v = trimSpaces(v)
+	// Canónico (src/shared/phone) — el MISMO que usa el dominio al guardar, así
+	// el valor que se valida y con el que se hace el dedup (ExistsByGymAndPhone)
+	// es IDÉNTICO al que termina en BD (E.164 con +52). Antes el dedup usaba un
+	// trimSpaces sin código de país y no macheaba el valor guardado.
+	v := phonepkg.Normalize(raw)
 	if !memberDomain.ValidatePhone(v) {
 		return "", memErrors.ErrInvalidPhone
 	}
 	return v, nil
-}
-
-func trimSpaces(s string) string {
-	out := make([]byte, 0, len(s))
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch c {
-		case ' ', '\t', '-', '(', ')':
-			continue
-		default:
-			out = append(out, c)
-		}
-	}
-	return string(out)
 }

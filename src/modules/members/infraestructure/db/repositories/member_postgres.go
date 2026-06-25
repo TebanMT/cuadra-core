@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
@@ -80,6 +79,32 @@ func (r *MemberPostgresRepository) GetNamesByIDs(tx sharedDomain.Transaction, id
 	return out, nil
 }
 
+func (r *MemberPostgresRepository) GetContactsByIDs(tx sharedDomain.Transaction, gymID uuid.UUID, ids []uuid.UUID) ([]memRepo.MemberContact, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	var rows []struct {
+		ID       uuid.UUID `gorm:"column:id"`
+		FullName string    `gorm:"column:full_name"`
+		Phone    string    `gorm:"column:phone"`
+	}
+	// gym_id en el WHERE = cerrojo anti cross-tenant. deleted_at IS NULL omite
+	// socios borrados entre que el FE arma la selección y se confirma.
+	err := gormTx.Model(&models.MemberModel{}).
+		Select("id", "full_name", "phone").
+		Where("gym_id = ? AND id IN ? AND deleted_at IS NULL", gymID, ids).
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	out := make([]memRepo.MemberContact, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, memRepo.MemberContact{ID: row.ID, FullName: row.FullName, Phone: row.Phone})
+	}
+	return out, nil
+}
+
 func (r *MemberPostgresRepository) ExistsByGymAndPhone(tx sharedDomain.Transaction, gymID uuid.UUID, phone string) (bool, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	var n int64
@@ -89,30 +114,35 @@ func (r *MemberPostgresRepository) ExistsByGymAndPhone(tx sharedDomain.Transacti
 	return n > 0, err
 }
 
-// PinHashCollidesInGym iterates over members in `gymID` with a non-null
-// pin_hash and runs bcrypt.Verify against each — bcrypt salts force this.
-// In a 1k-member gym the cost (~1ms per Verify) is acceptable for an
-// admin-side action; if it ever isn't, we'll cache an HMAC peppered hash.
-func (r *MemberPostgresRepository) PinHashCollidesInGym(tx sharedDomain.Transaction, gymID uuid.UUID, plainPin string, excludeMemberID *uuid.UUID) (bool, error) {
+// MemberNumberExistsInGym is an O(1) lookup on `uq_members_gym_number`
+// (ADR-010). Returns true when another non-deleted member in `gymID` already
+// holds `number`; excludeMemberID lets a member re-claim its own number.
+func (r *MemberPostgresRepository) MemberNumberExistsInGym(tx sharedDomain.Transaction, gymID uuid.UUID, number int, excludeMemberID *uuid.UUID) (bool, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	q := gormTx.Model(&models.MemberModel{}).
-		Where("gym_id = ? AND pin_hash IS NOT NULL AND deleted_at IS NULL", gymID)
+		Where("gym_id = ? AND member_number = ? AND deleted_at IS NULL", gymID, number)
 	if excludeMemberID != nil {
 		q = q.Where("id <> ?", *excludeMemberID)
 	}
-	var rows []struct {
-		ID      uuid.UUID
-		PinHash string
-	}
-	if err := q.Select("id, pin_hash").Find(&rows).Error; err != nil {
+	var n int64
+	if err := q.Count(&n).Error; err != nil {
 		return false, err
 	}
-	for _, h := range rows {
-		if bcrypt.CompareHashAndPassword([]byte(h.PinHash), []byte(plainPin)) == nil {
-			return true, nil
-		}
+	return n > 0, nil
+}
+
+// ListUsedMemberNumbers returns every member_number in use in `gymID`
+// (non-deleted, non-null). Backs the asignador's bump + gap-fill.
+func (r *MemberPostgresRepository) ListUsedMemberNumbers(tx sharedDomain.Transaction, gymID uuid.UUID) ([]int, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	var nums []int
+	err := gormTx.Model(&models.MemberModel{}).
+		Where("gym_id = ? AND member_number IS NOT NULL AND deleted_at IS NULL", gymID).
+		Pluck("member_number", &nums).Error
+	if err != nil {
+		return nil, err
 	}
-	return false, nil
+	return nums, nil
 }
 
 // NextFolio uses SELECT ... FOR UPDATE on the matching gym scope to serialise
@@ -175,7 +205,9 @@ func (r *MemberPostgresRepository) List(tx sharedDomain.Transaction, q memRepo.L
 	}
 	switch q.StatusFilter {
 	case "active":
-		base = base.Where("m.status = ? AND ms.status = 'active' AND ms.expiry_date IS NOT NULL AND ms.expiry_date - ?::date > 7", memberDomain.StatusActive, today)
+		// Vigente = expiry >= hoy; INCLUYE "por vencer" (subconjunto), igual
+		// que CountActiveMembers. expiring_soon ya no es excluyente.
+		base = base.Where("m.status = ? AND ms.status = 'active' AND ms.expiry_date IS NOT NULL AND ms.expiry_date >= ?::date", memberDomain.StatusActive, today)
 	case "expiring_soon":
 		base = base.Where("m.status = ? AND ms.status = 'active' AND ms.expiry_date IS NOT NULL AND ms.expiry_date - ?::date BETWEEN 0 AND 7", memberDomain.StatusActive, today)
 	case "expired":
@@ -301,32 +333,23 @@ func (r *MemberPostgresRepository) GetWithCurrentMembership(tx sharedDomain.Tran
 	return out, nil
 }
 
-// ListPinCandidates returns (member_id, pin_hash) for every member in
-// `gymID` (active OR inactive) que tenga PIN asignado. Usado por
-// checkins/UC-032. NO filtramos por status: si un socio inactivo
-// ingresa su PIN, queremos que el access evaluator devuelva
-// denied_inactive con el nombre del socio en vez de "no encontré a este
-// socio" (que sugiere PIN incorrecto, no socio bloqueado).
-// Ver MemberPostgresRepository.PinHashCollidesInGym para el rationale
-// de iterar bcrypt en Go-land en vez de comparar el hash en SQL.
-func (r *MemberPostgresRepository) ListPinCandidates(tx sharedDomain.Transaction, gymID uuid.UUID) ([]memRepo.PinCandidate, error) {
+// FindByMemberNumber does the O(1) check-in lookup on `uq_members_gym_number`
+// (ADR-010). Returns (nil, nil) when no non-deleted member holds the number.
+// NO filtramos por status: si un socio inactivo ingresa su número, queremos
+// que el access evaluator devuelva denied_inactive con el nombre del socio
+// en vez de "no encontré a este socio" (que sugiere número incorrecto, no
+// socio bloqueado).
+func (r *MemberPostgresRepository) FindByMemberNumber(tx sharedDomain.Transaction, gymID uuid.UUID, number int) (*memberDomain.Member, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
-	var rows []struct {
-		ID      uuid.UUID
-		PinHash string
+	var row models.MemberModel
+	err := gormTx.Where("gym_id = ? AND member_number = ? AND deleted_at IS NULL", gymID, number).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
 	}
-	err := gormTx.Model(&models.MemberModel{}).
-		Where("gym_id = ? AND pin_hash IS NOT NULL AND deleted_at IS NULL", gymID).
-		Select("id, pin_hash").
-		Find(&rows).Error
 	if err != nil {
 		return nil, err
 	}
-	out := make([]memRepo.PinCandidate, 0, len(rows))
-	for _, row := range rows {
-		out = append(out, memRepo.PinCandidate{MemberID: row.ID, PinHash: row.PinHash})
-	}
-	return out, nil
+	return memberFromModel(&row), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -351,9 +374,7 @@ func memberToModel(m *memberDomain.Member) models.MemberModel {
 		Status:               m.Status,
 		EnrollmentPaid:       m.EnrollmentPaid,
 		LastMaintenancePaid:  m.LastMaintenancePaid,
-		PinHash:              m.PinHash,
-		PinPlain:             m.PinPlain,
-		PinAssignedAt:        m.PinAssignedAt,
+		MemberNumber:         m.MemberNumber,
 		LastContactAttemptAt: m.LastContactAttemptAt,
 		Gender:               m.Gender,
 		CreatedBy:            m.CreatedBy,
@@ -375,9 +396,7 @@ func memberFromModel(r *models.MemberModel) *memberDomain.Member {
 		Status:               r.Status,
 		EnrollmentPaid:       r.EnrollmentPaid,
 		LastMaintenancePaid:  r.LastMaintenancePaid,
-		PinHash:              r.PinHash,
-		PinPlain:             r.PinPlain,
-		PinAssignedAt:        r.PinAssignedAt,
+		MemberNumber:         r.MemberNumber,
 		LastContactAttemptAt: r.LastContactAttemptAt,
 		Gender:               r.Gender,
 		CreatedBy:            r.CreatedBy,

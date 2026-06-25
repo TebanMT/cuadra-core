@@ -14,10 +14,10 @@
 package r2
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"time"
 
@@ -40,6 +40,25 @@ type Config struct {
 	// vacío para no romper la firma de NewClient si alguien lo pasa
 	// desde main.go; no se usa internamente.
 	PublicBaseURL string
+
+	// PublicMediaBucket is a SEPARATE, PUBLIC R2 bucket for assets that must
+	// be fetchable by third parties without auth — hoy las WhatsApp media
+	// (banners de bienvenida que Twilio/Meta descargan anónimamente). A
+	// diferencia de Bucket (privado, PII), este tiene Public Access / dominio
+	// público habilitado. Sólo uploads server-side (el cloud genera + sube).
+	PublicMediaBucket string
+	// PublicMediaBaseURL es el prefijo público que sirve PublicMediaBucket
+	// (el `https://pub-xxxx.r2.dev` administrado de R2, o un dominio propio
+	// tipo `https://media.entinta.mx`). La URL pública del objeto es
+	// PublicMediaBaseURL + "/" + objectKey.
+	PublicMediaBaseURL string
+
+	// PublicMediaAccessKey / PublicMediaSecretKey son las credenciales de un
+	// token EXCLUSIVO del bucket público (menor privilegio: el token de fotos
+	// privadas no toca este bucket y viceversa). Mismo AccountID (misma cuenta
+	// Cloudflare). Si quedan vacías, el cliente cae a AccessKey/SecretKey.
+	PublicMediaAccessKey string
+	PublicMediaSecretKey string
 }
 
 // IsConfigured reports whether enough env vars are present to mint URLs.
@@ -49,12 +68,27 @@ func (c Config) IsConfigured() bool {
 	return c.AccountID != "" && c.AccessKey != "" && c.SecretKey != "" && c.Bucket != ""
 }
 
+// IsPublicMediaConfigured reports whether the public media bucket is wired
+// (bucket + public base URL + writable credentials). The write creds are
+// either the exclusive public token (PublicMediaAccessKey/SecretKey) or, as a
+// fallback, the main R2 creds. AccountID is shared (same Cloudflare account).
+func (c Config) IsPublicMediaConfigured() bool {
+	if c.AccountID == "" || c.PublicMediaBucket == "" || c.PublicMediaBaseURL == "" {
+		return false
+	}
+	hasExclusive := c.PublicMediaAccessKey != "" && c.PublicMediaSecretKey != ""
+	hasMain := c.AccessKey != "" && c.SecretKey != ""
+	return hasExclusive || hasMain
+}
+
 // Client wraps the s3 client + presign helper. The presign client is
-// stateful (caches signer state) so we keep it as a field.
+// stateful (caches signer state) so we keep it as a field. We also keep the
+// raw s3 client for server-side PutObject (public media uploads).
 type Client struct {
-	cfg       Config
-	s3c       *s3.Client
-	presigner *s3.PresignClient
+	cfg            Config
+	s3c            *s3.Client
+	pubMediaClient *s3.Client // separate creds for the public media bucket
+	presigner      *s3.PresignClient
 }
 
 // NewClient bootstraps the s3 client against R2's S3-compatible
@@ -80,11 +114,68 @@ func NewClient(c Config) (*Client, error) {
 		// R2 endpoint.
 		UsePathStyle: true,
 	})
+	// Public media client — exclusive token scoped to the public bucket when
+	// provided (R2_PUBLIC_MEDIA_ACCESS_KEY/SECRET); falls back to the main
+	// creds otherwise. Same Cloudflare account → same endpoint.
+	var pubMediaClient *s3.Client
+	if c.PublicMediaBucket != "" {
+		ak, sk := c.PublicMediaAccessKey, c.PublicMediaSecretKey
+		if ak == "" || sk == "" {
+			ak, sk = c.AccessKey, c.SecretKey
+		}
+		pubMediaClient = s3.New(s3.Options{
+			Region:       "auto",
+			BaseEndpoint: aws.String(endpoint),
+			Credentials:  credentials.NewStaticCredentialsProvider(ak, sk, ""),
+			UsePathStyle: true,
+		})
+	}
 	return &Client{
-		cfg:       c,
-		s3c:       s3c,
-		presigner: s3.NewPresignClient(s3c),
+		cfg:            c,
+		s3c:            s3c,
+		pubMediaClient: pubMediaClient,
+		presigner:      s3.NewPresignClient(s3c),
 	}, nil
+}
+
+// PutPublicObject uploads body to the PUBLIC media bucket server-side and
+// returns the object's public URL (PublicMediaBaseURL + "/" + objectKey).
+// Used for WhatsApp media (welcome banners) that Twilio/Meta fetch
+// anonymously. The bucket must have Public Access / a public domain enabled;
+// this call only writes the object — it does not (and cannot) flip bucket
+// visibility.
+func (c *Client) PutPublicObject(
+	ctx context.Context,
+	objectKey, contentType string,
+	body []byte,
+) (publicURL string, err error) {
+	if c == nil {
+		return "", errors.New("r2: client nil")
+	}
+	if !c.cfg.IsPublicMediaConfigured() {
+		return "", errors.New("r2: public media bucket not configured (R2_PUBLIC_MEDIA_BUCKET / R2_PUBLIC_MEDIA_BASE_URL)")
+	}
+	if c.pubMediaClient == nil {
+		return "", errors.New("r2: public media client not initialised")
+	}
+	if objectKey == "" || contentType == "" || len(body) == 0 {
+		return "", errors.New("r2: objectKey + contentType + body required")
+	}
+	_, err = c.pubMediaClient.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:        aws.String(c.cfg.PublicMediaBucket),
+		Key:           aws.String(objectKey),
+		Body:          bytes.NewReader(body),
+		ContentType:   aws.String(contentType),
+		ContentLength: aws.Int64(int64(len(body))),
+		// Banners are immutable (object key carries a fresh UUID per send) so
+		// they're safe to cache hard at the edge / in Meta's media cache.
+		CacheControl: aws.String("public, max-age=31536000, immutable"),
+	})
+	if err != nil {
+		return "", fmt.Errorf("r2 put public object: %w", err)
+	}
+	base := strings.TrimRight(c.cfg.PublicMediaBaseURL, "/")
+	return base + "/" + strings.TrimLeft(objectKey, "/"), nil
 }
 
 // PresignUpload mints a presigned PUT URL the caller can use to upload
@@ -122,34 +213,6 @@ func (c *Client) PresignUpload(
 		return "", fmt.Errorf("r2 presign put: %w", err)
 	}
 	return req.URL, nil
-}
-
-// PutObject uploads a reader directly to R2 (server-side, no presign).
-// Used for server-generated assets (welcome banners, etc.).
-// Returns the public URL if PublicBaseURL is configured.
-func (c *Client) PutObject(ctx context.Context, key, contentType string, body io.Reader, size int64) error {
-	if c == nil {
-		return errors.New("r2: client nil")
-	}
-	_, err := c.s3c.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:        aws.String(c.cfg.Bucket),
-		Key:           aws.String(key),
-		ContentType:   aws.String(contentType),
-		Body:          body,
-		ContentLength: aws.Int64(size),
-	})
-	if err != nil {
-		return fmt.Errorf("r2 put object: %w", err)
-	}
-	return nil
-}
-
-// PublicURL builds the public URL for a key using PublicBaseURL.
-func (c *Client) PublicURL(key string) string {
-	if c == nil || c.cfg.PublicBaseURL == "" {
-		return ""
-	}
-	return strings.TrimRight(c.cfg.PublicBaseURL, "/") + "/" + key
 }
 
 // PresignDownload mintea una GET firmada para leer un objeto privado.

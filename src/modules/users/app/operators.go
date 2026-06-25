@@ -394,6 +394,14 @@ func (uc *ResetOperatorPassword) Execute(ctx context.Context, in ResetOperatorPa
 		if u.GymID != in.GymID {
 			return sharedDomain.NewBusinessError(userErrors.ErrCrossGym, "")
 		}
+		if !u.IsOperator() {
+			// Reset legacy es sólo para operadores. El password del dueño es
+			// autoridad del cloud (signup / forgot-password); fijarlo aquí
+			// desde recepción aplicaría el hash local pero el sync lo descarta
+			// (guardUserCredential en src/shared/sync), dejando el dashboard
+			// del dueño con el hash viejo. Mismo criterio que RotateOperatorPIN.
+			return sharedDomain.NewBusinessError(userErrors.ErrTargetNotEligible, "")
+		}
 		u.ApplyPassword(hash, true, now)
 		if _, err := uc.Users.Update(tx, u); err != nil {
 			return sharedDomain.NewUnexpectedError(err)

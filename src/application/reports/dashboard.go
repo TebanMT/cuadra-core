@@ -29,6 +29,18 @@ type DashboardOutput struct {
 
 	ActiveMembers KPI `json:"active_members"`
 	IncomeMonth   KPI `json:"income_month"`
+	// RealizedProfitMonth — ganancia realizada de productos del mes en
+	// curso vs mismo rango del mes anterior (Standard, sin gate Plus).
+	// revenue − COGS sobre ventas NO reembolsadas; el costo es el promedio
+	// ponderado all-time del producto. RealizedProfitCoverage lleva la
+	// cobertura honesta ("X de Y líneas con costo") por separado.
+	RealizedProfitMonth    KPI            `json:"realized_profit_month"`
+	RealizedProfitCoverage ProfitCoverage `json:"realized_profit_coverage"`
+	// RealizedProfitMarginPct — margen de la utilidad del mes: utilidad /
+	// ingreso por productos × 100 (el % de las ventas de productos que fue
+	// utilidad). nil cuando no hubo ventas de productos en el rango. Es el
+	// número estable de "2 dígitos" que el dueño espera ver, no una tendencia.
+	RealizedProfitMarginPct *float64 `json:"realized_profit_margin_pct,omitempty"`
 	// ExpensesMonth — egresos del mes corriente vs mismo rango del mes
 	// anterior. Suma DOS fuentes: mercancía (stock_movements restock con
 	// costo) + gastos generales (BC expenses). Es el número visible en
@@ -66,6 +78,15 @@ type AttentionSummary struct {
 	LowStock            int `json:"low_stock"`
 	PendingBalance      int `json:"pending_balance"`
 	BirthdaysToday      int `json:"birthdays_today"`
+}
+
+// ProfitCoverage — cobertura honesta de la ganancia realizada: de las
+// líneas de venta del período, cuántas tienen costo capturado en su
+// producto (las que no, suman a revenue pero no a COGS). El FE lo muestra
+// como hint "X de Y con costo".
+type ProfitCoverage struct {
+	ItemsWithCost int `json:"items_with_cost"`
+	ItemsTotal    int `json:"items_total"`
 }
 
 // KPI is the typical "value + delta" tile.
@@ -156,6 +177,19 @@ func (uc *Dashboard) Execute(ctx context.Context, in DashboardInput) (*Dashboard
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}
 
+	// Ganancia realizada de productos (Standard): revenue − COGS sobre las
+	// ventas no reembolsadas del rango. Mismo windowing que ingresos para
+	// que el dueño compare "vendí X, gané Y" en el mismo período. La
+	// cobertura sale del rango actual (la del previo no se muestra).
+	realizedNow, err := uc.Reader.RealizedProductProfitBetween(tx, in.GymID, monthStart, today)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
+	realizedPrev, err := uc.Reader.RealizedProductProfitBetween(tx, in.GymID, prevMonthStart, prevMonthEnd)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
+
 	expiringWeek, err := uc.Reader.CountExpiringBetween(tx, in.GymID, today, today.AddDate(0, 0, 7))
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
@@ -212,11 +246,17 @@ func (uc *Dashboard) Execute(ctx context.Context, in DashboardInput) (*Dashboard
 	}
 
 	out := &DashboardOutput{
-		GeneratedAt:          now,
-		ActiveMembers:        newKPI(float64(activeNow), float64(activePrev)),
-		IncomeMonth:          newKPI(incomeMonth, incomePrev),
-		InventoryCostMonth:   newKPI(inventoryCostMonth, inventoryCostPrev),
-		GeneralExpensesMonth: newKPI(generalExpensesMonth, generalExpensesPrev),
+		GeneratedAt:         now,
+		ActiveMembers:       newKPI(float64(activeNow), float64(activePrev)),
+		IncomeMonth:         newKPI(incomeMonth, incomePrev),
+		RealizedProfitMonth: newKPI(realizedNow.Revenue-realizedNow.COGS, realizedPrev.Revenue-realizedPrev.COGS),
+		RealizedProfitCoverage: ProfitCoverage{
+			ItemsWithCost: realizedNow.ItemsWithCost,
+			ItemsTotal:    realizedNow.ItemsTotal,
+		},
+		RealizedProfitMarginPct: realizedMarginPct(realizedNow),
+		InventoryCostMonth:      newKPI(inventoryCostMonth, inventoryCostPrev),
+		GeneralExpensesMonth:    newKPI(generalExpensesMonth, generalExpensesPrev),
 		ExpensesMonth: newKPI(
 			inventoryCostMonth+generalExpensesMonth,
 			inventoryCostPrev+generalExpensesPrev,
@@ -250,6 +290,18 @@ const (
 	attnInactiveAbsentDays = 21
 	recentPaymentsLimit    = 10
 )
+
+// realizedMarginPct devuelve el margen de la utilidad del mes como % del
+// ingreso por productos: (Revenue − COGS) / Revenue × 100. El numerador es la
+// MISMA utilidad que muestra el KPI, así que el margen es coherente con el
+// monto desplegado. nil cuando no hubo ventas de productos (Revenue == 0).
+func realizedMarginPct(r RealizedProductProfit) *float64 {
+	if r.Revenue <= 0 {
+		return nil
+	}
+	pct := (r.Revenue - r.COGS) / r.Revenue * 100
+	return &pct
+}
 
 // newKPI builds the standard {current, previous, delta, delta_pct} tile.
 // Shared by Dashboard (UC-033) and RangeReport (UC-036). delta_pct stays nil

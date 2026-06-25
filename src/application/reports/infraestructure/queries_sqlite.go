@@ -815,6 +815,55 @@ func (r *SQLiteReader) SumInventoryCostBetween(tx sharedDomain.Transaction, gymI
 	return float64(cents.Int64) / 100, err
 }
 
+// RealizedProductProfitBetween — espejo SQLite de la versión Postgres.
+// unit_price_snapshot y cost están en centavos; el costo unitario promedio
+// ponderado usa (2*SUM(cost*delta)+den)/(2*den) (half-up entero) = paridad
+// con ROUND(SUM(cost*delta)/SUM(delta),2) de Postgres. Todo se calcula en
+// centavos y se divide /100 al edge. Filtra
+// por payment_date (TEXT YYYY-MM-DD, comparación lexicográfica) y excluye
+// ventas reembolsadas.
+func (r *SQLiteReader) RealizedProductProfitBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (reports.RealizedProductProfit, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	var row struct {
+		RevenueCents  sql.NullInt64 `db:"revenue"`
+		CogsCents     sql.NullInt64 `db:"cogs"`
+		ItemsTotal    int           `db:"items_total"`
+		ItemsWithCost int           `db:"items_with_cost"`
+	}
+	err := stx.Get(context.Background(), &row, `
+		SELECT
+		  COALESCE(SUM(si.unit_price_snapshot * si.quantity), 0) AS revenue,
+		  COALESCE(SUM(CASE WHEN c.avg_unit_cost IS NOT NULL THEN si.quantity * c.avg_unit_cost ELSE 0 END), 0) AS cogs,
+		  COUNT(*) AS items_total,
+		  COALESCE(SUM(CASE WHEN c.avg_unit_cost IS NOT NULL THEN 1 ELSE 0 END), 0) AS items_with_cost
+		FROM sale_items si
+		JOIN sales s ON s.id = si.sale_id AND s.deleted_at IS NULL
+		JOIN payments p ON p.id = s.payment_id AND p.deleted_at IS NULL
+		LEFT JOIN (
+		  SELECT product_id, (2*SUM(cost * delta) + SUM(delta)) / (2*SUM(delta)) AS avg_unit_cost
+		  FROM stock_movements
+		  WHERE gym_id = ? AND movement_type = 'restock' AND cost IS NOT NULL AND deleted_at IS NULL
+		  GROUP BY product_id
+		  HAVING SUM(delta) > 0
+		) c ON c.product_id = si.product_id
+		WHERE si.gym_id = ? AND si.deleted_at IS NULL
+		  AND p.payment_date >= ? AND p.payment_date <= ?
+		  AND NOT EXISTS (
+		    SELECT 1 FROM payments rfd
+		    WHERE rfd.parent_payment_id = p.id AND rfd.concept = 'refund' AND rfd.deleted_at IS NULL
+		  )`,
+		gymID.String(), gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt))
+	if err != nil {
+		return reports.RealizedProductProfit{}, err
+	}
+	return reports.RealizedProductProfit{
+		Revenue:       float64(row.RevenueCents.Int64) / 100,
+		COGS:          float64(row.CogsCents.Int64) / 100,
+		ItemsTotal:    row.ItemsTotal,
+		ItemsWithCost: row.ItemsWithCost,
+	}, nil
+}
+
 // ListInventoryCostsBetween — JOINea product_name. ORDER BY created_at
 // DESC para que el último egreso quede arriba en la tabla del FE.
 func (r *SQLiteReader) ListInventoryCostsBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time, limit int) ([]reports.InventoryCostRow, error) {

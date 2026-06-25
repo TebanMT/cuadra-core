@@ -235,6 +235,67 @@ func TestRotateOperatorPIN_RejectsOwner(t *testing.T) {
 	}
 }
 
+func TestResetOperatorPassword_RejectsOwner(t *testing.T) {
+	db, uow, gym := setupOperatorsFixture(t)
+	userRepo := usersRepoLite.NewUserSQLiteRepository()
+	rec := audit.NewSQLiteRecorder()
+	seedOwner(t, uow, userRepo, gym.ID)
+	ownerID := fetchOwnerID(t, db, gym.ID)
+
+	reset := usersApp.NewResetOperatorPassword(userRepo, nil, uow, rec)
+	_, err := reset.Execute(context.Background(), usersApp.ResetOperatorPasswordInput{
+		GymID: gym.ID, ActorUserID: ownerID, TargetID: ownerID,
+	})
+	if err == nil || !strings.Contains(err.Error(), userErrors.ErrTargetNotEligible.Error()) {
+		t.Errorf("apuntar al dueño debe dar ErrTargetNotEligible, got %v", err)
+	}
+	// El password_hash del dueño debe quedar intacto — el password del dueño
+	// es autoridad del cloud, no se toca desde este endpoint legacy.
+	var pwdHash *string
+	if err := db.Get(&pwdHash, "SELECT password_hash FROM users WHERE id = ?", ownerID.String()); err != nil {
+		t.Fatalf("query password_hash: %v", err)
+	}
+	if pwdHash == nil || *pwdHash != "bcrypt-hash" {
+		t.Errorf("password_hash del dueño debe quedar intacto ('bcrypt-hash'); got %v", pwdHash)
+	}
+}
+
+func TestResetOperatorPassword_AllowsOperator(t *testing.T) {
+	db, uow, gym := setupOperatorsFixture(t)
+	userRepo := usersRepoLite.NewUserSQLiteRepository()
+	rec := audit.NewSQLiteRecorder()
+	seedOwner(t, uow, userRepo, gym.ID)
+	ownerID := fetchOwnerID(t, db, gym.ID)
+
+	create := usersApp.NewCreateOperator(userRepo, uow, rec)
+	out, err := create.Execute(context.Background(), usersApp.CreateOperatorInput{
+		GymID: gym.ID, OwnerID: ownerID,
+		FullName: "Carla", Phone: "4425551234",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	reset := usersApp.NewResetOperatorPassword(userRepo, nil, uow, rec)
+	rout, err := reset.Execute(context.Background(), usersApp.ResetOperatorPasswordInput{
+		GymID: gym.ID, ActorUserID: ownerID, TargetID: out.UserID,
+	})
+	if err != nil {
+		t.Fatalf("reset de operador debe pasar, got %v", err)
+	}
+	if rout.Password == "" {
+		t.Errorf("esperaba una contraseña temporal no vacía")
+	}
+	// El operador queda con password_hash set (login legacy email+password).
+	var pwdHash *string
+	if err := db.Get(&pwdHash, "SELECT password_hash FROM users WHERE id = ?", out.UserID.String()); err != nil {
+		t.Fatalf("query password_hash: %v", err)
+	}
+	if pwdHash == nil || *pwdHash == "" {
+		t.Errorf("el operador debe quedar con password_hash tras el reset")
+	}
+}
+
 // seedOwner crea un owner directamente vía dominio + repo, sin pasar por
 // SignupOwner (que requiere wireup de JWT). Suficiente para CountOperatorsByGym
 // y para satisfacer el created_by FK.

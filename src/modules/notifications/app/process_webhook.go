@@ -11,7 +11,45 @@ import (
 	notification "github.com/cuadra/cuadra-core/src/modules/notifications/domain/notification"
 	notiRepo "github.com/cuadra/cuadra-core/src/modules/notifications/domain/repository"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
+	"github.com/cuadra/cuadra-core/src/shared/phone"
 )
+
+// Intención de opt-out detectada en un mensaje entrante del socio.
+const (
+	intentNone = iota
+	intentStop // baja: STOP / BAJA / CANCELAR / ALTO / UNSUBSCRIBE
+	intentStart
+)
+
+// normalizeInboundPhone limpia el "From" de Twilio ("whatsapp:+52…") y lo
+// normaliza al formato canónico (igual que los teléfonos de socios), para que
+// el match en el dispatcher sea consistente.
+func normalizeInboundPhone(from string) string {
+	from = strings.TrimSpace(from)
+	from = strings.TrimPrefix(from, "whatsapp:")
+	return phone.Normalize(from)
+}
+
+// optOutIntent clasifica el texto del socio. Sólo mira la PRIMERA palabra para
+// no dar falsos positivos ("trabaja" no es "baja"). Case-insensitive.
+func optOutIntent(body string) int {
+	b := strings.ToUpper(strings.TrimSpace(body))
+	if b == "" {
+		return intentNone
+	}
+	first := b
+	if i := strings.IndexAny(b, " \t\n.,;:!"); i >= 0 {
+		first = b[:i]
+	}
+	switch first {
+	case "STOP", "BAJA", "CANCELAR", "ALTO", "UNSUBSCRIBE", "BAJAR":
+		return intentStop
+	case "ALTA", "START", "SUSCRIBIR", "SUBSCRIBE":
+		return intentStart
+	default:
+		return intentNone
+	}
+}
 
 // ProcessWebhookInput is the structured slice of a Twilio StatusCallback /
 // IncomingMessage payload that the controller hands the use case after
@@ -22,7 +60,12 @@ type ProcessWebhookInput struct {
 	Status            string
 	ErrorCode         string
 	ErrorMessage      string
-	RawPayload        []byte
+	// Inbound (EventTypeIncoming): teléfono y texto del socio. Usados para
+	// detectar STOP/BAJA → opt-out de marketing. FromPhone llega crudo de
+	// Twilio ("whatsapp:+52…"); el use case lo normaliza.
+	FromPhone  string
+	Body       string
+	RawPayload []byte
 }
 
 type ProcessWebhookOutput struct {
@@ -36,6 +79,10 @@ type ProcessWebhook struct {
 	Notifications notiRepo.NotificationRepository
 	Events        notiRepo.WhatsAppEventRepository
 	UoW           sharedDomain.UnitOfWork
+	// OptOut (opcional; nil = sin manejo de opt-out, p.ej. en tests). Cuando
+	// el socio responde STOP/BAJA registramos su teléfono aquí; START/ALTA lo
+	// quita. Se cablea sólo en cmd/server (cloud).
+	OptOut notiRepo.OptOutRepository
 }
 
 func NewProcessWebhook(
@@ -88,6 +135,24 @@ func (uc *ProcessWebhook) Execute(ctx context.Context, in ProcessWebhookInput) (
 		}
 		if _, err := uc.Events.Create(tx, ev); err != nil {
 			return sharedDomain.NewUnexpectedError(err)
+		}
+
+		// Opt-out de marketing: si el socio respondió STOP/BAJA registramos su
+		// teléfono; START/ALTA lo da de baja del opt-out (re-suscribe). Aplica
+		// sólo a mensajes entrantes y cuando el repo está cableado (cloud).
+		if uc.OptOut != nil && in.EventType == eventDomain.EventTypeIncoming {
+			if ph := normalizeInboundPhone(in.FromPhone); ph != "" {
+				switch optOutIntent(in.Body) {
+				case intentStop:
+					if err := uc.OptOut.SetOptedOut(tx, ph, now); err != nil {
+						return sharedDomain.NewUnexpectedError(err)
+					}
+				case intentStart:
+					if err := uc.OptOut.ClearOptOut(tx, ph); err != nil {
+						return sharedDomain.NewUnexpectedError(err)
+					}
+				}
+			}
 		}
 
 		// Status reconciliation: mark our row failed when Meta says so.

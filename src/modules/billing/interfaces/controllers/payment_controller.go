@@ -663,18 +663,22 @@ type cashCloseClosedResp struct {
 }
 
 type cashCloseReportResp struct {
-	Date             string                      `json:"date"`
-	ByMethod         map[string]float64          `json:"by_method"`
-	ByConcept        map[string]conceptTotalResp `json:"by_concept"`
-	Operators        []operatorTotalResp         `json:"operators"`
-	Total            float64                     `json:"total"`
-	RefundsTotal     float64                     `json:"refunds_total"`
-	RefundsCount     int                         `json:"refunds_count"`
-	Expenses         []cashCloseExpenseResp      `json:"expenses"`
-	ExpensesTotal    float64                     `json:"expenses_total"`
-	ExpensesByMethod map[string]float64          `json:"expenses_by_method"`
-	NetTotal         float64                     `json:"net_total"`
-	Closed           *cashCloseClosedResp        `json:"closed,omitempty"`
+	Date      string                      `json:"date"`
+	ByMethod  map[string]float64          `json:"by_method"`
+	ByConcept map[string]conceptTotalResp `json:"by_concept"`
+	Operators []operatorTotalResp         `json:"operators"`
+	Total     float64                     `json:"total"`
+	// RefundsTotal / RefundByMethod van en MAGNITUD POSITIVA (el dominio los
+	// guarda negativos). El FE los muestra con un "−" explícito y resta los
+	// refunds en efectivo del cajón.
+	RefundsTotal     float64                `json:"refunds_total"`
+	RefundsCount     int                    `json:"refunds_count"`
+	RefundByMethod   map[string]float64     `json:"refund_by_method"`
+	Expenses         []cashCloseExpenseResp `json:"expenses"`
+	ExpensesTotal    float64                `json:"expenses_total"`
+	ExpensesByMethod map[string]float64     `json:"expenses_by_method"`
+	NetTotal         float64                `json:"net_total"`
+	Closed           *cashCloseClosedResp   `json:"closed,omitempty"`
 }
 
 type cashCloseReq struct {
@@ -830,14 +834,20 @@ func (ctrl *PaymentController) handleCashCloseReport(c *gin.Context) {
 			PaymentMethod: e.PaymentMethod,
 		})
 	}
+	// Refunds a magnitud positiva para el wire (el dominio los guarda negativos).
+	refundByMethod := make(map[string]float64, len(out.Totals.RefundByMethod))
+	for k, v := range out.Totals.RefundByMethod {
+		refundByMethod[k] = -v
+	}
 	resp := cashCloseReportResp{
 		Date:             date.Format("2006-01-02"),
 		ByMethod:         out.Totals.ByMethod,
 		ByConcept:        concepts,
 		Operators:        ops,
 		Total:            out.Totals.GrandTotal,
-		RefundsTotal:     out.Totals.RefundTotal,
+		RefundsTotal:     -out.Totals.RefundTotal,
 		RefundsCount:     out.Totals.RefundCount,
+		RefundByMethod:   refundByMethod,
 		Expenses:         gastos,
 		ExpensesTotal:    out.ExpensesTotal,
 		ExpensesByMethod: out.ExpensesByMethod,

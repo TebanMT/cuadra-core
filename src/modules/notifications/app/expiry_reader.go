@@ -12,14 +12,13 @@ import (
 // pulls this projection straight from the join (members + memberships +
 // gyms) so the use case stays decoupled from the storage shape.
 type ExpiryCandidate struct {
-	GymID            uuid.UUID
-	GymName          string
-	GymWhatsAppReady bool
-	MemberID         uuid.UUID
-	MemberFullName   string
-	MemberPhone      string
-	MembershipType   string
-	ExpiryDate       time.Time
+	GymID          uuid.UUID
+	GymName        string
+	MemberID       uuid.UUID
+	MemberFullName string
+	MemberPhone    string
+	MembershipType string
+	ExpiryDate     time.Time
 }
 
 // ExpiryReader is the cross-context query surface used by UC-038. It lives

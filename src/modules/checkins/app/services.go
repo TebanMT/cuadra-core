@@ -18,6 +18,7 @@ import (
 	"github.com/cuadra/cuadra-core/src/modules/checkins/domain/checkin"
 	chkErrors "github.com/cuadra/cuadra-core/src/modules/checkins/domain/errors"
 	chkRepo "github.com/cuadra/cuadra-core/src/modules/checkins/domain/repository"
+	gymRepo "github.com/cuadra/cuadra-core/src/modules/gyms/domain/repository"
 	memApp "github.com/cuadra/cuadra-core/src/modules/members/app"
 	"github.com/cuadra/cuadra-core/src/modules/members/domain/access"
 	"github.com/cuadra/cuadra-core/src/shared/audit"
@@ -47,13 +48,19 @@ func recordCheckin(
 	ctx context.Context,
 	tx sharedDomain.Transaction,
 	memberSvc *memApp.MemberService,
+	gyms gymRepo.GymRepository,
 	repo chkRepo.CheckinRepository,
 	recorder audit.Recorder,
 	gymID, memberID uuid.UUID,
 	method string,
 	operatorID *uuid.UUID,
-	now, today time.Time,
+	now time.Time,
 ) (*CheckinView, error) {
+	// `today` debe ser el día CALENDARIO del gym en SU zona horaria, no UTC:
+	// las membresías vencen a medianoche (date-only) y comparar contra el día
+	// UTC rechazaba a un socio en su ÚLTIMO día de vigencia en la tarde-noche
+	// (ya cruzó medianoche UTC). gymLocalToday resuelve la tz del gym.
+	today := gymLocalToday(tx, gyms, gymID, now)
 	statusOut, err := memberSvc.GetAccessStatus(ctx, tx, memApp.GetAccessStatusInput{
 		GymID:    gymID,
 		MemberID: memberID,
@@ -67,8 +74,8 @@ func recordCheckin(
 	switch method {
 	case checkin.MethodFingerprint:
 		c, err = checkin.NewFingerprintCheckin(uuid.New(), gymID, memberID, statusOut.Status, now)
-	case checkin.MethodPin:
-		c, err = checkin.NewPinCheckin(uuid.New(), gymID, memberID, statusOut.Status, now)
+	case checkin.MethodNumber:
+		c, err = checkin.NewNumberCheckin(uuid.New(), gymID, memberID, statusOut.Status, now)
 	case checkin.MethodManual:
 		if operatorID == nil {
 			return nil, sharedDomain.NewValidationError(chkErrors.ErrOperatorRequired)
@@ -124,8 +131,29 @@ func recordCheckin(
 }
 
 // truncateToDay drops the time-of-day so AccessStatusEvaluator does the right
-// thing regardless of when in the day the checkin happens.
+// thing regardless of when in the day the checkin happens. UTC fallback.
 func truncateToDay(t time.Time) time.Time {
 	t = t.UTC()
 	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+// gymLocalToday devuelve el día calendario del gym en SU zona horaria,
+// expresado como medianoche UTC (la convención date-only que usan las
+// fechas de vigencia). Carga el gym para leer su Timezone; si no hay repo
+// cableado, el gym no existe, o la tz es inválida, cae al día UTC
+// (comportamiento previo) — nunca rompe el check-in por esto.
+func gymLocalToday(tx sharedDomain.Transaction, gyms gymRepo.GymRepository, gymID uuid.UUID, now time.Time) time.Time {
+	if gyms == nil {
+		return truncateToDay(now)
+	}
+	g, err := gyms.GetByID(tx, gymID)
+	if err != nil || g == nil || g.Timezone == "" {
+		return truncateToDay(now)
+	}
+	loc, err := time.LoadLocation(g.Timezone)
+	if err != nil {
+		return truncateToDay(now)
+	}
+	local := now.In(loc)
+	return time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, time.UTC)
 }

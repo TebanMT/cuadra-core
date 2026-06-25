@@ -47,10 +47,24 @@ func (g *Generator) Next(tx sharedDomain.Transaction, gymID uuid.UUID, concept s
 	}
 	next := 1
 	if maxFolio != "" {
-		s := strings.TrimPrefix(maxFolio, prefix+"-")
+		// Tomar el número DESPUÉS del primer '-' SIN asumir el prefijo. Los
+		// pagos importados/legacy pueden traer un prefijo distinto al
+		// canónico (p.ej. "PROD-00005" en vez de "PRD-000005"); el
+		// TrimPrefix(prefix+"-") anterior no lo quitaba y Sscanf leía 0 →
+		// next=1 → colisión con un folio ya existente (UNIQUE gym_id,folio).
+		// Esto coincide con el ORDER BY de MaxFolioForConcept, que rankea por
+		// el número tras el primer '-' (SUBSTR a partir de INSTR('-')+1, o el
+		// folio completo si no hay '-'). Como next = max_numérico + 1 es
+		// estrictamente mayor que cualquier folio existente, el folio
+		// canónico resultante no puede colisionar.
+		numPart := maxFolio
+		if i := strings.Index(maxFolio, "-"); i >= 0 {
+			numPart = maxFolio[i+1:]
+		}
 		var n int
-		_, _ = fmt.Sscanf(s, "%d", &n)
-		next = n + 1
+		if _, err := fmt.Sscanf(numPart, "%d", &n); err == nil {
+			next = n + 1
+		}
 	}
 	return fmt.Sprintf("%s-%06d", prefix, next), nil
 }

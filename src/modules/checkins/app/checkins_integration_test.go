@@ -61,12 +61,21 @@ func setupCheckinsFixture(t *testing.T) *checkinsFixture {
 	t.Cleanup(func() { db.Close() })
 	db.SetMaxOpenConns(1)
 
-	for _, m := range []string{
-		"../../../../db_migrations/sqlite/001_init_schema.sql",
-		"../../../../db_migrations/sqlite/005_users_pin.sql",
-		"../../../../db_migrations/sqlite/008_gym_charge_settings.sql",
-		"../../../../db_migrations/sqlite/018_gyms_stripe_customer.sql",
-	} {
+	// Todas las migraciones en orden — no un subset cherry-picked. Así el
+	// schema del test matchea producción y no se rompe cada vez que una
+	// migración agrega una columna a una tabla base (p.ej. member_number de
+	// ADR-010). os.ReadDir ordena por nombre y los archivos están zero-padded
+	// (001_..) → orden correcto.
+	migDir := "../../../../db_migrations/sqlite"
+	migEntries, err := os.ReadDir(migDir)
+	if err != nil {
+		t.Fatalf("read migrations dir: %v", err)
+	}
+	for _, e := range migEntries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".sql" {
+			continue
+		}
+		m := filepath.Join(migDir, e.Name())
 		schema, err := os.ReadFile(m)
 		if err != nil {
 			t.Fatalf("read %s: %v", m, err)
@@ -297,48 +306,50 @@ func TestUC030_ManualCheckin_Allowed(t *testing.T) {
 	}
 }
 
-// TestUC032_PIN_MatchesAndRejects walks: assign PIN → wrong PIN fails → right
-// PIN succeeds → 5 wrong attempts trigger lockout.
-func TestUC032_PIN_MatchesAndRejects(t *testing.T) {
+// TestUC032_Number_MatchesAndRejects walks (ADR-010): assign número → número
+// incorrecto falla → número correcto entra → suficientes intentos incorrectos
+// disparan el lockout anti-enumeración.
+func TestUC032_Number_MatchesAndRejects(t *testing.T) {
 	f := setupCheckinsFixture(t)
 	ctx := context.Background()
 
-	// Assign a PIN.
-	assignPin := memApp.NewAssignPin(f.memberRepo, f.uow, f.recorder)
-	pinOut, err := assignPin.Execute(ctx, memApp.AssignPinInput{
+	// Asignar número de socio explícito.
+	assignNumber := memApp.NewAssignMemberNumber(f.memberRepo, f.uow, f.recorder)
+	out, err := assignNumber.Execute(ctx, memApp.AssignMemberNumberInput{
 		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: f.memberID,
-		PlainPin: "4729",
+		Number: 4729,
 	})
 	if err != nil {
-		t.Fatalf("assignPin: %v", err)
+		t.Fatalf("assignNumber: %v", err)
 	}
-	if pinOut.Pin != "4729" {
-		t.Errorf("PIN echo mismatch: %s", pinOut.Pin)
-	}
-
-	limiter := chkApp.NewPinAttemptLimiter()
-	uc := chkApp.NewCheckinByPin(f.memberSvc, f.memberRepo, f.checkinRepo, f.uow, f.recorder, limiter)
-
-	// Wrong PIN → BusinessError.
-	if _, err := uc.Execute(ctx, chkApp.CheckinByPinInput{GymID: f.gymID, Pin: "0000"}); err == nil {
-		t.Errorf("wrong PIN should fail")
+	if out.MemberNumber != 4729 {
+		t.Errorf("number echo mismatch: %d", out.MemberNumber)
 	}
 
-	// Right PIN → success.
-	view, err := uc.Execute(ctx, chkApp.CheckinByPinInput{GymID: f.gymID, Pin: "4729"})
+	limiter := chkApp.NewNumberAttemptLimiter()
+	uc := chkApp.NewCheckinByNumber(f.memberSvc, f.memberRepo, f.checkinRepo, f.uow, f.recorder, limiter)
+
+	// Número incorrecto → BusinessError.
+	if _, err := uc.Execute(ctx, chkApp.CheckinByNumberInput{GymID: f.gymID, Number: 1111}); err == nil {
+		t.Errorf("wrong number should fail")
+	}
+
+	// Número correcto → success.
+	view, err := uc.Execute(ctx, chkApp.CheckinByNumberInput{GymID: f.gymID, Number: 4729})
 	if err != nil {
-		t.Fatalf("right PIN: %v", err)
+		t.Fatalf("right number: %v", err)
 	}
-	if view.Method != "pin" || view.Result != "allowed_active" {
-		t.Errorf("PIN checkin payload wrong: %+v", view)
+	if view.Method != "number" || view.Result != "allowed_active" {
+		t.Errorf("number checkin payload wrong: %+v", view)
 	}
 
-	// 5 wrong attempts trigger lockout.
-	for i := 0; i < 5; i++ {
-		_, _ = uc.Execute(ctx, chkApp.CheckinByPinInput{GymID: f.gymID, Pin: "1111"})
+	// Suficientes intentos incorrectos disparan el lockout (max=10 en el
+	// limiter anti-enumeración relajado de ADR-010).
+	for i := 0; i < 10; i++ {
+		_, _ = uc.Execute(ctx, chkApp.CheckinByNumberInput{GymID: f.gymID, Number: 1111})
 	}
 	if !limiter.IsBlocked(f.gymID, time.Now()) {
-		t.Errorf("after 5 failures the gym should be blocked")
+		t.Errorf("tras 10 fallos el gym debería estar bloqueado")
 	}
 }
 

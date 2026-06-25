@@ -40,9 +40,10 @@ var (
 	ErrSendFailedFinal      = errors.New("envío falló definitivamente")
 
 	// Broadcast
-	ErrBroadcastEmpty   = errors.New("el broadcast no tiene destinatarios")
-	ErrBroadcastTooBig  = errors.New("el broadcast excede el máximo permitido en un envío")
-	ErrBroadcastMessage = errors.New("el mensaje del broadcast no puede estar vacío")
+	ErrBroadcastEmpty        = errors.New("el broadcast no tiene destinatarios")
+	ErrBroadcastTooBig       = errors.New("el broadcast excede el máximo de socios por envío de tu plan")
+	ErrBroadcastMessage      = errors.New("el mensaje del broadcast no puede estar vacío")
+	ErrBroadcastMonthlyLimit = errors.New("llegaste al máximo de envíos masivos de este mes")
 
 	// Webhooks
 	ErrInvalidSignature = errors.New("firma del webhook inválida")

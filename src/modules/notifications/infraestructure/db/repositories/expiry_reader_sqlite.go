@@ -23,23 +23,19 @@ func NewExpirySQLiteReader() *ExpirySQLiteReader { return &ExpirySQLiteReader{} 
 func (r *ExpirySQLiteReader) FindExpiringOn(tx sharedDomain.Transaction, targetDate time.Time) ([]notiApp.ExpiryCandidate, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	type row struct {
-		GymID                 string         `db:"gym_id"`
-		GymName               sql.NullString `db:"gym_name"`
-		WhatsAppConnectedAt   sql.NullInt64  `db:"whatsapp_connected_at"`
-		WhatsAppBusinessPhone sql.NullString `db:"whatsapp_business_phone"`
-		MemberID              string         `db:"member_id"`
-		FullName              string         `db:"full_name"`
-		Phone                 string         `db:"phone"`
-		MembershipType        string         `db:"membership_type"`
-		ExpiryDate            string         `db:"expiry_date"`
+		GymID          string         `db:"gym_id"`
+		GymName        sql.NullString `db:"gym_name"`
+		MemberID       string         `db:"member_id"`
+		FullName       string         `db:"full_name"`
+		Phone          string         `db:"phone"`
+		MembershipType string         `db:"membership_type"`
+		ExpiryDate     string         `db:"expiry_date"`
 	}
 	var rows []row
 	const q = `
 		SELECT
 		    g.id   AS gym_id,
 		    g.name AS gym_name,
-		    g.whatsapp_connected_at,
-		    g.whatsapp_business_phone,
 		    m.id   AS member_id,
 		    m.full_name,
 		    m.phone,
@@ -71,7 +67,6 @@ func (r *ExpirySQLiteReader) FindExpiringOn(tx sharedDomain.Transaction, targetD
 		if x.GymName.Valid {
 			c.GymName = x.GymName.String
 		}
-		c.GymWhatsAppReady = x.WhatsAppConnectedAt.Valid && x.WhatsAppBusinessPhone.Valid && x.WhatsAppBusinessPhone.String != ""
 		out = append(out, c)
 	}
 	return out, nil

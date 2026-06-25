@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	gymErrors "github.com/cuadra/cuadra-core/src/modules/gyms/domain/errors"
+	phonepkg "github.com/cuadra/cuadra-core/src/shared/phone"
 	"github.com/cuadra/cuadra-core/src/shared/runtime"
 )
 
@@ -431,8 +432,21 @@ func (u ProfileUpdate) HasPlusOnlyFields() bool {
 		u.LogoURL != nil ||
 		u.PrimaryColor != nil ||
 		u.SecondaryColor != nil ||
-		u.AccessWebhookURL != nil ||
-		u.AccessWebhookSecret != nil
+		// El webhook de acceso solo es acción Plus cuando se ESTABLECE una
+		// URL/secret real. Un valor VACÍO significa "no usar" o "limpiar" la
+		// feature y NO debe gatear: el desktop manda access_webhook_url:""
+		// en CADA guardado de perfil aunque el gym Standard no tenga webhook,
+		// y un puntero a "" no es nil (omitempty solo afecta el marshaling),
+		// así que sin este guard TODO gym Standard recibía 402 al guardar su
+		// propio perfil. ApplyProfileUpdate ya trata "" como clear sin error.
+		profileFieldSet(u.AccessWebhookURL) ||
+		profileFieldSet(u.AccessWebhookSecret)
+}
+
+// profileFieldSet reporta si el puntero trae un valor no vacío (tras trim).
+// Distingue "el cliente mandó un valor real" de "mandó vacío/no lo tocó".
+func profileFieldSet(p *string) bool {
+	return p != nil && strings.TrimSpace(*p) != ""
 }
 
 func (g *Gym) ApplyProfileUpdate(u ProfileUpdate) error {
@@ -452,7 +466,10 @@ func (g *Gym) ApplyProfileUpdate(u ProfileUpdate) error {
 		}
 	}
 	if u.WhatsApp != nil {
-		v := strings.TrimSpace(*u.WhatsApp)
+		// Normaliza a E.164 (quita espacios/guiones/paréntesis y antepone +52
+		// a nacionales de 10 dígitos) ANTES de validar, en vez de sólo
+		// trim+rechazar — así el dueño puede teclear "+52 446 105 7446".
+		v := phonepkg.Normalize(*u.WhatsApp)
 		if v == "" {
 			g.WhatsApp = nil
 		} else {
@@ -661,7 +678,7 @@ func (g *Gym) UpdateChargeSettings(in ChargeSettingsInput, now time.Time) error 
 // connection moment — after this point notifications.dispatcher will route
 // outbound messages through the configured number.
 func (g *Gym) ConnectWhatsApp(phone string, tokenEnc []byte, now time.Time) error {
-	v := strings.TrimSpace(phone)
+	v := phonepkg.Normalize(phone)
 	if v == "" || !whatsappRegex.MatchString(v) {
 		return gymErrors.ErrInvalidWhatsApp
 	}
@@ -678,6 +695,17 @@ func (g *Gym) ConnectWhatsApp(phone string, tokenEnc []byte, now time.Time) erro
 // IsWhatsAppConnected reports whether the gym has finished UC-037.
 func (g *Gym) IsWhatsAppConnected() bool {
 	return g.WhatsAppConnectedAt != nil && g.WhatsAppBusinessPhone != nil && *g.WhatsAppBusinessPhone != ""
+}
+
+// UsesOwnWhatsAppNumber reports whether outbound socio/owner messages must be
+// sent from the gym's OWN connected WhatsApp Business number instead of from
+// Tinta's master sender. Per ADR-009 §2.1 only Plus-tier gyms that completed
+// UC-037 send from their own number; Standard, trial, and Plus-not-yet-
+// connected gyms all send from Tinta's master sender. The dispatcher uses
+// this to resolve the `from`; the gym name already rides in the template
+// variables so the socio keeps the gym context either way.
+func (g *Gym) UsesOwnWhatsAppNumber() bool {
+	return IsPlusPlan(g.SubscriptionPlan) && g.IsWhatsAppConnected()
 }
 
 // DisconnectWhatsApp limpia los campos de WhatsApp del gym (UC-037 desconectar).
@@ -711,6 +739,85 @@ func (g *Gym) NotifyMemberPinEnabled() bool {
 		return b
 	}
 	return true
+}
+
+// MemberNumberDigits reports the configured length of the gym's member
+// numbers (ADR-010 §2.1). Stored under KioskSettings["member_number_digits"];
+// default DefaultMemberNumberDigits (4). El valor sólo crece (ver
+// GrowMemberNumberDigits) — nunca baja, así los números ya asignados no se
+// rompen. Un valor presente pero menor al default se trata como el default
+// (fail-safe ante data corrupta o downgrades manuales).
+func (g *Gym) MemberNumberDigits() int {
+	const def = 4 // = member.DefaultMemberNumberDigits (sin importar el pkg members)
+	if g.KioskSettings == nil {
+		return def
+	}
+	v, ok := g.KioskSettings["member_number_digits"]
+	if !ok {
+		return def
+	}
+	// JSON round-trips numbers as float64; el seed local los deja como int.
+	var d int
+	switch n := v.(type) {
+	case float64:
+		d = int(n)
+	case int:
+		d = n
+	case int64:
+		d = int(n)
+	default:
+		return def
+	}
+	if d < def {
+		return def
+	}
+	return d
+}
+
+// GrowMemberNumberDigits sube la longitud del número de socio a `digits`
+// SÓLO si es mayor a la actual (monótono — ADR-010 §2.1: "sólo crece; al
+// reconciliar entre dispositivos gana el máximo"). Devuelve true si cambió.
+// El asignador lo llama al consumir ~50% del espacio del dígito actual.
+func (g *Gym) GrowMemberNumberDigits(digits int, now time.Time) bool {
+	if digits <= g.MemberNumberDigits() {
+		return false
+	}
+	if g.KioskSettings == nil {
+		g.KioskSettings = map[string]any{}
+	}
+	g.KioskSettings["member_number_digits"] = digits
+	g.Version++
+	g.UpdatedAt = now
+	return true
+}
+
+// OwnerWelcomeSent reporta si ya se envió el banner "tu sistema ya está vivo"
+// al dueño (ADR-010 / onboarding). Guardado en KioskSettings["owner_welcomed"].
+// Es el guard de fire-once: el WhatsApp + la regeneración del código de acceso
+// se disparan UNA sola vez, en el primer link del primer dispositivo del gym.
+func (g *Gym) OwnerWelcomeSent() bool {
+	if g.KioskSettings == nil {
+		return false
+	}
+	if b, ok := g.KioskSettings["owner_welcomed"].(bool); ok {
+		return b
+	}
+	return false
+}
+
+// MarkOwnerWelcomeSent fija el flag de fire-once. Idempotente: si ya estaba
+// marcado, no bumpea version. Debe persistirse en la MISMA tx que la
+// regeneración del código + el encolado de la notificación.
+func (g *Gym) MarkOwnerWelcomeSent(now time.Time) {
+	if g.OwnerWelcomeSent() {
+		return
+	}
+	if g.KioskSettings == nil {
+		g.KioskSettings = map[string]any{}
+	}
+	g.KioskSettings["owner_welcomed"] = true
+	g.Version++
+	g.UpdatedAt = now
 }
 
 func assignColor(target **string, raw string) error {

@@ -84,6 +84,30 @@ type Reader interface {
 	//   - RangeReport (totals.inventory_cost del período seleccionado)
 	SumInventoryCostBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (float64, error)
 
+	// RealizedProductProfitBetween — ganancia REALIZADA de productos en el
+	// rango: revenue (SUM precio_snapshot × qty) − COGS (SUM qty ×
+	// costo_promedio_del_producto), sobre sale_items de ventas NO
+	// reembolsadas, filtradas por payment_date (mismo windowing que
+	// IncomeMonth / TopProductsBetween). El costo es el promedio ponderado
+	// por cantidad all-time de las entradas `restock` con costo UNITARIO
+	// (SUM(cost·delta)/SUM(delta)). COGS y la cobertura solo cuentan items
+	// cuyo producto tiene costo capturado; los demás suman a revenue pero no
+	// a COGS, y se reportan en ItemsTotal/ItemsWithCost para honestidad.
+	//
+	// APROXIMACIÓN DELIBERADA (Standard): se aplica el costo promedio ACTUAL
+	// del producto a ventas pasadas — no hay capas de costo por lote, así que
+	// si el costo subió/bajó después de la venta el COGS histórico no lo
+	// refleja. Es el trade-off de "promedio simple" del tier Standard.
+	//
+	// DIFERIDO A PLUS (NO implementar aquí — documentado en CUADRA-SPEC §9.6):
+	// margen por producto en el tiempo / tendencia, costeo por capas
+	// (FIFO/lotes), varianza de costo + alertas, margen por venta individual,
+	// top/bottom productos por margen, margen por proveedor, y el "resultado
+	// mensual" completo (Ingresos − COGS − Gastos). El modelo de datos ya lo
+	// soporta (el costo vive por entrada en stock_movements); el faseo es por
+	// UX/pricing, no por límite técnico.
+	RealizedProductProfitBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (RealizedProductProfit, error)
+
 	// ListInventoryCostsBetween lista los movimientos de restock con
 	// costo en un rango, ordenados por created_at DESC. JOINea
 	// product_name para que el FE no tenga que hacer N+1. Usado por la
@@ -162,6 +186,18 @@ type InventoryCostRow struct {
 	CostTotal   float64 // CostUnit * Delta — pre-computado para evitar N+1 en FE
 	Reason      *string
 	OccurredAt  time.Time
+}
+
+// RealizedProductProfit — desglose de la ganancia realizada de productos
+// en un rango. Revenue y COGS en pesos; el caso de uso calcula
+// realized = Revenue − COGS y arma el KPI. ItemsTotal/ItemsWithCost es la
+// cobertura: cuántas líneas de venta tienen costo capturado para la parte
+// de COGS (las que no, suman a Revenue pero no a COGS).
+type RealizedProductProfit struct {
+	Revenue       float64
+	COGS          float64
+	ItemsTotal    int
+	ItemsWithCost int
 }
 
 // DailyIncome — one bar of the dashboard chart (UC-033).

@@ -16,12 +16,13 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// bcryptCost es el factor de costo de HashPassword / HashPIN. Producción usa
-// 12 (ADR-002 §3.2). Bajo `go test` cae a bcrypt.MinCost: las suites de
-// integración crean muchos socios y CreateMember → generateUniquePin hace
-// O(N²) bcrypt-compares; con cost 12 + `-race` eso revienta el timeout de
-// 10 min de `go test`. testing.Testing() es true sólo bajo el harness de
-// test, así que el binario de producción nunca ve el costo bajo.
+// bcryptCost es el factor de costo de HashPassword / HashPIN (passwords de
+// usuario + PIN de login del operador — el número de socio de ADR-010 ya NO
+// se hashea). Producción usa 12 (ADR-002 §3.2). Bajo `go test` cae a
+// bcrypt.MinCost: las suites de integración crean muchos usuarios/operadores
+// y con cost 12 + `-race` eso revienta el timeout de 10 min de `go test`.
+// testing.Testing() es true sólo bajo el harness de test, así que el binario
+// de producción nunca ve el costo bajo.
 var bcryptCost = func() int {
 	if testing.Testing() {
 		return bcrypt.MinCost

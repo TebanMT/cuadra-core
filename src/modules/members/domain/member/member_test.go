@@ -95,18 +95,36 @@ func TestChangeStatus(t *testing.T) {
 	}
 }
 
-func TestValidatePin(t *testing.T) {
-	if err := member.ValidatePin("1234"); err != nil {
-		t.Errorf("4-digit pin should pass")
+func TestValidateMemberNumber(t *testing.T) {
+	// ADR-010: el número de socio es un entero positivo. El piso del rango de
+	// generación (1000) NO se valida aquí — backfills de PINs viejos pueden
+	// quedar por debajo.
+	if err := member.ValidateMemberNumber(4827); err != nil {
+		t.Errorf("número positivo debería pasar: %v", err)
 	}
-	if err := member.ValidatePin("12a4"); err == nil {
-		t.Errorf("non-digit should fail")
+	if err := member.ValidateMemberNumber(1); err != nil {
+		t.Errorf("número positivo pequeño debería pasar (backfill): %v", err)
 	}
-	if err := member.ValidatePin("123"); err == nil {
-		t.Errorf("3-digit should fail")
+	if err := member.ValidateMemberNumber(0); err == nil {
+		t.Errorf("cero debería fallar")
 	}
-	if err := member.ValidatePin("12345"); err == nil {
-		t.Errorf("5-digit should fail")
+	if err := member.ValidateMemberNumber(-5); err == nil {
+		t.Errorf("negativo debería fallar")
+	}
+}
+
+func TestSetMemberNumber(t *testing.T) {
+	m, err := member.NewMember(uuid.New(), uuid.New(), "MEM-000001", "Juan Pérez", "5512345678", uuid.New(), time.Now().UTC())
+	if err != nil {
+		t.Fatalf("NewMember: %v", err)
+	}
+	before := m.Version
+	m.SetMemberNumber(4827, time.Now().UTC())
+	if m.MemberNumber == nil || *m.MemberNumber != 4827 {
+		t.Fatalf("MemberNumber = %v, want 4827", m.MemberNumber)
+	}
+	if m.Version != before+1 {
+		t.Errorf("Version no bumpeó: %d → %d", before, m.Version)
 	}
 }
 

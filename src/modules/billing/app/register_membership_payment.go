@@ -124,6 +124,10 @@ type RegisterMembershipPayment struct {
 	// Promotions es opcional. Si nil, el use case ignora cualquier
 	// Promotion del input (caso: build legacy sin el BC enganchado).
 	Promotions *promoApp.ApplyPromotion
+	// Welcome (opcional) encola el WhatsApp de bienvenida cuando este pago
+	// activa al socio por PRIMERA vez (membresía pasa de pending/inexistente
+	// a active). Nil = no se manda (tests/builds sin notifications).
+	Welcome memApp.WelcomeNotifier
 }
 
 func NewRegisterMembershipPayment(
@@ -153,6 +157,14 @@ func NewRegisterMembershipPayment(
 // con `Promotion != nil` se validen y apliquen dentro de la misma tx.
 func (uc *RegisterMembershipPayment) WithPromotions(p *promoApp.ApplyPromotion) *RegisterMembershipPayment {
 	uc.Promotions = p
+	return uc
+}
+
+// WithWelcomeNotifier engancha el seam de bienvenida (el mismo que usa
+// CreateMember). El welcome se dispara sólo en la PRIMERA activación del
+// socio (su primer pago activa la membresía), no en renovaciones.
+func (uc *RegisterMembershipPayment) WithWelcomeNotifier(n memApp.WelcomeNotifier) *RegisterMembershipPayment {
+	uc.Welcome = n
 	return uc
 }
 
@@ -188,6 +200,20 @@ func (uc *RegisterMembershipPayment) Execute(ctx context.Context, in RegisterMem
 		}, now)
 		if err != nil {
 			return err
+		}
+
+		// 2.5 Welcome de WhatsApp — sólo cuando este pago ACTIVA al socio por
+		// primera vez. renewed.OldMembership==nil marca esa transición (Caso A
+		// pending→active o Caso 0 re-inscripción de huérfano), no una renovación
+		// (Caso B deja OldMembership != nil). Idempotente por (socio, número) en
+		// el seam, así que renovar nunca re-envía. Requiere número asignado.
+		if uc.Welcome != nil && renewed.OldMembership == nil &&
+			member.MemberNumber != nil && *member.MemberNumber != 0 {
+			if _, werr := uc.Welcome.Notify(ctx, tx, memApp.WelcomeNotifyInput{
+				GymID: in.GymID, MemberID: in.MemberID, Number: *member.MemberNumber,
+			}, now); werr != nil {
+				return werr
+			}
 		}
 
 		// 3. Compute the base amount using the (now-loaded) MembershipType.
@@ -402,7 +428,9 @@ func (uc *RegisterMembershipPayment) Execute(ctx context.Context, in RegisterMem
 			Folio:          p.Folio,
 			OperatorID:     in.ActorUserID,
 			BalancePending: p.BalancePending,
-			MembershipType: mt.Name,
+			// Datos reales para el recibo: nombre del plan + vigencia nueva.
+			MembershipTypeName: mt.Name,
+			NewExpiry:          renewed.NewMembership.ExpiryDate,
 		}
 
 		out = RegisterMembershipPaymentOutput{

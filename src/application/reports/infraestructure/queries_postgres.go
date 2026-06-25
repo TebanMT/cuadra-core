@@ -653,6 +653,55 @@ func (r *PostgresReader) SumInventoryCostBetween(tx sharedDomain.Transaction, gy
 	return total, err
 }
 
+// RealizedProductProfitBetween — ganancia realizada de productos en el
+// rango. revenue = SUM(precio_snapshot × qty); cogs = SUM(qty ×
+// costo_promedio_actual) solo de items con costo. Excluye ventas
+// reembolsadas vía NOT EXISTS del pago hijo concept='refund'. Filtra por
+// payment_date para alinear con IncomeMonth / TopProductsBetween.
+// ROUND(SUM(cost*delta)/SUM(delta),2) (costo unitario ponderado) = paridad
+// con SQLite.
+func (r *PostgresReader) RealizedProductProfitBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (reports.RealizedProductProfit, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	var row struct {
+		Revenue       float64
+		Cogs          float64
+		ItemsTotal    int
+		ItemsWithCost int
+	}
+	err := gormTx.Raw(`
+		SELECT
+		  COALESCE(SUM(si.unit_price_snapshot * si.quantity), 0) AS revenue,
+		  COALESCE(SUM(CASE WHEN c.avg_unit_cost IS NOT NULL THEN si.quantity * c.avg_unit_cost ELSE 0 END), 0) AS cogs,
+		  COUNT(*) AS items_total,
+		  COALESCE(SUM(CASE WHEN c.avg_unit_cost IS NOT NULL THEN 1 ELSE 0 END), 0) AS items_with_cost
+		FROM sale_items si
+		JOIN sales s ON s.id = si.sale_id AND s.deleted_at IS NULL
+		JOIN payments p ON p.id = s.payment_id AND p.deleted_at IS NULL
+		LEFT JOIN (
+		  SELECT product_id, ROUND(SUM(cost * delta) / SUM(delta), 2) AS avg_unit_cost
+		  FROM stock_movements
+		  WHERE gym_id = ? AND movement_type = 'restock' AND cost IS NOT NULL AND deleted_at IS NULL
+		  GROUP BY product_id
+		  HAVING SUM(delta) > 0
+		) c ON c.product_id = si.product_id
+		WHERE si.gym_id = ? AND si.deleted_at IS NULL
+		  AND p.payment_date >= ? AND p.payment_date <= ?
+		  AND NOT EXISTS (
+		    SELECT 1 FROM payments rfd
+		    WHERE rfd.parent_payment_id = p.id AND rfd.concept = 'refund' AND rfd.deleted_at IS NULL
+		  )`,
+		gymID, gymID, from.Format(dateFmt), to.Format(dateFmt)).Scan(&row).Error
+	if err != nil {
+		return reports.RealizedProductProfit{}, err
+	}
+	return reports.RealizedProductProfit{
+		Revenue:       row.Revenue,
+		COGS:          row.Cogs,
+		ItemsTotal:    row.ItemsTotal,
+		ItemsWithCost: row.ItemsWithCost,
+	}, nil
+}
+
 // ListInventoryCostsBetween — JOIN a products para incluir el nombre y
 // evitar el N+1 desde el FE. ORDER DESC porque la tabla del FE muestra
 // el último egreso arriba.

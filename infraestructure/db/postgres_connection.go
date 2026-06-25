@@ -4,11 +4,13 @@ package db
 
 import (
 	"log"
+	"os"
 	"sync"
 	"time"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 var (
@@ -22,7 +24,22 @@ var (
 func InitPostgres(dsn string) *gorm.DB {
 	postgresOnce.Do(func() {
 		var err error
-		postgresInstance, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
+		// IgnoreRecordNotFoundError: optional lookups (per-gym template
+		// overrides, idempotency probes) use First() and treat
+		// ErrRecordNotFound as "no override / not seen yet" — it's expected
+		// flow, not an error worth logging. We keep Warn level so slow
+		// queries and real errors still surface.
+		gormCfg := &gorm.Config{
+			Logger: logger.New(
+				log.New(os.Stdout, "", log.LstdFlags),
+				logger.Config{
+					SlowThreshold:             200 * time.Millisecond,
+					LogLevel:                  logger.Warn,
+					IgnoreRecordNotFoundError: true,
+				},
+			),
+		}
+		postgresInstance, err = gorm.Open(postgres.Open(dsn), gormCfg)
 		if err != nil {
 			log.Fatalf("postgres connect: %v", err)
 		}

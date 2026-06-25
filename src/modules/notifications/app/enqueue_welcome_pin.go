@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -18,18 +17,18 @@ import (
 )
 
 // EnqueueWelcomePin is the notifications-side implementation of
-// memApp.WelcomePinNotifier. It writes a single row to notification_queue
+// memApp.WelcomeNotifier. It writes a single row to notification_queue
 // using the caller's transaction so the enqueue stays atomic with the PIN
 // assignment in members.
 //
-// Gating, in order:
+// Gating, in order (ADR-009: the sender is resolved at dispatch, so there is
+// no WhatsApp-connection gate here anymore — Tinta's master number is the
+// fallback sender for Standard/trial gyms; Plus gyms that connected their own
+// number send from it):
 //
-//  1. gym.IsWhatsAppConnected — no point queuing if the gym hasn't finished
-//     UC-037; the dispatcher would fail outbound and the row would just sit
-//     in `failed`.
-//  2. gym.NotifyMemberPinEnabled — opt-out toggle per gym (default true).
-//  3. member is in the same gym (defense in depth against a wiring bug).
-//  4. member has a non-empty phone — without a recipient address we can't
+//  1. gym.NotifyMemberPinEnabled — opt-out toggle per gym (default true).
+//  2. member is in the same gym (defense in depth against a wiring bug).
+//  3. member has a non-empty phone — without a recipient address we can't
 //     dispatch and the domain New() constructor would refuse the row.
 //
 // Returning (result, nil) with Dispatched=false is the explicit "skipped
@@ -39,7 +38,6 @@ type EnqueueWelcomePin struct {
 	Notifications notiRepo.NotificationRepository
 	Gyms          gymRepo.GymRepository
 	Members       memRepo.MemberRepository
-	ImageGen      WelcomeImageGenerator
 }
 
 func NewEnqueueWelcomePin(
@@ -50,28 +48,18 @@ func NewEnqueueWelcomePin(
 	return &EnqueueWelcomePin{Notifications: notifications, Gyms: gyms, Members: members}
 }
 
-// WithImageGenerator sets the image generator and returns self for chaining.
-func (uc *EnqueueWelcomePin) WithImageGenerator(g WelcomeImageGenerator) *EnqueueWelcomePin {
-	uc.ImageGen = g
-	return uc
-}
-
-// Notify satisfies memApp.WelcomePinNotifier.
+// Notify satisfies memApp.WelcomeNotifier.
 func (uc *EnqueueWelcomePin) Notify(
 	ctx context.Context,
 	tx sharedDomain.Transaction,
-	in memApp.WelcomePinNotifyInput,
+	in memApp.WelcomeNotifyInput,
 	now time.Time,
-) (memApp.WelcomePinDispatchResult, error) {
-	out := memApp.WelcomePinDispatchResult{}
+) (memApp.WelcomeDispatchResult, error) {
+	out := memApp.WelcomeDispatchResult{}
 
 	gym, err := uc.Gyms.GetByID(tx, in.GymID)
 	if err != nil {
 		return out, sharedDomain.NewUnexpectedError(err)
-	}
-	if !gym.IsWhatsAppConnected() {
-		out.SkippedReason = "whatsapp_not_connected"
-		return out, nil
 	}
 	if !gym.NotifyMemberPinEnabled() {
 		out.SkippedReason = "disabled_by_gym"
@@ -96,27 +84,19 @@ func (uc *EnqueueWelcomePin) Notify(
 	if gym.Name != nil {
 		gymName = *gym.Name
 	}
-
-	imageURL := ""
-	if uc.ImageGen != nil {
-		url, err := uc.ImageGen.Generate(ctx, in.Pin)
-		if err != nil {
-			log.Printf("[notifications/welcome_pin] image gen failed (degraded): %v", err)
-		} else {
-			imageURL = url
-		}
-	}
 	vars := map[string]string{
-		"image_url":         imageURL,
 		"member_first_name": firstName(member.FullName),
 		"gym_name":          gymName,
+		// member_number reemplaza al viejo "pin" en el payload (ADR-010); el
+		// dispatcher lo hornea en el banner de bienvenida.
+		"member_number": fmt.Sprintf("%d", in.Number),
 	}
 
-	// Idempotency: scope by member + pin so that re-generating the PIN
+	// Idempotency: scope by member + number so that re-assigning the number
 	// produces a new outbound message (the operator wants the socio to
-	// receive the NEW code) while accidental double-fires of the same
-	// (member, pin) pair collapse to one row.
-	idempKey := fmt.Sprintf("welcome_pin:%s:%s", in.MemberID.String(), in.Pin)
+	// receive the NEW number) while accidental double-fires of the same
+	// (member, number) pair collapse to one row.
+	idempKey := fmt.Sprintf("welcome_number:%s:%d", in.MemberID.String(), in.Number)
 	existing, err := uc.Notifications.GetByIdempotencyKey(tx, in.GymID, idempKey)
 	if err != nil {
 		return out, sharedDomain.NewUnexpectedError(err)
@@ -132,7 +112,7 @@ func (uc *EnqueueWelcomePin) Notify(
 		in.GymID,
 		member.ID,
 		notiDomain.ChannelWhatsApp,
-		"member_welcome",
+		"member_welcome_number",
 		notiDomain.RecipientMember,
 		phone,
 		vars,

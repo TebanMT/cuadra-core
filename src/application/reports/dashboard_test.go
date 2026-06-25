@@ -42,6 +42,8 @@ type fakeReader struct {
 	topMembers      []reports.TopMemberRow
 	checkinsByDay   []reports.DailyCount
 
+	realizedNow, realizedPrev reports.RealizedProductProfit
+
 	inventoryCost     float64
 	inventoryCostRows []reports.InventoryCostRow
 
@@ -56,8 +58,9 @@ type fakeReader struct {
 	genderComposition reports.GenderCompositionRow
 	genderByHour      []reports.AttendanceByGenderHourRow
 
-	activeCalls int
-	incomeCalls int
+	activeCalls   int
+	incomeCalls   int
+	realizedCalls int
 }
 
 func (r *fakeReader) CountActiveMembers(_ sharedDomain.Transaction, _ uuid.UUID, t time.Time) (int, error) {
@@ -139,6 +142,13 @@ func (r *fakeReader) ListRecentPayments(_ sharedDomain.Transaction, _ uuid.UUID,
 }
 func (r *fakeReader) SumInventoryCostBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time) (float64, error) {
 	return r.inventoryCost, nil
+}
+func (r *fakeReader) RealizedProductProfitBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time) (reports.RealizedProductProfit, error) {
+	r.realizedCalls++
+	if r.realizedCalls == 1 {
+		return r.realizedNow, nil
+	}
+	return r.realizedPrev, nil
 }
 func (r *fakeReader) ListInventoryCostsBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time, _ int) ([]reports.InventoryCostRow, error) {
 	return r.inventoryCostRows, nil
@@ -223,6 +233,43 @@ func TestDashboard_ComposesKPIs(t *testing.T) {
 	}
 	if got := out.TodayCash["cash"]; got != 1500 {
 		t.Errorf("cash bucket = %.2f, want 1500", got)
+	}
+}
+
+func TestDashboard_RealizedProfitKPIAndCoverage(t *testing.T) {
+	reader := &fakeReader{
+		realizedNow:  reports.RealizedProductProfit{Revenue: 1000, COGS: 600, ItemsTotal: 8, ItemsWithCost: 5},
+		realizedPrev: reports.RealizedProductProfit{Revenue: 800, COGS: 500},
+	}
+	uc := reports.NewDashboard(reader, fakeUoW{}, 0)
+	out, err := uc.Execute(context.Background(), reports.DashboardInput{GymID: uuid.New()})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	// realized = revenue − COGS: actual 400, previo 300.
+	if out.RealizedProfitMonth.Current != 400 || out.RealizedProfitMonth.Previous != 300 {
+		t.Errorf("realized KPI = %+v, want 400/300", out.RealizedProfitMonth)
+	}
+	// Cobertura del rango actual (la del previo no se expone).
+	if out.RealizedProfitCoverage.ItemsTotal != 8 || out.RealizedProfitCoverage.ItemsWithCost != 5 {
+		t.Errorf("cobertura = %+v, want 5/8", out.RealizedProfitCoverage)
+	}
+	// Margen = utilidad / ingreso = (1000−600)/1000 = 40%.
+	if out.RealizedProfitMarginPct == nil || *out.RealizedProfitMarginPct != 40 {
+		t.Errorf("margen = %v, want 40", out.RealizedProfitMarginPct)
+	}
+}
+
+func TestDashboard_RealizedMarginNilWhenNoProductSales(t *testing.T) {
+	// Sin ventas de productos (Revenue 0) → margen nil (no se muestra chip).
+	reader := &fakeReader{realizedNow: reports.RealizedProductProfit{}}
+	uc := reports.NewDashboard(reader, fakeUoW{}, 0)
+	out, err := uc.Execute(context.Background(), reports.DashboardInput{GymID: uuid.New()})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if out.RealizedProfitMarginPct != nil {
+		t.Errorf("margen = %v, want nil (sin ventas)", *out.RealizedProfitMarginPct)
 	}
 }
 

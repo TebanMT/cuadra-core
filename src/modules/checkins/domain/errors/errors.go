@@ -5,7 +5,7 @@
 //
 //	UC-029 Checkin por huella   -> ErrFingerprintNotEnrolled, ErrNoFingerprintMatch, ErrReaderNotAvailable
 //	UC-030 Checkin manual       -> ErrMemberRequired, ErrOperatorRequired
-//	UC-032 Checkin por PIN      -> ErrPinIncorrect, ErrPinTooManyAttempts
+//	UC-032 Checkin por número   -> ErrNumberIncorrect, ErrNumberTooManyAttempts, ErrNumberFormat
 //	DA-29.2 Override            -> ErrOverrideReasonTooShort, ErrCannotOverrideAllowed
 package errors
 
@@ -24,10 +24,10 @@ var (
 	ErrFingerprintNotEnrolled = errors.New("ningún socio tiene huella registrada")
 	ErrNoFingerprintMatch     = errors.New("no identifiqué la huella; intenta de nuevo o pasa con recepción")
 
-	// PIN (UC-032)
-	ErrPinIncorrect       = errors.New("PIN incorrecto. Intenta de nuevo")
-	ErrPinTooManyAttempts = errors.New("demasiados intentos de PIN; espera un minuto y vuelve a intentar")
-	ErrPinFormat          = errors.New("el PIN debe ser de 4 dígitos")
+	// Número de socio (UC-032 — ADR-010, antes "PIN de acceso")
+	ErrNumberIncorrect       = errors.New("número de socio incorrecto. Intenta de nuevo")
+	ErrNumberTooManyAttempts = errors.New("demasiados intentos; espera un minuto y vuelve a intentar")
+	ErrNumberFormat          = errors.New("el número de socio no es válido")
 
 	// Override (DA-29.2)
 	ErrOverrideReasonTooShort = errors.New("la razón del override debe tener al menos 5 caracteres")

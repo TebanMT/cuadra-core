@@ -9,7 +9,7 @@ import (
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 )
 
-// OperatorWelcomePINDispatch espeja a WelcomePinDispatchResult del lado de
+// OperatorWelcomePINDispatch espeja a WelcomeDispatchResult del lado de
 // members. Lo replicamos en users para no acoplar BCs vía importes
 // cruzados — el notifier real (notifications/app/EnqueueOperatorWelcomePIN)
 // implementa la interface OperatorWelcomePINNotifier definida abajo.

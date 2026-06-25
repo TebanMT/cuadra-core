@@ -83,7 +83,36 @@ func (s *MemberService) RenewMembershipForPayment(ctx context.Context, tx shared
 	}
 	current, err := s.Memberships.GetCurrentByMember(tx, in.MemberID)
 	if err != nil {
-		return nil, err
+		if !errors.Is(err, memErrors.ErrNoActiveMembership) {
+			return nil, err
+		}
+		// Caso 0 — socio huérfano: no tiene membresía vigente (active/pending).
+		// Pasa cuando se importó sin sociomembresia, cuando su membresía quedó
+		// en 'expired'/'cancelled', o cuando nunca se le asignó una. En vez de
+		// rebotar el cobro con ErrNoActiveMembership, lo RE-INSCRIBIMOS: creamos
+		// una membresía nueva con el plan elegido y la activamos con este pago
+		// (mismo efecto que el Caso A, pero partiendo de cero). Las membresías
+		// viejas quedan como historial; el índice uq_memberships_member_active
+		// no se viola porque ninguna está activa.
+		member, mErr := s.Members.GetByID(tx, in.MemberID)
+		if mErr != nil {
+			return nil, mErr
+		}
+		if member.GymID != mt.GymID {
+			return nil, sharedDomain.NewBusinessError(memErrors.ErrCrossGym, "")
+		}
+		fresh := membershipDomain.NewPendingPayment(uuid.New(), mt.GymID, in.MemberID, mt, in.PaymentDate, now)
+		if actErr := fresh.Activate(in.PaymentDate, now); actErr != nil {
+			return nil, sharedDomain.NewBusinessError(actErr, "")
+		}
+		if _, cErr := s.Memberships.Create(tx, fresh); cErr != nil {
+			return nil, sharedDomain.NewUnexpectedError(cErr)
+		}
+		return &RenewMembershipForPaymentOutput{
+			OldMembership: nil,
+			NewMembership: fresh,
+			NextType:      mt,
+		}, nil
 	}
 	if current.GymID != mt.GymID {
 		return nil, sharedDomain.NewBusinessError(memErrors.ErrCrossGym, "")

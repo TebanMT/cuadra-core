@@ -22,6 +22,15 @@ type ProductRepository interface {
 	// stock" — sin esto los contadores reflejaban únicamente lo que el
 	// operador veía en pantalla, mintiendo cuando había paginación.
 	ListAggregates(tx sharedDomain.Transaction, q ListQuery) (ProductAggregates, error)
+	// ListUnitCosts devuelve, por producto del filtro, el costo unitario
+	// promedio ponderado por cantidad all-time (en pesos) —
+	// SUM(cost*delta)/SUM(delta) sobre las entradas `restock` con costo
+	// unitario capturado. Solo incluye productos
+	// con al menos una entrada con costo; los demás se omiten del mapa
+	// ("sin costo capturado"). Alimenta la línea "Costo prom · Precio ·
+	// Margen" de la ficha del producto. El redondeo a centavos es idéntico
+	// en SQLite y Postgres (ver impls) para que ambos binarios coincidan.
+	ListUnitCosts(tx sharedDomain.Transaction, q ListQuery) (map[uuid.UUID]float64, error)
 	ExistsByGymAndName(tx sharedDomain.Transaction, gymID uuid.UUID, name string, excludeID *uuid.UUID) (bool, error)
 }
 
@@ -32,6 +41,19 @@ type ProductAggregates struct {
 	TotalValue float64 // precio venta × existencias, solo activos
 	LowCount   int     // activos con stock <= stock_minimum y > 0
 	OutCount   int     // activos con stock = 0
+
+	// Ganancia potencial sobre el stock (Standard, sin gate Plus). El
+	// costo unitario es el promedio ponderado all-time de las ENTRADAS
+	// con costo capturado (stock_movements `restock` con `cost`). Los
+	// productos SIN costo capturado se EXCLUYEN de los montos de costo y
+	// ganancia, pero SÍ cuentan en ProductsTotal — la cobertura honesta
+	// vive en ProductsWithCost/ProductsTotal ("14 de 18 con costo"). Todos
+	// los montos en pesos, solo productos activos del filtro.
+	CostValue         float64 // SUM(stock × costoProm) de los activos con costo
+	PotentialProfit   float64 // SUM(stock × (precio − costoProm)) de los activos con costo
+	SaleValueWithCost float64 // SUM(stock × precio) de los MISMOS activos con costo — denominador del margen %
+	ProductsTotal     int     // # de productos activos en el filtro
+	ProductsWithCost  int     // # de esos activos con costo promedio capturado
 }
 
 // ActiveFilter restringe la consulta por el flag `active` del producto.

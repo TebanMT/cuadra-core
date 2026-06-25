@@ -69,8 +69,11 @@ func (r *fpFakeMemberRepo) GetByID(_ sharedDomain.Transaction, id uuid.UUID) (*m
 func (r *fpFakeMemberRepo) ExistsByGymAndPhone(sharedDomain.Transaction, uuid.UUID, string) (bool, error) {
 	return false, nil
 }
-func (r *fpFakeMemberRepo) PinHashCollidesInGym(sharedDomain.Transaction, uuid.UUID, string, *uuid.UUID) (bool, error) {
+func (r *fpFakeMemberRepo) MemberNumberExistsInGym(sharedDomain.Transaction, uuid.UUID, int, *uuid.UUID) (bool, error) {
 	return false, nil
+}
+func (r *fpFakeMemberRepo) ListUsedMemberNumbers(sharedDomain.Transaction, uuid.UUID) ([]int, error) {
+	return nil, nil
 }
 func (r *fpFakeMemberRepo) NextFolio(sharedDomain.Transaction, uuid.UUID) (string, error) {
 	return "test_001", nil
@@ -86,6 +89,16 @@ func (r *fpFakeMemberRepo) GetNamesByIDs(_ sharedDomain.Transaction, ids []uuid.
 	for _, id := range ids {
 		if m, ok := r.members[id]; ok {
 			out[id] = m.FullName
+		}
+	}
+	return out, nil
+}
+
+func (r *fpFakeMemberRepo) GetContactsByIDs(_ sharedDomain.Transaction, gymID uuid.UUID, ids []uuid.UUID) ([]memRepo.MemberContact, error) {
+	out := make([]memRepo.MemberContact, 0, len(ids))
+	for _, id := range ids {
+		if m, ok := r.members[id]; ok && m.GymID == gymID {
+			out = append(out, memRepo.MemberContact{ID: m.ID, FullName: m.FullName, Phone: m.Phone})
 		}
 	}
 	return out, nil

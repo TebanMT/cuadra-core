@@ -11,6 +11,7 @@ import (
 
 	chkErrors "github.com/cuadra/cuadra-core/src/modules/checkins/domain/errors"
 	chkRepo "github.com/cuadra/cuadra-core/src/modules/checkins/domain/repository"
+	gymRepo "github.com/cuadra/cuadra-core/src/modules/gyms/domain/repository"
 	memApp "github.com/cuadra/cuadra-core/src/modules/members/app"
 	"github.com/cuadra/cuadra-core/src/shared/audit"
 	"github.com/cuadra/cuadra-core/src/shared/biometric"
@@ -53,6 +54,8 @@ type CheckinByFingerprint struct {
 	Reader  biometric.Reader
 	UoW     sharedDomain.UnitOfWork
 	Audit   audit.Recorder
+	// Gyms (opcional) → evaluar la vigencia en la zona horaria del gym.
+	Gyms gymRepo.GymRepository
 }
 
 func NewCheckinByFingerprint(
@@ -66,6 +69,12 @@ func NewCheckinByFingerprint(
 		Members: members, Repo: repo, Reader: reader,
 		UoW: uow, Audit: recorder,
 	}
+}
+
+// WithGyms cablea el repo de gyms para evaluar el acceso en el día local.
+func (uc *CheckinByFingerprint) WithGyms(g gymRepo.GymRepository) *CheckinByFingerprint {
+	uc.Gyms = g
+	return uc
 }
 
 func (uc *CheckinByFingerprint) Execute(ctx context.Context, in CheckinByFingerprintInput) (*CheckinView, error) {
@@ -122,11 +131,10 @@ func (uc *CheckinByFingerprint) Execute(ctx context.Context, in CheckinByFingerp
 	}
 
 	// Phase 3 — record the checkin in a Command tx.
-	today := truncateToDay(now)
 	var view *CheckinView
 	err = uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
-		v, err := recordCheckin(ctx, tx, uc.Members, uc.Repo, uc.Audit,
-			in.GymID, memberID, "fingerprint", nil, now, today)
+		v, err := recordCheckin(ctx, tx, uc.Members, uc.Gyms, uc.Repo, uc.Audit,
+			in.GymID, memberID, "fingerprint", nil, now)
 		if err != nil {
 			return err
 		}

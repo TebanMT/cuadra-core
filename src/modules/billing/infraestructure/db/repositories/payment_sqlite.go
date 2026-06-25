@@ -190,8 +190,16 @@ func (r *PaymentSQLiteRepository) HasRefundFor(tx sharedDomain.Transaction, pare
 func (r *PaymentSQLiteRepository) MaxFolioForConcept(tx sharedDomain.Transaction, gymID uuid.UUID, concept string) (string, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	var max sql.NullString
+	// Ordena por el valor NUMÉRICO del folio (lo de después del '-'), no
+	// lexicográfico: MAX(folio) como string daba "MEM-99999" > "MEM-100000"
+	// (porque '9' > '1'), así que el folio siguiente calculado (100000)
+	// colisionaba con uno ya existente — caso típico tras importar pagos con
+	// MEM-%05d de IDs legacy que pasan de 99999.
 	err := stx.Get(context.Background(), &max,
-		`SELECT MAX(folio) FROM payments WHERE gym_id = ? AND concept = ?`,
+		`SELECT folio FROM payments
+		   WHERE gym_id = ? AND concept = ?
+		   ORDER BY CAST(SUBSTR(folio, INSTR(folio, '-') + 1) AS INTEGER) DESC, folio DESC
+		   LIMIT 1`,
 		gymID.String(), concept)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return "", err

@@ -9,6 +9,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"net/url"
 	"strings"
 
 	"github.com/twilio/twilio-go"
@@ -17,6 +19,7 @@ import (
 	notiDomain "github.com/cuadra/cuadra-core/src/modules/notifications/domain"
 	notiErrors "github.com/cuadra/cuadra-core/src/modules/notifications/domain/errors"
 	tplDomain "github.com/cuadra/cuadra-core/src/modules/notifications/domain/template"
+	phonepkg "github.com/cuadra/cuadra-core/src/shared/phone"
 )
 
 // TwilioProvider implements notifications.WhatsAppProvider over the Twilio
@@ -27,7 +30,7 @@ type TwilioProvider struct {
 	client            *twilio.RestClient
 	statusCallbackURL string
 	templateContent   map[string]string // template_key -> Twilio Content SID (HX...)
-	otpFrom           string            // Cuadra master sender for UC-037 OTPs (E.164)
+	masterFrom        string            // Tinta master WhatsApp sender: Standard/trial tier + UC-037 OTPs (E.164)
 }
 
 // TwilioOptions wires the provider. AccountSID / AuthToken are normally
@@ -43,10 +46,12 @@ type TwilioOptions struct {
 	AuthToken           string
 	StatusCallbackURL   string
 	TemplateContentSIDs map[string]string
-	// OTPFromNumber is Cuadra's master WhatsApp business number used to
-	// deliver UC-037 connect-step OTPs. It's distinct from the per-gym
-	// `cfg.Phone` because at OTP time the gym hasn't connected yet. E.164.
-	OTPFromNumber string
+	// MasterFromNumber is Tinta's master WhatsApp business sender. Per
+	// ADR-009 §2.1 it's the `from` for every Standard/trial gym (and for
+	// Plus gyms that haven't connected their own number via UC-037), and
+	// also the sender for the UC-037 connect-step OTPs. Distinct from the
+	// per-gym `cfg.Phone`. E.164. Wired from TWILIO_WHATSAPP_NUMBER.
+	MasterFromNumber string
 }
 
 // NewTwilioProvider returns a configured provider. Returns nil-config error
@@ -63,12 +68,40 @@ func NewTwilioProvider(opts TwilioOptions) (*TwilioProvider, error) {
 	if opts.TemplateContentSIDs == nil {
 		opts.TemplateContentSIDs = map[string]string{}
 	}
+	// Twilio rechaza un StatusCallback no público (error 21609 con localhost).
+	// El callback es opcional — sólo entrega delivery receipts — así que si no
+	// es alcanzable (dev/localhost) lo omitimos: el mensaje se envía igual,
+	// sólo sin status updates. En prod, TWILIO_WEBHOOK_URL apunta a un https
+	// público y se respeta.
+	callback := strings.TrimSpace(opts.StatusCallbackURL)
+	if callback != "" && !isPublicCallbackURL(callback) {
+		log.Printf("[notifications] StatusCallback %q no es público (localhost/no-http(s)) — se omite; los mensajes se envían sin delivery receipts. Usa un túnel (cloudflared/ngrok) en TWILIO_WEBHOOK_URL si los quieres.", callback)
+		callback = ""
+	}
 	return &TwilioProvider{
 		client:            cli,
-		statusCallbackURL: opts.StatusCallbackURL,
+		statusCallbackURL: callback,
 		templateContent:   opts.TemplateContentSIDs,
-		otpFrom:           strings.TrimSpace(opts.OTPFromNumber),
+		masterFrom:        phonepkg.Normalize(opts.MasterFromNumber),
 	}, nil
+}
+
+// isPublicCallbackURL reports whether Twilio can actually POST to u: an
+// http(s) URL whose host isn't loopback. Twilio rejects localhost / 127.0.0.1
+// with error 21609 at send time.
+func isPublicCallbackURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	switch strings.ToLower(u.Hostname()) {
+	case "", "localhost", "127.0.0.1", "0.0.0.0", "::1":
+		return false
+	}
+	return true
 }
 
 // SendTemplate sends a pre-approved WhatsApp template message. When the
@@ -81,7 +114,7 @@ func (p *TwilioProvider) SendTemplate(
 	recipient, templateKey string,
 	vars map[string]string,
 ) (string, error) {
-	from, err := whatsappAddress(cfg.Phone)
+	from, err := p.resolveFrom(cfg)
 	if err != nil {
 		return "", err
 	}
@@ -131,7 +164,7 @@ func (p *TwilioProvider) SendFreeform(
 	cfg notiDomain.GymWhatsAppConfig,
 	recipient, text string,
 ) (string, error) {
-	from, err := whatsappAddress(cfg.Phone)
+	from, err := p.resolveFrom(cfg)
 	if err != nil {
 		return "", err
 	}
@@ -157,14 +190,14 @@ func (p *TwilioProvider) SendFreeform(
 }
 
 // SendOTP delivers the UC-037 connect-step verification code over WhatsApp.
-// Uses Cuadra's master sender (`OTPFromNumber`). The content must be an
+// Uses Tinta's master sender (`MasterFromNumber`). The content must be an
 // approved authentication template — Meta forbids freeform OTP delivery.
 // The template key is registered as `whatsapp_connect_otp` and its Twilio
 // Content SID lives in TemplateContentSIDs. Falls back to a freeform body
 // when the SID isn't configured (sandbox / dev) so the operator on a
 // sandbox number can still complete the flow.
 func (p *TwilioProvider) SendOTP(ctx context.Context, phone, code string) error {
-	from, err := whatsappAddress(p.otpFrom)
+	from, err := whatsappAddress(p.masterFrom)
 	if err != nil {
 		return err
 	}
@@ -218,16 +251,34 @@ func (p *TwilioProvider) RegisterSender(ctx context.Context, phone string) (stri
 	return "PENDING_SENDER_REGISTRATION", nil
 }
 
+// resolveFrom picks the outbound sender address. Per ADR-009 §2.1, a gym
+// that sends from its own number (Plus + UC-037 completed) arrives here with
+// that number in cfg.Phone; everyone else (Standard / trial / Plus-not-
+// connected) arrives with an empty Phone and falls back to Tinta's master
+// sender (`masterFrom`, the same number used for connect-step OTPs). If the
+// master sender isn't configured the address resolution fails loudly — a
+// server misconfig, not a per-gym condition.
+func (p *TwilioProvider) resolveFrom(cfg notiDomain.GymWhatsAppConfig) (string, error) {
+	phone := strings.TrimSpace(cfg.Phone)
+	if phone == "" {
+		phone = p.masterFrom
+	}
+	return whatsappAddress(phone)
+}
+
 func whatsappAddress(phone string) (string, error) {
 	p := strings.TrimSpace(phone)
-	if p == "" {
-		return "", notiErrors.ErrInvalidPhone
-	}
 	if strings.HasPrefix(p, "whatsapp:") {
 		return p, nil
 	}
-	if !strings.HasPrefix(p, "+") {
-		p = "+" + p
+	// Defensa en el borde con Twilio: normaliza a E.164 (quita espacios/
+	// guiones/paréntesis y antepone +52 a nacionales de 10 dígitos) y valida
+	// estricto. Cubre incluso datos legacy ya en BD sin esperar migración —
+	// antes sólo hacía TrimSpace + anteponer '+', dejando pasar espacios
+	// internos y números sin código de país que Twilio rechaza (21211/21611).
+	p = phonepkg.Normalize(p)
+	if !phonepkg.Valid(p) {
+		return "", notiErrors.ErrInvalidPhone
 	}
 	return "whatsapp:" + p, nil
 }

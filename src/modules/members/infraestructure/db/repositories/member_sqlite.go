@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"golang.org/x/crypto/bcrypt"
 
 	memErrors "github.com/cuadra/cuadra-core/src/modules/members/domain/errors"
 	memberDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/member"
@@ -28,26 +27,25 @@ type MemberSQLiteRepository struct{}
 func NewMemberSQLiteRepository() *MemberSQLiteRepository { return &MemberSQLiteRepository{} }
 
 type sqliteMemberRow struct {
-	ID                   string         `db:"id"`
-	GymID                string         `db:"gym_id"`
-	Version              int            `db:"version"`
-	CreatedAt            int64          `db:"created_at"`
-	UpdatedAt            int64          `db:"updated_at"`
-	DeletedAt            sql.NullInt64  `db:"deleted_at"`
-	SyncedAt             sql.NullInt64  `db:"synced_at"`
-	Folio                string         `db:"folio"`
-	FullName             string         `db:"full_name"`
-	Phone                string         `db:"phone"`
-	Email                sql.NullString `db:"email"`
-	Birthdate            sql.NullString `db:"birthdate"`
-	PhotoURL             sql.NullString `db:"photo_url"`
-	Notes                sql.NullString `db:"notes"`
-	Status               string         `db:"status"`
-	EnrollmentPaid       int            `db:"enrollment_paid"`
-	LastMaintenancePaid  sql.NullString `db:"last_maintenance_paid"`
-	PinHash              sql.NullString `db:"pin_hash"`
-	PinPlain             sql.NullString `db:"pin_plain"`
-	PinAssignedAt        sql.NullInt64  `db:"pin_assigned_at"`
+	ID                  string         `db:"id"`
+	GymID               string         `db:"gym_id"`
+	Version             int            `db:"version"`
+	CreatedAt           int64          `db:"created_at"`
+	UpdatedAt           int64          `db:"updated_at"`
+	DeletedAt           sql.NullInt64  `db:"deleted_at"`
+	SyncedAt            sql.NullInt64  `db:"synced_at"`
+	Folio               string         `db:"folio"`
+	FullName            string         `db:"full_name"`
+	Phone               string         `db:"phone"`
+	Email               sql.NullString `db:"email"`
+	Birthdate           sql.NullString `db:"birthdate"`
+	PhotoURL            sql.NullString `db:"photo_url"`
+	Notes               sql.NullString `db:"notes"`
+	Status              string         `db:"status"`
+	EnrollmentPaid      int            `db:"enrollment_paid"`
+	LastMaintenancePaid sql.NullString `db:"last_maintenance_paid"`
+	// MemberNumber — número de socio público (ADR-010).
+	MemberNumber         sql.NullInt64  `db:"member_number"`
 	LastContactAttemptAt sql.NullInt64  `db:"last_contact_attempt_at"`
 	Gender               sql.NullString `db:"gender"`
 	CreatedBy            string         `db:"created_by"`
@@ -77,17 +75,19 @@ type joinedMemberRow struct {
 func (r *MemberSQLiteRepository) Create(tx sharedDomain.Transaction, m *memberDomain.Member) (*memberDomain.Member, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	row := memberToRow(m)
+	// pin_* deprecadas (ADR-010): no se insertan — quedan NULL para socios
+	// nuevos. member_number es el identificador público.
 	const stmt = `
 		INSERT INTO members (
 		    id, gym_id, version, created_at, updated_at, deleted_at,
 		    folio, full_name, phone, email, birthdate, photo_url, notes, status,
 		    enrollment_paid, last_maintenance_paid,
-		    pin_hash, pin_plain, pin_assigned_at, last_contact_attempt_at, gender, created_by
+		    member_number, last_contact_attempt_at, gender, created_by
 		) VALUES (
 		    :id, :gym_id, :version, :created_at, :updated_at, :deleted_at,
 		    :folio, :full_name, :phone, :email, :birthdate, :photo_url, :notes, :status,
 		    :enrollment_paid, :last_maintenance_paid,
-		    :pin_hash, :pin_plain, :pin_assigned_at, :last_contact_attempt_at, :gender, :created_by
+		    :member_number, :last_contact_attempt_at, :gender, :created_by
 		)`
 	if _, err := stx.NamedExec(context.Background(), stmt, row); err != nil {
 		return nil, err
@@ -102,13 +102,15 @@ func (r *MemberSQLiteRepository) Update(tx sharedDomain.Transaction, m *memberDo
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	m.UpdatedAt = time.Now().UTC()
 	row := memberToRow(m)
+	// pin_* deprecadas (ADR-010): se omiten del SET para conservar el dato
+	// existente intacto (rollback). member_number es la columna viva.
 	const stmt = `
 		UPDATE members SET
 		    version = :version, updated_at = :updated_at, deleted_at = :deleted_at,
 		    full_name = :full_name, phone = :phone, email = :email, birthdate = :birthdate,
 		    photo_url = :photo_url, notes = :notes, status = :status,
 		    enrollment_paid = :enrollment_paid, last_maintenance_paid = :last_maintenance_paid,
-		    pin_hash = :pin_hash, pin_plain = :pin_plain, pin_assigned_at = :pin_assigned_at,
+		    member_number = :member_number,
 		    last_contact_attempt_at = :last_contact_attempt_at, gender = :gender
 		WHERE id = :id`
 	if _, err := stx.NamedExec(context.Background(), stmt, row); err != nil {
@@ -168,6 +170,43 @@ func (r *MemberSQLiteRepository) GetNamesByIDs(tx sharedDomain.Transaction, ids 
 	return out, nil
 }
 
+func (r *MemberSQLiteRepository) GetContactsByIDs(tx sharedDomain.Transaction, gymID uuid.UUID, ids []uuid.UUID) ([]memRepo.MemberContact, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	placeholders := make([]string, len(ids))
+	args := make([]any, 0, len(ids)+1)
+	args = append(args, gymID.String())
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args = append(args, id.String())
+	}
+	// gym_id = cerrojo anti cross-tenant; deleted_at IS NULL omite borrados.
+	q := fmt.Sprintf(
+		`SELECT id, full_name, phone FROM members WHERE gym_id = ? AND id IN (%s) AND deleted_at IS NULL`,
+		strings.Join(placeholders, ","),
+	)
+	type row struct {
+		ID       string `db:"id"`
+		FullName string `db:"full_name"`
+		Phone    string `db:"phone"`
+	}
+	var rows []row
+	if err := stx.Select(context.Background(), &rows, q, args...); err != nil {
+		return nil, err
+	}
+	out := make([]memRepo.MemberContact, 0, len(rows))
+	for _, rw := range rows {
+		id, err := uuid.Parse(rw.ID)
+		if err != nil {
+			continue
+		}
+		out = append(out, memRepo.MemberContact{ID: id, FullName: rw.FullName, Phone: rw.Phone})
+	}
+	return out, nil
+}
+
 func (r *MemberSQLiteRepository) ExistsByGymAndPhone(tx sharedDomain.Transaction, gymID uuid.UUID, phone string) (bool, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	var n int
@@ -177,28 +216,34 @@ func (r *MemberSQLiteRepository) ExistsByGymAndPhone(tx sharedDomain.Transaction
 	return n > 0, err
 }
 
-func (r *MemberSQLiteRepository) PinHashCollidesInGym(tx sharedDomain.Transaction, gymID uuid.UUID, plainPin string, excludeMemberID *uuid.UUID) (bool, error) {
+// MemberNumberExistsInGym — O(1) sobre uq_members_gym_number (ADR-010).
+func (r *MemberSQLiteRepository) MemberNumberExistsInGym(tx sharedDomain.Transaction, gymID uuid.UUID, number int, excludeMemberID *uuid.UUID) (bool, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
-	q := `SELECT id, pin_hash FROM members WHERE gym_id = ? AND pin_hash IS NOT NULL AND deleted_at IS NULL`
-	args := []any{gymID.String()}
+	q := `SELECT COUNT(1) FROM members WHERE gym_id = ? AND member_number = ? AND deleted_at IS NULL`
+	args := []any{gymID.String(), number}
 	if excludeMemberID != nil {
 		q += ` AND id <> ?`
 		args = append(args, excludeMemberID.String())
 	}
-	type pinRow struct {
-		ID      string `db:"id"`
-		PinHash string `db:"pin_hash"`
-	}
-	var rows []pinRow
-	if err := stx.Select(context.Background(), &rows, q, args...); err != nil {
+	var n int
+	if err := stx.Get(context.Background(), &n, q, args...); err != nil {
 		return false, err
 	}
-	for _, row := range rows {
-		if bcrypt.CompareHashAndPassword([]byte(row.PinHash), []byte(plainPin)) == nil {
-			return true, nil
-		}
+	return n > 0, nil
+}
+
+// ListUsedMemberNumbers — números en uso en el gym (no borrados, no nulos).
+func (r *MemberSQLiteRepository) ListUsedMemberNumbers(tx sharedDomain.Transaction, gymID uuid.UUID) ([]int, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	var nums []int
+	err := stx.Select(context.Background(), &nums,
+		`SELECT member_number FROM members
+		 WHERE gym_id = ? AND member_number IS NOT NULL AND deleted_at IS NULL`,
+		gymID.String())
+	if err != nil {
+		return nil, err
 	}
-	return false, nil
+	return nums, nil
 }
 
 func (r *MemberSQLiteRepository) NextFolio(tx sharedDomain.Transaction, gymID uuid.UUID) (string, error) {
@@ -251,10 +296,12 @@ func (r *MemberSQLiteRepository) List(tx sharedDomain.Transaction, q memRepo.Lis
 	}
 	switch q.StatusFilter {
 	case "active":
-		// Vigente: socio activo + membership activa + expiry > today+7.
-		// Excluye pending_payment (sin expiry) por la condición de
-		// status='active' Y expiry_date NOT NULL.
-		where = append(where, `m.status = 'active' AND ms.status = 'active' AND ms.expiry_date IS NOT NULL AND CAST(julianday(ms.expiry_date) - julianday(?) AS INTEGER) > 7`)
+		// Vigente = socio activo + membership activa + expiry >= hoy.
+		// INCLUYE los "por vencer" (0-7 días): un socio por vencer sigue
+		// activo. Coincide con CountActiveMembers (KPI del dashboard); el
+		// segmento "expiring_soon" es un SUBCONJUNTO de éste, no excluyente.
+		// Excluye pending_payment (sin expiry) por status='active' Y expiry NOT NULL.
+		where = append(where, `m.status = 'active' AND ms.status = 'active' AND ms.expiry_date IS NOT NULL AND CAST(julianday(ms.expiry_date) - julianday(?) AS INTEGER) >= 0`)
 		args = append(args, today)
 	case "expiring_soon":
 		where = append(where, `m.status = 'active' AND ms.status = 'active' AND ms.expiry_date IS NOT NULL AND CAST(julianday(ms.expiry_date) - julianday(?) AS INTEGER) BETWEEN 0 AND 7`)
@@ -313,7 +360,7 @@ func (r *MemberSQLiteRepository) List(tx sharedDomain.Transaction, q memRepo.Lis
 		    m.id, m.gym_id, m.version, m.created_at, m.updated_at, m.deleted_at, m.synced_at,
 		    m.folio, m.full_name, m.phone, m.email, m.birthdate, m.photo_url, m.notes, m.status,
 		    m.enrollment_paid, m.last_maintenance_paid,
-		    m.pin_hash, m.pin_assigned_at, m.last_contact_attempt_at, m.gender, m.created_by,
+		    m.member_number, m.last_contact_attempt_at, m.gender, m.created_by,
 		    ms.id AS ms_id, ms.gym_id AS ms_gym_id, ms.version AS ms_version,
 		    ms.created_at AS ms_created_at, ms.updated_at AS ms_updated_at, ms.deleted_at AS ms_deleted_at,
 		    ms.member_id AS ms_member_id, ms.membership_type_id AS ms_membership_type_id,
@@ -368,35 +415,23 @@ func (r *MemberSQLiteRepository) GetWithCurrentMembership(tx sharedDomain.Transa
 	return out, nil
 }
 
-// ListPinCandidates — see member_postgres.go for the contract.
-func (r *MemberSQLiteRepository) ListPinCandidates(tx sharedDomain.Transaction, gymID uuid.UUID) ([]memRepo.PinCandidate, error) {
+// FindByMemberNumber — see member_postgres.go for the contract. O(1) lookup
+// on uq_members_gym_number; (nil, nil) when no non-deleted member holds it.
+// NO filtramos por status — los inactivos también matchean para que el
+// access evaluator devuelva denied_inactive con el nombre del socio.
+func (r *MemberSQLiteRepository) FindByMemberNumber(tx sharedDomain.Transaction, gymID uuid.UUID, number int) (*memberDomain.Member, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
-	type pinRow struct {
-		ID      string `db:"id"`
-		PinHash string `db:"pin_hash"`
+	var row sqliteMemberRow
+	err := stx.Get(context.Background(), &row,
+		`SELECT * FROM members WHERE gym_id = ? AND member_number = ? AND deleted_at IS NULL`,
+		gymID.String(), number)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
 	}
-	var rows []pinRow
-	// NO filtramos por status — los inactivos también participan en el
-	// match para que el access evaluator pueda devolver denied_inactive
-	// con el nombre del socio. Antes los excluíamos y el kiosko mostraba
-	// "No encontré a este socio" para un PIN válido de un socio inactivo,
-	// lo que confunde al operador.
-	err := stx.Select(context.Background(), &rows,
-		`SELECT id, pin_hash FROM members
-		 WHERE gym_id = ? AND pin_hash IS NOT NULL AND deleted_at IS NULL`,
-		gymID.String())
 	if err != nil {
 		return nil, err
 	}
-	out := make([]memRepo.PinCandidate, 0, len(rows))
-	for _, row := range rows {
-		id, perr := uuid.Parse(row.ID)
-		if perr != nil {
-			continue
-		}
-		out = append(out, memRepo.PinCandidate{MemberID: id, PinHash: row.PinHash})
-	}
-	return out, nil
+	return memberFromRow(&row), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -435,14 +470,8 @@ func memberToRow(m *memberDomain.Member) sqliteMemberRow {
 	if m.LastMaintenancePaid != nil {
 		row.LastMaintenancePaid = sql.NullString{String: m.LastMaintenancePaid.UTC().Format(dateLayout), Valid: true}
 	}
-	if m.PinHash != nil {
-		row.PinHash = sql.NullString{String: *m.PinHash, Valid: true}
-	}
-	if m.PinPlain != nil {
-		row.PinPlain = sql.NullString{String: *m.PinPlain, Valid: true}
-	}
-	if m.PinAssignedAt != nil {
-		row.PinAssignedAt = sql.NullInt64{Int64: m.PinAssignedAt.UnixMilli(), Valid: true}
+	if m.MemberNumber != nil {
+		row.MemberNumber = sql.NullInt64{Int64: int64(*m.MemberNumber), Valid: true}
 	}
 	if m.LastContactAttemptAt != nil {
 		row.LastContactAttemptAt = sql.NullInt64{Int64: m.LastContactAttemptAt.UnixMilli(), Valid: true}
@@ -492,17 +521,9 @@ func memberFromRow(r *sqliteMemberRow) *memberDomain.Member {
 			m.LastMaintenancePaid = &t
 		}
 	}
-	if r.PinHash.Valid {
-		v := r.PinHash.String
-		m.PinHash = &v
-	}
-	if r.PinPlain.Valid {
-		v := r.PinPlain.String
-		m.PinPlain = &v
-	}
-	if r.PinAssignedAt.Valid {
-		t := time.UnixMilli(r.PinAssignedAt.Int64).UTC()
-		m.PinAssignedAt = &t
+	if r.MemberNumber.Valid {
+		n := int(r.MemberNumber.Int64)
+		m.MemberNumber = &n
 	}
 	if r.LastContactAttemptAt.Valid {
 		t := time.UnixMilli(r.LastContactAttemptAt.Int64).UTC()
@@ -526,6 +547,31 @@ func strPtrOrNil(p *string) any {
 	return *p
 }
 
+func intPtrOrNil(p *int) any {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+// dateStrPtrOrNil → string ISO 'YYYY-MM-DD' o nil (columnas DATE como
+// birthdate / last_maintenance_paid). msPtrOrNil → epoch-ms o nil
+// (columnas timestamp como last_contact_attempt_at / deleted_at). Mismo
+// formato que memberToRow para que el payload de sync round-trippee.
+func dateStrPtrOrNil(t *time.Time) any {
+	if t == nil {
+		return nil
+	}
+	return t.UTC().Format(dateLayout)
+}
+
+func msPtrOrNil(t *time.Time) any {
+	if t == nil {
+		return nil
+	}
+	return t.UnixMilli()
+}
+
 func enqueueMember(stx *sharedDomain.SqlxTransaction, m *memberDomain.Member) error {
 	if stx.Queue == nil {
 		return nil
@@ -534,19 +580,36 @@ func enqueueMember(stx *sharedDomain.SqlxTransaction, m *memberDomain.Member) er
 	// UPSERT only emits columns present in the map, and a missing required
 	// column on first-sight INSERT triggers a 23502 NOT NULL violation.
 	payload, err := json.Marshal(map[string]any{
-		"id":              m.ID.String(),
-		"gym_id":          m.GymID.String(),
-		"version":         m.Version,
-		"created_at":      m.CreatedAt.UnixMilli(),
-		"updated_at":      m.UpdatedAt.UnixMilli(),
+		"id":         m.ID.String(),
+		"gym_id":     m.GymID.String(),
+		"version":    m.Version,
+		"created_at": m.CreatedAt.UnixMilli(),
+		"updated_at": m.UpdatedAt.UnixMilli(),
+		// deleted_at debe viajar o el soft-delete del socio nunca llega al
+		// cloud (el projector lo lee para tombstonear) y el socio "revive"
+		// en el dashboard / 2º equipo.
+		"deleted_at":      msPtrOrNil(m.DeletedAt),
 		"folio":           m.Folio,
 		"full_name":       m.FullName,
 		"phone":           m.Phone,
 		"email":           strPtrOrNil(m.Email),
+		"birthdate":       dateStrPtrOrNil(m.Birthdate),
+		"photo_url":       strPtrOrNil(m.PhotoURL),
+		"notes":           strPtrOrNil(m.Notes),
 		"status":          m.Status,
 		"enrollment_paid": m.EnrollmentPaid,
-		"gender":          strPtrOrNil(m.Gender),
-		"created_by":      m.CreatedBy.String(),
+		// last_maintenance_paid (DATE) y last_contact_attempt_at (timestamp):
+		// sin estos, el reporte de cumpleaños, el estado de mantenimiento y la
+		// "persecución por pago" del dashboard quedaban rotos (el operador
+		// contacta en desktop pero el dueño no lo ve → doble mensajería).
+		"last_maintenance_paid":   dateStrPtrOrNil(m.LastMaintenancePaid),
+		"last_contact_attempt_at": msPtrOrNil(m.LastContactAttemptAt),
+		"gender":                  strPtrOrNil(m.Gender),
+		"created_by":              m.CreatedBy.String(),
+		// member_number (ADR-010): viaja al cloud para que el projector
+		// pueda enforcar el índice único y reconciliar duplicados al sync.
+		// Nullable — nil cuando el socio aún no tiene número.
+		"member_number": intPtrOrNil(m.MemberNumber),
 	})
 	if err != nil {
 		return err

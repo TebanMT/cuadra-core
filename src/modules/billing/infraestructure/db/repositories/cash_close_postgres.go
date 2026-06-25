@@ -53,16 +53,19 @@ func (r *CashClosePostgresReader) Aggregate(tx sharedDomain.Transaction, q billi
 		return nil, err
 	}
 
-	type refundSummary struct {
-		Total float64
-		Cnt   int
+	// Refunds agrupados por método: alimentan RefundTotal y RefundByMethod
+	// (para descontar del cajón los refunds en efectivo). amount es negativo.
+	type refundRow struct {
+		PaymentMethod string
+		Total         float64
+		Cnt           int
 	}
-	var refundSum refundSummary
+	var refundRows []refundRow
 	if err := gormTx.Model(&models.PaymentModel{}).
-		Select("COALESCE(SUM(amount), 0) AS total, COUNT(*) AS cnt").
+		Select("payment_method, COALESCE(SUM(amount), 0) AS total, COUNT(*) AS cnt").
 		Where("gym_id = ? AND payment_date = ? AND concept = ? AND deleted_at IS NULL",
 			q.GymID, dateStr, paymentDomain.ConceptRefund).
-		Scan(&refundSum).Error; err != nil {
+		Group("payment_method").Scan(&refundRows).Error; err != nil {
 		return nil, err
 	}
 
@@ -94,11 +97,15 @@ func (r *CashClosePostgresReader) Aggregate(tx sharedDomain.Transaction, q billi
 	}
 
 	out := &billingRepo.CashCloseTotals{
-		ByMethod:    map[string]float64{},
-		ByConcept:   map[string]billingRepo.ConceptTotal{},
-		ByOperator:  make([]billingRepo.OperatorTotal, 0, len(opRows)),
-		RefundTotal: refundSum.Total,
-		RefundCount: refundSum.Cnt,
+		ByMethod:       map[string]float64{},
+		ByConcept:      map[string]billingRepo.ConceptTotal{},
+		ByOperator:     make([]billingRepo.OperatorTotal, 0, len(opRows)),
+		RefundByMethod: map[string]float64{},
+	}
+	for _, rf := range refundRows {
+		out.RefundByMethod[rf.PaymentMethod] = rf.Total // negativo
+		out.RefundTotal += rf.Total
+		out.RefundCount += rf.Cnt
 	}
 	for _, m := range methodRows {
 		out.ByMethod[m.PaymentMethod] = m.Total

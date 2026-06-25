@@ -28,6 +28,13 @@ type UpdateTemplate struct {
 	Templates notiRepo.TemplateOverrideRepository
 	UoW       sharedDomain.UnitOfWork
 	Audit     audit.Recorder
+	// CanEditBody reporta si el gym puede PERSONALIZAR el texto (capacidad
+	// Plus). nil = permitido (fail-open para tests / binarios sin dominio de
+	// gyms). En Standard el texto es fijo: lo que sale por WhatsApp es el
+	// template que Meta aprobó (Twilio Content SID), así que un body editado no
+	// cambiaría el mensaje — sólo confundiría. Por eso, sin Plus, forzamos el
+	// body al default y sólo respetamos el switch on/off. Se cablea en cmd/*.
+	CanEditBody func(ctx context.Context, gymID uuid.UUID) bool
 }
 
 func NewUpdateTemplate(templates notiRepo.TemplateOverrideRepository,
@@ -36,8 +43,15 @@ func NewUpdateTemplate(templates notiRepo.TemplateOverrideRepository,
 }
 
 func (uc *UpdateTemplate) Execute(ctx context.Context, in UpdateTemplateInput) (*tplDomain.Override, error) {
-	if tplDomain.LookupDefault(in.Key) == nil {
+	def := tplDomain.LookupDefault(in.Key)
+	if def == nil {
 		return nil, sharedDomain.NewValidationError(notiErrors.ErrTemplateNotFound)
+	}
+	// Sin Plus el texto no se personaliza: forzamos el body al default
+	// aprobado por Meta. El switch on/off (in.Enabled) sí se respeta.
+	body := in.Body
+	if uc.CanEditBody != nil && !uc.CanEditBody(ctx, in.GymID) {
+		body = def.Body
 	}
 	now := time.Now().UTC()
 	var out *tplDomain.Override
@@ -48,7 +62,7 @@ func (uc *UpdateTemplate) Execute(ctx context.Context, in UpdateTemplateInput) (
 		}
 		var override *tplDomain.Override
 		if existing == nil {
-			override, err = tplDomain.NewOverride(uuid.New(), in.GymID, in.Key, in.Body, now)
+			override, err = tplDomain.NewOverride(uuid.New(), in.GymID, in.Key, body, now)
 			if err != nil {
 				return sharedDomain.NewValidationError(err)
 			}
@@ -57,7 +71,7 @@ func (uc *UpdateTemplate) Execute(ctx context.Context, in UpdateTemplateInput) (
 			}
 		} else {
 			override = existing
-			if err := override.Edit(in.Body, now); err != nil {
+			if err := override.Edit(body, now); err != nil {
 				return sharedDomain.NewValidationError(err)
 			}
 			if in.Enabled != nil {

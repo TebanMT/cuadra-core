@@ -9,6 +9,7 @@ import (
 	"github.com/cuadra/cuadra-core/src/modules/checkins/domain/checkin"
 	chkErrors "github.com/cuadra/cuadra-core/src/modules/checkins/domain/errors"
 	chkRepo "github.com/cuadra/cuadra-core/src/modules/checkins/domain/repository"
+	gymRepo "github.com/cuadra/cuadra-core/src/modules/gyms/domain/repository"
 	memApp "github.com/cuadra/cuadra-core/src/modules/members/app"
 	"github.com/cuadra/cuadra-core/src/shared/audit"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
@@ -25,7 +26,7 @@ type OverrideCheckinInput struct {
 	GymID          uuid.UUID
 	OperatorID     uuid.UUID
 	MemberID       uuid.UUID
-	OriginalMethod string // "fingerprint" | "manual" | "pin"
+	OriginalMethod string // "fingerprint" | "manual" | "number"
 	Reason         string
 	Now            time.Time
 }
@@ -38,10 +39,19 @@ type OverrideCheckin struct {
 	Repo    chkRepo.CheckinRepository
 	UoW     sharedDomain.UnitOfWork
 	Audit   audit.Recorder
+	// Gyms (opcional) → días-a-vencer en la zona horaria del gym (la decisión
+	// la toma el operador; esto es sólo informativo en el view).
+	Gyms gymRepo.GymRepository
 }
 
 func NewOverrideCheckin(members *memApp.MemberService, repo chkRepo.CheckinRepository, uow sharedDomain.UnitOfWork, recorder audit.Recorder) *OverrideCheckin {
 	return &OverrideCheckin{Members: members, Repo: repo, UoW: uow, Audit: recorder}
+}
+
+// WithGyms cablea el repo de gyms para el cálculo de vigencia en día local.
+func (uc *OverrideCheckin) WithGyms(g gymRepo.GymRepository) *OverrideCheckin {
+	uc.Gyms = g
+	return uc
 }
 
 func (uc *OverrideCheckin) Execute(ctx context.Context, in OverrideCheckinInput) (*CheckinView, error) {
@@ -59,12 +69,12 @@ func (uc *OverrideCheckin) Execute(ctx context.Context, in OverrideCheckinInput)
 	if method == "" {
 		method = checkin.MethodManual
 	}
-	today := truncateToDay(now)
-
 	var view *CheckinView
 	err := uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
 		// Re-fetch member info just for the response — we don't use the
-		// status to decide anything (the operator decided).
+		// status to decide anything (the operator decided). `today` en la tz
+		// del gym para que los días-a-vencer del view sean correctos.
+		today := gymLocalToday(tx, uc.Gyms, in.GymID, now)
 		statusOut, err := uc.Members.GetAccessStatus(ctx, tx, memApp.GetAccessStatusInput{
 			GymID: in.GymID, MemberID: in.MemberID, Today: today,
 		})

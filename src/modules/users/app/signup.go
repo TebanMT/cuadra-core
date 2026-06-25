@@ -113,9 +113,15 @@ func (uc *SignupOwner) Execute(ctx context.Context, in SignupOwnerInput) (Signup
 	if in.Password != in.PasswordConfirm {
 		return SignupOwnerOutput{}, sharedDomain.NewValidationError(userErrors.ErrPasswordMismatch)
 	}
-	trimmedPhone := strings.TrimSpace(in.Phone)
-	if trimmedPhone != "" {
-		if err := userDomain.ValidatePhone(trimmedPhone); err != nil {
+	// Normaliza a E.164 (canónico) ANTES de validar, así un alta con espacios
+	// o sin código de país ("+52 446…", "4461057446") se acepta y se guarda
+	// limpio. Si el dueño escribió algo SIN dígitos (typo "abc"), rawPhone no
+	// queda vacío pero normalizedPhone sí → ValidatePhone("") lo rechaza en
+	// vez de tragarse el error. El teléfono del dueño es opcional: vacío = nil.
+	rawPhone := strings.TrimSpace(in.Phone)
+	normalizedPhone := userDomain.NormalizePhone(in.Phone)
+	if rawPhone != "" {
+		if err := userDomain.ValidatePhone(normalizedPhone); err != nil {
 			return SignupOwnerOutput{}, sharedDomain.NewValidationError(err)
 		}
 	}
@@ -143,7 +149,7 @@ func (uc *SignupOwner) Execute(ctx context.Context, in SignupOwnerInput) (Signup
 
 	gym := gymDomain.NewTrialGym(gymID, uc.TrialDays, now)
 	user := userDomain.NewUser(userID, gymID, in.Email, hash, in.FullName, userDomain.RoleOwner, false, nil, now)
-	user.SetInitialPhone(trimmedPhone)
+	user.SetInitialPhone(normalizedPhone)
 	user.AssignPIN(pinHash, now)
 	// AssignPIN bumpea Version a 2; el row recién creado es v1.
 	user.Version = 1

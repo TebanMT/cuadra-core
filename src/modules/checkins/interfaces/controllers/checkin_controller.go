@@ -25,7 +25,7 @@ import (
 // (kiosk_controller.go, build tag sidecar).
 type CheckinController struct {
 	Manual               *chkApp.CheckinManual
-	Pin                  *chkApp.CheckinByPin
+	Number               *chkApp.CheckinByNumber
 	Override             *chkApp.OverrideCheckin
 	Repo                 chkRepo.CheckinRepository
 	UoW                  sharedDomain.UnitOfWork
@@ -38,7 +38,7 @@ type CheckinController struct {
 
 func NewCheckinController(
 	manual *chkApp.CheckinManual,
-	pin *chkApp.CheckinByPin,
+	number *chkApp.CheckinByNumber,
 	override *chkApp.OverrideCheckin,
 	repo chkRepo.CheckinRepository,
 	uow sharedDomain.UnitOfWork,
@@ -49,7 +49,7 @@ func NewCheckinController(
 		fingerprint = func() bool { return false }
 	}
 	return &CheckinController{
-		Manual: manual, Pin: pin, Override: override,
+		Manual: manual, Number: number, Override: override,
 		Repo: repo, UoW: uow, FingerprintAvailable: fingerprint, Tokens: tokens,
 		Webhook: accesswebhook.Noop(),
 	}
@@ -92,7 +92,7 @@ func (c *CheckinController) RegisterRoutes(r *gin.Engine) {
 	api.Use(middleware.AuthMiddleware(c.Tokens))
 	{
 		api.POST("/checkins/manual", c.handleManual)
-		api.POST("/checkins/pin", c.handlePin)
+		api.POST("/checkins/number", c.handleNumber)
 		api.POST("/checkins/override", c.handleOverride)
 		api.GET("/checkins", c.handleListRecent)
 		api.GET("/checkins/methods", c.handleMethods)
@@ -112,8 +112,10 @@ type manualReq struct {
 	MemberID string `json:"member_id" binding:"required"`
 }
 
-type pinReq struct {
-	Pin string `json:"pin" binding:"required"`
+// numberReq backs POST /checkins/number (ADR-010 — check-in por número de
+// socio). El número de socio es entero; el FE lo manda como member_number.
+type numberReq struct {
+	MemberNumber int `json:"member_number"`
 }
 
 type overrideReq struct {
@@ -198,7 +200,7 @@ func recentToWire(r chkRepo.RecentCheckinRow) checkinEventWire {
 
 type checkinMethodsResp struct {
 	FingerprintAvailable bool `json:"fingerprint_available"`
-	PinAvailable         bool `json:"pin_available"`
+	NumberAvailable      bool `json:"number_available"`
 	ManualAvailable      bool `json:"manual_available"`
 }
 
@@ -240,15 +242,17 @@ func (c *CheckinController) handleManual(ctx *gin.Context) {
 	utils.JsonResponse(ctx, http.StatusCreated, toCheckinResp(out))
 }
 
-func (c *CheckinController) handlePin(ctx *gin.Context) {
+// handleNumber sirve POST /checkins/number — check-in por número de socio
+// (ADR-010) con lookup O(1).
+func (c *CheckinController) handleNumber(ctx *gin.Context) {
 	gymID, _ := middleware.GetGymID(ctx)
-	var req pinReq
+	var req numberReq
 	if err := ctx.ShouldBindJSON(&req); err != nil {
 		utils.ErrorResponse(ctx, http.StatusBadRequest, err)
 		return
 	}
-	out, err := c.Pin.Execute(ctx.Request.Context(), chkApp.CheckinByPinInput{
-		GymID: gymID, Pin: req.Pin,
+	out, err := c.Number.Execute(ctx.Request.Context(), chkApp.CheckinByNumberInput{
+		GymID: gymID, Number: req.MemberNumber,
 	})
 	if err != nil {
 		utils.ErrorResponse(ctx, utils.DomainErrorToHttpCode(err), err)
@@ -309,7 +313,7 @@ func (c *CheckinController) handleListRecent(ctx *gin.Context) {
 func (c *CheckinController) handleMethods(ctx *gin.Context) {
 	utils.JsonResponse(ctx, http.StatusOK, checkinMethodsResp{
 		FingerprintAvailable: c.FingerprintAvailable(),
-		PinAvailable:         true,
+		NumberAvailable:      true,
 		ManualAvailable:      true,
 	})
 }

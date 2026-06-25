@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 
 	infraDB "github.com/cuadra/cuadra-core/infraestructure/db"
@@ -58,7 +59,6 @@ import (
 	notiDomain "github.com/cuadra/cuadra-core/src/modules/notifications/domain"
 	notiRepoPg "github.com/cuadra/cuadra-core/src/modules/notifications/infraestructure/db/repositories"
 	notiEmail "github.com/cuadra/cuadra-core/src/modules/notifications/infraestructure/email"
-	notiImageGen "github.com/cuadra/cuadra-core/src/modules/notifications/infraestructure/imagegen"
 	notiWhatsApp "github.com/cuadra/cuadra-core/src/modules/notifications/infraestructure/whatsapp"
 	notiCtrl "github.com/cuadra/cuadra-core/src/modules/notifications/interfaces/controllers"
 
@@ -172,6 +172,15 @@ func main() {
 		AccessKey: envOrDefault("R2_ACCESS_KEY", ""),
 		SecretKey: envOrDefault("R2_SECRET_KEY", ""),
 		Bucket:    envOrDefault("R2_BUCKET", ""),
+		// ADR-009: bucket PÚBLICO separado para las WhatsApp media (banners de
+		// bienvenida que Twilio descarga anónimamente). Distinto del Bucket
+		// privado de fotos. PublicMediaBaseURL es el dominio público de R2.
+		// Las *_ACCESS/SECRET son de un token exclusivo del bucket público
+		// (menor privilegio); si quedan vacías, cae a R2_ACCESS_KEY/SECRET_KEY.
+		PublicMediaBucket:    envOrDefault("R2_PUBLIC_MEDIA_BUCKET", ""),
+		PublicMediaBaseURL:   envOrDefault("R2_PUBLIC_MEDIA_BASE_URL", ""),
+		PublicMediaAccessKey: envOrDefault("R2_PUBLIC_MEDIA_ACCESS_KEY", ""),
+		PublicMediaSecretKey: envOrDefault("R2_PUBLIC_MEDIA_SECRET_KEY", ""),
 	}
 	var r2Client *r2.Client
 	if r2Cfg.IsConfigured() {
@@ -182,27 +191,6 @@ func main() {
 		r2Client = c
 	} else {
 		log.Printf("R2 not configured (R2_ACCOUNT_ID / R2_ACCESS_KEY / R2_SECRET_KEY / R2_BUCKET) — member photo uploads will queue locally until env vars are set")
-	}
-
-	// R2 público (public-media-tinta) — para banners de bienvenida con PIN.
-	// Usa las mismas credenciales que el bucket privado pero diferente bucket
-	// y PublicBaseURL para construir URLs permanentes sin firma.
-	r2PublicCfg := r2.Config{
-		AccountID:     envOrDefault("R2_ACCOUNT_ID", ""),
-		AccessKey:     envOrDefault("R2_ACCESS_KEY", ""),
-		SecretKey:     envOrDefault("R2_SECRET_KEY", ""),
-		Bucket:        envOrDefault("R2_PUBLIC_BUCKET", "public-media-tinta"),
-		PublicBaseURL: envOrDefault("R2_PUBLIC_BASE_URL", ""),
-	}
-	var welcomeBannerGen *notiImageGen.WelcomeBannerGen
-	if r2PublicCfg.IsConfigured() && r2PublicCfg.PublicBaseURL != "" {
-		pubClient, err := r2.NewClient(r2PublicCfg)
-		if err != nil {
-			log.Fatalf("init R2 public: %v", err)
-		}
-		welcomeBannerGen = notiImageGen.NewWelcomeBannerGen(pubClient)
-	} else {
-		log.Printf("R2 public not configured (R2_PUBLIC_BUCKET / R2_PUBLIC_BASE_URL) — welcome banners will be skipped (degraded mode)")
 	}
 
 	signup := usersApp.NewSignupOwner(userRepo, gymRepo, uow, tokens, recorder, trialDays)
@@ -247,7 +235,12 @@ func main() {
 	memberDetail := memApp.NewGetMemberDetail(memberRepo, fingerprintRepo, uow)
 	toggleMember := memApp.NewToggleMemberStatus(memberRepo, uow, recorder)
 	lockExpiry := memApp.NewLockMembershipExpiry(membershipRepo, adjustmentRepo, uow, recorder)
-	assignPin := memApp.NewAssignPin(memberRepo, uow, recorder)
+	assignNumber := memApp.NewAssignMemberNumber(memberRepo, uow, recorder)
+	// ADR-010: la longitud del número de socio (y su bump al ~50%) vive en el
+	// config del gym; este seam la lee/crece dentro de la tx del alta/asignación.
+	memberNumberCfg := gymApp.NewMemberNumberConfig(gymRepo)
+	createMember.WithMemberNumberDigits(memberNumberCfg)
+	assignNumber.WithDigitsStore(memberNumberCfg)
 	importCSV := memApp.NewImportMembersFromCSV(memberRepo, membershipRepo, mtRepo, uow, recorder)
 	memberSvc := memApp.NewMemberService(memberRepo, membershipRepo, mtRepo).
 		WithFingerprints(fingerprintRepo).
@@ -276,34 +269,43 @@ func main() {
 	gmkProvider := bcrypto.NewInMemoryGMKProvider()
 	registerFingerprint := memApp.NewRegisterFingerprint(memberRepo, fingerprintRepo, gmkProvider, uow, recorder)
 	deleteFingerprint := memApp.NewDeleteFingerprint(memberRepo, fingerprintRepo, uow, recorder)
-	checkinManual := chkApp.NewCheckinManual(memberSvc, checkinRepo, uow, recorder)
-	checkinPin := chkApp.NewCheckinByPin(memberSvc, memberRepo, checkinRepo, uow, recorder, nil)
-	checkinOverride := chkApp.NewOverrideCheckin(memberSvc, checkinRepo, uow, recorder)
+	checkinManual := chkApp.NewCheckinManual(memberSvc, checkinRepo, uow, recorder).WithGyms(gymRepo)
+	checkinNumber := chkApp.NewCheckinByNumber(memberSvc, memberRepo, checkinRepo, uow, recorder, nil).WithGyms(gymRepo)
+	checkinOverride := chkApp.NewOverrideCheckin(memberSvc, checkinRepo, uow, recorder).WithGyms(gymRepo)
 
 	// ── Notifications (Sesión 7) ──────────────────────────────────────────
-	enqueueReceipt := notiApp.NewEnqueueReceipt(notificationRepo, gymRepo, memberRepo, uow, dashboardURL)
-	receiptNotifier := notiApp.NewBillingReceiptNotifier(enqueueReceipt)
+	enqueueReceipt := notiApp.NewEnqueueReceipt(notificationRepo, gymRepo, memberRepo, uow)
 	enqueueWelcomePin := notiApp.NewEnqueueWelcomePin(notificationRepo, gymRepo, memberRepo)
-	if welcomeBannerGen != nil {
-		enqueueWelcomePin.WithImageGenerator(welcomeBannerGen)
-	}
 	// Wire la seam de welcome-PIN en los use cases de members que asignan
 	// PIN. La notifications BC implementa el contrato; members lo usa sin
 	// importar el paquete de notificaciones.
-	createMember.WithWelcomePinNotifier(enqueueWelcomePin)
-	assignPin.WithWelcomePinNotifier(enqueueWelcomePin)
+	createMember.WithWelcomeNotifier(enqueueWelcomePin)
+	assignNumber.WithWelcomeNotifier(enqueueWelcomePin)
 	// Mismo patrón para el alta/rotación de operadores: el PIN viaja por
 	// WhatsApp al número del operador. Skip silencioso cuando el gym no
 	// tiene WhatsApp conectado — el owner ve el PIN en el response.
 	enqueueOperatorWelcomePIN := notiApp.NewEnqueueOperatorWelcomePIN(notificationRepo, gymRepo, userRepo)
-	if welcomeBannerGen != nil {
-		enqueueOperatorWelcomePIN.WithImageGenerator(welcomeBannerGen)
-	}
 	createOp.WithWelcomePINNotifier(enqueueOperatorWelcomePIN)
 	rotateOpPIN.WithWelcomePINNotifier(enqueueOperatorWelcomePIN)
+	// ADR-010: banner "tu sistema ya está vivo" al dueño en el primer link del
+	// primer dispositivo. redeemInstaller se construyó arriba; lo enchufamos
+	// acá una vez que notificationRepo está listo.
+	enqueueOwnerWelcome := notiApp.NewEnqueueOwnerWelcome(notificationRepo, gymRepo, userRepo)
+	redeemInstaller.WithOwnerWelcome(enqueueOwnerWelcome)
 	enqueueExpiry := notiApp.NewEnqueueExpiryReminder(notificationRepo, expiryReader, uow)
 	enqueueOwnerAlert := notiApp.NewEnqueueOwnerAlert(notificationRepo, gymRepo, userRepo, alertConfigRepo, uow)
+	optOutRepo := notiRepoPg.NewOptOutPostgresRepository()
 	dispatchNoti := notiApp.NewDispatchNotification(notificationRepo, templateRepo, gymRepo, whatsappProvider, notiEmailProvider, uow)
+	// Opt-out de marketing: el dispatcher omite broadcasts a quien dijo STOP.
+	dispatchNoti.OptOut = optOutRepo
+	// ADR-009: media welcome banners (PIN horneado en imagen). El renderer es
+	// puro; el uploader necesita R2 + el bucket público configurado.
+	dispatchNoti.Banner = welcomeBannerRenderer{}
+	if r2Client != nil && r2Cfg.IsPublicMediaConfigured() {
+		dispatchNoti.Media = r2PublicUploader{c: r2Client}
+	} else {
+		log.Printf("[notifications] R2 public media no configurado (R2_PUBLIC_MEDIA_BUCKET / R2_PUBLIC_MEDIA_BASE_URL) — los templates de bienvenida con banner fallarán hasta configurarlo")
+	}
 	connectWhatsApp := notiApp.NewConnectWhatsApp(gymRepo, whatsappProvider, uow, recorder)
 	disconnectWhatsApp := notiApp.NewDisconnectWhatsApp(gymRepo, uow, recorder)
 	whatsappStatus := notiApp.NewGetWhatsAppStatus(gymRepo, notificationRepo, uow)
@@ -311,19 +313,45 @@ func main() {
 	updateTemplate := notiApp.NewUpdateTemplate(templateRepo, uow, recorder)
 	listOwnerAlerts := notiApp.NewListOwnerAlerts(alertConfigRepo, templateRepo, uow)
 	updateOwnerAlert := notiApp.NewUpdateOwnerAlert(alertConfigRepo, templateRepo, uow, recorder)
-	broadcast := notiApp.NewBroadcast(notificationRepo, memberRepo, gymRepo, uow, recorder)
+	// Gate de personalización de copy: el TEXTO sólo se edita cuando el gym
+	// envía desde su PROPIO número (UsesOwnWhatsAppNumber = Plus + UC-037
+	// conectado). Si sale por el número maestro de Tinta —Standard, trial, o
+	// Plus que aún no conecta— lo que llega es la plantilla aprobada por Meta
+	// (Twilio Content SID), así que editar el body no cambia el mensaje: el use
+	// case lo fuerza al default y sólo respeta el switch on/off. Fail-open en
+	// error de lookup (mismo criterio que RequirePlusPlan).
+	canEditTemplateBody := func(ctx context.Context, gymID uuid.UUID) bool {
+		tx, err := uow.Query(ctx)
+		if err != nil {
+			return true
+		}
+		g, err := gymRepo.GetByID(tx, gymID)
+		if err != nil || g == nil {
+			return true
+		}
+		return g.UsesOwnWhatsAppNumber()
+	}
+	updateTemplate.CanEditBody = canEditTemplateBody
+	updateOwnerAlert.CanEditBody = canEditTemplateBody
+	broadcast := notiApp.NewBroadcast(notificationRepo, memberRepo, gymRepo, audit.NewPostgresReader(), uow, recorder)
 	listNotifications := notiApp.NewListNotifications(notificationRepo, uow)
 	retryNotification := notiApp.NewRetryNotification(notificationRepo, uow, recorder)
 	processWebhook := notiApp.NewProcessWebhook(notificationRepo, whatsappEventRepo, uow)
+	// Inbound STOP/BAJA → registra el opt-out (mismo repo que consulta el dispatcher).
+	processWebhook.OptOut = optOutRepo
 	billingSubscriber := notiApp.NewBillingEventSubscriber(enqueueReceipt)
 
 	// ── Billing (Sesión 3) ────────────────────────────────────────────────
 	// `folios` se construyó arriba (lo reusa createMember). Mismo generator.
 	registerPayment := billingApp.NewRegisterMembershipPayment(paymentRepo, folios, memberSvc, memberRepo, uow, recorder, billingSubscriber).
-		WithPromotions(applyPromo)
+		WithPromotions(applyPromo).
+		WithWelcomeNotifier(enqueueWelcomePin)
 	settlePayment := billingApp.NewSettlePendingBalance(paymentRepo, folios, uow, recorder)
 	receiptPayment := billingApp.NewGenerateReceipt(paymentRepo, gymRepo, memberRepo, uow)
-	sendReceipt := billingApp.NewSendReceipt(paymentRepo, uow, receiptNotifier)
+	// El dispatcher genera el PDF del comprobante (reusa GenerateReceipt),
+	// lo sube a R2 y mete la URL en el template de recibo ({receipt_url}).
+	dispatchNoti.Receipt = receiptPDFRenderer{gen: receiptPayment}
+	sendReceipt := billingApp.NewSendReceipt(paymentRepo, uow).WithPublisher(billingSubscriber)
 	listMemberPayments := billingApp.NewListMemberPayments(paymentRepo, memberRepo, uow)
 	listGymPayments := billingApp.NewListGymPayments(paymentRepo, memberRepo, uow)
 	refundPayment := billingApp.NewRefundPayment(paymentRepo, folios, memberSvc, uow, recorder)
@@ -333,6 +361,7 @@ func main() {
 	createProduct := prodApp.NewCreateProduct(productRepo, stockMovementRepo, uow, recorder)
 	updateProduct := prodApp.NewUpdateProduct(productRepo, uow, recorder)
 	deactivateProduct := prodApp.NewDeactivateProduct(productRepo, uow, recorder)
+	reactivateProduct := prodApp.NewReactivateProduct(productRepo, uow, recorder)
 	listProducts := prodApp.NewListProducts(productRepo, uow)
 	adjustStock := prodApp.NewAdjustStock(productRepo, stockMovementRepo, uow, recorder)
 	// Expenses (gastos generales del gym) — CRUD + listado con filtros.
@@ -404,16 +433,16 @@ func main() {
 
 	mtCtrl := memCtrl.NewMembershipTypeController(createMT, updateMT, deactivateMT, listMT, tokens)
 	promotionsCtrl := promoCtrl.NewPromotionController(createPromo, updatePromo, deactivatePromo, reactivatePromo, listPromos, getPromoByCode, listAppliedByMonth, tokens)
-	memberCtrl := memCtrl.NewMemberController(createMember, updateMember, listMembers, memberDetail, toggleMember, lockExpiry, assignPin, tokens).
+	memberCtrl := memCtrl.NewMemberController(createMember, updateMember, listMembers, memberDetail, toggleMember, lockExpiry, assignNumber, tokens).
 		WithImportCSV(importCSV)
 	fingerprintCtrl := memCtrl.NewFingerprintController(registerFingerprint, deleteFingerprint, tokens)
 	paymentCtrl := billingCtrl.NewPaymentController(registerPayment, settlePayment, receiptPayment, sendReceipt, listMemberPayments, listGymPayments, refundPayment, registerSale, refundSale, cashClose, tokens)
 	paymentCtrl.PlanGate = plusGate
-	productCtrl := prodCtrl.NewProductController(createProduct, updateProduct, deactivateProduct, listProducts, adjustStock, tokens)
+	productCtrl := prodCtrl.NewProductController(createProduct, updateProduct, deactivateProduct, reactivateProduct, listProducts, adjustStock, tokens)
 	expenseController := expCtrl.NewExpenseController(createExpense, updateExpense, deleteExpense, listExpenses, tokens)
 	expenseController.PlanGate = plusGate
 	// Cloud has no biometric reader — fingerprint flows live on the sidecar.
-	checkinCtrl := chkCtrl.NewCheckinController(checkinManual, checkinPin, checkinOverride, checkinRepo, uow, nil, tokens)
+	checkinCtrl := chkCtrl.NewCheckinController(checkinManual, checkinNumber, checkinOverride, checkinRepo, uow, nil, tokens)
 	reportsController := reportsCtrl.NewReportsController(dashboard, attentionRequired, rangeReport, exportReport, markContacted, markLost, tokens).
 		WithGenderReport(genderReport)
 	reportsController.PlanGate = plusGate
@@ -701,18 +730,30 @@ func buildSubscriptionGateways() map[subDomain.Provider]subDomain.CheckoutGatewa
 // used; otherwise we fall back to stdout (logs only, dev-friendly).
 func buildWhatsAppProvider(baseURL string) notiDomain.WhatsAppProvider {
 	provider := strings.ToLower(envOrDefault("WHATSAPP_PROVIDER", "stdout"))
+	prod := os.Getenv("ENVIRONMENT") == "production"
 	if provider == "twilio" {
 		sid := os.Getenv("TWILIO_ACCOUNT_SID")
 		token := os.Getenv("TWILIO_AUTH_TOKEN")
 		if sid == "" || token == "" {
+			if prod {
+				warnWhatsAppDisabledInProd("WHATSAPP_PROVIDER=twilio pero faltan TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN")
+			}
 			log.Printf("[notifications] TWILIO creds missing — falling back to stdout provider")
 			return notiWhatsApp.NewStdoutProvider()
+		}
+		// ADR-009: el número maestro de Tinta (sender de Standard/trial + el
+		// `from` de los OTPs de UC-037) se toma de TWILIO_WHATSAPP_NUMBER —
+		// el nombre intuitivo donde el operador pone su sender de Twilio.
+		// TWILIO_OTP_FROM queda como alias de compatibilidad.
+		masterFrom := envOrDefault("TWILIO_WHATSAPP_NUMBER", "")
+		if strings.TrimSpace(masterFrom) == "" {
+			masterFrom = envOrDefault("TWILIO_OTP_FROM", "")
 		}
 		opts := notiWhatsApp.TwilioOptions{
 			AccountSID:          sid,
 			AuthToken:           token,
 			StatusCallbackURL:   envOrDefault("TWILIO_WEBHOOK_URL", baseURL+"/api/v1/webhooks/twilio"),
-			OTPFromNumber:       envOrDefault("TWILIO_OTP_FROM", ""),
+			MasterFromNumber:    masterFrom,
 			TemplateContentSIDs: parseTwilioContentSIDs(os.Getenv("TWILIO_CONTENT_SIDS")),
 		}
 		p, err := notiWhatsApp.NewTwilioProvider(opts)
@@ -725,7 +766,27 @@ func buildWhatsAppProvider(baseURL string) notiDomain.WhatsAppProvider {
 	if provider == "mock" {
 		return notiWhatsApp.NewMockProvider()
 	}
+	if prod {
+		warnWhatsAppDisabledInProd("WHATSAPP_PROVIDER=" + provider + " (no es 'twilio')")
+	}
 	return notiWhatsApp.NewStdoutProvider()
+}
+
+// warnWhatsAppDisabledInProd imprime un banner imposible de ignorar cuando el
+// servidor de PRODUCCIÓN arranca sin un proveedor real de WhatsApp: en ese
+// caso TODOS los mensajes (vencimientos, recibos, bienvenida con número, OTP
+// de UC-037, alertas al dueño) sólo se loguean y NUNCA se entregan, sin error
+// visible — el modo de falla más silencioso para un diferenciador headline.
+// No abortamos (un lanzamiento sin WhatsApp puede ser deliberado), pero el
+// banner deja el problema a la vista en los logs de boot.
+func warnWhatsAppDisabledInProd(reason string) {
+	const bar = "============================================================"
+	log.Print(bar)
+	log.Print("[notifications] ⚠️  WHATSAPP DESHABILITADO EN PRODUCCIÓN")
+	log.Printf("[notifications] %s", reason)
+	log.Print("[notifications] Los mensajes NO se enviarán — sólo se loguean a stdout.")
+	log.Print("[notifications] Configura WHATSAPP_PROVIDER=twilio + credenciales Twilio.")
+	log.Print(bar)
 }
 
 // resendAuthSender adapts a notifications-side ResendProvider to

@@ -254,7 +254,12 @@ func main() {
 	memberDetail := memApp.NewGetMemberDetail(memberRepo, fingerprintRepo, uow)
 	toggleMember := memApp.NewToggleMemberStatus(memberRepo, uow, recorder)
 	lockExpiry := memApp.NewLockMembershipExpiry(membershipRepo, adjustmentRepo, uow, recorder)
-	assignPin := memApp.NewAssignPin(memberRepo, uow, recorder)
+	assignNumber := memApp.NewAssignMemberNumber(memberRepo, uow, recorder)
+	// ADR-010: la longitud del número de socio (y su bump al ~50%) vive en el
+	// config del gym; este seam la lee/crece dentro de la tx del alta/asignación.
+	memberNumberCfg := gymApp.NewMemberNumberConfig(gymRepo)
+	createMember.WithMemberNumberDigits(memberNumberCfg)
+	assignNumber.WithDigitsStore(memberNumberCfg)
 	importCSV := memApp.NewImportMembersFromCSV(memberRepo, membershipRepo, mtRepo, uow, recorder)
 	memberSvc := memApp.NewMemberService(memberRepo, membershipRepo, mtRepo).
 		WithFingerprints(fingerprintRepo).
@@ -278,10 +283,10 @@ func main() {
 	// check runs (production enrollment lives here, not in cloud).
 	registerFingerprint := memApp.NewRegisterFingerprint(memberRepo, fingerprintRepo, gmkProvider, uow, recorder).WithReader(bioReader)
 	deleteFingerprint := memApp.NewDeleteFingerprint(memberRepo, fingerprintRepo, uow, recorder)
-	checkinManual := chkApp.NewCheckinManual(memberSvc, checkinRepo, uow, recorder)
-	checkinPin := chkApp.NewCheckinByPin(memberSvc, memberRepo, checkinRepo, uow, recorder, nil)
-	checkinOverride := chkApp.NewOverrideCheckin(memberSvc, checkinRepo, uow, recorder)
-	checkinFingerprint := chkApp.NewCheckinByFingerprint(memberSvc, checkinRepo, bioReader, uow, recorder)
+	checkinManual := chkApp.NewCheckinManual(memberSvc, checkinRepo, uow, recorder).WithGyms(gymRepo)
+	checkinNumber := chkApp.NewCheckinByNumber(memberSvc, memberRepo, checkinRepo, uow, recorder, nil).WithGyms(gymRepo)
+	checkinOverride := chkApp.NewOverrideCheckin(memberSvc, checkinRepo, uow, recorder).WithGyms(gymRepo)
+	checkinFingerprint := chkApp.NewCheckinByFingerprint(memberSvc, checkinRepo, bioReader, uow, recorder).WithGyms(gymRepo)
 	kioskEvents := chkApp.NewKioskBroadcaster()
 	// kioskGymID is left zero until the operator logs in — the kiosko start
 	// endpoint sets it from the auth context. For now we wire a placeholder
@@ -295,13 +300,10 @@ func main() {
 	whatsappMock := notiWhatsApp.NewStdoutProvider()
 	emailMock := notiEmail.NewStdoutProvider()
 	// appBaseURL es la URL pública del frontend (página del comprobante).
-	// En el sidecar el frontend corre localmente en el mismo proceso Tauri;
-	// la URL por defecto cubre tanto el dev server como la app empaquetada.
-	appBaseURL := envOrDefault("APP_BASE_URL", "http://localhost:5173")
-	enqueueReceipt := notiApp.NewEnqueueReceipt(notificationRepo, gymRepo, memberRepo, uow, appBaseURL)
+	enqueueReceipt := notiApp.NewEnqueueReceipt(notificationRepo, gymRepo, memberRepo, uow)
 	enqueueWelcomePin := notiApp.NewEnqueueWelcomePin(notificationRepo, gymRepo, memberRepo)
-	createMember.WithWelcomePinNotifier(enqueueWelcomePin)
-	assignPin.WithWelcomePinNotifier(enqueueWelcomePin)
+	createMember.WithWelcomeNotifier(enqueueWelcomePin)
+	assignNumber.WithWelcomeNotifier(enqueueWelcomePin)
 	// Operator PIN-first: alta y rotación encolan WhatsApp con el PIN.
 	// Sidecar registra la noti localmente y el sync agent la empuja a
 	// cloud — el worker cloud despacha el outbound. Si el gym no tiene
@@ -317,7 +319,25 @@ func main() {
 	updateTemplate := notiApp.NewUpdateTemplate(templateRepo, uow, recorder)
 	listOwnerAlerts := notiApp.NewListOwnerAlerts(alertConfigRepo, templateRepo, uow)
 	updateOwnerAlert := notiApp.NewUpdateOwnerAlert(alertConfigRepo, templateRepo, uow, recorder)
-	broadcast := notiApp.NewBroadcast(notificationRepo, memberRepo, gymRepo, uow, recorder)
+	// Gate de personalización de copy. Ver cmd/server/main.go: el texto sólo se
+	// edita cuando el gym usa su PROPIO número (UsesOwnWhatsAppNumber); si sale
+	// por el maestro de Tinta, lo que llega es la plantilla aprobada por Meta,
+	// así que el use case fuerza el body al default y sólo respeta el switch
+	// on/off. Este es el path real de edición — la recepción pega al sidecar.
+	canEditTemplateBody := func(ctx context.Context, gymID uuid.UUID) bool {
+		tx, err := uow.Query(ctx)
+		if err != nil {
+			return true
+		}
+		g, err := gymRepo.GetByID(tx, gymID)
+		if err != nil || g == nil {
+			return true
+		}
+		return g.UsesOwnWhatsAppNumber()
+	}
+	updateTemplate.CanEditBody = canEditTemplateBody
+	updateOwnerAlert.CanEditBody = canEditTemplateBody
+	broadcast := notiApp.NewBroadcast(notificationRepo, memberRepo, gymRepo, audit.NewSQLiteReader(), uow, recorder)
 	listNotifications := notiApp.NewListNotifications(notificationRepo, uow)
 	retryNotification := notiApp.NewRetryNotification(notificationRepo, uow, recorder)
 	billingSubscriber := notiApp.NewBillingEventSubscriber(enqueueReceipt)
@@ -326,11 +346,11 @@ func main() {
 	// ── Billing (Sesión 3) ────────────────────────────────────────────────
 	// `folios` se construyó arriba (lo reusa createMember). Mismo generator.
 	registerPayment := billingApp.NewRegisterMembershipPayment(paymentRepo, folios, memberSvc, memberRepo, uow, recorder, billingSubscriber).
-		WithPromotions(applyPromo)
+		WithPromotions(applyPromo).
+		WithWelcomeNotifier(enqueueWelcomePin)
 	settlePayment := billingApp.NewSettlePendingBalance(paymentRepo, folios, uow, recorder)
 	receiptPayment := billingApp.NewGenerateReceipt(paymentRepo, gymRepo, memberRepo, uow)
-	receiptNotifier := notiApp.NewBillingReceiptNotifier(enqueueReceipt)
-	sendReceipt := billingApp.NewSendReceipt(paymentRepo, uow, receiptNotifier)
+	sendReceipt := billingApp.NewSendReceipt(paymentRepo, uow).WithPublisher(billingSubscriber)
 	listMemberPayments := billingApp.NewListMemberPayments(paymentRepo, memberRepo, uow)
 	listGymPayments := billingApp.NewListGymPayments(paymentRepo, memberRepo, uow)
 	refundPayment := billingApp.NewRefundPayment(paymentRepo, folios, memberSvc, uow, recorder)
@@ -340,6 +360,7 @@ func main() {
 	createProduct := prodApp.NewCreateProduct(productRepo, stockMovementRepo, uow, recorder)
 	updateProduct := prodApp.NewUpdateProduct(productRepo, uow, recorder)
 	deactivateProduct := prodApp.NewDeactivateProduct(productRepo, uow, recorder)
+	reactivateProduct := prodApp.NewReactivateProduct(productRepo, uow, recorder)
 	listProducts := prodApp.NewListProducts(productRepo, uow)
 	adjustStock := prodApp.NewAdjustStock(productRepo, stockMovementRepo, uow, recorder)
 	// Expenses (gastos generales) — CRUD + listado. Mismo wiring que cloud.
@@ -426,7 +447,7 @@ func main() {
 	// gate funciona offline.
 	plusGate := middleware.RequirePlusPlan(gymRepo, uow)
 
-	memberCtrl := memCtrl.NewMemberController(createMember, updateMember, listMembers, memberDetail, toggleMember, lockExpiry, assignPin, tokens).
+	memberCtrl := memCtrl.NewMemberController(createMember, updateMember, listMembers, memberDetail, toggleMember, lockExpiry, assignNumber, tokens).
 		WithUploadsDir(uploadsDir).
 		WithImportCSV(importCSV)
 	// SyncTrigger se setea más abajo cuando el agente está construido
@@ -435,7 +456,7 @@ func main() {
 	fingerprintCtrl := memCtrl.NewFingerprintController(registerFingerprint, deleteFingerprint, tokens)
 	paymentCtrl := billingCtrl.NewPaymentController(registerPayment, settlePayment, receiptPayment, sendReceipt, listMemberPayments, listGymPayments, refundPayment, registerSale, refundSale, cashClose, tokens)
 	paymentCtrl.PlanGate = plusGate
-	productCtrl := prodCtrl.NewProductController(createProduct, updateProduct, deactivateProduct, listProducts, adjustStock, tokens)
+	productCtrl := prodCtrl.NewProductController(createProduct, updateProduct, deactivateProduct, reactivateProduct, listProducts, adjustStock, tokens)
 	expenseController := expCtrl.NewExpenseController(createExpense, updateExpense, deleteExpense, listExpenses, tokens)
 	expenseController.PlanGate = plusGate
 	fingerprintAvailable := func() bool { return bioReader.Available(context.Background()) }
@@ -443,7 +464,7 @@ func main() {
 	// drive any turnstile / cerradura over HTTP). URL + HMAC secret live in
 	// gyms.kiosk_settings; dispatcher reads them per-call.
 	accessWebhook := accesswebhook.NewHTTPDispatcher(uow, gymRepo)
-	checkinCtrl := chkCtrl.NewCheckinController(checkinManual, checkinPin, checkinOverride, checkinRepo, uow, fingerprintAvailable, tokens).
+	checkinCtrl := chkCtrl.NewCheckinController(checkinManual, checkinNumber, checkinOverride, checkinRepo, uow, fingerprintAvailable, tokens).
 		WithWebhook(accessWebhook)
 	kioskCtrl := chkCtrl.NewKioskController(checkinFingerprint, kioskLoop, bioReader, tokens).
 		WithSibling(checkinCtrl)

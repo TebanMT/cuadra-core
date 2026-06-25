@@ -204,3 +204,31 @@ func TestIsAccessHardBlocked(t *testing.T) {
 		})
 	}
 }
+
+// TestHasPlusOnlyFields_EmptyWebhookNotPlus — regresión: el desktop manda
+// access_webhook_url:"" en cada guardado de perfil; un valor VACÍO no debe
+// considerarse acción Plus (antes gateaba a 402 a todo gym Standard).
+func TestHasPlusOnlyFields_EmptyWebhookNotPlus(t *testing.T) {
+	sp := func(s string) *string { return &s }
+	cases := []struct {
+		name string
+		u    gymDomain.ProfileUpdate
+		want bool
+	}{
+		{"vacío (caso del desktop) → no Plus", gymDomain.ProfileUpdate{AccessWebhookURL: sp("")}, false},
+		{"solo espacios → no Plus", gymDomain.ProfileUpdate{AccessWebhookURL: sp("   ")}, false},
+		{"nil → no Plus", gymDomain.ProfileUpdate{AccessWebhookURL: nil}, false},
+		{"URL real → Plus", gymDomain.ProfileUpdate{AccessWebhookURL: sp("https://x/door")}, true},
+		{"secret vacío → no Plus", gymDomain.ProfileUpdate{AccessWebhookSecret: sp("")}, false},
+		{"secret real → Plus", gymDomain.ProfileUpdate{AccessWebhookSecret: sp("s3cr3t")}, true},
+		{"RFC → Plus", gymDomain.ProfileUpdate{RFC: sp("XAXX010101000")}, true},
+		{"solo nombre/horario → no Plus", gymDomain.ProfileUpdate{Name: sp("Gym"), OpenTime: sp("06:00")}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.u.HasPlusOnlyFields(); got != tc.want {
+				t.Errorf("HasPlusOnlyFields() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

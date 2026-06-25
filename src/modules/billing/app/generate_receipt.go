@@ -76,34 +76,11 @@ func (uc *GenerateReceipt) Execute(ctx context.Context, in GenerateReceiptInput)
 	}, nil
 }
 
-// ReceiptNotifyInput es el payload que SendReceipt pasa al notifications BC
-// para encolar (o despachar en cloud) el comprobante.
-type ReceiptNotifyInput struct {
-	GymID          uuid.UUID
-	PaymentID      uuid.UUID
-	MemberID       *uuid.UUID
-	Concept        string
-	Amount         float64
-	Folio          string
-	MembershipType string // nombre del plan; vacío en ventas de producto
-	Channel        string // "whatsapp_member" | "whatsapp_other"
-	Recipient      string // teléfono override para whatsapp_other; vacío = usar el del socio
-}
-
-// ReceiptNotifyOutput es lo que el notifier devuelve a SendReceipt.
-type ReceiptNotifyOutput struct {
-	Status string // "queued" | "skipped"
-	Note   string
-}
-
-// ReceiptNotifier es el seam hacia el BC de notificaciones para el reenvío
-// manual de comprobantes (UC-020). Se define aquí para que billing no importe
-// el paquete notifications.
-type ReceiptNotifier interface {
-	NotifyReceipt(ctx context.Context, in ReceiptNotifyInput) (ReceiptNotifyOutput, error)
-}
-
-// SendReceiptInput backs the manual UC-020 "Reenviar comprobante" call.
+// SendReceiptInput backs the manual UC-020 "Reenviar comprobante" call. El
+// envío se delega al seam de notificaciones (EventPublisher →
+// BillingEventSubscriber → EnqueueReceipt), el MISMO que dispara el cobro
+// automático. Channel/Recipient quedan para overrides futuros (otro número /
+// email); hoy el envío default es WhatsApp al socio del pago vía master sender.
 type SendReceiptInput struct {
 	GymID     uuid.UUID
 	PaymentID uuid.UUID
@@ -117,15 +94,24 @@ type SendReceiptOutput struct {
 }
 
 type SendReceipt struct {
-	Payments billingRepo.PaymentRepository
-	UoW      sharedDomain.UnitOfWork
-	// Notifier es el seam hacia el BC de notificaciones. Nil = modo stub
-	// (útil en tests que no necesitan el flujo de notificaciones completo).
-	Notifier ReceiptNotifier
+	Payments  billingRepo.PaymentRepository
+	Publisher EventPublisher
+	UoW       sharedDomain.UnitOfWork
 }
 
-func NewSendReceipt(payments billingRepo.PaymentRepository, uow sharedDomain.UnitOfWork, notifier ReceiptNotifier) *SendReceipt {
-	return &SendReceipt{Payments: payments, UoW: uow, Notifier: notifier}
+func NewSendReceipt(payments billingRepo.PaymentRepository, uow sharedDomain.UnitOfWork) *SendReceipt {
+	return &SendReceipt{Payments: payments, Publisher: NoopPublisher{}, UoW: uow}
+}
+
+// WithPublisher inyecta el seam de notificaciones (el MISMO
+// BillingEventSubscriber que usa el cobro automático para el comprobante).
+// Sin él, SendReceipt degrada a NoopPublisher (no-op silencioso) — útil en
+// tests que no montan la BC de notificaciones.
+func (uc *SendReceipt) WithPublisher(p EventPublisher) *SendReceipt {
+	if p != nil {
+		uc.Publisher = p
+	}
+	return uc
 }
 
 func (uc *SendReceipt) Execute(ctx context.Context, in SendReceiptInput) (*SendReceiptOutput, error) {
@@ -140,51 +126,33 @@ func (uc *SendReceipt) Execute(ctx context.Context, in SendReceiptInput) (*SendR
 	if p.GymID != in.GymID {
 		return nil, sharedDomain.NewBusinessError(billingErrors.ErrCrossGym, "")
 	}
-
-	// Canales email: aún no implementados en Sesión 7.
-	switch in.Channel {
-	case "email_member", "email_other":
+	if p.MemberID == nil {
+		// Venta anónima sin socio: no hay a quién mandarle el comprobante.
 		return &SendReceiptOutput{
-			Status: "not_supported",
-			Note:   "Envío por email se habilitará en una sesión futura.",
+			Status: "skipped",
+			Note:   "El pago no tiene socio asociado.",
 		}, nil
 	}
-
-	// Canal WhatsApp — delegar al notifications BC.
-	if uc.Notifier == nil {
-		return &SendReceiptOutput{
-			Status: "queued_stub",
-			Note:   "Notifier no configurado (modo stub).",
-		}, nil
-	}
-
-	// Extraer el nombre del plan desde el primer renglón del desglose
-	// (UC-018 lo escribe como Breakdown[0].Label = mt.Name). En ventas
-	// de producto Breakdown tiene el nombre del artículo, no un plan.
-	membershipType := ""
-	if p.Concept == paymentDomain.ConceptMembership && len(p.Breakdown) > 0 {
-		membershipType = p.Breakdown[0].Label
-	}
-
-	notifyOut, err := uc.Notifier.NotifyReceipt(ctx, ReceiptNotifyInput{
-		GymID:          in.GymID,
-		PaymentID:      in.PaymentID,
-		MemberID:       p.MemberID,
-		Concept:        p.Concept,
-		Amount:         p.Amount,
-		Folio:          p.Folio,
-		MembershipType: membershipType,
-		Channel:        in.Channel,
-		Recipient:      in.Recipient,
+	// Reusa el MISMO seam que el cobro automático (EventPublisher →
+	// BillingEventSubscriber → EnqueueReceipt). Idempotente por pago (idemp
+	// key receipt:<paymentID>): si el comprobante ya se encoló al cobrar, esto
+	// NO duplica; si nunca salió (p.ej. el socio no tenía teléfono al cobrar y
+	// se lo agregaron después), lo encola ahora. El dispatcher resuelve el
+	// `from` por tier (master sender en Standard). Query() arriba devuelve un
+	// tx read-only sin lock (Tx=nil), así que el Command de EnqueueReceipt no choca.
+	uc.Publisher.PublishPaymentCompleted(ctx, PaymentCompletedEvent{
+		GymID:      p.GymID,
+		PaymentID:  in.PaymentID,
+		MemberID:   p.MemberID,
+		Concept:    p.Concept,
+		Amount:     p.Amount,
+		Folio:      p.Folio,
+		OperatorID: p.OperatorID,
 	})
-	if err != nil {
-		return nil, err
-	}
-	status := notifyOut.Status
-	if status == "" {
-		status = "queued"
-	}
-	return &SendReceiptOutput{Status: status, Note: notifyOut.Note}, nil
+	return &SendReceiptOutput{
+		Status: "queued",
+		Note:   "Comprobante encolado para envío por WhatsApp.",
+	}, nil
 }
 
 // ---------------------------------------------------------------------------

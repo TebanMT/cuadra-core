@@ -85,12 +85,18 @@ type CashCloseQuery struct {
 // the row count so the FE can render "Mensualidades · 4 cobros" without a
 // second roundtrip.
 type CashCloseTotals struct {
-	ByMethod    map[string]float64
-	ByConcept   map[string]ConceptTotal
-	ByOperator  []OperatorTotal
-	GrandTotal  float64
-	RefundTotal float64
-	RefundCount int
+	ByMethod   map[string]float64
+	ByConcept  map[string]ConceptTotal
+	ByOperator []OperatorTotal
+	GrandTotal float64
+	// RefundTotal y RefundByMethod son NEGATIVOS (los refunds se guardan con
+	// amount negativo). RefundByMethod permite descontar del cajón los
+	// reembolsos pagados en efectivo (que físicamente sacan dinero) — antes
+	// el corte sólo restaba gastos cash, no refunds cash, y reportaba un
+	// faltante fantasma. La presentación al FE va en magnitud positiva.
+	RefundTotal    float64
+	RefundByMethod map[string]float64
+	RefundCount    int
 }
 
 // ConceptTotal — total + count by payment concept.

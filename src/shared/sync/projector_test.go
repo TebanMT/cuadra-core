@@ -55,6 +55,107 @@ func TestBuildProjectorUpsert_OmitsAbsentColumns(t *testing.T) {
 	}
 }
 
+// helper: ¿el UPSERT generado para un payload (ya pasado por la guarda)
+// menciona la columna?
+func upsertHasColumn(t *testing.T, payload []byte, col string) bool {
+	t.Helper()
+	tbl := *FindTable("users")
+	q, _, err := buildProjectorUpsert(tbl, uuid.New(), uuid.New(), payload)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	return strings.Contains(q, col)
+}
+
+func TestGuardUserCredential_StripsOwnerPasswordHash(t *testing.T) {
+	// Regresión del bug "la contraseña del dueño deja de funcionar": un push
+	// del sidecar trae el password_hash del owner (viejo/stale/de menor costo).
+	// El cloud es la autoridad → la guarda lo descarta y el UPSERT lo omite,
+	// así ON CONFLICT preserva el hash bueno del cloud.
+	payload := json.RawMessage(`{"version":2,"email":"o@b.com","full_name":"X","role":"owner","active":true,"password_hash":"stale-or-weaker","updated_at":1714060000000}`)
+	guarded, err := guardUserCredential(payload)
+	if err != nil {
+		t.Fatalf("guard: %v", err)
+	}
+	if upsertHasColumn(t, guarded, "password_hash") {
+		t.Errorf("password_hash de owner debe quedar fuera del UPSERT")
+	}
+	// El resto del perfil sí debe proyectarse.
+	for _, want := range []string{"email", "full_name", "active"} {
+		if !upsertHasColumn(t, guarded, want) {
+			t.Errorf("falta columna %q tras la guarda", want)
+		}
+	}
+}
+
+func TestGuardUserCredential_StripsEmptyHashForAnyRole(t *testing.T) {
+	// El caso catastrófico: sidecar sin cached_login siembra password_hash=""
+	// y lo empuja. Para cualquier rol, un hash vacío jamás debe tocar la fila
+	// del cloud (si no, nullifyEmptyString lo colapsa a NULL y el login muere).
+	for _, role := range []string{"owner", "operator", "manager"} {
+		payload := json.RawMessage(`{"version":2,"email":"x@b.com","role":"` + role + `","active":true,"password_hash":"","updated_at":1}`)
+		guarded, err := guardUserCredential(payload)
+		if err != nil {
+			t.Fatalf("guard %s: %v", role, err)
+		}
+		if upsertHasColumn(t, guarded, "password_hash") {
+			t.Errorf("role=%s: password_hash vacío debe quedar fuera del UPSERT", role)
+		}
+	}
+}
+
+func TestGuardUserCredential_AllowsOperatorRealReset(t *testing.T) {
+	// El reset legacy de operador desde recepción (UC-009, cmd/sidecar) SÍ debe
+	// propagar: hash NO vacío + rol "operator" pasa intacto (incluso con
+	// espacios/capitalización distinta, por EqualFold+TrimSpace).
+	for _, role := range []string{"operator", "Operator", " operator "} {
+		payload := json.RawMessage(`{"version":3,"email":"op@b.com","role":"` + role + `","active":true,"password_hash":"$2a$12$realnewhash","updated_at":1}`)
+		guarded, err := guardUserCredential(payload)
+		if err != nil {
+			t.Fatalf("guard %q: %v", role, err)
+		}
+		if !upsertHasColumn(t, guarded, "password_hash") {
+			t.Errorf("role=%q: reset real de operador debe propagar password_hash", role)
+		}
+	}
+}
+
+func TestGuardUserCredential_FailsClosedOnUnknownOrMissingRole(t *testing.T) {
+	// Fail-closed: un hash NO vacío con rol ausente o desconocido NO debe
+	// escribirse — sólo el rol "operator" pasa. Protege contra writers futuros
+	// y el backfill Project() si el CHECK de rol upstream cambiara.
+	cases := []string{
+		`{"version":2,"email":"x@b.com","active":true,"password_hash":"$2a$12$h","updated_at":1}`,                  // rol ausente
+		`{"version":2,"email":"x@b.com","role":"manager","active":true,"password_hash":"$2a$12$h","updated_at":1}`, // rol desconocido
+		`{"version":2,"email":"x@b.com","role":null,"active":true,"password_hash":"$2a$12$h","updated_at":1}`,      // rol null
+	}
+	for _, c := range cases {
+		guarded, err := guardUserCredential(json.RawMessage(c))
+		if err != nil {
+			t.Fatalf("guard %s: %v", c, err)
+		}
+		if upsertHasColumn(t, guarded, "password_hash") {
+			t.Errorf("fail-closed: password_hash debe descartarse para %s", c)
+		}
+	}
+}
+
+func TestGuardUserCredential_NeverTouchesPinHash(t *testing.T) {
+	// pin_hash es autoridad del sidecar (se asigna en recepción) — la guarda
+	// no lo toca aunque descarte password_hash.
+	payload := json.RawMessage(`{"version":2,"email":"o@b.com","role":"owner","active":true,"password_hash":"x","pin_hash":"$2a$12$pin","updated_at":1}`)
+	guarded, err := guardUserCredential(payload)
+	if err != nil {
+		t.Fatalf("guard: %v", err)
+	}
+	if upsertHasColumn(t, guarded, "password_hash") {
+		t.Errorf("password_hash de owner debe quedar fuera")
+	}
+	if !upsertHasColumn(t, guarded, "pin_hash") {
+		t.Errorf("pin_hash debe preservarse (autoridad del sidecar)")
+	}
+}
+
 func TestBuildProjectorUpsert_PinsGymAndIDFromContext(t *testing.T) {
 	gymID := uuid.New()
 	entityID := uuid.New()

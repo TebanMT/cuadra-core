@@ -188,6 +188,14 @@ type dashboardWire struct {
 	GeneratedAt   time.Time    `json:"generated_at"`
 	ActiveMembers kpiTrendWire `json:"active_members"`
 	IncomeMonth   kpiTrendWire `json:"income_month"`
+	// RealizedProfitMonth — ganancia realizada de productos del mes
+	// (Standard). RealizedProfitCoverage acompaña con la cobertura para
+	// el hint "X de Y con costo".
+	RealizedProfitMonth    kpiTrendWire              `json:"realized_profit_month"`
+	RealizedProfitCoverage reportsApp.ProfitCoverage `json:"realized_profit_coverage"`
+	// RealizedProfitMarginPct — margen de la utilidad (utilidad / ingreso de
+	// productos × 100). El FE lo muestra como chip "X.XX%" en la tarjeta.
+	RealizedProfitMarginPct *float64 `json:"realized_profit_margin_pct,omitempty"`
 	// ExpensesMonth — agregado de mercancía + gastos generales. El FE
 	// muestra UN solo número con hint "Mercancía + otros". Internamente
 	// los sub-KPIs siguen existiendo en el use case por si después se
@@ -214,6 +222,13 @@ func toDashboardWire(d *reportsApp.DashboardOutput) dashboardWire {
 			Delta:    floatPtrIfMeaningful(d.IncomeMonth),
 			DeltaPct: d.IncomeMonth.DeltaPct,
 		},
+		RealizedProfitMonth: kpiTrendWire{
+			Value:    d.RealizedProfitMonth.Current,
+			Delta:    floatPtrIfMeaningful(d.RealizedProfitMonth),
+			DeltaPct: d.RealizedProfitMonth.DeltaPct,
+		},
+		RealizedProfitCoverage:  d.RealizedProfitCoverage,
+		RealizedProfitMarginPct: d.RealizedProfitMarginPct,
 		ExpensesMonth: kpiTrendWire{
 			Value:    d.ExpensesMonth.Current,
 			Delta:    floatPtrIfMeaningful(d.ExpensesMonth),

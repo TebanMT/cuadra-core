@@ -159,7 +159,7 @@ func newFixture(t *testing.T) *fixture {
 	}
 
 	folios := folioSvc.NewGenerator(paymentRepo)
-	enqueueReceipt := notiApp.NewEnqueueReceipt(notificationRepo, gymRepo, memberRepo, uow, "http://localhost:5173")
+	enqueueReceipt := notiApp.NewEnqueueReceipt(notificationRepo, gymRepo, memberRepo, uow)
 	subscriber := notiApp.NewBillingEventSubscriber(enqueueReceipt)
 	registerUC := billingApp.NewRegisterMembershipPayment(
 		paymentRepo, folios, memberSvc, memberRepo, uow, recorder, subscriber,
@@ -275,9 +275,12 @@ func TestUC039_PaymentCompletedEnqueuesReceiptWhenWhatsAppConnected(t *testing.T
 	}
 }
 
-func TestUC039_PaymentCompleted_SkipsWhenWhatsAppNotConnected(t *testing.T) {
+// ADR-009: un gym sin número propio conectado (Standard/trial) ya NO hace
+// skip — el recibo se encola igual y el dispatcher lo manda desde el número
+// maestro de Tinta. El gate viejo (skip si no conectado) quedó obsoleto.
+func TestUC039_PaymentCompleted_EnqueuesEvenWhenNotConnected(t *testing.T) {
 	f := newFixture(t)
-	// Skip the connect step on purpose.
+	// Skip the connect step on purpose — Tinta es el sender en este tier.
 
 	if _, err := f.registerUC.Execute(context.Background(), billingApp.RegisterMembershipPaymentInput{
 		GymID: f.gymID, ActorUserID: f.ownerID,
@@ -292,8 +295,8 @@ func TestUC039_PaymentCompleted_SkipsWhenWhatsAppNotConnected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if total != 0 {
-		t.Errorf("expected 0 notifications when whatsapp not connected, got %d", total)
+	if total != 1 {
+		t.Errorf("expected 1 receipt enqueued via Tinta master sender, got %d", total)
 	}
 }
 
@@ -324,6 +327,10 @@ func TestDispatcher_PendingRowSentByMockProvider(t *testing.T) {
 		nil,
 		f.uow,
 	)
+	// Los templates de recibo requieren el renderer del PDF + el uploader de
+	// R2 para inyectar {receipt_url}; en el test usamos fakes.
+	dispatcher.Receipt = fakeReceiptRenderer{}
+	dispatcher.Media = fakeMediaUploader{}
 	sent, err := dispatcher.Tick(context.Background(), time.Now().UTC().Add(time.Minute))
 	if err != nil {
 		t.Fatalf("tick: %v", err)
@@ -373,6 +380,10 @@ func TestDispatcher_TransientFailureRetries(t *testing.T) {
 		nil,
 		f.uow,
 	)
+	// Los templates de recibo requieren el renderer del PDF + el uploader de
+	// R2 para inyectar {receipt_url}; en el test usamos fakes.
+	dispatcher.Receipt = fakeReceiptRenderer{}
+	dispatcher.Media = fakeMediaUploader{}
 	sent, err := dispatcher.Tick(context.Background(), time.Now().UTC().Add(time.Minute))
 	if err != nil {
 		t.Fatalf("tick: %v", err)
@@ -389,5 +400,64 @@ func TestDispatcher_TransientFailureRetries(t *testing.T) {
 	}
 	if sent != 1 {
 		t.Errorf("expected 1 sent on retry, got %d", sent)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Fakes para el flujo de recibo (PDF + R2): los templates receipt_* requieren
+// un ReceiptPDFRenderer + un PublicMediaUploader para inyectar {receipt_url}.
+// ---------------------------------------------------------------------------
+
+type fakeReceiptRenderer struct{}
+
+func (fakeReceiptRenderer) RenderReceiptPDF(_ context.Context, _, _ uuid.UUID) ([]byte, string, error) {
+	return []byte("%PDF-1.4 fake"), "application/pdf", nil
+}
+
+type fakeMediaUploader struct{}
+
+func (fakeMediaUploader) UploadPublic(_ context.Context, objectKey, _ string, _ []byte) (string, error) {
+	return "https://media.test/" + objectKey, nil
+}
+
+// El recibo de membresía debe llevar el TIPO real ("Membresía <plan>"), la
+// vigencia real (no el approx hoy+30d con literal "ene") y el payment_id que
+// el dispatcher usa para generar el PDF. Regresión de los bugs de datos.
+func TestEnqueueReceipt_RealTypeExpiryAndPaymentID(t *testing.T) {
+	f := newFixture(t)
+	if _, err := f.registerUC.Execute(context.Background(), billingApp.RegisterMembershipPaymentInput{
+		GymID: f.gymID, ActorUserID: f.ownerID,
+		MemberID: f.memberID, MembershipTypeID: f.planID, Method: "cash",
+	}); err != nil {
+		t.Fatalf("register payment: %v", err)
+	}
+
+	tx, _ := f.uow.Query(context.Background())
+	rows, _, err := f.notiRepo.ListByGym(tx, f.gymID, "pending", 1, 50)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	var receipt *notification.Notification
+	for _, r := range rows {
+		if r.TemplateKey == "receipt_membership" {
+			receipt = r
+			break
+		}
+	}
+	if receipt == nil {
+		t.Fatal("no se encoló el recibo de membresía")
+	}
+	// El plan del fixture se llama "Mensual" → tipo = "Membresía Mensual"
+	// (no el hardcode anterior "Mensual" a secas).
+	if got := receipt.Payload["membership_type"]; got != "Membresía Mensual" {
+		t.Errorf("membership_type = %q, want %q", got, "Membresía Mensual")
+	}
+	// payment_id presente y parseable (lo usa el dispatcher para el PDF).
+	if _, err := uuid.Parse(receipt.Payload["payment_id"]); err != nil {
+		t.Errorf("payment_id inválido/ausente: %q", receipt.Payload["payment_id"])
+	}
+	// Vigencia real, no vacía y con formato "DD mmm YYYY".
+	if exp := receipt.Payload["expiry_date"]; len(exp) < 8 {
+		t.Errorf("expiry_date no parece una fecha real: %q", exp)
 	}
 }

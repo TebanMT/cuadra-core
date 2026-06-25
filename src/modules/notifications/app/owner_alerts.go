@@ -102,6 +102,9 @@ type UpdateOwnerAlert struct {
 	Templates notiRepo.TemplateOverrideRepository
 	UoW       sharedDomain.UnitOfWork
 	Audit     audit.Recorder
+	// CanEditBody: ver UpdateTemplate. Sin Plus, el texto de la alerta se
+	// fuerza al default aprobado por Meta; el switch on/off sí se respeta.
+	CanEditBody func(ctx context.Context, gymID uuid.UUID) bool
 }
 
 func NewUpdateOwnerAlert(
@@ -187,19 +190,25 @@ func (uc *UpdateOwnerAlert) Execute(ctx context.Context, in UpdateOwnerAlertInpu
 		// Template path — only when Body was provided. Validates against
 		// the canonical Definition (variables FIXED, copy editable).
 		if in.Body != nil {
+			// Sin Plus el texto no se personaliza: lo forzamos al default
+			// aprobado por Meta (el switch on/off sí se respetó arriba).
+			body := *in.Body
+			if uc.CanEditBody != nil && !uc.CanEditBody(ctx, in.GymID) {
+				body = tplDef.Body
+			}
 			existing, err := uc.Templates.GetByGymAndKey(tx, in.GymID, tplKey)
 			if err != nil {
 				return sharedDomain.NewUnexpectedError(err)
 			}
 			var override *tplDomain.Override
 			if existing == nil {
-				override, err = tplDomain.NewOverride(uuid.New(), in.GymID, tplKey, *in.Body, now)
+				override, err = tplDomain.NewOverride(uuid.New(), in.GymID, tplKey, body, now)
 				if err != nil {
 					return sharedDomain.NewValidationError(err)
 				}
 			} else {
 				override = existing
-				if err := override.Edit(*in.Body, now); err != nil {
+				if err := override.Edit(body, now); err != nil {
 					return sharedDomain.NewValidationError(err)
 				}
 			}

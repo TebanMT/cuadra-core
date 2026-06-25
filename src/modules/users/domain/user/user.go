@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	userErrors "github.com/cuadra/cuadra-core/src/modules/users/domain/errors"
+	phonepkg "github.com/cuadra/cuadra-core/src/shared/phone"
 )
 
 const (
@@ -167,7 +168,10 @@ func (u *User) RequiresPhone() bool { return u.Role == RoleOperator }
 // SetInitialPhone stores phone at create time without bumping Version (the
 // user is still v1). Empty / whitespace-only resets to nil.
 func (u *User) SetInitialPhone(phone string) {
-	v := strings.TrimSpace(phone)
+	// Normaliza a E.164 (igual que NewOperator) para que el teléfono del DUEÑO
+	// en el signup también quede canónico (+52…) y no sólo trim — antes un alta
+	// con "4461057446" se guardaba sin código de país.
+	v := phonepkg.Normalize(phone)
 	if v == "" {
 		u.Phone = nil
 		return
@@ -341,21 +345,7 @@ func NormalizeEmail(email string) string {
 // "+52 442 ..." and the country-code prefix is meaningful when WhatsApp
 // later dispatches the welcome PIN message.
 func NormalizePhone(phone string) string {
-	v := strings.TrimSpace(phone)
-	if v == "" {
-		return ""
-	}
-	var b strings.Builder
-	b.Grow(len(v))
-	for _, r := range v {
-		switch {
-		case r >= '0' && r <= '9':
-			b.WriteRune(r)
-		case r == '+' && b.Len() == 0:
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
+	return phonepkg.Normalize(phone)
 }
 
 // ---------------------------------------------------------------------------

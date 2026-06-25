@@ -148,32 +148,104 @@ func (r *ProductSQLiteRepository) List(tx sharedDomain.Transaction, q prodRepo.L
 // se restringe a activos porque inactivos no se venden. Devuelve totales
 // en moneda (cents → float al edge, mismo patrón que el resto del
 // modulo).
+//
+// El costo unitario por producto sale de un LEFT JOIN a la subconsulta de
+// stock_movements: promedio ponderado por cantidad de las entradas
+// `restock` con costo unitario. (2*SUM(cost*delta) + SUM(delta)) /
+// (2*SUM(delta)) con división entera = redondeo half-up a centavos (cost y
+// delta son no-negativos). Coincide centavo a centavo con
+// ROUND(SUM(cost*delta)/SUM(delta),2) de Postgres para que ambos binarios
+// devuelvan el MISMO número. Todo el cálculo de costo/ganancia se hace en
+// centavos enteros y se divide /100 al edge.
 func (r *ProductSQLiteRepository) ListAggregates(tx sharedDomain.Transaction, q prodRepo.ListQuery) (prodRepo.ProductAggregates, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	whereClause, args := buildProductWhereSqlite(q)
 	// Un solo round-trip — calcular todo en una query usando SUM/COUNT
-	// condicionales sobre la WHERE filtrada. Más eficiente que tres
+	// condicionales sobre la WHERE filtrada. Más eficiente que varias
 	// queries separadas, especialmente para catálogos chicos donde el
 	// overhead por query domina.
 	var row struct {
-		TotalValueCents sql.NullInt64 `db:"total_value"`
-		LowCount        int           `db:"low_count"`
-		OutCount        int           `db:"out_count"`
+		TotalValueCents        sql.NullInt64 `db:"total_value"`
+		LowCount               int           `db:"low_count"`
+		OutCount               int           `db:"out_count"`
+		CostValueCents         sql.NullInt64 `db:"cost_value"`
+		PotentialProfitCents   sql.NullInt64 `db:"potential_profit"`
+		SaleValueWithCostCents sql.NullInt64 `db:"sale_value_with_cost"`
+		ProductsTotal          int           `db:"products_total"`
+		ProductsWithCost       int           `db:"products_with_cost"`
 	}
 	stmt := fmt.Sprintf(`
 		SELECT
-		  COALESCE(SUM(CASE WHEN active = 1 THEN price * stock ELSE 0 END), 0) AS total_value,
-		  COALESCE(SUM(CASE WHEN active = 1 AND stock > 0 AND stock <= stock_minimum THEN 1 ELSE 0 END), 0) AS low_count,
-		  COALESCE(SUM(CASE WHEN active = 1 AND stock = 0 THEN 1 ELSE 0 END), 0) AS out_count
-		FROM products WHERE %s`, whereClause)
-	if err := stx.Get(context.Background(), &row, stmt, args...); err != nil {
+		  COALESCE(SUM(CASE WHEN p.active = 1 THEN p.price * p.stock ELSE 0 END), 0) AS total_value,
+		  COALESCE(SUM(CASE WHEN p.active = 1 AND p.stock > 0 AND p.stock <= p.stock_minimum THEN 1 ELSE 0 END), 0) AS low_count,
+		  COALESCE(SUM(CASE WHEN p.active = 1 AND p.stock = 0 THEN 1 ELSE 0 END), 0) AS out_count,
+		  COALESCE(SUM(CASE WHEN p.active = 1 AND c.avg_unit_cost IS NOT NULL THEN p.stock * c.avg_unit_cost ELSE 0 END), 0) AS cost_value,
+		  COALESCE(SUM(CASE WHEN p.active = 1 AND c.avg_unit_cost IS NOT NULL THEN p.stock * (p.price - c.avg_unit_cost) ELSE 0 END), 0) AS potential_profit,
+		  COALESCE(SUM(CASE WHEN p.active = 1 AND c.avg_unit_cost IS NOT NULL THEN p.stock * p.price ELSE 0 END), 0) AS sale_value_with_cost,
+		  COALESCE(SUM(CASE WHEN p.active = 1 THEN 1 ELSE 0 END), 0) AS products_total,
+		  COALESCE(SUM(CASE WHEN p.active = 1 AND c.avg_unit_cost IS NOT NULL THEN 1 ELSE 0 END), 0) AS products_with_cost
+		FROM products p
+		LEFT JOIN (%s) c ON c.product_id = p.id
+		WHERE %s`, avgUnitCostSubquerySqlite, whereClause)
+	// El placeholder de gym_id de la subconsulta va ANTES de los args de
+	// la WHERE (aparece antes en el SQL).
+	subArgs := append([]any{q.GymID.String()}, args...)
+	if err := stx.Get(context.Background(), &row, stmt, subArgs...); err != nil {
 		return prodRepo.ProductAggregates{}, err
 	}
 	return prodRepo.ProductAggregates{
-		TotalValue: float64(row.TotalValueCents.Int64) / 100,
-		LowCount:   row.LowCount,
-		OutCount:   row.OutCount,
+		TotalValue:        float64(row.TotalValueCents.Int64) / 100,
+		LowCount:          row.LowCount,
+		OutCount:          row.OutCount,
+		CostValue:         float64(row.CostValueCents.Int64) / 100,
+		PotentialProfit:   float64(row.PotentialProfitCents.Int64) / 100,
+		SaleValueWithCost: float64(row.SaleValueWithCostCents.Int64) / 100,
+		ProductsTotal:     row.ProductsTotal,
+		ProductsWithCost:  row.ProductsWithCost,
 	}, nil
+}
+
+// avgUnitCostSubquerySqlite — costo unitario promedio ponderado por
+// cantidad por producto en CENTAVOS enteros (cost y price se guardan en
+// centavos en SQLite). `cost` es unitario; el ponderado es
+// SUM(cost*delta)/SUM(delta) con redondeo half-up vía división entera.
+// `restock` literal igual que el resto de las queries de inventario del
+// repo de reportes.
+const avgUnitCostSubquerySqlite = `
+		  SELECT product_id, (2*SUM(cost * delta) + SUM(delta)) / (2*SUM(delta)) AS avg_unit_cost
+		  FROM stock_movements
+		  WHERE gym_id = ? AND movement_type = 'restock' AND cost IS NOT NULL AND deleted_at IS NULL
+		  GROUP BY product_id
+		  HAVING SUM(delta) > 0`
+
+// ListUnitCosts — costo unitario promedio (pesos) por producto del filtro,
+// solo de los que tienen costo capturado. INNER JOIN a la subconsulta de
+// costo: el mapa cubre exactamente el subconjunto con costo.
+func (r *ProductSQLiteRepository) ListUnitCosts(tx sharedDomain.Transaction, q prodRepo.ListQuery) (map[uuid.UUID]float64, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	whereClause, args := buildProductWhereSqlite(q)
+	stmt := fmt.Sprintf(`
+		SELECT p.id AS id, c.avg_unit_cost AS avg_unit_cost
+		FROM products p
+		JOIN (%s) c ON c.product_id = p.id
+		WHERE %s`, avgUnitCostSubquerySqlite, whereClause)
+	subArgs := append([]any{q.GymID.String()}, args...)
+	var rows []struct {
+		ID           string `db:"id"`
+		AvgUnitCostC int64  `db:"avg_unit_cost"`
+	}
+	if err := stx.Select(context.Background(), &rows, stmt, subArgs...); err != nil {
+		return nil, err
+	}
+	out := make(map[uuid.UUID]float64, len(rows))
+	for _, x := range rows {
+		id, err := uuid.Parse(x.ID)
+		if err != nil {
+			continue
+		}
+		out[id] = float64(x.AvgUnitCostC) / 100
+	}
+	return out, nil
 }
 
 // buildProductWhereSqlite — extraído para reuso entre List y

@@ -171,11 +171,13 @@ func TestSignupOwner_WithPhone(t *testing.T) {
 		audit.NewSQLiteRecorder(),
 		30,
 	)
-	const wantPhone = "55 1234 5678"
+	// El dueño teclea con espacios y sin código de país; debe quedar E.164.
+	const inputPhone = "55 1234 5678"
+	const wantPhone = "+525512345678"
 	if _, err := uc.Execute(context.Background(), usersApp.SignupOwnerInput{
 		FullName:        "Esteban Mares",
 		Email:           "esteban@gym.com",
-		Phone:           wantPhone,
+		Phone:           inputPhone,
 		Password:        "supersecret123",
 		PasswordConfirm: "supersecret123",
 	}); err != nil {
@@ -186,7 +188,7 @@ func TestSignupOwner_WithPhone(t *testing.T) {
 		t.Fatalf("read phone: %v", err)
 	}
 	if got != wantPhone {
-		t.Errorf("phone = %q, want %q", got, wantPhone)
+		t.Errorf("phone = %q, want %q (normalizado E.164)", got, wantPhone)
 	}
 
 	// Invalid phone (letters) must reject the whole signup — we cannot

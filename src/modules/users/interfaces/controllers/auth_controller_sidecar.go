@@ -722,10 +722,17 @@ func (p *SidecarAuthProxy) absorbAuthResponse(ctx context.Context, email, passwo
 	// password locally — we don't have the cloud-side bcrypt hash. This
 	// hash is local-only, never sent to cloud, and lives next to the
 	// SQLite that already holds operational PII.
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	//
+	// Usamos auth.HashPassword (mismo bcryptCost global que el cloud) en vez
+	// de bcrypt.DefaultCost (10): así la credencial offline no queda más débil
+	// que la del cloud, y si alguna vez se sincronizara (vía mirror/enqueue) no
+	// introduce un downgrade de costo. bcrypt es cost-agnóstico al verificar,
+	// así que los hashes cost=10 ya cacheados siguen funcionando.
+	hashStr, err := auth.HashPassword(password)
 	if err != nil {
 		return
 	}
+	hash := []byte(hashStr)
 	cached := cachedLoginRow{
 		Email:        email,
 		PasswordHash: string(hash),

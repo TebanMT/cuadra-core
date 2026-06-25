@@ -128,10 +128,13 @@ func (uc *EnqueueOwnerAlert) Execute(ctx context.Context, in EnqueueOwnerAlertIn
 			out.SkippedReason = "no_owner"
 			return nil
 		}
+		// ADR-009: no WhatsApp-connection gate — the dispatcher resolves the
+		// sender by tier (Tinta master for Standard, gym's own number for
+		// connected Plus). We only need the owner to have a phone.
 		phone := ownerPhone
-		if !gym.IsWhatsAppConnected() || phone == "" {
+		if phone == "" {
 			out.Skipped = true
-			out.SkippedReason = "no_whatsapp_or_phone"
+			out.SkippedReason = "no_owner_phone"
 			return nil
 		}
 		gymName := ""

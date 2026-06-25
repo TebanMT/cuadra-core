@@ -58,7 +58,7 @@ func TestDefinitionValidate_RequiresAllVariables(t *testing.T) {
 		t.Fatal("default template missing")
 	}
 
-	good := "Hola {member_first_name}, ${amount} por {membership_type} hasta {expiry_date} — {gym_name}"
+	good := "Hola {member_first_name}, ${amount} por {membership_type} hasta {expiry_date} — {gym_name}. Comprobante: {receipt_url}"
 	if err := def.Validate(good); err != nil {
 		t.Fatalf("good body rejected: %v", err)
 	}

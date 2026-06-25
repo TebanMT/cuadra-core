@@ -13,6 +13,7 @@ import (
 	prodErrors "github.com/cuadra/cuadra-core/src/modules/products/domain/errors"
 	productDomain "github.com/cuadra/cuadra-core/src/modules/products/domain/product"
 	prodRepo "github.com/cuadra/cuadra-core/src/modules/products/domain/repository"
+	stockMovementDomain "github.com/cuadra/cuadra-core/src/modules/products/domain/stockmovement"
 	"github.com/cuadra/cuadra-core/src/modules/products/infraestructure/db/models"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 )
@@ -102,28 +103,95 @@ func (r *ProductPostgresRepository) List(tx sharedDomain.Transaction, q prodRepo
 }
 
 // ListAggregates — paralelo a la versión SQLite. Una sola query que
-// agrega total_value (solo activos), low_count y out_count usando
-// SUM(CASE WHEN ...). Sobre catálogos de 50-200 SKUs es trivial.
+// agrega total_value (solo activos), low_count, out_count y la ganancia
+// potencial sobre el stock usando SUM(CASE WHEN ...). Sobre catálogos de
+// 50-200 SKUs es trivial.
+//
+// El costo unitario por producto sale de una subconsulta LEFT JOIN sobre
+// stock_movements: ROUND(SUM(cost*delta)/SUM(delta), 2) — promedio
+// ponderado por cantidad de las entradas `restock` con costo unitario.
+// ROUND a 2 decimales redondea a centavos half-away-from-zero; como cost
+// y delta son no-negativos, coincide centavo a centavo con el redondeo
+// entero de la versión SQLite ((2*SUM(cost*delta)+den)/(2*den)) — así
+// ambos binarios devuelven el MISMO número.
 func (r *ProductPostgresRepository) ListAggregates(tx sharedDomain.Transaction, q prodRepo.ListQuery) (prodRepo.ProductAggregates, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	base := buildProductFilterPg(gormTx.Model(&models.ProductModel{}), q)
+	costSub := avgUnitCostSubqueryPg(gormTx, q.GymID)
 	var row struct {
-		TotalValue float64
-		LowCount   int
-		OutCount   int
+		TotalValue        float64
+		LowCount          int
+		OutCount          int
+		CostValue         float64
+		PotentialProfit   float64
+		SaleValueWithCost float64
+		ProductsTotal     int
+		ProductsWithCost  int
 	}
-	if err := base.Session(&gorm.Session{}).Select(`
-		COALESCE(SUM(CASE WHEN active = true THEN price * stock ELSE 0 END), 0) AS total_value,
-		COALESCE(SUM(CASE WHEN active = true AND stock > 0 AND stock <= stock_minimum THEN 1 ELSE 0 END), 0) AS low_count,
-		COALESCE(SUM(CASE WHEN active = true AND stock = 0 THEN 1 ELSE 0 END), 0) AS out_count`).
+	if err := base.Session(&gorm.Session{}).
+		Joins("LEFT JOIN (?) AS c ON c.product_id = products.id", costSub).
+		Select(`
+		COALESCE(SUM(CASE WHEN products.active = true THEN products.price * products.stock ELSE 0 END), 0) AS total_value,
+		COALESCE(SUM(CASE WHEN products.active = true AND products.stock > 0 AND products.stock <= products.stock_minimum THEN 1 ELSE 0 END), 0) AS low_count,
+		COALESCE(SUM(CASE WHEN products.active = true AND products.stock = 0 THEN 1 ELSE 0 END), 0) AS out_count,
+		COALESCE(SUM(CASE WHEN products.active = true AND c.avg_unit_cost IS NOT NULL THEN products.stock * c.avg_unit_cost ELSE 0 END), 0) AS cost_value,
+		COALESCE(SUM(CASE WHEN products.active = true AND c.avg_unit_cost IS NOT NULL THEN products.stock * (products.price - c.avg_unit_cost) ELSE 0 END), 0) AS potential_profit,
+		COALESCE(SUM(CASE WHEN products.active = true AND c.avg_unit_cost IS NOT NULL THEN products.stock * products.price ELSE 0 END), 0) AS sale_value_with_cost,
+		COALESCE(SUM(CASE WHEN products.active = true THEN 1 ELSE 0 END), 0) AS products_total,
+		COALESCE(SUM(CASE WHEN products.active = true AND c.avg_unit_cost IS NOT NULL THEN 1 ELSE 0 END), 0) AS products_with_cost`).
 		Scan(&row).Error; err != nil {
 		return prodRepo.ProductAggregates{}, err
 	}
 	return prodRepo.ProductAggregates{
-		TotalValue: row.TotalValue,
-		LowCount:   row.LowCount,
-		OutCount:   row.OutCount,
+		TotalValue:        row.TotalValue,
+		LowCount:          row.LowCount,
+		OutCount:          row.OutCount,
+		CostValue:         row.CostValue,
+		PotentialProfit:   row.PotentialProfit,
+		SaleValueWithCost: row.SaleValueWithCost,
+		ProductsTotal:     row.ProductsTotal,
+		ProductsWithCost:  row.ProductsWithCost,
 	}, nil
+}
+
+// ListUnitCosts — costo unitario promedio (pesos) por producto del filtro,
+// solo de los que tienen al menos una entrada con costo. Reusa el mismo
+// filtro que List/ListAggregates vía INNER JOIN a la subconsulta de costo,
+// de modo que el mapa cubre exactamente el subconjunto con costo capturado.
+func (r *ProductPostgresRepository) ListUnitCosts(tx sharedDomain.Transaction, q prodRepo.ListQuery) (map[uuid.UUID]float64, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	base := buildProductFilterPg(gormTx.Model(&models.ProductModel{}), q)
+	costSub := avgUnitCostSubqueryPg(gormTx, q.GymID)
+	var rows []struct {
+		ID          uuid.UUID
+		AvgUnitCost float64
+	}
+	if err := base.Session(&gorm.Session{}).
+		Joins("JOIN (?) AS c ON c.product_id = products.id", costSub).
+		Select("products.id AS id, c.avg_unit_cost AS avg_unit_cost").
+		Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[uuid.UUID]float64, len(rows))
+	for _, x := range rows {
+		out[x.ID] = x.AvgUnitCost
+	}
+	return out, nil
+}
+
+// avgUnitCostSubqueryPg construye la subconsulta de costo unitario
+// promedio ponderado por cantidad por producto (pesos, 2 decimales).
+// `cost` en stock_movements es el costo UNITARIO de la entrada (igual que
+// el KPI de egresos, que totaliza cost*delta); el promedio ponderado es
+// SUM(cost*delta)/SUM(delta). Una sola definición reusada por
+// ListAggregates y ListUnitCosts para que el redondeo sea idéntico.
+func avgUnitCostSubqueryPg(gormTx *gorm.DB, gymID uuid.UUID) *gorm.DB {
+	return gormTx.Model(&models.StockMovementModel{}).
+		Select("product_id, ROUND(SUM(cost * delta) / SUM(delta), 2) AS avg_unit_cost").
+		Where("gym_id = ? AND movement_type = ? AND cost IS NOT NULL AND deleted_at IS NULL",
+			gymID, stockMovementDomain.TypeRestock).
+		Group("product_id").
+		Having("SUM(delta) > 0")
 }
 
 // buildProductFilterPg — extraído del cuerpo de List para reuso con

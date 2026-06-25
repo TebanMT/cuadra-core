@@ -2,9 +2,9 @@
 // ADR-002 §3.12).
 //
 // A Checkin records ONE access decision: who tried to enter, when, by which
-// method (huella / PIN / búsqueda manual), and what the access evaluator said
-// at that moment. Past checkins are immutable — even if the member's plan
-// status changes later, the historical row stays as it was.
+// method (huella / número de socio / búsqueda manual), and what the access
+// evaluator said at that moment. Past checkins are immutable — even if the
+// member's plan status changes later, the historical row stays as it was.
 package checkin
 
 import (
@@ -16,11 +16,12 @@ import (
 	"github.com/cuadra/cuadra-core/src/modules/members/domain/access"
 )
 
-// Method enumerates the chk_checkins_method values (ADR-002 §3.12).
+// Method enumerates the chk_checkins_method values (ADR-002 §3.12 + ADR-010:
+// el método "pin" se renombró a "number" — el check-in por número de socio).
 const (
 	MethodFingerprint = "fingerprint"
 	MethodManual      = "manual"
-	MethodPin         = "pin"
+	MethodNumber      = "number"
 )
 
 // Result enumerates chk_checkins_result. The first 5 mirror access.AccessStatus
@@ -71,8 +72,9 @@ func NewFingerprintCheckin(id, gymID, memberID uuid.UUID, status access.AccessSt
 	}, nil
 }
 
-// NewPinCheckin (UC-032) — automatic, no operator. Same shape as fingerprint.
-func NewPinCheckin(id, gymID, memberID uuid.UUID, status access.AccessStatus, now time.Time) (*Checkin, error) {
+// NewNumberCheckin (UC-032, ADR-010) — automatic, no operator. Check-in por
+// número de socio. Same shape as fingerprint.
+func NewNumberCheckin(id, gymID, memberID uuid.UUID, status access.AccessStatus, now time.Time) (*Checkin, error) {
 	res, err := resultFromStatus(status, false)
 	if err != nil {
 		return nil, err
@@ -80,7 +82,7 @@ func NewPinCheckin(id, gymID, memberID uuid.UUID, status access.AccessStatus, no
 	return &Checkin{
 		ID: id, GymID: gymID, Version: 1,
 		MemberID:  memberID,
-		CheckinAt: now, Method: MethodPin, Result: res,
+		CheckinAt: now, Method: MethodNumber, Result: res,
 		CreatedAt: now, UpdatedAt: now,
 	}, nil
 }
@@ -169,5 +171,5 @@ func resultFromStatus(s access.AccessStatus, override bool) (string, error) {
 }
 
 func isKnownMethod(m string) bool {
-	return m == MethodFingerprint || m == MethodManual || m == MethodPin
+	return m == MethodFingerprint || m == MethodManual || m == MethodNumber
 }

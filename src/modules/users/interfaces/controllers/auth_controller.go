@@ -546,12 +546,10 @@ func (ctrl *AuthController) handleSignup(c *gin.Context) {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
 		return
 	}
-	// Fire the verification email asynchronously of signup's outcome — a
-	// transient outbound-email failure should never block account
-	// creation. The dashboard's "Reenviar" button covers retries.
-	if ctrl.RequestEmailVerify != nil {
-		_ = ctrl.RequestEmailVerify.Execute(c.Request.Context(), out.UserID)
-	}
+	// El correo de verificación lo dispara SignupOwner.Execute vía su
+	// EmailVerifier (best-effort post-commit). NO lo reenviamos aquí — hacerlo
+	// mandaba el correo "Verifica tu correo en Tinta" dos veces. El controller
+	// conserva RequestEmailVerify SÓLO para el endpoint /resend-verification.
 	utils.JsonResponse(c, http.StatusCreated, signupResp{
 		UserID:         out.UserID,
 		GymID:          out.GymID,

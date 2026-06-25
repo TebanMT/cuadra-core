@@ -84,19 +84,18 @@ func DefaultLibrary() []Definition {
 			Body:      "Hola {member_first_name}, te extrañamos en {gym_name}. Te dejamos esta nota por si quieres regresar.",
 		},
 		{
-			// receipt_url apunta a ${APP_URL}/payments/{id}/receipt — página
-			// pública de solo lectura generada por el frontend. No requiere
-			// storage externo: el PDF se genera on-demand desde esa URL.
-			// Sesión 7 (SendReceipt UC-020) debe inyectar esta variable al
-			// encolar; enqueue_receipt.go tiene el TODO correspondiente.
+			// El template aprobado en Twilio tiene 6 vars; la 6ª es la URL del
+			// comprobante (PDF subido a R2 por el dispatcher). El ORDEN fija
+			// {{1}}..{{6}} vía contentVariablesJSON — NO reordenar sin cambiar
+			// el template aprobado, o Twilio rechaza (count mismatch).
 			Key:       "receipt_membership",
 			Channel:   ChannelWhatsApp,
 			Category:  CategoryUtility,
 			Variables: []string{"member_first_name", "amount", "membership_type", "expiry_date", "gym_name", "receipt_url"},
-			Body:      "¡Listo, {member_first_name}! Recibimos tu pago de ${amount} por {membership_type}. Tu nueva vigencia es hasta el {expiry_date}. Descarga tu comprobante: {receipt_url} — {gym_name}. ¡A seguir entrenando! 💪",
+			Body:      "¡Listo, {member_first_name}! Recibimos tu pago de ${amount} por {membership_type}. Tu nueva vigencia es hasta el {expiry_date}. Descarga tu comprobante: {receipt_url} — {gym_name}. ¡A seguir entrenando!",
 		},
 		{
-			// Ver nota receipt_url arriba.
+			// 4 vars; la 4ª es la URL del comprobante.
 			Key:       "receipt_product",
 			Channel:   ChannelWhatsApp,
 			Category:  CategoryUtility,
@@ -143,34 +142,66 @@ func DefaultLibrary() []Definition {
 			Channel:   ChannelWhatsApp,
 			Category:  CategoryMarketing,
 			Variables: []string{"member_first_name", "gym_name", "message"},
-			Body:      "👋 Hola {member_first_name}, tienes un mensaje de parte de {gym_name}: {message} Esperamos verte pronto en el gym.",
+			// Texto del template Marketing aprobado por Meta ({{1}}=member_first_name,
+			// {{2}}=gym_name, {{3}}=message). El dueño sólo escribe {message}; el
+			// saludo y el cierre son fijos. Mantener en sync con el Content SID.
+			Body: "Hola {member_first_name}, tienes un mensaje de parte de {gym_name}: {message} Esperamos verte pronto en el gym.",
 		},
 		{
-			// operator_welcome: se envía al operador (recepcionista) al alta
-			// y cuando el dueño regenera su PIN. El PIN se incluye embebido
-			// en la imagen del header (image_url) generada dinámicamente
-			// server-side — igual que member_welcome — para evitar keywords
-			// de autenticación en el body y que Meta lo clasifique como utility.
-			// image_url → variable del header (posición {{1}} en Twilio).
-			// full_name / gym_name → variables del body ({{2}}, {{3}}).
-			Key:       "operator_welcome",
-			Channel:   ChannelWhatsApp,
-			Category:  CategoryUtility,
-			Variables: []string{"image_url", "full_name", "gym_name"},
-			Body:      "¡Hola {full_name}! 👋 {gym_name} te dio de alta en Tinta. En la imagen encuentras tus datos para comenzar a operar el sistema. ¡Bienvenido al equipo!",
+			// operator_welcome_pin: se envía al operador (recepcionista) al
+			// alta y cuando el dueño regenera su PIN. Reemplaza al viejo
+			// "operator_temp_password" — los operadores nuevos ya no llevan
+			// password, sólo PIN de 4 dígitos para login en recepción.
+			Key:      "operator_welcome_pin",
+			Channel:  ChannelWhatsApp,
+			Category: CategoryAuthentication,
+			// ADR-009: template Twilio de tipo MEDIA. El PIN no puede ir como
+			// texto (Meta no lo aprueba), así que va horneado en el banner que
+			// el dispatcher genera. Variables = contrato POSICIONAL del media
+			// template aprobado: {{1}}=URL imagen, {{2}}=nombre, {{3}}=gym.
+			// El Body de abajo NO se manda por WhatsApp — es sólo fallback de
+			// email/mock y se renderiza con el payload (que aún trae el PIN).
+			Variables: []string{"welcome_image_url", "full_name", "gym_name"},
+			Body:      "Hola {full_name}, {gym_name} te dio de alta en Tinta. Tu PIN de acceso es *{pin}*. Lo usas en el sistema del gym para iniciar sesión.",
 		},
 		{
-			// member_welcome: se envía al socio al inscribirse. El PIN de
-			// acceso se incluye embebido en la imagen del header (image_url)
-			// generada dinámicamente server-side — así el body no contiene
-			// keywords de autenticación y Meta lo clasifica como utility.
-			// image_url → variable del header (posición {{1}} en Twilio).
-			// member_first_name / gym_name → variables del body ({{2}}, {{3}}).
-			Key:       "member_welcome",
-			Channel:   ChannelWhatsApp,
-			Category:  CategoryUtility,
-			Variables: []string{"image_url", "member_first_name", "gym_name"},
-			Body:      "¡{member_first_name}, bienvenido a {gym_name}! 🏋️ Ya eres parte de nuestra comunidad. El equipo de recepción te espera. ¡Mucho éxito! 💪",
+			// member_welcome_number: se envía al socio al inscribirse y cuando
+			// el operador (re)asigna su número. El NÚMERO DE SOCIO (ADR-010)
+			// es público y se usa en el kiosko para registrar la entrada.
+			// Categoría: utility (no marketing — es información transaccional
+			// ligada a la inscripción que el socio acaba de hacer).
+			// OJO: esta clave indexa el Content SID de Twilio en
+			// TWILIO_CONTENT_SIDS — al renombrar (ADR-010 purga) hay que
+			// actualizar esa env. operator_welcome_pin (PIN de login) NO cambia.
+			Key:      "member_welcome_number",
+			Channel:  ChannelWhatsApp,
+			Category: CategoryUtility,
+			// ADR-009: template Twilio de tipo MEDIA. El número va horneado en
+			// el banner que genera el dispatcher (Meta no aprueba código en
+			// texto). Variables = contrato POSICIONAL del media template
+			// aprobado (HXd072…): {{1}}=nombre socio, {{2}}=gym, {{3}}=URL
+			// imagen. El Body es sólo fallback email/mock.
+			Variables: []string{"member_first_name", "gym_name", "welcome_image_url"},
+			Body:      "Hola {member_first_name}, soy {gym_name}. Tu número de socio es *{member_number}*. Es tu acceso al gym; úsalo si tu biométrico no está disponible. ¡Bienvenido!",
+		},
+		{
+			// owner_welcome: se envía al DUEÑO cuando vincula el primer
+			// dispositivo del gym (ADR-010 / onboarding) — el momento en que
+			// el sistema queda "vivo". Lleva su código de acceso horneado en
+			// el banner. Categoría UTILITY para Meta: es un media template
+			// transaccional (confirmación post-acción), NO authentication —
+			// esa categoría es sólo para OTP con botón copy-code y no admite
+			// header de imagen.
+			Key:      "owner_welcome",
+			Channel:  ChannelWhatsApp,
+			Category: CategoryUtility,
+			// ADR-009: template Twilio de tipo MEDIA. El código va horneado en
+			// el banner (KindOwner). Variables = contrato POSICIONAL del media
+			// template: {{1}}=URL imagen, {{2}}=nombre, {{3}}=gym. El Body es
+			// sólo fallback email/mock. La clave indexa el Content SID en
+			// TWILIO_CONTENT_SIDS.
+			Variables: []string{"welcome_image_url", "full_name", "gym_name"},
+			Body:      "Hola {full_name}, ¡tu sistema Tinta ya está vivo! Tu código de acceso es *{pin}*. Úsalo para entrar rápido a recepción.",
 		},
 		{
 			// UC-037 connect-step OTP. Sent from Cuadra's master WhatsApp

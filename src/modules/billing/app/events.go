@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -22,9 +23,12 @@ type PaymentCompletedEvent struct {
 	Folio          string
 	OperatorID     uuid.UUID
 	BalancePending float64
-	// MembershipType es el nombre del plan (e.g. "Mensual Premium") para
-	// el template receipt_membership. Vacío en ventas de producto.
-	MembershipType string
+	// MembershipTypeName y NewExpiry alimentan el recibo de WhatsApp con el
+	// plan y la vigencia REALES (antes el recibo hardcodeaba "Mensual" y
+	// aproximaba hoy+30d). Sólo se llenan para pagos de membresía; en ventas
+	// de producto quedan en su zero-value (string vacío / nil).
+	MembershipTypeName string
+	NewExpiry          *time.Time
 }
 
 // EventPublisher abstracts the future notifications bus. NoopPublisher is the

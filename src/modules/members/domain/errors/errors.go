@@ -10,7 +10,7 @@ import "errors"
 //	UC-013 UpdateMember    -> ErrMemberNotFound, ErrInvalidPhone, ErrInvalidEmail
 //	UC-016 ToggleStatus    -> ErrInvalidStatus
 //	UC-017 LockExpiry      -> ErrAdjustmentReasonRequired, ErrMembershipNotFound, ErrNoActiveMembership
-//	UC-032 AssignPin       -> ErrInvalidPin, ErrPinAlreadyTaken
+//	UC-032 AssignMemberNumber -> ErrInvalidMemberNumber, ErrMemberNumberAlreadyTaken, ErrMemberNumberExhausted
 var (
 	// Membership Type
 	ErrMembershipTypeNotFound      = errors.New("plan de membresía no encontrado")
@@ -43,9 +43,10 @@ var (
 	ErrAdjustmentReasonRequired = errors.New("la razón del ajuste es obligatoria (mínimo 5 caracteres)")
 	ErrAdjustmentInvalidDays    = errors.New("la cantidad de días del ajuste no es válida")
 
-	// PIN
-	ErrInvalidPin      = errors.New("el PIN debe ser de 4 dígitos")
-	ErrPinAlreadyTaken = errors.New("ese PIN ya está en uso por otro socio del gimnasio")
+	// Número de socio (ADR-010 — antes "PIN de acceso")
+	ErrInvalidMemberNumber      = errors.New("el número de socio no es válido")
+	ErrMemberNumberAlreadyTaken = errors.New("ese número de socio ya está en uso por otro socio del gimnasio")
+	ErrMemberNumberExhausted    = errors.New("no se pudo asignar un número de socio único; el espacio del gimnasio está saturado")
 
 	// Contact attempt (UC-035)
 	ErrInvalidContactChannel     = errors.New("canal de contacto inválido (whatsapp/phone/in_person/other)")

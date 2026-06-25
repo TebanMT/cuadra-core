@@ -17,7 +17,9 @@
 //
 //	membresia              → membership_types
 //	producto               → products
-//	socio                  → members  (status from `estado`, pin_hash from `clave`)
+//	socio                  → members  (status from `estado`; legacy `clave` se
+//	                         preserva en notes — NO se backfillea member_number,
+//	                         lo asigna AssignMemberNumber al primer alta/check-in)
 //	sociomembresia         → memberships
 //	sociomembresia_pago    → payments (concept=membership)
 //	salida + detallesalida → sales + sale_items + payments (concept=product)
@@ -56,6 +58,7 @@ import (
 	memModels "github.com/cuadra/cuadra-core/src/modules/members/infraestructure/db/models"
 	prodModels "github.com/cuadra/cuadra-core/src/modules/products/infraestructure/db/models"
 	usersModels "github.com/cuadra/cuadra-core/src/modules/users/infraestructure/db/models"
+	phonepkg "github.com/cuadra/cuadra-core/src/shared/phone"
 	syncShared "github.com/cuadra/cuadra-core/src/shared/sync"
 )
 
@@ -227,7 +230,7 @@ func ensureGymAndOwner(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID, cr
 			if v := strings.TrimSpace(src.config.Domicilio); v != "" {
 				city = &v
 			}
-			if v := strings.TrimSpace(src.config.Telefono); v != "" {
+			if v := phonepkg.Normalize(src.config.Telefono); v != "" {
 				wa = &v
 			}
 			if v := strings.TrimSpace(src.config.RFC); v != "" {
@@ -902,6 +905,105 @@ func mapPaymentMethod(idTypePayment int) string {
 	}
 }
 
+// ── Inferencia de género (sólo import legacy) ────────────────────────────────
+// El sistema viejo nunca guardó sexo, pero el reporte de género (DA-012.7) lo
+// necesita. guessGender hace un best-effort sobre el PRIMER nombre de pila:
+// primero un diccionario de nombres mexicanos comunes (sobre todo los que NO
+// siguen la regla -o/-a), y si no, la heurística de sufijo español
+// (-a → mujer, -o → hombre). Es deliberadamente imperfecto: son datos de
+// dogfooding y el operador puede corregir cualquier socio luego. Devuelve nil
+// ("no capturado" → NULL) cuando no puede decidir. Valores = enum
+// chk_members_gender: "hombre" | "mujer".
+var accentReplacer = strings.NewReplacer(
+	"á", "a", "é", "e", "í", "i", "ó", "o", "ú", "u", "ü", "u", "ñ", "n",
+)
+
+// genderByName cubre los nombres frecuentes que la regla de sufijo erraría
+// (femeninos que no terminan en -a, masculinos que no terminan en -o).
+var genderByName = map[string]string{
+	// Femeninos que NO terminan en -a
+	"carmen": "mujer", "guadalupe": "mujer", "beatriz": "mujer", "isabel": "mujer",
+	"raquel": "mujer", "soledad": "mujer", "mercedes": "mujer", "dolores": "mujer",
+	"concepcion": "mujer", "pilar": "mujer", "rosario": "mujer", "lourdes": "mujer",
+	"ines": "mujer", "ruth": "mujer", "esther": "mujer", "noemi": "mujer",
+	"abigail": "mujer", "itzel": "mujer", "anabel": "mujer", "maribel": "mujer",
+	"ivonne": "mujer", "jazmin": "mujer", "jacqueline": "mujer", "jocelyn": "mujer",
+	"jennifer": "mujer", "miriam": "mujer", "iris": "mujer", "citlali": "mujer",
+	"nayeli": "mujer", "mayte": "mujer", "dulce": "mujer", "montserrat": "mujer",
+	"ingrid": "mujer", "marisol": "mujer", "consuelo": "mujer", "belen": "mujer",
+	"karen": "mujer", "evelyn": "mujer", "ashley": "mujer", "betsy": "mujer",
+	"xochitl": "mujer", "magali": "mujer", "lizbeth": "mujer", "liz": "mujer",
+	"yaretzi": "mujer", "estefani": "mujer", "ma": "mujer",
+	"emily": "mujer", "emely": "mujer", "wendy": "mujer", "ivon": "mujer",
+	"yvonne": "mujer", "nancy": "mujer", "lizeth": "mujer", "mitzi": "mujer",
+	"britany": "mujer", "brittany": "mujer", "estefany": "mujer", "anel": "mujer",
+	"yamilet": "mujer", "marlen": "mujer", "yuridia": "mujer", "nohemi": "mujer",
+	// Masculinos que NO terminan en -o
+	"jose": "hombre", "juan": "hombre", "luis": "hombre", "jesus": "hombre",
+	"miguel": "hombre", "angel": "hombre", "manuel": "hombre", "rafael": "hombre",
+	"gabriel": "hombre", "daniel": "hombre", "samuel": "hombre", "ismael": "hombre",
+	"israel": "hombre", "joel": "hombre", "abel": "hombre", "uriel": "hombre",
+	"axel": "hombre", "david": "hombre", "ivan": "hombre", "adrian": "hombre",
+	"julian": "hombre", "fabian": "hombre", "sebastian": "hombre", "cristian": "hombre",
+	"christian": "hombre", "brian": "hombre", "kevin": "hombre", "edwin": "hombre",
+	"efrain": "hombre", "joaquin": "hombre", "agustin": "hombre", "martin": "hombre",
+	"ruben": "hombre", "hector": "hombre", "victor": "hombre", "cesar": "hombre",
+	"oscar": "hombre", "nestor": "hombre", "salvador": "hombre", "omar": "hombre",
+	"saul": "hombre", "raul": "hombre", "abraham": "hombre", "elias": "hombre",
+	"matias": "hombre", "tobias": "hombre", "enrique": "hombre", "felipe": "hombre",
+	"jorge": "hombre", "jaime": "hombre", "vicente": "hombre", "yair": "hombre",
+	"jair": "hombre", "jonathan": "hombre", "alan": "hombre", "aaron": "hombre",
+	"ramon": "hombre", "simon": "hombre", "noe": "hombre", "rene": "hombre",
+	"emanuel": "hombre", "emmanuel": "hombre", "leonel": "hombre", "gael": "hombre",
+	"esteban": "hombre", "isaac": "hombre", "jared": "hombre", "brandon": "hombre",
+	"caleb": "hombre", "kaleb": "hombre", "alexis": "hombre", "emyr": "hombre",
+	"yahir": "hombre", "dilan": "hombre", "dylan": "hombre", "bryan": "hombre",
+	// Resueltos a partir de los nombres reales del dump (la regla -o/-a no los cubre).
+	"ailen": "mujer", "angeles": "mujer", "arely": "mujer", "aritzi": "mujer",
+	"berenice": "mujer", "berlen": "mujer", "denisse": "mujer", "elizabeth": "mujer",
+	"evelin": "mujer", "flor": "mujer", "gaby": "mujer", "jaqueline": "mujer",
+	"jenni": "mujer", "joselin": "mujer", "judith": "mujer", "karol": "mujer",
+	"leslie": "mujer", "lezli": "mujer", "luz": "mujer", "maite": "mujer",
+	"mari": "mujer", "matilde": "mujer", "michel": "mujer", "nahomi": "mujer",
+	"nicol": "mujer", "nicolle": "mujer", "nury": "mujer", "yoali": "mujer",
+	"yuli":   "mujer",
+	"adriel": "hombre", "alex": "hombre", "alexander": "hombre", "andres": "hombre",
+	"avi": "hombre", "brayan": "hombre", "carlos": "hombre", "dominick": "hombre",
+	"edgar": "hombre", "erick": "hombre", "henrry": "hombre", "hernan": "hombre",
+	"irvin": "hombre", "javier": "hombre", "jhonatan": "hombre", "josue": "hombre",
+	"nelson": "hombre", "roger": "hombre", "suriel": "hombre", "thenotorious": "hombre",
+	"valentin": "hombre", "yael": "hombre",
+}
+
+// firstToken devuelve el primer nombre de pila en minúsculas y sin acentos.
+func firstToken(s string) string {
+	fields := strings.Fields(strings.ToLower(s))
+	if len(fields) == 0 {
+		return ""
+	}
+	return accentReplacer.Replace(strings.Trim(fields[0], ".,"))
+}
+
+func guessGender(rawName string) *string {
+	name := firstToken(rawName)
+	if name == "" {
+		return nil
+	}
+	if g, ok := genderByName[name]; ok {
+		return &g
+	}
+	switch {
+	case strings.HasSuffix(name, "a"):
+		g := "mujer"
+		return &g
+	case strings.HasSuffix(name, "o"):
+		g := "hombre"
+		return &g
+	default:
+		return nil
+	}
+}
+
 func mapMemberStatus(estado int) string {
 	switch estado {
 	case 1:
@@ -954,6 +1056,40 @@ func durationDays(meses, semanas, dias int) int {
 // it back in SQLite's INTEGER-cents columns cleanly, dates as YYYY-MM-DD,
 // timestamps as unix milliseconds.
 
+// syncEmitSeq da a cada fila de sync_entities un server_updated_at único y
+// creciente. El import original ponía el MISMO `now` a todas, lo que rompía el
+// pull del sidecar en dos formas: (1) ListSince ordena por (server_updated_at,
+// entity_id) y, con timestamps idénticos, el desempate por UUID mezclaba hijos
+// antes que padres → "FOREIGN KEY constraint failed" en el SQLite del sidecar;
+// (2) el cursor avanza con `server_updated_at > since`, así que un bloque con el
+// mismo timestamp se truncaba a la primera página. Espaciamos por rango
+// topológico (1s por nivel: padres en una banda anterior a hijos) + una
+// secuencia global en microsegundos (cada fila distinta, para que la paginación
+// avance). El offset total queda en pocos segundos — no en el futuro lejano,
+// para no ensombrecer escrituras reales posteriores al import.
+var syncEmitSeq int64
+
+// syncTopoRank ordena los entity types por dependencia de FK: un tipo nunca
+// debe sincronizarse antes que aquellos a los que referencia.
+func syncTopoRank(entityType string) int {
+	switch entityType {
+	case "gyms", "users":
+		return 0
+	case "membership_types", "products":
+		return 1
+	case "members":
+		return 2
+	case "memberships", "sales":
+		return 3
+	case "payments", "checkins", "cash_close_events":
+		return 4
+	case "sale_items", "stock_movements":
+		return 5
+	default:
+		return 6
+	}
+}
+
 // emitSyncEntity upserts a single (gym_id, entity_type, entity_id) row into
 // sync_entities with the given payload + version. Any existing row gets
 // overwritten — combined with the deterministic UUIDs the importer mints,
@@ -968,6 +1104,11 @@ func emitSyncEntity(tx *gorm.DB, gymID, entityID uuid.UUID, entityType string, v
 	if err != nil {
 		return err
 	}
+	// server_updated_at único y topológicamente ordenado (ver syncEmitSeq).
+	syncEmitSeq++
+	serverUpdatedAt := now.
+		Add(time.Duration(syncTopoRank(entityType)) * time.Second).
+		Add(time.Duration(syncEmitSeq) * time.Microsecond)
 	return tx.Exec(`
 		INSERT INTO sync_entities (gym_id, entity_type, entity_id, version, payload, server_updated_at, deleted_at)
 		VALUES (?, ?, ?, ?, ?::jsonb, ?, ?)
@@ -976,7 +1117,7 @@ func emitSyncEntity(tx *gorm.DB, gymID, entityID uuid.UUID, entityType string, v
 		    payload = EXCLUDED.payload,
 		    server_updated_at = EXCLUDED.server_updated_at,
 		    deleted_at = EXCLUDED.deleted_at`,
-		gymID, entityType, entityID, version, string(bytes), now, deletedAt,
+		gymID, entityType, entityID, version, string(bytes), serverUpdatedAt, deletedAt,
 	).Error
 }
 
@@ -1126,11 +1267,11 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 	}
 	log.Printf("import: products=%d", len(src.products))
 
-	// 3. members. Folio is `idSocio` zero-padded to 5; pin_hash is the legacy
-	// `clave` text value (already a short numeric pin in this dump — Cuadra
-	// stores bcrypt of the pin, but here we keep the plaintext column NULL
-	// and surface `clave` only via Notes so the operator can see it during
-	// migration. Setting a real pin requires the operator to re-assign one.)
+	// 3. members. Folio is `idSocio` zero-padded to 5. El número de socio
+	// (ADR-010) NO se backfillea desde el `clave` legacy aquí — se deja sin
+	// asignar y el sidecar/cloud le da uno al primer alta/check-in; el `clave`
+	// se preserva sólo en Notes para que el operador lo vea durante la
+	// migración. (member_number lo asigna AssignMemberNumber.)
 	memberIDs := map[int]uuid.UUID{}
 	for _, s := range src.socios {
 		id := legacyID("socio", s.ID)
@@ -1156,7 +1297,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 		// rewrites "" → NULL — so we substitute a visible placeholder when
 		// the legacy row left it empty. The dash makes it obvious in the UI
 		// that the operator never registered a number for this socio.
-		phone := strings.TrimSpace(s.Telefono)
+		phone := phonepkg.Normalize(s.Telefono)
 		if phone == "" {
 			phone = "—"
 		}
@@ -1171,6 +1312,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 			Birthdate: s.FechaNacimiento,
 			Notes:     notes,
 			Status:    mapMemberStatus(s.Estado),
+			Gender:    guessGender(s.Nombre),
 			CreatedBy: ownerID,
 		}
 		if err := tx.Create(&row).Error; err != nil {
@@ -1191,6 +1333,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 			"notes":           optStringPtr(row.Notes),
 			"status":          row.Status,
 			"enrollment_paid": row.EnrollmentPaid,
+			"gender":          optStringPtr(row.Gender),
 			"created_by":      row.CreatedBy.String(),
 		}); err != nil {
 			return fmt.Errorf("emit member %d: %w", s.ID, err)
@@ -1387,10 +1530,14 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 		}
 		payment := billingModels.PaymentModel{
 			ID: paymentID, GymID: gymID, Version: 1,
-			CreatedAt:     derefTime(s.FechaCreacion, now),
-			UpdatedAt:     now,
-			DeletedAt:     deletedAt,
-			Folio:         fmt.Sprintf("PROD-%05d", s.ID),
+			CreatedAt: derefTime(s.FechaCreacion, now),
+			UpdatedAt: now,
+			DeletedAt: deletedAt,
+			// Prefijo canónico "PRD-%06d" (igual que folio.PrefixForConcept /
+			// el generador). Antes era "PROD-%05d": el generador hacía
+			// TrimPrefix(maxFolio, "PRD-") y no quitaba "PROD-", parseaba 0 →
+			// next=1 → colisión UNIQUE(gym_id, folio) en cada venta nueva.
+			Folio:         fmt.Sprintf("PRD-%06d", s.ID),
 			Amount:        s.Total,
 			PaymentMethod: mapPaymentMethod(s.IDTypePayment),
 			Concept:       "product",

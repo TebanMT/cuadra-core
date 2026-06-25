@@ -138,10 +138,17 @@ func (r *PaymentPostgresRepository) MaxFolioForConcept(tx sharedDomain.Transacti
 	var max struct {
 		Max *string
 	}
+	// Ordena por el valor NUMÉRICO del folio (lo de después del '-'), no
+	// lexicográfico: MAX(folio) como texto daba "MEM-99999" > "MEM-100000"
+	// (porque '9' > '1'), y el siguiente folio calculado colisionaba con uno
+	// ya existente (p.ej. importado con MEM-%05d de IDs legacy > 99999). Con
+	// FOR UPDATE sobre la fila ganadora se serializa la asignación de folios.
 	err := gormTx.Model(&models.PaymentModel{}).
 		Clauses(clause.Locking{Strength: "UPDATE"}).
-		Select("MAX(folio) AS max").
+		Select("folio AS max").
 		Where("gym_id = ? AND concept = ?", gymID, concept).
+		Order("NULLIF(split_part(folio, '-', 2), '')::int DESC NULLS LAST, folio DESC").
+		Limit(1).
 		Scan(&max).Error
 	if err != nil {
 		return "", err
