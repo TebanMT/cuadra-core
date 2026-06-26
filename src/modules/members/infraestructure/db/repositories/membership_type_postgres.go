@@ -5,7 +5,6 @@ package repositories
 import (
 	"encoding/json"
 	"errors"
-	"math"
 	"strings"
 	"time"
 
@@ -80,20 +79,22 @@ func emitMembershipTypeToSync(g *gorm.DB, mt *mtDomain.MembershipType) error {
 	if mt.MaintenanceFrequency != nil && *mt.MaintenanceFrequency != "" {
 		freq = mt.MaintenanceFrequency
 	}
-	// math.Round porque float64 pesos puede tener residuos de precisión
-	// (450.99 * 100 = 45098.99999…). Sin redondear se pierde 1 centavo
-	// por la conversión a int64.
-	toCents := func(pesos float64) int64 { return int64(math.Round(pesos * 100)) }
+	// El wire de sync lleva el dinero en PESOS (float), igual que products y
+	// el resto de tablas: el apply del sidecar (agent_apply.moneyColumns) hace
+	// pesos→cents al materializar en SQLite. ANTES acá se mandaba toCents() →
+	// el sidecar lo re-multiplicaba ×100 al hacer pull-back, dejando los precios
+	// del desktop ×100 (Trimestral $1,300 se veía $130,000). Ahora va en pesos
+	// crudos, consistente con product_postgres.go.
 	payload, err := json.Marshal(map[string]any{
 		"id":                    mt.ID.String(),
 		"gym_id":                mt.GymID.String(),
 		"version":               mt.Version,
 		"name":                  mt.Name,
-		"price":                 toCents(mt.Price),
+		"price":                 mt.Price,
 		"duration_days":         mt.DurationDays,
 		"duration_months":       mt.DurationMonths,
-		"enrollment_fee":        toCents(mt.EnrollmentFee),
-		"maintenance_fee":       toCents(mt.MaintenanceFee),
+		"enrollment_fee":        mt.EnrollmentFee,
+		"maintenance_fee":       mt.MaintenanceFee,
 		"maintenance_frequency": freq,
 		"active":                mt.Active,
 		"created_at":            mt.CreatedAt.UnixMilli(),

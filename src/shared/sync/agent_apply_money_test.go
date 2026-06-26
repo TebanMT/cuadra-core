@@ -77,3 +77,48 @@ func TestApplyPullChange_Product_PesosConvertidosACentavos(t *testing.T) {
 		})
 	}
 }
+
+// Espejo de membership_types: mismo contrato pesos-en-wire → centavos-en-SQLite.
+// Regresión del bug donde el cloud serializaba membership_types.price con
+// toCents() (centavos) mientras el apply espera PESOS → el desktop mostraba los
+// precios ×100 tras el primer pull-back (Trimestral $1,300 se veía $130,000).
+// Con $500 en el wire, la columna price de SQLite (centavos) debe quedar 50000.
+func TestApplyPullChange_MembershipType_PesosConvertidosACentavos(t *testing.T) {
+	gymID := uuid.New()
+	db, uow := freshSidecarDBWithGym(t, gymID)
+
+	id := uuid.New().String()
+	now := time.Now().UTC().UnixMilli()
+	payload, err := json.Marshal(map[string]any{
+		"id":              id,
+		"gym_id":          gymID.String(),
+		"version":         1,
+		"created_at":      now,
+		"updated_at":      now,
+		"name":            "Mensual",
+		"price":           500.00, // PESOS en el wire (igual que el cloud ya corregido)
+		"duration_days":   30,
+		"enrollment_fee":  0.00,
+		"maintenance_fee": 0.00,
+		"active":          true,
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	change := syncpkg.PullChange{
+		EntityType: "membership_types", EntityID: id, Version: 1,
+		Payload: payload, ServerUpdatedAt: time.Now().UTC(),
+	}
+	if err := uow.Command(context.Background(), func(tx sharedDomain.Transaction) error {
+		return syncpkg.ApplyPullChange(context.Background(), tx, change)
+	}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	var cents int64
+	if err := db.Get(&cents, `SELECT price FROM membership_types WHERE id = ?`, id); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if cents != 50000 {
+		t.Errorf("price = %d centavos, want 50000 ($500 × 100). Si da 5000000, el cloud está mandando centavos.", cents)
+	}
+}

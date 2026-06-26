@@ -137,7 +137,11 @@ func emitAppliedToSync(g *gorm.DB, ap *promoDomain.AppliedPromotion) error {
 		"promotion_name_snapshot": ap.PromotionNameSnapshot,
 		"kind_snapshot":           ap.KindSnapshot,
 		"value_snapshot":          valueSnap,
-		"discount_amount":         int64(ap.DiscountAmount*100 + 0.5),
+		// discount_amount es money pura y SÍ está en agent_apply.moneyColumns
+		// (a diferencia de value_snapshot) → el apply del sidecar hace
+		// pesos→cents. Por eso va en PESOS crudos: antes mandaba ×100 y el
+		// sidecar lo re-multiplicaba → el descuento quedaba ×100 en el desktop.
+		"discount_amount":         ap.DiscountAmount,
 		"extra_days_applied":      ap.ExtraDaysApplied,
 		"notes":                   ap.Notes,
 		"created_at":              ap.CreatedAt.UnixMilli(),
