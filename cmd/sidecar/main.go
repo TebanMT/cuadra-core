@@ -309,6 +309,7 @@ func main() {
 	enqueueReceipt := notiApp.NewEnqueueReceipt(notificationRepo, gymRepo, memberRepo, uow)
 	enqueueWelcomePin := notiApp.NewEnqueueWelcomePin(notificationRepo, gymRepo, memberRepo)
 	createMember.WithWelcomeNotifier(enqueueWelcomePin)
+	createMember.WithReceiptNotifier(notiApp.NewFirstPaymentReceiptNotifier(enqueueReceipt))
 	assignNumber.WithWelcomeNotifier(enqueueWelcomePin)
 	// Operator PIN-first: alta y rotación encolan WhatsApp con el PIN.
 	// Sidecar registra la noti localmente y el sync agent la empuja a

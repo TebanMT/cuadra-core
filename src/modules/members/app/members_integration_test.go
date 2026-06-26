@@ -650,3 +650,82 @@ func TestUC013_UpdateMember_GenderNotProvided_DoesNotTouch(t *testing.T) {
 		t.Errorf("Gender mutated when not provided: %v", got.Gender)
 	}
 }
+
+// fakeReceiptNotifier graba las invocaciones del seam del recibo del primer
+// pago, para verificar que CreateMember lo dispara (regresión: el alta cobraba
+// el primer pago pero nunca encolaba el recibo — sí lo hacía la renovación).
+type fakeReceiptNotifier struct {
+	calls []memApp.PaymentReceiptInput
+}
+
+func (f *fakeReceiptNotifier) NotifyPaymentReceipt(_ context.Context, in memApp.PaymentReceiptInput) {
+	f.calls = append(f.calls, in)
+}
+
+func TestUC012_CreateMember_FirstPaymentEnqueuesReceipt(t *testing.T) {
+	f := setupMembersFixture(t)
+	typeID := f.createMembershipType(t, "Mensual")
+
+	paymentRepo := billingRepoLite.NewPaymentSQLiteRepository()
+	folios := folioSvc.NewGenerator(paymentRepo)
+	receipt := &fakeReceiptNotifier{}
+	uc := memApp.NewCreateMemberWithBilling(f.memberRepo, f.membershipR, f.mtRepo, paymentRepo, folios, f.uow, f.recorder).
+		WithReceiptNotifier(receipt)
+
+	out, err := uc.Execute(context.Background(), memApp.CreateMemberInput{
+		GymID: f.gymID, ActorUserID: f.ownerID,
+		FullName:           "Ana López",
+		Phone:              "+524429876543",
+		MembershipTypeID:   typeID,
+		StartDate:          time.Now().UTC(),
+		ChargeFirstPayment: true,
+		PaymentMethod:      "cash",
+	})
+	if err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	if len(receipt.calls) != 1 {
+		t.Fatalf("receipt notifier llamado %d veces, want 1 (el recibo del primer pago no se encoló)", len(receipt.calls))
+	}
+	got := receipt.calls[0]
+	if out.PaymentID == nil || got.PaymentID != *out.PaymentID {
+		t.Errorf("receipt PaymentID = %v, want %v", got.PaymentID, out.PaymentID)
+	}
+	if got.MemberID != out.MemberID {
+		t.Errorf("receipt MemberID = %v, want %v", got.MemberID, out.MemberID)
+	}
+	if got.MembershipTypeName != "Mensual" {
+		t.Errorf("receipt MembershipTypeName = %q, want Mensual", got.MembershipTypeName)
+	}
+	if got.Amount <= 0 {
+		t.Errorf("receipt Amount = %v, want > 0", got.Amount)
+	}
+	if got.NewExpiry == nil {
+		t.Errorf("receipt NewExpiry nil — debería traer la vigencia nueva del primer pago")
+	}
+}
+
+func TestUC012_CreateMember_NoFirstPayment_NoReceipt(t *testing.T) {
+	f := setupMembersFixture(t)
+	typeID := f.createMembershipType(t, "Mensual")
+
+	paymentRepo := billingRepoLite.NewPaymentSQLiteRepository()
+	folios := folioSvc.NewGenerator(paymentRepo)
+	receipt := &fakeReceiptNotifier{}
+	uc := memApp.NewCreateMemberWithBilling(f.memberRepo, f.membershipR, f.mtRepo, paymentRepo, folios, f.uow, f.recorder).
+		WithReceiptNotifier(receipt)
+
+	if _, err := uc.Execute(context.Background(), memApp.CreateMemberInput{
+		GymID: f.gymID, ActorUserID: f.ownerID,
+		FullName:           "Sin Pago",
+		Phone:              "+524420000000",
+		MembershipTypeID:   typeID,
+		StartDate:          time.Now().UTC(),
+		ChargeFirstPayment: false,
+	}); err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	if len(receipt.calls) != 0 {
+		t.Errorf("receipt notifier llamado %d veces sin primer pago, want 0", len(receipt.calls))
+	}
+}

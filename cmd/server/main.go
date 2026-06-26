@@ -286,6 +286,7 @@ func main() {
 	// PIN. La notifications BC implementa el contrato; members lo usa sin
 	// importar el paquete de notificaciones.
 	createMember.WithWelcomeNotifier(enqueueWelcomePin)
+	createMember.WithReceiptNotifier(notiApp.NewFirstPaymentReceiptNotifier(enqueueReceipt))
 	assignNumber.WithWelcomeNotifier(enqueueWelcomePin)
 	// Mismo patrón para el alta/rotación de operadores: el PIN viaja por
 	// WhatsApp al número del operador. Skip silencioso cuando el gym no

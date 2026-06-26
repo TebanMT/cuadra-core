@@ -132,6 +132,11 @@ type CreateMember struct {
 	// (ver notifications/app/EnqueueWelcomePin). Nil = no se envía
 	// notificación; usado en tests que no exercisan WhatsApp.
 	Welcome WelcomeNotifier
+	// Receipt es la seam del RECIBO del primer pago. CreateMember cobra el
+	// primer pago directo (sin pasar por el EventPublisher de billing), así
+	// que sin esto el recibo del alta nunca se encola (sí el de renovación).
+	// Se invoca POST-commit. Nil = no se envía.
+	Receipt PaymentReceiptNotifier
 	// Digits resuelve/crece la longitud del número de socio por gym
 	// (ADR-010). Nil = default fijo (4 dígitos, sin bump).
 	Digits MemberNumberDigitsStore
@@ -178,6 +183,14 @@ func (uc *CreateMember) WithWelcomeNotifier(n WelcomeNotifier) *CreateMember {
 	return uc
 }
 
+// WithReceiptNotifier engancha el seam del recibo del primer pago. Sin esto,
+// el alta con primer pago NO encola recibo (la renovación sí, vía
+// RegisterMembershipPayment → EventPublisher). Se invoca post-commit.
+func (uc *CreateMember) WithReceiptNotifier(n PaymentReceiptNotifier) *CreateMember {
+	uc.Receipt = n
+	return uc
+}
+
 // WithMemberNumberDigits wires the gyms-backed config seam (length + bump)
 // so auto-assignment honors the per-gym member_number_digits (ADR-010).
 func (uc *CreateMember) WithMemberNumberDigits(s MemberNumberDigitsStore) *CreateMember {
@@ -211,6 +224,9 @@ func (uc *CreateMember) Execute(ctx context.Context, in CreateMemberInput) (*Cre
 	}
 
 	var out CreateMemberOutput
+	// Datos del recibo del primer pago — se capturan DENTRO de la tx (donde
+	// viven p/mt/ms) y se encolan POST-commit. nil = no hubo primer pago.
+	var receiptIn *PaymentReceiptInput
 	err := uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
 		// 1) Type must exist + belong to gym + be active.
 		mt, err := uc.MembershipTypes.GetByID(tx, in.MembershipTypeID)
@@ -532,6 +548,19 @@ func (uc *CreateMember) Execute(ctx context.Context, in CreateMemberInput) (*Cre
 			out.PaymentID = &paymentID
 			out.PaymentFolio = p.Folio
 			out.PaymentTotal = p.Amount
+			// Capturar datos del recibo del primer pago — se encola tras el
+			// commit (paso post-tx). Plan + vigencia REALES, igual que el
+			// recibo de renovación (RegisterMembershipPayment).
+			receiptIn = &PaymentReceiptInput{
+				GymID:              in.GymID,
+				PaymentID:          paymentID,
+				MemberID:           m.ID,
+				Concept:            p.Concept,
+				Amount:             p.Amount,
+				Folio:              p.Folio,
+				MembershipTypeName: mt.Name,
+				NewExpiry:          ms.ExpiryDate,
+			}
 			if promoResult != nil {
 				appliedID := promoResult.AppliedID
 				out.PromotionAppliedID = &appliedID
@@ -554,6 +583,19 @@ func (uc *CreateMember) Execute(ctx context.Context, in CreateMemberInput) (*Cre
 	if err != nil {
 		return nil, err
 	}
+
+	// Recibo del primer pago: se encola POST-commit (EnqueueReceipt abre su
+	// propia tx y no debe anidarse en la del alta). Best-effort — si falla, el
+	// pago ya commiteó y el dispatcher reintenta. El welcome, en cambio, va
+	// dentro de la tx porque comparte el row de notification_queue del alta.
+	if receiptIn != nil {
+		notifier := uc.Receipt
+		if notifier == nil {
+			notifier = noopPaymentReceiptNotifier{}
+		}
+		notifier.NotifyPaymentReceipt(ctx, *receiptIn)
+	}
+
 	return &out, nil
 }
 
