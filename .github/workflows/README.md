@@ -29,7 +29,7 @@ Corre **solo en push de un tag semver** (`v1.4.0`, `v1.4.0-rc.1`) o por
 |---|---|
 | `checks` | Reusa `ci.yml` (lint + test) sobre el commit exacto que estás taggeando. Si no pasa, no construye ni despliega. |
 | `build` | Cross-compila `tinta-server` linux/amd64 con `CGO_ENABLED=0`, estampando `-X main.version=$(git describe --tags --always --dirty)`. Sube el binario como artifact del run. |
-| `deploy` | Baja el artifact, `scp` atómico al Hetzner CX33, `rsync` de `db_migrations/postgres/`, las aplica con `psql -v ON_ERROR_STOP=1`, reinicia `tinta-server` vía `sudo systemctl`, y hace smoke test a `/health`. |
+| `deploy` | Baja el artifact, `scp` atómico al Hetzner CX33, `rsync` de `db_migrations/postgres/` a `/opt/tinta/migrations/`, reinicia `tinta-server` vía `sudo systemctl`, y hace smoke test a `/health`. **Las migraciones NO se aplican con `psql` en el deploy** — el binario corre `ApplyPostgresMigrations` (version-aware) al arrancar, así que el restart aplica solo las versiones nuevas leyendo de `/opt/tinta/migrations`. |
 
 > **El gate duro del deploy es el `systemctl is-active`** (si el servicio no
 > queda activo en 30s, el job falla). El smoke test a `/health` es
@@ -146,10 +146,13 @@ ese código y `git describe` lo estampa con ese tag.
 > desde tu laptop compila + sube + reinicia directo (también estampa la
 > versión vía `git describe`). Es el bypass de último recurso.
 
-> **Cuidado con migraciones**: las del repo son forward-only. Si el commit
-> anterior tenía menos migraciones, las que ya están aplicadas en Postgres
-> no se revierten — solo se "saltan" las nuevas. Si necesitas revertir
-> schema, hazlo a mano con un `*.sql` de rollback.
+> **Cuidado con migraciones**: son forward-only y las aplica el binario al
+> arrancar, version-aware (salta las que ya están en `_migrations`). Si
+> haces rollback a un commit con menos migraciones, las ya aplicadas en
+> Postgres no se revierten — solo no corren las nuevas. Para revertir schema,
+> hazlo a mano con un `*.sql` de rollback. Una migración que FALLA al aplicar
+> impide que el binario levante (`log.Fatalf`), así que el deploy falla en el
+> poll de `is-active` en lugar de dejar prod a medias.
 
 ## Rotar el SSH key
 

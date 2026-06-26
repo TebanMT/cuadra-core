@@ -56,21 +56,15 @@ ssh "${SSH_USER}@${SERVER}" "
 "
 
 if [ "${SKIP_MIGRATE:-0}" != "1" ]; then
-  echo "→ Subiendo migraciones SQL..."
+  echo "→ Subiendo migraciones SQL a ${REMOTE_MIGRATIONS}..."
+  # Solo copiamos los .sql. El binario los aplica al arrancar
+  # (ApplyPostgresMigrations, version-aware) en el restart de abajo — NO los
+  # corremos con psql acá. Re-aplicar todo desde 001 se rompía cuando una
+  # migración posterior evolucionaba el esquema (p.ej. 020 dropeó el índice
+  # único de huellas y re-correr 001 lo recreaba sobre datos multi-huella).
   rsync -avz --delete \
     db_migrations/postgres/ \
     "${SSH_USER}@${SERVER}:${REMOTE_MIGRATIONS}/"
-
-  echo "→ Aplicando migraciones (psql -v ON_ERROR_STOP=1)..."
-  ssh "${SSH_USER}@${SERVER}" bash -s <<'EOF'
-set -euo pipefail
-source /opt/tinta/tinta-server.env
-for f in $(ls -1 /opt/tinta/migrations/*.sql | sort); do
-  echo "  applying $(basename "$f")"
-  psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -f "$f" >/dev/null
-done
-echo "✓ Migraciones aplicadas"
-EOF
 fi
 
 if [ "${SKIP_RESTART:-0}" != "1" ]; then

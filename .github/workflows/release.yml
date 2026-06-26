@@ -10,8 +10,10 @@
 #                exacto que estás taggeando.
 #   2. build   — cross-compila tinta-server linux/amd64 estampando la
 #                versión (-X main.version=<tag>) y la sube como artifact.
-#   3. deploy  — baja el artifact, scp atómico al server, rsync + psql de
-#                migraciones, restart de systemd y smoke test a /health.
+#   3. deploy  — baja el artifact, scp atómico al server, rsync de las
+#                migraciones a /opt/tinta/migrations, restart de systemd
+#                (el binario aplica las migraciones nuevas al boot,
+#                version-aware) y smoke test a /health.
 #
 # Así puedes subir todos los commits que quieras a main sin tocar prod;
 # el tag es la única puerta a producción y te da semantic versioning real
@@ -222,6 +224,16 @@ jobs:
           "
 
       - name: Sincronizar migraciones SQL
+        # Solo COPIAMOS los .sql a /opt/tinta/migrations — NO los aplicamos
+        # acá. El binario corre ApplyPostgresMigrations al arrancar
+        # (cmd/server/main.go:108), que es VERSION-AWARE: consulta la tabla
+        # _migrations y aplica únicamente las versiones nuevas. El loop
+        # `psql` que antes vivía acá re-aplicaba TODO desde 001 y se rompía
+        # cuando una migración posterior evolucionaba el esquema (p.ej. 020
+        # dropeó uq_member_fingerprints_member para permitir multi-huella, y
+        # re-correr 001 intentaba recrear ese índice único sobre datos ya
+        # válidos → "Key is duplicated"). El rsync deja los archivos listos
+        # para que el migrador del boot los lea en el restart de abajo.
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
         run: |
@@ -229,28 +241,17 @@ jobs:
             db_migrations/postgres/ \
             tinta@${DEPLOY_HOST}:/opt/tinta/migrations/
 
-      - name: Aplicar migraciones
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-        run: |
-          ssh tinta@${DEPLOY_HOST} bash -s <<'EOF'
-          set -euo pipefail
-          source /opt/tinta/tinta-server.env
-          for f in $(ls -1 /opt/tinta/migrations/*.sql | sort); do
-            echo "  applying $(basename "$f")"
-            psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -f "$f" >/dev/null
-          done
-          echo "✓ Migraciones aplicadas"
-          EOF
-
-      - name: Reiniciar tinta-server
+      - name: Reiniciar tinta-server (aplica migraciones nuevas al boot)
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
         run: |
           ssh tinta@${DEPLOY_HOST} 'sudo /bin/systemctl restart tinta-server'
 
-          # Esperamos a que systemd reporte active. Si en 30s no está
-          # corriendo, falla el deploy y nos avisa.
+          # Al arrancar, el binario aplica las migraciones nuevas
+          # (version-aware). Si alguna falla, ApplyPostgresMigrations hace
+          # log.Fatalf → el server no levanta → este poll lo detecta y falla
+          # el deploy. Esperamos a que systemd reporte active; si en 30s no
+          # está corriendo, falla y nos avisa.
           for i in $(seq 1 15); do
             status=$(ssh tinta@${DEPLOY_HOST} 'sudo /bin/systemctl is-active tinta-server' || true)
             if [ "$status" = "active" ]; then
