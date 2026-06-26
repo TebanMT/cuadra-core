@@ -141,11 +141,11 @@ func emitAppliedToSync(g *gorm.DB, ap *promoDomain.AppliedPromotion) error {
 		// (a diferencia de value_snapshot) → el apply del sidecar hace
 		// pesos→cents. Por eso va en PESOS crudos: antes mandaba ×100 y el
 		// sidecar lo re-multiplicaba → el descuento quedaba ×100 en el desktop.
-		"discount_amount":         ap.DiscountAmount,
-		"extra_days_applied":      ap.ExtraDaysApplied,
-		"notes":                   ap.Notes,
-		"created_at":              ap.CreatedAt.UnixMilli(),
-		"updated_at":              ap.UpdatedAt.UnixMilli(),
+		"discount_amount":    ap.DiscountAmount,
+		"extra_days_applied": ap.ExtraDaysApplied,
+		"notes":              ap.Notes,
+		"created_at":         ap.CreatedAt.UnixMilli(),
+		"updated_at":         ap.UpdatedAt.UnixMilli(),
 	})
 	if err != nil {
 		return err
