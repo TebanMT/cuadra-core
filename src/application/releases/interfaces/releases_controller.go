@@ -46,19 +46,24 @@ func (ctrl *Controller) RegisterRoutes(r *gin.Engine) {
 // GET /releases/latest/:target/:current_version
 // ---------------------------------------------------------------------------
 
-// manifestWire es el shape que Tauri Updater 2 espera (ADR-005 §2.1). El
-// campo `platforms` mapea target → {signature, url}. Para nuestro endpoint
-// con el target en la URL, devolvemos UN solo entry — Tauri lo acepta igual.
+// manifestWire es el shape "Dynamic" (flat) que el plugin tauri-updater v2
+// espera cuando el servidor responde UN solo target (ADR-005 §2.1).
+//
+// OJO — por qué flat y NO un map `platforms`: el plugin v2, al recibir una
+// respuesta CON campo `platforms`, la trata como "Static format" y busca la
+// key `"{os}-{arch}"` (ej. "windows-x86_64") con match EXACTO. Como nosotros
+// codificamos el target en la URL ({{target}}="windows") y servimos un solo
+// release, devolver un map keyed por "windows" NO matchearía "windows-x86_64"
+// → el updater rechazaría TODO update (TargetsNotFound). El formato flat
+// (sin `platforms`, con `url`+`signature` al tope) hace que el plugin tome el
+// entry directo, sin matching de key. Verificado contra tauri-plugin-updater
+// 2.10.1: RemoteRelease::deserialize → si no hay `platforms` ⇒ Dynamic.
 type manifestWire struct {
-	Version   string                  `json:"version"`
-	Notes     string                  `json:"notes"`
-	PubDate   time.Time               `json:"pub_date"`
-	Platforms map[string]platformWire `json:"platforms"`
-}
-
-type platformWire struct {
-	Signature string `json:"signature"`
-	URL       string `json:"url"`
+	Version   string    `json:"version"`
+	Notes     string    `json:"notes"`
+	PubDate   time.Time `json:"pub_date"`
+	URL       string    `json:"url"`
+	Signature string    `json:"signature"`
 }
 
 func (ctrl *Controller) handleGetLatest(c *gin.Context) {
@@ -104,15 +109,11 @@ func (ctrl *Controller) handleGetLatest(c *gin.Context) {
 	}
 	rel := out.Release
 	c.JSON(http.StatusOK, manifestWire{
-		Version: rel.Version,
-		Notes:   rel.Notes,
-		PubDate: rel.PubDate,
-		Platforms: map[string]platformWire{
-			rel.TargetPlatform: {
-				Signature: rel.SignatureEd25519,
-				URL:       rel.URL,
-			},
-		},
+		Version:   rel.Version,
+		Notes:     rel.Notes,
+		PubDate:   rel.PubDate,
+		URL:       rel.URL,
+		Signature: rel.SignatureEd25519,
 	})
 }
 
@@ -169,6 +170,11 @@ func (ctrl *Controller) handleRegister(c *gin.Context) {
 			errors.Is(err, releasesApp.ErrInvalidRollout),
 			errors.Is(err, releasesApp.ErrInvalidChannel):
 			utils.ErrorResponse(c, http.StatusBadRequest, err)
+		case errors.Is(err, releasesApp.ErrAlreadyExists):
+			// El (version, target, channel) ya estaba registrado — re-run del
+			// pipeline. 409 (no 500) para que el workflow lo trate como
+			// idempotente y no falle el job: el release ya está publicado.
+			utils.ErrorResponse(c, http.StatusConflict, err)
 		default:
 			utils.ErrorResponse(c, http.StatusInternalServerError, err)
 		}

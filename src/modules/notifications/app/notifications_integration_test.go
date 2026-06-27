@@ -403,6 +403,11 @@ func TestDispatcher_TransientFailureRetries(t *testing.T) {
 	}
 }
 
+// Nota: la supresión de mensajes stale (stale → `held`) NO se testea sobre este
+// harness SQLite porque `held` es un estado SÓLO de Postgres (el dispatcher
+// corre únicamente en el cloud y `held` nunca sincroniza al sidecar). El test
+// DB-agnóstico de la decisión del dispatcher vive en stale_dispatch_test.go.
+
 // ---------------------------------------------------------------------------
 // Fakes para el flujo de recibo (PDF + R2): los templates receipt_* requieren
 // un ReceiptPDFRenderer + un PublicMediaUploader para inyectar {receipt_url}.

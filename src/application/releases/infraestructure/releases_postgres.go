@@ -7,6 +7,7 @@ package infraestructure
 
 import (
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -80,7 +81,7 @@ func (r *PostgresStore) Insert(tx sharedDomain.Transaction, rel releases.Release
 	if !ok {
 		return errors.New("releases.PostgresStore: transaction is not GORM-backed")
 	}
-	return gormTx.Tx.Exec(`
+	err := gormTx.Tx.Exec(`
 		INSERT INTO releases (
 		    id, version, target_platform, channel, url,
 		    signature_ed25519, pub_date, notes, rollout_percent, force_immediate
@@ -88,4 +89,31 @@ func (r *PostgresStore) Insert(tx sharedDomain.Transaction, rel releases.Release
 		rel.ID, rel.Version, rel.TargetPlatform, rel.Channel, rel.URL,
 		rel.SignatureEd25519, rel.PubDate, rel.Notes, rel.RolloutPercent, rel.ForceImmediate,
 	).Error
+	if err != nil {
+		// El UNIQUE (version, target_platform, channel) de la migración 026
+		// salta cuando el pipeline re-postea el mismo release (re-run de un tag).
+		// Lo convertimos en un error tipado para que el handler responda 409 en
+		// vez de 500 — el release ya está registrado, es idempotente.
+		if isUniqueViolation(err) {
+			return releases.ErrAlreadyExists
+		}
+		return err
+	}
+	return nil
+}
+
+// isUniqueViolation testea tanto el SQLSTATE de Postgres como el wrapping
+// genérico de GORM. Evitamos una dependencia dura de github.com/lib/pq
+// matcheando el mensaje — alcanza para el único path de unicidad de releases.
+// (Mismo patrón que subscriptions/infraestructure/db/event_postgres.go.)
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, gorm.ErrDuplicatedKey) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "duplicate key value violates unique constraint") ||
+		strings.Contains(msg, "UNIQUE constraint failed")
 }

@@ -37,8 +37,9 @@ func (fakeUoW) Command(_ context.Context, fn func(tx sharedDomain.Transaction) e
 }
 
 type fakeStore struct {
-	rel      *releasesApp.Release
-	inserted []releasesApp.Release
+	rel       *releasesApp.Release
+	inserted  []releasesApp.Release
+	insertErr error // si != nil, Insert lo devuelve (ej. simular el UNIQUE)
 }
 
 func (f *fakeStore) LatestForTarget(_ sharedDomain.Transaction, _, _ string) (*releasesApp.Release, error) {
@@ -46,6 +47,9 @@ func (f *fakeStore) LatestForTarget(_ sharedDomain.Transaction, _, _ string) (*r
 }
 
 func (f *fakeStore) Insert(_ sharedDomain.Transaction, r releasesApp.Release) error {
+	if f.insertErr != nil {
+		return f.insertErr
+	}
 	f.inserted = append(f.inserted, r)
 	return nil
 }
@@ -83,17 +87,18 @@ func TestGetLatest_204_SinPublicaciones(t *testing.T) {
 func TestGetLatest_200_ConManifestTauri(t *testing.T) {
 	rel := &releasesApp.Release{
 		Version:          "1.2.4",
-		TargetPlatform:   "x86_64-pc-windows-msvc",
+		TargetPlatform:   "windows",
 		Channel:          "stable",
-		URL:              "https://releases.entinta.app/win/Tinta-Setup-1.2.4.exe",
+		URL:              "https://dl.entinta.app/desktop/v1.2.4/Tinta-Setup.exe",
 		SignatureEd25519: "deadbeef",
 		Notes:            "Fix de impresión",
 		PubDate:          time.Date(2026, 4, 25, 10, 0, 0, 0, time.UTC),
 		RolloutPercent:   100,
 	}
 	r := newRouter(t, &fakeStore{rel: rel}, "")
+	// {{target}} del plugin v2 = el OS ("windows"), no el target-triple.
 	req := httptest.NewRequest(http.MethodGet,
-		"/api/v1/releases/latest/x86_64-pc-windows-msvc/1.2.3", nil)
+		"/api/v1/releases/latest/windows/1.2.3", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -106,16 +111,17 @@ func TestGetLatest_200_ConManifestTauri(t *testing.T) {
 	if got["version"] != "1.2.4" {
 		t.Errorf("version = %v, want 1.2.4", got["version"])
 	}
-	platforms, ok := got["platforms"].(map[string]any)
-	if !ok {
-		t.Fatalf("platforms ausente o mal-tipado")
+	// Formato "Dynamic" (flat): url + signature al tope, SIN map `platforms`.
+	// El plugin v2 buscaría platforms["windows-x86_64"] (no "windows"), así que
+	// un map keyed por target no matchea — por eso servimos flat.
+	if _, hasPlatforms := got["platforms"]; hasPlatforms {
+		t.Errorf("el manifest NO debe incluir `platforms` (rompe el lookup del plugin v2): %+v", got)
 	}
-	p, ok := platforms["x86_64-pc-windows-msvc"].(map[string]any)
-	if !ok {
-		t.Fatalf("plataforma faltante en manifest: %+v", platforms)
+	if got["url"] != "https://dl.entinta.app/desktop/v1.2.4/Tinta-Setup.exe" {
+		t.Errorf("url = %v", got["url"])
 	}
-	if p["signature"] != "deadbeef" || p["url"] == "" {
-		t.Errorf("platform fields mal: %+v", p)
+	if got["signature"] != "deadbeef" {
+		t.Errorf("signature = %v, want deadbeef", got["signature"])
 	}
 }
 
@@ -238,6 +244,29 @@ func TestAdminRegister_201_PersistsReleaseConToken(t *testing.T) {
 	}
 	if store.inserted[0].Version != "1.2.4" || store.inserted[0].RolloutPercent != 5 {
 		t.Errorf("inserted = %+v", store.inserted[0])
+	}
+}
+
+func TestAdminRegister_409_Duplicado(t *testing.T) {
+	// El UNIFICADO (version, target, channel) ya existe → el store devuelve
+	// ErrAlreadyExists → el handler debe responder 409 (no 500), para que el
+	// re-run del pipeline sea idempotente.
+	store := &fakeStore{insertErr: releasesApp.ErrAlreadyExists}
+	r := newRouter(t, store, "secreto-de-pipeline")
+	body, _ := json.Marshal(map[string]any{
+		"version":           "1.2.4",
+		"target_platform":   "windows",
+		"url":               "https://dl.entinta.app/desktop/v1.2.4/Tinta-Setup.exe",
+		"signature_ed25519": "deadbeef",
+		"rollout_percent":   100,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/releases", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secreto-de-pipeline")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Errorf("status = %d, want 409 (duplicado idempotente), body=%s", w.Code, w.Body.String())
 	}
 }
 

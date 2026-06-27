@@ -36,6 +36,11 @@ var (
 	ErrInvalidSignature = errors.New("signature_ed25519 requerido")
 	ErrInvalidRollout   = errors.New("rollout_percent fuera de [0,100]")
 	ErrInvalidChannel   = errors.New("channel debe ser 'stable' o 'beta'")
+	// ErrAlreadyExists = el (version, target_platform, channel) ya existe (el
+	// UNIQUE de la migración 026). Re-postear el mismo set es idempotente desde
+	// la óptica del pipeline (un re-run del mismo tag), así que el handler lo
+	// mapea a 409 en vez de 500 — el release ya quedó registrado, no es error.
+	ErrAlreadyExists = errors.New("release con esa version+target+channel ya existe")
 )
 
 type RegisterRelease struct {

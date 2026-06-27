@@ -346,7 +346,8 @@ func (r *NotificationSQLiteRepository) ChannelStats(tx sharedDomain.Transaction,
 		FROM notification_queue
 		WHERE gym_id = ? AND channel = ?
 		  AND created_at >= ?
-		  AND deleted_at IS NULL`,
+		  AND deleted_at IS NULL
+			  AND status <> 'held'`,
 		gymID.String(), channel, since.UTC().UnixMilli(),
 	)
 	if err != nil {

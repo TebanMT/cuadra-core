@@ -26,6 +26,11 @@ const (
 	StatusSent      = "sent"
 	StatusFailed    = "failed"
 	StatusCancelled = "cancelled"
+	// StatusHeld — el evento ocurrió hace más que el TTL del template (gym
+	// estuvo mucho tiempo sin internet), así que NO se envía tarde. No es un
+	// fallo ni una cancelación: es un mensaje retenido, recuperable. Fase 1 de
+	// supresión de stale; la Fase 2 (Plus) agrega la UI para enviar/descartar.
+	StatusHeld = "held"
 )
 
 // RecipientType mirrors chk_notification_queue_recipient_type.
@@ -166,6 +171,23 @@ func (n *Notification) Cancel(now time.Time) {
 		return
 	}
 	n.Status = StatusCancelled
+	n.Version++
+	n.UpdatedAt = now
+}
+
+// MarkHeld retiene un mensaje stale: el evento ocurrió hace más que el TTL del
+// template (típicamente porque el gym estuvo mucho tiempo sin internet), así
+// que NO lo enviamos tarde. No se pierde — queda en `held` y la Fase 2 (Plus)
+// lo recupera o descarta. `reason` queda en ErrorMessage para contexto. Sólo
+// transiciona desde pending; en cualquier otro estado es no-op.
+func (n *Notification) MarkHeld(reason string, now time.Time) {
+	if n.Status != StatusPending {
+		return
+	}
+	n.Status = StatusHeld
+	if r := strings.TrimSpace(reason); r != "" {
+		n.ErrorMessage = &r
+	}
 	n.Version++
 	n.UpdatedAt = now
 }

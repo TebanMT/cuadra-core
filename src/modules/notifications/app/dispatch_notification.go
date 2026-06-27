@@ -130,6 +130,17 @@ func (uc *DispatchNotification) Tick(ctx context.Context, now time.Time) (int, e
 // dispatchOne fires the provider call and persists the resulting state.
 // Returns true on successful send.
 func (uc *DispatchNotification) dispatchOne(ctx context.Context, n *notification.Notification, now time.Time) bool {
+	// Fase 1 — supresión de mensajes stale. Si el evento ocurrió hace más que el
+	// TTL del template (gym mucho tiempo sin internet → la noti se encoló local
+	// y recién ahora sincronizó), NO lo enviamos tarde: lo retenemos en `held`
+	// (no se pierde; la Fase 2/Plus lo recupera). Sólo aplica a canales outbound
+	// — in_app es un flag local, no tiene "envío tarde".
+	if n.Channel == notification.ChannelWhatsApp || n.Channel == notification.ChannelEmail {
+		if isStale(n.TemplateKey, n.CreatedAt, now) {
+			uc.markHeld(ctx, n, now)
+			return false
+		}
+	}
 	switch n.Channel {
 	case notification.ChannelWhatsApp:
 		return uc.dispatchWhatsApp(ctx, n, now)
@@ -464,6 +475,28 @@ func (uc *DispatchNotification) markFailed(ctx context.Context, n *notification.
 	})
 	if err != nil {
 		log.Printf("[notifications/dispatch] markFailed failed id=%s err=%v", n.ID, err)
+	}
+}
+
+// markHeld retiene un mensaje stale (Fase 1): demasiado viejo para enviarse
+// tarde. No es fallo ni cancelación — queda recuperable en `held`. Logueamos
+// para que "no se envió por demora" deje rastro.
+func (uc *DispatchNotification) markHeld(ctx context.Context, n *notification.Notification, now time.Time) {
+	age := now.Sub(n.CreatedAt).Round(time.Hour)
+	reason := fmt.Sprintf("retenido por demora: %s de antigüedad (> TTL %s)", age, staleTTL(n.TemplateKey))
+	log.Printf("[notifications/dispatch] id=%s gym=%s template=%s RETENIDO (held): %s",
+		n.ID, n.GymID, n.TemplateKey, reason)
+	err := uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
+		fresh, err := uc.Notifications.GetByID(tx, n.ID)
+		if err != nil {
+			return err
+		}
+		fresh.MarkHeld(reason, now)
+		_, err = uc.Notifications.Update(tx, fresh)
+		return err
+	})
+	if err != nil {
+		log.Printf("[notifications/dispatch] markHeld failed id=%s err=%v", n.ID, err)
 	}
 }
 

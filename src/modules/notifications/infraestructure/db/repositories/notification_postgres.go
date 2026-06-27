@@ -204,6 +204,7 @@ func (r *NotificationPostgresRepository) ChannelStats(tx sharedDomain.Transactio
 		WHERE gym_id = ? AND channel = ?
 		  AND created_at >= ?
 		  AND deleted_at IS NULL
+		  AND status <> 'held'
 	`, gymID, channel, since.UTC()).Scan(&row).Error
 	if err != nil {
 		return notiRepo.NotificationStats{}, err
