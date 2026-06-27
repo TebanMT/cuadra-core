@@ -85,7 +85,7 @@ func TestDispatch_StaleMessageHeldNotSent(t *testing.T) {
 			Channel:      notification.ChannelWhatsApp,
 			TemplateKey:  "receipt_membership", // TTL 1d
 			Status:       notification.StatusPending,
-			ScheduledFor: now,                          // leasable
+			ScheduledFor: now,                           // leasable
 			CreatedAt:    now.Add(-10 * 24 * time.Hour), // 10 días viejo → stale
 		},
 	}}
