@@ -32,6 +32,23 @@ type ConnectWhatsAppOutput struct {
 	ConnectedAt time.Time
 }
 
+// GymSyncToucher bumpea la fila del gym en el journal de sync del cloud para
+// que el próximo pull incremental de los sidecars la incluya. Espejo del
+// puerto homónimo en subscriptions/app (consumer-side interface, Go idiom):
+// el connect/disconnect de WhatsApp es cloud-authoritative — el ceremony
+// necesita internet + provider real y el token es credencial cloud — así que
+// escribe la tabla `gyms` sin pasar por el push pipeline, igual que los
+// webhooks de Stripe. Sin el touch, la fila nunca entra al delta y los
+// sidecars se quedan con el estado viejo hasta un full sync. Los valores
+// vivos los inyecta gymCanonicalAugmentExpr (shared/sync) al construir el
+// payload del pull; el touch sólo mueve server_updated_at.
+//
+// Nil en el binario sidecar y en tests unitarios (el journal sólo existe en
+// el cloud) — mismo patrón que subscriptions/app.RecordEvent.SyncTouch.
+type GymSyncToucher interface {
+	TouchGym(ctx context.Context, tx sharedDomain.Transaction, gymID uuid.UUID) error
+}
+
 // ConnectWhatsApp reaches into the gyms BC to record the connection state.
 // Cross-BC by design: the Gym aggregate owns the (Phone, ConnectedAt) pair
 // and notifications BC owns the provider integration. Audit row is recorded
@@ -41,6 +58,8 @@ type ConnectWhatsApp struct {
 	Provider notiDomain.WhatsAppProvider
 	UoW      sharedDomain.UnitOfWork
 	Audit    audit.Recorder
+	// SyncTouch (opcional; se cablea sólo en cmd/server). Ver GymSyncToucher.
+	SyncTouch GymSyncToucher
 }
 
 func NewConnectWhatsApp(gyms gymRepo.GymRepository, provider notiDomain.WhatsAppProvider,
@@ -77,6 +96,14 @@ func (uc *ConnectWhatsApp) Execute(ctx context.Context, in ConnectWhatsAppInput)
 		updated, err := uc.Gyms.Update(tx, g)
 		if err != nil {
 			return sharedDomain.NewUnexpectedError(err)
+		}
+		// Misma tx que el Update: si el touch falla, todo rollbackea y el
+		// dueño reintenta el connect — nunca un gym conectado en la tabla
+		// con un journal que no lo propaga a los sidecars.
+		if uc.SyncTouch != nil {
+			if err := uc.SyncTouch.TouchGym(ctx, tx, g.ID); err != nil {
+				return sharedDomain.NewUnexpectedError(err)
+			}
 		}
 		_ = uc.Audit.Record(ctx, tx, audit.Entry{
 			GymID:       g.ID,
@@ -120,6 +147,8 @@ type DisconnectWhatsApp struct {
 	Gyms  gymRepo.GymRepository
 	UoW   sharedDomain.UnitOfWork
 	Audit audit.Recorder
+	// SyncTouch (opcional; se cablea sólo en cmd/server). Ver GymSyncToucher.
+	SyncTouch GymSyncToucher
 }
 
 func NewDisconnectWhatsApp(gyms gymRepo.GymRepository, uow sharedDomain.UnitOfWork, recorder audit.Recorder) *DisconnectWhatsApp {
@@ -140,6 +169,11 @@ func (uc *DisconnectWhatsApp) Execute(ctx context.Context, in DisconnectWhatsApp
 		g.DisconnectWhatsApp(now)
 		if _, err := uc.Gyms.Update(tx, g); err != nil {
 			return sharedDomain.NewUnexpectedError(err)
+		}
+		if uc.SyncTouch != nil {
+			if err := uc.SyncTouch.TouchGym(ctx, tx, g.ID); err != nil {
+				return sharedDomain.NewUnexpectedError(err)
+			}
 		}
 		_ = uc.Audit.Record(ctx, tx, audit.Entry{
 			GymID:       g.ID,

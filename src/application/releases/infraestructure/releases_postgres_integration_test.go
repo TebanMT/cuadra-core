@@ -4,29 +4,21 @@ package infraestructure_test
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
-	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
 	"github.com/cuadra/cuadra-core/src/application/releases"
 	"github.com/cuadra/cuadra-core/src/application/releases/infraestructure"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
+	"github.com/cuadra/cuadra-core/src/shared/testutil"
 )
 
 func openTestDB(t *testing.T) (*gorm.DB, sharedDomain.UnitOfWork) {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		dsn = "postgres://postgres:postgres@localhost:5432/cuadra?sslmode=disable"
-	}
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
-	if err != nil {
-		t.Skipf("integration test skipped — Postgres unreachable: %v", err)
-	}
+	db := testutil.OpenPostgres(t)
 	return db, sharedDomain.NewPostgresUnitOfWork(db)
 }
 

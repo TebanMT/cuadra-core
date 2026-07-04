@@ -455,6 +455,10 @@ func main() {
 	reportsController.PlanGate = plusGate
 	notificationsCtrl := notiCtrl.NewController(connectWhatsApp, disconnectWhatsApp, whatsappStatus, listTemplates, updateTemplate, broadcast, listNotifications, retryNotification, listOwnerAlerts, updateOwnerAlert, whatsappProvider, tokens)
 	notificationsCtrl.PlanGate = plusGate
+	// El ceremony de UC-037 acepta sk_live_* además de JWT owner: el desktop
+	// conecta WhatsApp a través del WhatsAppSidecarProxy del sidecar, cuyos
+	// JWTs de operador están firmados con el secret local y no validan aquí.
+	notificationsCtrl.SidecarTokens = sidecarStore
 
 	// ── Challenges (retos) ────────────────────────────────────────────────
 	// Full vertical slice: list/detail/config, categories, participants,
@@ -580,6 +584,16 @@ func main() {
 	syncConflicts := syncShared.NewConflictLogger()
 	syncHandler := syncShared.NewHandler(uow, syncStore, syncConflicts, tokens, sidecarStore, syncMetrics)
 	syncHandler.RegisterRoutes(r)
+	// Los webhooks de Stripe/MP mutan la suscripción del gym cloud-side; el
+	// touch re-manda la fila del gym en el pull incremental de los sidecars
+	// (sin esto el desktop se queda mostrando el trial hasta un full sync).
+	recordSubEvent.SyncTouch = syncStore
+	// Mismo trato para el connect/disconnect de WhatsApp (UC-037): es
+	// cloud-authoritative (el sidecar ya no muta estos campos y su push los
+	// omite), así que sin el touch los sidecars nunca ven el cambio. Los
+	// valores vivos los inyecta gymCanonicalAugmentExpr en cada pull.
+	connectWhatsApp.SyncTouch = syncStore
+	disconnectWhatsApp.SyncTouch = syncStore
 
 	// Releases (ADR-005) — GET público para el Tauri updater + POST admin
 	// con shared secret para el pipeline. RELEASES_ADMIN_TOKEN vacío

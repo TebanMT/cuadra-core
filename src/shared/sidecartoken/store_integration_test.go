@@ -4,28 +4,19 @@ package sidecartoken_test
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
-	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
 	"github.com/cuadra/cuadra-core/src/shared/sidecartoken"
+	"github.com/cuadra/cuadra-core/src/shared/testutil"
 )
 
 func openTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		dsn = "postgres://postgres:postgres@localhost:5432/cuadra?sslmode=disable"
-	}
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
-	if err != nil {
-		t.Skipf("integration test skipped — Postgres unreachable: %v", err)
-	}
-	return db
+	return testutil.OpenPostgres(t)
 }
 
 // seedGym creates a minimal gym + user so the FK in sidecar_credentials

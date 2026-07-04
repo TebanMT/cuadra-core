@@ -86,6 +86,72 @@ func NewPostgresStore() *PostgresStore {
 	return &PostgresStore{MaxClockSkew: defaultMaxClockSkew}
 }
 
+// TouchEntity bumpea server_updated_at de una fila EXISTENTE del journal para
+// que el próximo pull incremental (ListSince) la incluya. Es el mecanismo
+// para cambios cloud-authoritative que escriben la tabla canónica sin pasar
+// por el push pipeline (p.ej. webhooks de Stripe/MP mutando la suscripción
+// del gym): el valor vivo lo inyecta la augmentation al LEER, así que basta
+// mover el timestamp — el payload guardado no se re-serializa.
+//
+// NO inserta si la fila no existe (un gym cuyo sidecar nunca ha pusheado no
+// tiene fila; fabricar un payload parcial aquí arriesgaría pisar campos en el
+// apply del sidecar). Devuelve touched=false en ese caso — el bootstrap /
+// full sync cubre a esos gyms.
+func (s *PostgresStore) TouchEntity(
+	ctx context.Context,
+	tx sharedDomain.Transaction,
+	gymID uuid.UUID,
+	entityType string,
+	entityID uuid.UUID,
+) (bool, error) {
+	g := gormTx(tx)
+	res := g.WithContext(ctx).Exec(`
+		UPDATE sync_entities SET server_updated_at = NOW()
+		 WHERE gym_id = ? AND entity_type = ? AND entity_id = ?`,
+		gymID, entityType, entityID)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
+}
+
+// TouchGym — re-mandar la fila del gym tras un cambio de suscripción.
+// Satisface el puerto subscriptions/app.GymSyncToucher.
+//
+// A diferencia de TouchEntity, además de mover server_updated_at BUMPEA la
+// versión del journal. El touch timestamp-only sólo propagaba a devices con
+// versión atrasada: tras un push exitoso, el sidecar que pusheó queda con
+// local.version == journal.version (stampLocalSynced), y su ApplyPullChange
+// descarta la fila touched por LWW (local.version >= change.version) — en el
+// caso común de UN solo desktop, el cambio de suscripción nunca aterrizaba.
+//
+// version = GREATEST(se.version + 1, gy.version):
+//   - `se.version + 1` garantiza bump ESTRICTO sobre lo que el último push
+//     dejó stampeado en el sidecar. No basta igualar gyms.version: tras un
+//     conflict client-wins el journal queda ADELANTE del row vivo (updateRow
+//     escribe row.Version+1 pero el projector proyecta a gyms la versión del
+//     payload del cliente), y un GREATEST plano sería no-op de versión.
+//   - `gy.version` porque los writes cloud-side bumpean gyms.version vía
+//     dominio (p.ej. Gym.ActivateSubscription en RecordEvent) en la misma tx
+//     ANTES del touch — en steady state gy = se+1 y el journal cae exacto en
+//     la versión del row vivo.
+//
+// Trade-off deliberado: un push offline encolado con la versión empatada cae
+// al conflict path (LWW por updated_at) en vez de aceptarse limpio. Es la
+// semántica documentada, y el client-wins es seguro para billing: enqueueGym
+// no emite subscription_* y el projector sólo escribe llaves presentes.
+func (s *PostgresStore) TouchGym(ctx context.Context, tx sharedDomain.Transaction, gymID uuid.UUID) error {
+	g := gormTx(tx)
+	return g.WithContext(ctx).Exec(`
+		UPDATE sync_entities se
+		   SET server_updated_at = NOW(),
+		       version = GREATEST(se.version + 1, gy.version)
+		  FROM gyms gy
+		 WHERE gy.id = se.entity_id
+		   AND se.gym_id = ? AND se.entity_type = 'gyms' AND se.entity_id = ?`,
+		gymID, gymID).Error
+}
+
 // UpsertOne applies one push item with LWW semantics. Returns an
 // UpsertResult describing what happened (accepted / conflict_*) so the
 // handler can build both the wire response and the conflict-log entry.
@@ -298,7 +364,7 @@ func (s *PostgresStore) updateRow(
 }
 
 // gymCanonicalAugmentExpr — para sync_entities.entity_type='gyms',
-// inyecta cinco grupos de columnas desde el row vivo de `gyms`:
+// inyecta cuatro grupos de columnas desde el row vivo de `gyms`:
 //
 //  1. Billing (cloud-owned): subscription_plan, subscription_status,
 //     stripe_customer_id, trial_ends_at, subscription_ends_at. El sidecar
@@ -317,11 +383,24 @@ func (s *PostgresStore) updateRow(
 //     pull-eo siempre recibe el último valor reconocido por cloud,
 //     incluso si el payload guardado es viejo.
 //
+//  4. WhatsApp Business (cloud-owned, UC-037): whatsapp_business_phone,
+//     whatsapp_connected_at, whatsapp_business_token_enc. El ceremony de
+//     connect/disconnect vive sólo en el cloud (necesita provider real +
+//     internet; el desktop lo alcanza vía el WhatsAppSidecarProxy) y
+//     enqueueGym los omite del push — esta inyección es el ÚNICO camino
+//     por el que el estado de conexión llega a los sidecars. token_enc es
+//     BYTEA: viaja como base64 (mismo wire que el JSON de Go para []byte)
+//     para que blobColumns en agent_apply.go lo decodifique; translate()
+//     quita los saltos de línea que encode(...,'base64') mete cada 76
+//     chars (RFC 2045), que base64.StdEncoding no tolera. Hoy es NULL by
+//     design (MVP guarda senderID en audit, no credenciales) y el NULL
+//     sobrevive el encode.
+//
 // El operador `||` de jsonb concatena objetos con prioridad al lado
 // derecho — entonces el valor del cloud SIEMPRE gana sobre el payload.
-// Para 1 (billing) es la regla; para 2/3 es no-op semántico (gym row =
-// proyección del último push) y arregla cualquier payload pre-fix sin
-// necesidad de tocar sync_entities.
+// Para 1/4 (billing, whatsapp) es la regla; para 2/3 es no-op semántico
+// (gym row = proyección del último push) y arregla cualquier payload
+// pre-fix sin necesidad de tocar sync_entities.
 //
 // Timestamps TIMESTAMPTZ se serializan como epoch ms (bigint) — formato
 // wire del sidecar. NULLs sobreviven: jsonb_build_object emite JSON null
@@ -344,7 +423,13 @@ const gymCanonicalAugmentExpr = `
 	                CASE WHEN g.subscription_ends_at IS NULL THEN NULL
 	                ELSE (EXTRACT(EPOCH FROM g.subscription_ends_at) * 1000)::bigint END,
 	            'created_at',     (EXTRACT(EPOCH FROM g.created_at) * 1000)::bigint,
-	            'kiosk_settings', g.kiosk_settings
+	            'kiosk_settings', g.kiosk_settings,
+	            'whatsapp_business_phone', g.whatsapp_business_phone,
+	            'whatsapp_connected_at',
+	                CASE WHEN g.whatsapp_connected_at IS NULL THEN NULL
+	                ELSE (EXTRACT(EPOCH FROM g.whatsapp_connected_at) * 1000)::bigint END,
+	            'whatsapp_business_token_enc',
+	                translate(encode(g.whatsapp_business_token_enc, 'base64'), E'\n', '')
 	        )
 	    ELSE se.payload
 	END`

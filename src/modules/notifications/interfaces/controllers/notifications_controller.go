@@ -22,6 +22,8 @@ import (
 	notiDomain "github.com/cuadra/cuadra-core/src/modules/notifications/domain/notification"
 	"github.com/cuadra/cuadra-core/src/shared/auth"
 	"github.com/cuadra/cuadra-core/src/shared/middleware"
+	phonepkg "github.com/cuadra/cuadra-core/src/shared/phone"
+	"github.com/cuadra/cuadra-core/src/shared/sidecartoken"
 	"github.com/cuadra/cuadra-core/src/shared/utils"
 )
 
@@ -53,6 +55,12 @@ type Controller struct {
 	// módulo de notifications. Hoy solo broadcast (envío masivo a socios)
 	// es Plus; los recordatorios automáticos + comprobantes son Standard.
 	PlanGate gin.HandlerFunc
+	// SidecarTokens (opcional; se cablea sólo en cmd/server) habilita el
+	// ceremony de UC-037 para requests autenticadas con sk_live_*: el
+	// WhatsAppSidecarProxy del sidecar forwardea start/connect/disconnect
+	// con ese token porque los JWTs del operador de escritorio están
+	// firmados con el secret local del sidecar y el cloud no los acepta.
+	SidecarTokens sidecartoken.Store
 }
 
 func NewController(
@@ -87,20 +95,37 @@ func NewController(
 }
 
 func (ctrl *Controller) RegisterRoutes(r *gin.Engine) {
+	// UC-037 — ceremony de conexión WhatsApp (start emite OTP, connect lo
+	// verifica y persiste, DELETE desconecta). Es cloud-authoritative: el
+	// ceremony necesita provider real (Twilio) + internet y el token es
+	// credencial cloud, así que sólo el binario que cablea el use case
+	// (cmd/server) registra estas rutas. El sidecar pasa Connect=nil y en su
+	// lugar registra el WhatsAppSidecarProxy, que forwardea aquí con su
+	// sk_live_*. Por eso el gate acepta sidecar_token además de JWT owner:
+	// el sk_live_* identifica al bootstrap user del pareo (fase 1 = el
+	// dueño), y el proxy ya validó role=owner contra su JWT local antes de
+	// forwardear.
+	if ctrl.Connect != nil {
+		ceremonyAuth := middleware.AuthMiddleware(ctrl.Tokens)
+		if ctrl.SidecarTokens != nil {
+			ceremonyAuth = middleware.SidecarOrJWTMiddleware(ctrl.Tokens, ctrl.SidecarTokens)
+		}
+		ceremony := r.Group("/api/v1", ceremonyAuth, requireOwnerOrSidecarToken())
+		ceremony.POST("/gyms/me/whatsapp/start", ctrl.handleWhatsappStart)
+		ceremony.POST("/gyms/me/whatsapp/connect", ctrl.handleConnect)
+		ceremony.DELETE("/gyms/me/whatsapp", ctrl.handleDisconnect)
+	}
+
 	api := r.Group("/api/v1")
 	api.Use(middleware.AuthMiddleware(ctrl.Tokens))
 	{
-		// UC-037 — 2-step WhatsApp connect: /start emits an OTP via the
-		// provider, /connect verifies it and persists the gym credential.
-		api.POST("/gyms/me/whatsapp/start", middleware.RequireOwner(), ctrl.handleWhatsappStart)
-		api.POST("/gyms/me/whatsapp/connect", middleware.RequireOwner(), ctrl.handleConnect)
 		// Wire shape canónico (item 7): el FE consume `GET /whatsapp` con un
 		// shape rico (status, phone_number, stats, last_error). Mantenemos
 		// `/status` como alias por compat — el handler es el mismo y devuelve
-		// la versión rica. El DELETE desconecta el número.
+		// la versión rica. El GET sí vive en ambos binarios: el sidecar lo
+		// responde de su SQLite (la fila de gyms llega por sync pull).
 		api.GET("/gyms/me/whatsapp", ctrl.handleStatus)
 		api.GET("/gyms/me/whatsapp/status", ctrl.handleStatus)
-		api.DELETE("/gyms/me/whatsapp", middleware.RequireOwner(), ctrl.handleDisconnect)
 		api.GET("/notification-templates", ctrl.handleListTemplates)
 		api.PATCH("/notification-templates/:key", middleware.RequireOwner(), ctrl.handleUpdateTemplate)
 		// Broadcast (envío masivo a socios). Ahora disponible en Standard pero
@@ -126,8 +151,14 @@ func (ctrl *Controller) RegisterRoutes(r *gin.Engine) {
 // DTOs
 // ---------------------------------------------------------------------------
 
+// connectReq — paso 2 del ceremony. El FE (WhatsAppSetupPage vía proxy del
+// sidecar) manda `phone_number` + `code`; `phone` se acepta como alias del
+// wire shape viejo. El code es obligatorio: /connect sólo persiste después
+// de verificar el OTP emitido por /start.
 type connectReq struct {
-	Phone string `json:"phone" validate:"required,min=8,max=20"`
+	Phone       string `json:"phone" validate:"omitempty,min=8,max=20"`
+	PhoneNumber string `json:"phone_number" validate:"omitempty,min=8,max=20"`
+	Code        string `json:"code" validate:"required,len=6"`
 }
 
 type whatsappStartReq struct {
@@ -258,10 +289,26 @@ func (ctrl *Controller) handleConnect(c *gin.Context) {
 	if !bindJSON(c, &req) {
 		return
 	}
+	rawPhone := req.PhoneNumber
+	if rawPhone == "" {
+		rawPhone = req.Phone
+	}
+	// Normalizamos ANTES de verificar para comparar contra lo que /start
+	// guardó (que también normaliza) — el FE manda el mismo E.164 en ambos
+	// pasos, pero no dependemos de eso.
+	phone := phonepkg.Normalize(rawPhone)
+	if phone == "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, errInvalidPhone)
+		return
+	}
+	if !ctrl.OTPStore.Verify(gymID, phone, req.Code) {
+		utils.ErrorResponse(c, http.StatusBadRequest, errInvalidOTP)
+		return
+	}
 	out, err := ctrl.Connect.Execute(c.Request.Context(), notiApp.ConnectWhatsAppInput{
 		GymID:       gymID,
 		ActorUserID: userID,
-		Phone:       req.Phone,
+		Phone:       phone,
 	})
 	if err != nil {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
@@ -538,8 +585,29 @@ var _ = errBadID
 
 var (
 	errInvalidOTP    = errors.New("código inválido o expirado")
+	errInvalidPhone  = errors.New("teléfono inválido")
 	errOTPSendFailed = errors.New("no pudimos enviar el código por WhatsApp; intenta de nuevo")
+	errNotOwner      = errors.New("no tienes permisos para esta acción")
 )
+
+// requireOwnerOrSidecarToken — gate del ceremony UC-037. Con JWT exige
+// role=owner (igual que middleware.RequireOwner); con sk_live_* deja pasar:
+// la credencial de máquina la emitió el pareo del dueño y el proxy del
+// sidecar ya validó role=owner contra su JWT local antes de forwardear.
+func requireOwnerOrSidecarToken() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if middleware.GetAuthMethod(c) == "sidecar_token" {
+			c.Next()
+			return
+		}
+		if role, _ := middleware.GetRole(c); role != "owner" {
+			utils.ErrorResponse(c, http.StatusForbidden, errNotOwner)
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
 
 func (ctrl *Controller) handleWhatsappStart(c *gin.Context) {
 	gymID, _ := middleware.GetGymID(c)
@@ -547,7 +615,14 @@ func (ctrl *Controller) handleWhatsappStart(c *gin.Context) {
 	if !bindJSON(c, &req) {
 		return
 	}
-	code, exp, err := ctrl.OTPStore.Issue(gymID, req.PhoneNumber)
+	// Normalizado al guardar para que Verify en /connect (que también
+	// normaliza) compare manzanas con manzanas.
+	phone := phonepkg.Normalize(req.PhoneNumber)
+	if phone == "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, errInvalidPhone)
+		return
+	}
+	code, exp, err := ctrl.OTPStore.Issue(gymID, phone)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, err)
 		return
@@ -556,8 +631,8 @@ func (ctrl *Controller) handleWhatsappStart(c *gin.Context) {
 	// the FE can prompt the operator to retry; the issued code stays in
 	// the store, so a manual /start re-issues a fresh one (overwrites).
 	if ctrl.WhatsApp != nil {
-		if sendErr := ctrl.WhatsApp.SendOTP(c.Request.Context(), req.PhoneNumber, code); sendErr != nil {
-			log.Printf("[notifications] whatsapp OTP send failed for gym=%s phone=%s: %v", gymID, req.PhoneNumber, sendErr)
+		if sendErr := ctrl.WhatsApp.SendOTP(c.Request.Context(), phone, code); sendErr != nil {
+			log.Printf("[notifications] whatsapp OTP send failed for gym=%s phone=%s: %v", gymID, phone, sendErr)
 			utils.ErrorResponse(c, http.StatusBadGateway, errOTPSendFailed)
 			return
 		}
@@ -578,9 +653,6 @@ func envIsDev() bool {
 	v := strings.ToLower(os.Getenv("WHATSAPP_PROVIDER"))
 	return v == "" || v == "stdout" || v == "mock"
 }
-
-// silence unused-import on errInvalidOTP until /connect wires it.
-var _ = errInvalidOTP
 
 // ---------------------------------------------------------------------------
 // Owner-alerts (UC-040 DA-40.1)

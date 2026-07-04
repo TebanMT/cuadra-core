@@ -88,16 +88,17 @@ func TestWhatsappStart_FailedSendReturns502(t *testing.T) {
 }
 
 // newWhatsappRouter wires a minimal Controller with the provided mock
-// provider and a one-off owner JWT. The use cases passed to NewController
-// are nil — handleWhatsappStart never reaches them, and the test routes
-// only POST /start.
+// provider and a one-off owner JWT. Connect must be non-nil (RegisterRoutes
+// sólo registra el ceremony cuando el binario cablea el use case — el
+// sidecar pasa nil y usa su proxy); un struct vacío basta porque
+// handleWhatsappStart nunca lo toca. El resto de use cases quedan nil.
 func newWhatsappRouter(t *testing.T, provider *whatsapp.MockProvider) (*gin.Engine, string) {
 	t.Helper()
 	tokens := auth.NewJWTService("test-secret")
 	gin.SetMode(gin.TestMode)
 
 	ctrl := controllers.NewController(
-		(*notiApp.ConnectWhatsApp)(nil),
+		&notiApp.ConnectWhatsApp{},
 		(*notiApp.DisconnectWhatsApp)(nil),
 		(*notiApp.GetWhatsAppStatus)(nil),
 		(*notiApp.ListTemplates)(nil),

@@ -199,3 +199,92 @@ func TestApplyPullChange_Gym_MissingCreatedAt_FailsCleanly(t *testing.T) {
 		t.Errorf("created_at mutated despite rollback: was %d, now %d", originalCreatedAt, after)
 	}
 }
+
+// subscriptionPullPayload — el payload que el cloud emite en un pull tras un
+// touch de suscripción: el payload guardado del último push, con los campos
+// billing vivos inyectados por gymCanonicalAugmentExpr encima.
+func subscriptionPullPayload(t *testing.T, gymID uuid.UUID, version int, plan, status string) []byte {
+	t.Helper()
+	var pl map[string]any
+	if err := json.Unmarshal(realisticGymPullPayload(t, gymID, version, false), &pl); err != nil {
+		t.Fatalf("unmarshal base payload: %v", err)
+	}
+	pl["subscription_plan"] = plan
+	pl["subscription_status"] = status
+	b, err := json.Marshal(pl)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	return b
+}
+
+// TestApplyPullChange_Gym_TouchSuscripcion_LWWPorVersion — escenario completo
+// del gap de propagación de suscripciones (caso 2, memoria
+// project_sync_propagation_gap): tras un push exitoso, el sidecar que pusheó
+// queda con local.version == sync_entities.version (stampLocalSynced). Un
+// touch cloud-side timestamp-only re-manda la fila con esa MISMA versión y
+// este sidecar — el caso común de UN solo desktop — la descarta por LWW.
+//
+//  1. Pin del hoyo: PullChange con version == local se descarta (sin error,
+//     idempotente). Documenta por qué TouchGym debe bumpear la versión del
+//     journal, no sólo server_updated_at.
+//  2. Fix: PullChange con version local+1 (touch con bump) aplica y el
+//     subscription_plan/status vivos aterrizan en el row local.
+func TestApplyPullChange_Gym_TouchSuscripcion_LWWPorVersion(t *testing.T) {
+	gymID := uuid.New()
+	db, uow := freshSidecarDBWithGym(t, gymID)
+	// Estado post-push: local.version == journal.version == 3. Los defaults
+	// del esquema dejan subscription_plan='trial' — el valor stale que el
+	// touch debe reemplazar.
+	if _, err := db.Exec(`UPDATE gyms SET version = 3 WHERE id = ?`, gymID); err != nil {
+		t.Fatalf("set local version: %v", err)
+	}
+
+	apply := func(version int) error {
+		change := syncpkg.PullChange{
+			EntityType:      "gyms",
+			EntityID:        gymID.String(),
+			Version:         version,
+			Payload:         subscriptionPullPayload(t, gymID, version, "standard_monthly", "active"),
+			ServerUpdatedAt: time.Now().UTC(),
+		}
+		return uow.Command(context.Background(), func(tx sharedDomain.Transaction) error {
+			return syncpkg.ApplyPullChange(context.Background(), tx, change)
+		})
+	}
+
+	readGym := func() (plan, status string, version int) {
+		var row struct {
+			Plan    string `db:"subscription_plan"`
+			Status  string `db:"subscription_status"`
+			Version int    `db:"version"`
+		}
+		if err := db.Get(&row, `
+			SELECT subscription_plan, subscription_status, version
+			  FROM gyms WHERE id = ?`, gymID); err != nil {
+			t.Fatalf("read gym: %v", err)
+		}
+		return row.Plan, row.Status, row.Version
+	}
+
+	// 1. Touch viejo (timestamp-only, versión empatada): descartado.
+	if err := apply(3); err != nil {
+		t.Fatalf("apply version empatada: %v", err)
+	}
+	plan, _, version := readGym()
+	if plan != "trial" || version != 3 {
+		t.Fatalf("el pull con version == local NO debía aplicar: plan=%q version=%d", plan, version)
+	}
+
+	// 2. Touch con bump de versión: aplica el estado vivo.
+	if err := apply(4); err != nil {
+		t.Fatalf("apply version bumpeada: %v", err)
+	}
+	plan, status, version := readGym()
+	if plan != "standard_monthly" || status != "active" {
+		t.Errorf("la suscripción no aterrizó: plan=%q status=%q", plan, status)
+	}
+	if version != 4 {
+		t.Errorf("version local = %d, want 4", version)
+	}
+}

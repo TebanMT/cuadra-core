@@ -4,6 +4,7 @@ package controllers
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/url"
@@ -67,6 +68,17 @@ func (ctrl *WebhookController) handleStatusCallback(c *gin.Context) {
 		return
 	}
 
+	// RawPayload va como el form YA parseado y marshaleado a JSON — NUNCA
+	// el body crudo: Twilio manda x-www-form-urlencoded y la columna
+	// whatsapp_events.raw_payload es JSONB (postgres) / CHECK json_valid
+	// (sqlite). Guardar el body crudo rollbackeaba el INSERT con 22P02,
+	// el webhook respondía 500 y Twilio reintentaba en loop (bug jul-2026).
+	raw, err := formToJSON(parsed)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, notiErrors.ErrInvalidPayload)
+		return
+	}
+
 	in := notiApp.ProcessWebhookInput{
 		EventType:         eventTypeFromForm(parsed),
 		ProviderMessageID: parsed.Get("MessageSid"),
@@ -77,13 +89,29 @@ func (ctrl *WebhookController) handleStatusCallback(c *gin.Context) {
 		// socio. El use case detecta STOP/BAJA para opt-out de marketing.
 		FromPhone:  parsed.Get("From"),
 		Body:       parsed.Get("Body"),
-		RawPayload: body,
+		RawPayload: raw,
 	}
 	if _, err := ctrl.Process.Execute(c.Request.Context(), in); err != nil {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
 		return
 	}
 	c.Status(http.StatusOK)
+}
+
+// formToJSON serializa el form de Twilio como objeto JSON plano, preservando
+// el callback completo para debug/cumplimiento: {"MessageStatus":"sent",...}.
+// Twilio no repite llaves en la práctica; si alguna llegara repetida se
+// preserva como array para no perder datos.
+func formToJSON(form url.Values) ([]byte, error) {
+	obj := make(map[string]any, len(form))
+	for k, vs := range form {
+		if len(vs) == 1 {
+			obj[k] = vs[0]
+		} else {
+			obj[k] = vs
+		}
+	}
+	return json.Marshal(obj)
 }
 
 // eventTypeFromForm decides whether this is an inbound message or a status

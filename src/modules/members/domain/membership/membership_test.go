@@ -239,6 +239,78 @@ func TestRenew_Mensual_AcumulaPorMeses(t *testing.T) {
 	}
 }
 
+// TestNewMembership_Mensual_MismoDiaDelMesSiguiente: repro del bug de
+// prod (2-jul-2026): una mensual vendida el 2-jul debe vencer el 2-ago
+// (mismo día del mes siguiente), NO el 1-ago (30 días corridos).
+func TestNewMembership_Mensual_MismoDiaDelMesSiguiente(t *testing.T) {
+	mt := mustTypeMonths(t, 1)
+	now := time.Now().UTC()
+	start := time.Date(2026, 7, 2, 0, 0, 0, 0, time.UTC)
+	ms := membership.New(uuid.New(), uuid.New(), uuid.New(), mt, start, now)
+	want := time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC)
+	if !ms.ExpiryDate.Equal(want) {
+		t.Errorf("expiry = %v, want %v (mismo día del mes siguiente)", ms.ExpiryDate, want)
+	}
+}
+
+// TestNewMembership_Mensual_FinDeMesBisiesto: 31-ene de año bisiesto
+// clampa al 29-feb (no al 28, no al 2-mar).
+func TestNewMembership_Mensual_FinDeMesBisiesto(t *testing.T) {
+	mt := mustTypeMonths(t, 1)
+	now := time.Now().UTC()
+	// 2028 es bisiesto → febrero tiene 29 días.
+	start := time.Date(2028, 1, 31, 0, 0, 0, 0, time.UTC)
+	ms := membership.New(uuid.New(), uuid.New(), uuid.New(), mt, start, now)
+	want := time.Date(2028, 2, 29, 0, 0, 0, 0, time.UTC)
+	if !ms.ExpiryDate.Equal(want) {
+		t.Errorf("expiry = %v, want %v (clamp a 29-feb bisiesto)", ms.ExpiryDate, want)
+	}
+}
+
+// TestActivate_Mensual_UsaMesNatural: un socio inscrito sin pago
+// (pending_payment) que paga después también debe recibir 1 mes natural
+// desde la fecha de pago — Activate() pasa por computeExpiry igual que New.
+func TestActivate_Mensual_UsaMesNatural(t *testing.T) {
+	mt := mustTypeMonths(t, 1)
+	now := time.Now().UTC()
+	inscribed := time.Date(2026, 6, 28, 0, 0, 0, 0, time.UTC)
+	ms := membership.NewPendingPayment(uuid.New(), mt.GymID, uuid.New(), mt, inscribed, now)
+	// Paga el 2-jul (start shiftea a la fecha de pago porque el original
+	// quedó en el pasado) → vence el 2-ago.
+	pay := time.Date(2026, 7, 2, 0, 0, 0, 0, time.UTC)
+	if err := ms.Activate(pay, now); err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+	wantStart := pay
+	wantExpiry := time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC)
+	if !ms.StartDate.Equal(wantStart) {
+		t.Errorf("start = %v, want %v (shift a fecha de pago)", ms.StartDate, wantStart)
+	}
+	if ms.ExpiryDate == nil || !ms.ExpiryDate.Equal(wantExpiry) {
+		t.Errorf("expiry = %v, want %v (1 mes natural desde el pago)", ms.ExpiryDate, wantExpiry)
+	}
+}
+
+// TestRenew_Anual_VencidaReiniciaDesdePago: renovación de anual vencida
+// reinicia desde la fecha de pago con 12 meses naturales.
+func TestRenew_Anual_VencidaReiniciaDesdePago(t *testing.T) {
+	mt := mustTypeMonths(t, 12)
+	now := time.Now().UTC()
+	start := time.Date(2025, 3, 10, 0, 0, 0, 0, time.UTC)
+	current := membership.New(uuid.New(), mt.GymID, uuid.New(), mt, start, now)
+	// Vencía 10-mar-2026; paga hasta el 2-jul-2026 → nueva vigencia
+	// 2-jul-2026 → 2-jul-2027.
+	pay := time.Date(2026, 7, 2, 0, 0, 0, 0, time.UTC)
+	next := current.Renew(uuid.New(), mt, pay, now)
+	wantExpiry := time.Date(2027, 7, 2, 0, 0, 0, 0, time.UTC)
+	if !next.StartDate.Equal(pay) {
+		t.Errorf("renew start = %v, want %v", next.StartDate, pay)
+	}
+	if !next.ExpiryDate.Equal(wantExpiry) {
+		t.Errorf("renew expiry = %v, want %v (12 meses naturales)", next.ExpiryDate, wantExpiry)
+	}
+}
+
 func TestIsActiveAndDays(t *testing.T) {
 	mt := mustType(t, 30)
 	now := time.Now().UTC()

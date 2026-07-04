@@ -156,13 +156,22 @@ func (uc *ProcessWebhook) Execute(ctx context.Context, in ProcessWebhookInput) (
 		}
 
 		// Status reconciliation: mark our row failed when Meta says so.
+		// Cubre pending Y sent — el dispatcher marca sent en cuanto Twilio
+		// acepta el mensaje, pero el failed/undelivered terminal llega después
+		// por este webhook; sin la transición sent→failed la noti quedaba
+		// "sent" para siempre aunque Meta nunca la entregó (invisible para la
+		// persecución por pago y sin retry manual posible). No dispara retry
+		// automático: corregir el status deja la fila elegible para el retry
+		// manual del dueño (RetryNotification exige failed).
 		if notif != nil && in.EventType == eventDomain.EventTypeStatus && eventDomain.IsTerminalFailure(in.Status) {
-			if notif.IsPending() {
-				reason := strings.TrimSpace(in.ErrorMessage)
-				if reason == "" {
-					reason = "twilio: " + in.Status
+			reason := strings.TrimSpace(in.ErrorMessage)
+			if reason == "" {
+				reason = "twilio: " + in.Status
+				if ec := strings.TrimSpace(in.ErrorCode); ec != "" {
+					reason += " (error " + ec + ")"
 				}
-				notif.MarkFailedFinal(reason, now)
+			}
+			if notif.ReconcileDeliveryFailure(reason, now) {
 				if _, err := uc.Notifications.Update(tx, notif); err != nil {
 					return sharedDomain.NewUnexpectedError(err)
 				}

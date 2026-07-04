@@ -9,34 +9,25 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
 	"github.com/cuadra/cuadra-core/src/shared/auth"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
+	"github.com/cuadra/cuadra-core/src/shared/testutil"
 )
 
-// projectorTestDB lazily opens the integration Postgres handle. Tests that
-// need it call this; if DATABASE_URL is missing the suite skips so CI on
-// machines without Postgres remains green.
+// projectorTestDB lazily opens the integration Postgres handle with the
+// schema migrated to head. Tests that need it call this; if Postgres is
+// unreachable the suite skips so CI on machines without Postgres stays green.
 func projectorTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		dsn = "postgres://postgres:postgres@localhost:5432/cuadra?sslmode=disable"
-	}
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
-	if err != nil {
-		t.Skipf("integration test skipped — cannot reach Postgres at %s: %v", dsn, err)
-	}
-	return db
+	return testutil.OpenPostgres(t)
 }
 
 // seedGymAndOwner inserts a fresh gym + owner user via raw SQL so the

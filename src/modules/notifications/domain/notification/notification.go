@@ -164,6 +164,26 @@ func (n *Notification) MarkFailedFinal(reason string, now time.Time) {
 	n.UpdatedAt = now
 }
 
+// ReconcileDeliveryFailure aplica un status terminal de fallo reportado por
+// el provider (failed/undelivered del StatusCallback de Twilio). A diferencia
+// de MarkFailedFinal, admite la transición sent→failed: el dispatcher marca
+// sent en cuanto Twilio ACEPTA el mensaje, pero el veredicto de entrega de
+// Meta llega después por webhook — si Meta dice que nunca se entregó, el
+// status honesto es failed. Limpia SentAt para que la fila no cuente como
+// entregada Y fallida a la vez en ChannelStats. No reintenta: los fallos
+// terminales (número inválido, sin WhatsApp, template rechazado) no se
+// arreglan reenviando; el canal de recuperación es el retry manual del dueño,
+// que exige status=failed. Devuelve false (no-op) desde failed (callback
+// duplicado — idempotente), cancelled y held.
+func (n *Notification) ReconcileDeliveryFailure(reason string, now time.Time) bool {
+	if n.Status != StatusPending && n.Status != StatusSent {
+		return false
+	}
+	n.SentAt = nil
+	n.MarkFailedFinal(reason, now)
+	return true
+}
+
 // Cancel transitions to cancelled. Used by UC-022 (refund) and broadcast
 // "stop" actions to keep pending rows from firing.
 func (n *Notification) Cancel(now time.Time) {

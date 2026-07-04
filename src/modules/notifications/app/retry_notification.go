@@ -72,10 +72,16 @@ func (uc *RetryNotification) Execute(ctx context.Context, in RetryNotificationIn
 		// próxima vuelta del dispatcher lo procese, RetryCount conservado
 		// (señal de cuántos intentos automáticos llevó antes), ErrorMessage
 		// limpiado para que el FE no muestre "último error" desactualizado.
+		// ProviderMessageID también se limpia: el SID pertenece al intento
+		// anterior, y un StatusCallback duplicado/tardío de ese SID no debe
+		// matchear esta fila re-armada (ProcessWebhook la marcaría failed
+		// antes de que el dispatcher la despache). El envío nuevo setea su
+		// propio SID en MarkSent.
 		n.Status = notification.StatusPending
 		n.ScheduledFor = now
 		n.FailedAt = nil
 		n.ErrorMessage = nil
+		n.ProviderMessageID = nil
 		n.Version++
 		n.UpdatedAt = now
 		if _, err := uc.Notifications.Update(tx, n); err != nil {

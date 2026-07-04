@@ -319,8 +319,12 @@ func main() {
 	createOp.WithWelcomePINNotifier(enqueueOperatorWelcomePIN)
 	rotateOpPIN.WithWelcomePINNotifier(enqueueOperatorWelcomePIN)
 	enqueueOwnerAlert := notiApp.NewEnqueueOwnerAlert(notificationRepo, gymRepo, userRepo, alertConfigRepo, uow)
-	connectWhatsApp := notiApp.NewConnectWhatsApp(gymRepo, whatsappMock, uow, recorder)
-	disconnectWhatsApp := notiApp.NewDisconnectWhatsApp(gymRepo, uow, recorder)
+	// El ceremony de UC-037 (connect/disconnect) ya NO se cablea aquí: es
+	// cloud-authoritative (necesita Twilio real + internet; el mock local
+	// "registraba" senders contra stdout y el push nunca propagaba los
+	// campos). El desktop llega vía WhatsAppSidecarProxy, que forwardea al
+	// cloud con el sk_live_* — ver el registro de rutas más abajo. El GET
+	// de status sí sigue local (lee el SQLite sincronizado).
 	whatsappStatus := notiApp.NewGetWhatsAppStatus(gymRepo, notificationRepo, uow)
 	listTemplates := notiApp.NewListTemplates(templateRepo, uow)
 	updateTemplate := notiApp.NewUpdateTemplate(templateRepo, uow, recorder)
@@ -481,7 +485,9 @@ func main() {
 	// fingerprintCtrl + kioskCtrl stay for kiosk-loop and test callers.
 	biometricCtrl := chkCtrl.NewBiometricController(bioReader, registerFingerprint, checkinFingerprint, tokens).
 		WithSibling(checkinCtrl)
-	notificationsCtrl := notiCtrl.NewController(connectWhatsApp, disconnectWhatsApp, whatsappStatus, listTemplates, updateTemplate, broadcast, listNotifications, retryNotification, listOwnerAlerts, updateOwnerAlert, whatsappMock, tokens)
+	// Connect/Disconnect nil → el controller compartido NO registra las
+	// rutas del ceremony; las cubre el WhatsAppSidecarProxy (proxy al cloud).
+	notificationsCtrl := notiCtrl.NewController(nil, nil, whatsappStatus, listTemplates, updateTemplate, broadcast, listNotifications, retryNotification, listOwnerAlerts, updateOwnerAlert, whatsappMock, tokens)
 	notificationsCtrl.PlanGate = plusGate
 
 	// Suscripción — sidecar sólo expone el GET. El historial ahora SÍ vive
@@ -603,6 +609,15 @@ func main() {
 	kioskCtrl.RegisterRoutes(r)
 	biometricCtrl.RegisterRoutes(r)
 	notificationsCtrl.RegisterRoutes(r)
+	// Ceremony de WhatsApp (UC-037) → proxy al cloud con el sk_live_* del
+	// pareo. Owner-only local; el ceremony requiere internet por diseño
+	// (misma decisión que checkout). El GET de status quedó arriba, local.
+	whatsappProxy := notiCtrl.NewWhatsAppSidecarProxy(notiCtrl.WhatsAppSidecarProxy{
+		CloudURL: cloudURL,
+		UoW:      uow,
+		Tokens:   tokens,
+	})
+	whatsappProxy.RegisterRoutes(r)
 	reportsController.RegisterRoutes(r)
 	challengeCtrl.RegisterRoutes(r)
 	subscriptionCtrl.RegisterReadOnlyRoutes(r)

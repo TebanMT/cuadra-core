@@ -241,6 +241,14 @@ var SyncedTables = []EntityTable{
 		},
 	},
 	{
+		// provider_message_id (SID de Twilio) queda fuera de Columns a
+		// propósito: es correlación cloud-only del StatusCallback
+		// (GetByProviderMessageID en process_webhook) y el desktop no lo usa.
+		// Incluirlo lo expondría a que un push stale del sidecar (retry manual
+		// lo limpia localmente, filas pre-fix nunca lo tuvieron) lo pise con
+		// NULL en el cloud y rompa la reconciliación del webhook. Los payloads
+		// de ambos lados (enqueueNotification / emitNotificationToSync) sí lo
+		// traen — el apply lo descarta, forward-compat si algún día se agrega.
 		Type:  "notification_queue",
 		Table: "notification_queue",
 		Columns: []string{

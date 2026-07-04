@@ -502,3 +502,126 @@ func TestRecordEvent_MissingExternalID(t *testing.T) {
 		t.Fatal("expected validation error for empty external_id")
 	}
 }
+
+// ── Sync touch (bug jul-2026: el status pagado no llegaba al sidecar) ────
+//
+// Los webhooks escriben la tabla gyms cloud-side sin pasar por el push
+// pipeline; sin el TouchGym la fila nunca entra al pull incremental y el
+// desktop se queda mostrando el trial. Estos tests fijan CUÁNDO se bumpea:
+// todo evento que cambia la suscripción sí, voucher_* y replays no.
+
+type fakeSyncTouch struct{ touched []uuid.UUID }
+
+func (f *fakeSyncTouch) TouchGym(_ context.Context, _ sharedDomain.Transaction, gymID uuid.UUID) error {
+	f.touched = append(f.touched, gymID)
+	return nil
+}
+
+func TestRecordEvent_Activate_TouchesGymSync(t *testing.T) {
+	gyms, gymID := newTrialGym(t)
+	events := &fakeEvents{}
+	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	uc := newRecordEvent(t, gyms, events, now)
+	touch := &fakeSyncTouch{}
+	uc.SyncTouch = touch
+
+	_, err := uc.Execute(context.Background(), RecordEventInput{
+		GymID:      gymID,
+		Provider:   subDomain.ProviderStripe,
+		Type:       subDomain.EventActivated,
+		ExternalID: "evt_touch_1",
+		Plan:       gymDomain.PlanStandardMonthly,
+		OccurredAt: now,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(touch.touched) != 1 || touch.touched[0] != gymID {
+		t.Fatalf("TouchGym llamadas = %v, want exactamente [%s]", touch.touched, gymID)
+	}
+}
+
+func TestRecordEvent_CancelledYTrialExtended_TouchesGymSync(t *testing.T) {
+	cases := []struct {
+		name string
+		in   RecordEventInput
+	}{
+		{"cancelled", RecordEventInput{
+			Provider: subDomain.ProviderStripe, Type: subDomain.EventCancelled,
+			ExternalID: "evt_cancel",
+		}},
+		{"trial_extended", RecordEventInput{
+			Provider: subDomain.ProviderManual, Type: subDomain.EventTrialExtended,
+			ExternalID: "evt_extend", RawPayload: map[string]any{"days": float64(7)},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gyms, gymID := newTrialGym(t)
+			events := &fakeEvents{}
+			now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+			uc := newRecordEvent(t, gyms, events, now)
+			touch := &fakeSyncTouch{}
+			uc.SyncTouch = touch
+
+			tc.in.GymID = gymID
+			tc.in.OccurredAt = now
+			if _, err := uc.Execute(context.Background(), tc.in); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(touch.touched) != 1 {
+				t.Fatalf("TouchGym llamadas = %d, want 1", len(touch.touched))
+			}
+		})
+	}
+}
+
+func TestRecordEvent_VoucherEmitted_NoTouch(t *testing.T) {
+	gyms, gymID := newTrialGym(t)
+	events := &fakeEvents{}
+	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	uc := newRecordEvent(t, gyms, events, now)
+	touch := &fakeSyncTouch{}
+	uc.SyncTouch = touch
+
+	_, err := uc.Execute(context.Background(), RecordEventInput{
+		GymID:      gymID,
+		Provider:   subDomain.ProviderMercadoPago,
+		Type:       subDomain.EventVoucherEmitted,
+		ExternalID: "evt_voucher",
+		OccurredAt: now,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(touch.touched) != 0 {
+		t.Fatalf("voucher_emitted no cambia status — TouchGym llamadas = %d, want 0", len(touch.touched))
+	}
+}
+
+func TestRecordEvent_IdempotentReplay_NoTouch(t *testing.T) {
+	gyms, gymID := newTrialGym(t)
+	events := &fakeEvents{}
+	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	uc := newRecordEvent(t, gyms, events, now)
+	touch := &fakeSyncTouch{}
+	uc.SyncTouch = touch
+
+	in := RecordEventInput{
+		GymID:      gymID,
+		Provider:   subDomain.ProviderStripe,
+		Type:       subDomain.EventActivated,
+		ExternalID: "evt_replay",
+		Plan:       gymDomain.PlanStandardMonthly,
+		OccurredAt: now,
+	}
+	if _, err := uc.Execute(context.Background(), in); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if _, err := uc.Execute(context.Background(), in); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if len(touch.touched) != 1 {
+		t.Fatalf("el replay idempotente no debe re-bumpear — TouchGym llamadas = %d, want 1", len(touch.touched))
+	}
+}

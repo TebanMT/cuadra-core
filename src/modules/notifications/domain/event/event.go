@@ -3,6 +3,8 @@
 package event
 
 import (
+	"bytes"
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -61,7 +63,7 @@ func NewStatusEvent(
 		Status:            &s,
 		ErrorCode:         errorCode,
 		ErrorMessage:      errorMessage,
-		RawPayload:        rawPayload,
+		RawPayload:        ensureJSONPayload(rawPayload),
 		ReceivedAt:        now,
 	}
 }
@@ -79,9 +81,34 @@ func NewIncomingEvent(
 		GymID:             gymID,
 		ProviderMessageID: providerMessageID,
 		EventType:         EventTypeIncoming,
-		RawPayload:        rawPayload,
+		RawPayload:        ensureJSONPayload(rawPayload),
 		ReceivedAt:        now,
 	}
+}
+
+// ensureJSONPayload garantiza el invariante de whatsapp_events.raw_payload
+// — JSONB NOT NULL en postgres, TEXT CHECK(json_valid) en sqlite. Twilio
+// manda form-urlencoded (no JSON); guardar esos bytes crudos rollbackeaba
+// el INSERT con 22P02 y el webhook entero respondía 500 en loop (bug
+// jul-2026). El caller idealmente ya pasa JSON (el controller marshalea el
+// form parseado); esto es la red de seguridad para que un payload no-JSON
+// degrade a {"raw": "..."} en vez de tirar el evento. Vacío → "{}" (la
+// columna es NOT NULL).
+func ensureJSONPayload(raw []byte) []byte {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return []byte("{}")
+	}
+	if json.Valid(trimmed) {
+		return trimmed
+	}
+	wrapped, err := json.Marshal(map[string]string{"raw": string(raw)})
+	if err != nil {
+		// Marshal de map[string]string no puede fallar en la práctica;
+		// defensivo para no violar el NOT NULL.
+		return []byte("{}")
+	}
+	return wrapped
 }
 
 // IsTerminalFailure reports whether the status indicates we should stop

@@ -46,12 +46,33 @@ type RecordEventOutput struct {
 	Applied bool
 }
 
+// GymSyncToucher bumpea la fila del gym en el journal de sync del cloud
+// (sync_entities.server_updated_at) para que el próximo pull INCREMENTAL de
+// los sidecars la incluya. Los cambios de suscripción son cloud-authoritative
+// (webhooks Stripe/MP) y escriben la tabla `gyms` sin pasar por el push
+// pipeline — sin este touch, la fila nunca entra al delta y el desktop se
+// queda con el status viejo hasta un full sync (bug jul-2026: dueño paga,
+// cloud queda active, desktop sigue mostrando "te quedan X días de prueba").
+//
+// Basta bumpear el timestamp — NO se re-serializa el payload: la
+// augmentation del pull (gymCanonicalAugmentExpr en shared/sync) inyecta
+// subscription_plan/status/trial_ends_at/subscription_ends_at VIVOS de la
+// tabla gyms al construir cada payload.
+//
+// Nil en el binario sidecar y en tests unitarios (el journal sólo existe en
+// el cloud) — mismo patrón que ProcessWebhook.OptOut.
+type GymSyncToucher interface {
+	TouchGym(ctx context.Context, tx sharedDomain.Transaction, gymID uuid.UUID) error
+}
+
 type RecordEvent struct {
 	Events  subDomain.EventRepository
 	Gyms    gymRepo.GymRepository
 	UoW     sharedDomain.UnitOfWork
 	Audit   audit.Recorder
 	NowFunc func() time.Time
+	// SyncTouch (opcional; se cablea sólo en cmd/server). Ver GymSyncToucher.
+	SyncTouch GymSyncToucher
 }
 
 func NewRecordEvent(events subDomain.EventRepository, gyms gymRepo.GymRepository,
@@ -113,6 +134,11 @@ func (uc *RecordEvent) Execute(ctx context.Context, in RecordEventInput) (Record
 			return nil
 		}
 
+		// subscriptionChanged: el evento tocó el estado de suscripción del
+		// gym (status / plan / fechas) → hay que re-mandar la fila del gym
+		// a los sidecars vía el touch de sync_entities. Los eventos
+		// voucher_* NO cambian nada del gym a propósito y no bumpean.
+		subscriptionChanged := false
 		switch in.Type {
 		case subDomain.EventActivated, subDomain.EventRenewed:
 			plan := in.Plan
@@ -125,10 +151,13 @@ func (uc *RecordEvent) Execute(ctx context.Context, in RecordEventInput) (Record
 			if err := gym.ActivateSubscription(plan, in.PeriodEndsAt, now); err != nil {
 				return err
 			}
+			subscriptionChanged = true
 		case subDomain.EventPastDue:
 			gym.MarkPastDue(now)
+			subscriptionChanged = true
 		case subDomain.EventCancelled:
 			gym.Cancel(now)
+			subscriptionChanged = true
 		case subDomain.EventTrialExtended:
 			// Plan field doubles as days-to-extend (string-typed because the
 			// canonical Plan slot here would be empty). Webhook never emits
@@ -140,6 +169,7 @@ func (uc *RecordEvent) Execute(ctx context.Context, in RecordEventInput) (Record
 				}
 			}
 			gym.ExtendTrial(days, now)
+			subscriptionChanged = true
 		case subDomain.EventVoucherEmitted, subDomain.EventVoucherExpired:
 			// No-op sobre el gym a propósito. Estos eventos sólo dejan
 			// rastro en subscription_events para que el dashboard pueda
@@ -165,6 +195,14 @@ func (uc *RecordEvent) Execute(ctx context.Context, in RecordEventInput) (Record
 		}
 		if _, err := uc.Gyms.Update(tx, gym); err != nil {
 			return sharedDomain.NewUnexpectedError(err)
+		}
+		// Mismo tx que el Update: si el touch falla, todo rollbackea y el
+		// provider reintenta el webhook — nunca un gym activo en la tabla
+		// con un journal que no lo propaga.
+		if subscriptionChanged && uc.SyncTouch != nil {
+			if err := uc.SyncTouch.TouchGym(ctx, tx, gym.ID); err != nil {
+				return sharedDomain.NewUnexpectedError(err)
+			}
 		}
 
 		eventID := uuid.New()

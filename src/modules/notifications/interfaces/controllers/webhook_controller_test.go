@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha1"
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	eventDomain "github.com/cuadra/cuadra-core/src/modules/notifications/domain/event"
 	"github.com/cuadra/cuadra-core/src/modules/notifications/interfaces/controllers"
 )
 
@@ -113,15 +115,73 @@ func TestWebhookSignature_MissingHeaderRejected(t *testing.T) {
 	}
 }
 
+// TestWebhook_TwilioFormBody_ForwardsValidJSONPayload: el StatusCallback real
+// de Twilio es application/x-www-form-urlencoded, NO JSON. El controller debe
+// entregar RawPayload como el form parseado y marshaleado a JSON — guardar el
+// body crudo en whatsapp_events.raw_payload (JSONB) era el 22P02 → 500 en
+// loop de jul-2026.
+func TestWebhook_TwilioFormBody_ForwardsValidJSONPayload(t *testing.T) {
+	r, process := newTestRouterWithProcess(t)
+
+	form := url.Values{}
+	form.Set("ChannelPrefix", "whatsapp")
+	form.Set("ApiVersion", "2010-04-01")
+	form.Set("MessageStatus", "sent")
+	form.Set("SmsSid", "SM3f2c1e8a9b7d6f5e4a3b2c1d0e9f8a7b")
+	form.Set("SmsStatus", "sent")
+	form.Set("To", "whatsapp:+5214421234567")
+	form.Set("From", "whatsapp:+14155238886")
+	form.Set("MessageSid", "SM3f2c1e8a9b7d6f5e4a3b2c1d0e9f8a7b")
+	form.Set("AccountSid", "ACa1b2c3d4e5f60718293a4b5c6d7e8f90")
+
+	signed := computeTwilioSignature(testAuthToken, testWebhookURL, form)
+	req := httptest.NewRequest(http.MethodPost, testWebhookURL, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Twilio-Signature", signed)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if len(process.Calls) != 1 {
+		t.Fatalf("Process.Execute llamado %d veces, want 1", len(process.Calls))
+	}
+	in := process.Calls[0]
+	if !json.Valid(in.RawPayload) {
+		t.Fatalf("RawPayload NO es JSON válido (iría a 22P02 en JSONB): %q", in.RawPayload)
+	}
+	var decoded map[string]string
+	if err := json.Unmarshal(in.RawPayload, &decoded); err != nil {
+		t.Fatalf("unmarshal RawPayload: %v", err)
+	}
+	// El callback se preserva completo para debug/cumplimiento.
+	if decoded["MessageStatus"] != "sent" || decoded["To"] != "whatsapp:+5214421234567" {
+		t.Errorf("payload no preservó el callback: %v", decoded)
+	}
+	// Y los campos estructurados siguen llegando parseados.
+	if in.EventType != eventDomain.EventTypeStatus ||
+		in.ProviderMessageID != "SM3f2c1e8a9b7d6f5e4a3b2c1d0e9f8a7b" ||
+		in.Status != "sent" {
+		t.Errorf("campos estructurados incorrectos: %+v", in)
+	}
+}
+
 // newTestRouter builds a controller wired with a noop ProcessWebhook (the
 // dependency is satisfied via a fake repo and uow that immediately return
 // (nil, nil) for the look-up paths exercised by the test).
 func newTestRouter(t *testing.T) *gin.Engine {
+	t.Helper()
+	r, _ := newTestRouterWithProcess(t)
+	return r
+}
+
+func newTestRouterWithProcess(t *testing.T) (*gin.Engine, *noopProcess) {
 	t.Helper()
 	process := newNoopProcess()
 	ctrl := controllers.NewWebhookController(process, testAuthToken, testWebhookURL)
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	ctrl.RegisterRoutes(r)
-	return r
+	return r, process
 }

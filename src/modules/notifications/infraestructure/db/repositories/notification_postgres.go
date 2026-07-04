@@ -33,6 +33,9 @@ func (r *NotificationPostgresRepository) Create(tx sharedDomain.Transaction, n *
 	if err := gormTx.Create(&row).Error; err != nil {
 		return nil, err
 	}
+	if err := emitNotificationToSync(gormTx, n); err != nil {
+		return nil, err
+	}
 	return notificationFromModel(&row)
 }
 
@@ -53,7 +56,77 @@ func (r *NotificationPostgresRepository) Update(tx sharedDomain.Transaction, n *
 	if err := gormTx.Model(&models.NotificationModel{}).Where("id = ?", n.ID).Updates(updates).Error; err != nil {
 		return nil, err
 	}
+	if err := emitNotificationToSync(gormTx, n); err != nil {
+		return nil, err
+	}
 	return n, nil
+}
+
+// emitNotificationToSync espeja notification_queue en sync_entities — mismo
+// patrón que emitPromotionToSync. Los cambios de status cloud-side (MarkSent
+// del dispatcher, pending→failed del webhook, sent→failed de la
+// reconciliación de fallos terminales de Twilio) sólo llegan al sidecar si
+// sync_entities bumpea version + server_updated_at; sin este mirror el
+// desktop muestra el status stale para siempre.
+//
+// Upsert con payload COMPLETO (no delta): las filas creadas cloud-side
+// (expiry reminders del scheduler, re-encolados del projector como
+// enqueueWelcomeRenotify) no existen en sync_entities, así que un UPDATE-only
+// las dejaría invisibles — el ON CONFLICT las da de alta al primer toque.
+//
+// Timestamps en epoch-ms: el shape que ApplyPullChange aterriza en el SQLite
+// del sidecar (simétrico con enqueueNotification del repo SQLite).
+// idempotency_key y provider_message_id viajan por esa misma simetría, pero
+// NO están en tables.go Columns → el apply del sidecar los descarta a
+// propósito (provider_message_id es correlación cloud-only del StatusCallback
+// de Twilio; ver el comentario en SyncedTables).
+func emitNotificationToSync(g *gorm.DB, n *notiDomain.Notification) error {
+	msOrNil := func(t *time.Time) any {
+		if t == nil {
+			return nil
+		}
+		return t.UTC().UnixMilli()
+	}
+	payload, err := json.Marshal(map[string]any{
+		"id":                  n.ID.String(),
+		"gym_id":              n.GymID.String(),
+		"version":             n.Version,
+		"created_at":          n.CreatedAt.UTC().UnixMilli(),
+		"updated_at":          n.UpdatedAt.UTC().UnixMilli(),
+		"deleted_at":          msOrNil(n.DeletedAt),
+		"channel":             n.Channel,
+		"template_key":        n.TemplateKey,
+		"recipient_type":      n.RecipientType,
+		"recipient_id":        n.RecipientID.String(),
+		"recipient_address":   n.RecipientAddress,
+		"payload":             n.Payload,
+		"status":              n.Status,
+		"sent_at":             msOrNil(n.SentAt),
+		"failed_at":           msOrNil(n.FailedAt),
+		"error_message":       n.ErrorMessage,
+		"retry_count":         n.RetryCount,
+		"scheduled_for":       n.ScheduledFor.UTC().UnixMilli(),
+		"idempotency_key":     n.IdempotencyKey,
+		"provider_message_id": n.ProviderMessageID,
+	})
+	if err != nil {
+		return err
+	}
+	var deletedAt any
+	if n.DeletedAt != nil {
+		deletedAt = *n.DeletedAt
+	}
+	return g.Exec(`
+		INSERT INTO sync_entities
+			(gym_id, entity_type, entity_id, version, payload, server_updated_at, deleted_at)
+		VALUES (?, 'notification_queue', ?, ?, ?::jsonb, NOW(), ?)
+		ON CONFLICT (gym_id, entity_type, entity_id) DO UPDATE SET
+			version = EXCLUDED.version,
+			payload = EXCLUDED.payload,
+			server_updated_at = NOW(),
+			deleted_at = EXCLUDED.deleted_at`,
+		n.GymID, n.ID, n.Version, string(payload), deletedAt,
+	).Error
 }
 
 func (r *NotificationPostgresRepository) GetByID(tx sharedDomain.Transaction, id uuid.UUID) (*notiDomain.Notification, error) {

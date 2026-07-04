@@ -293,6 +293,16 @@ func (r *GymSQLiteRepository) HasMembershipType(tx sharedDomain.Transaction, gym
 // el DEFAULT cuando el INSERT bind-ea NULL explícito. Postgres aguanta
 // porque su columna sí cumple el DEFAULT en ese mismo escenario.
 //
+// Los campos whatsapp_business_* (phone, token_enc, connected_at) TAMPOCO
+// van en el payload, por la misma regla que billing: el ceremony de UC-037
+// es cloud-authoritative (jul-2026) — el desktop conecta vía el
+// WhatsAppSidecarProxy, el cloud persiste + TouchGym, y los valores vivos
+// viajan de regreso inyectados por gymCanonicalAugmentExpr en cada pull.
+// La alternativa (agregarlos aquí, sidecar-owned) se descartó porque
+// entrenca la autoridad en el lado sin provider real: un push stale de un
+// gym editado offline pisaría un connect hecho cloud-side — exactamente el
+// bug del subscription_plan rebotando a "trial" descrito arriba.
+//
 // Si en algún momento el sidecar necesita propagar info de billing al
 // cloud (improbable — el cloud siempre se entera primero por webhook),
 // hay que rediseñar este contrato, no agregar campos aquí.
