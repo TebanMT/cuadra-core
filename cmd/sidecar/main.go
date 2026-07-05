@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -655,10 +656,22 @@ func main() {
 	go agent.Run(syncCtx)
 
 	port := envOrDefault("SIDECAR_PORT", "9090")
+	// Bindear ANTES de anunciar. Imprimir LISTENING_ON con el puerto aún
+	// sin reservar producía un falso "ready": el SidecarManager de Tauri
+	// marca el sidecar como listo al ver la línea, y si el bind fallaba
+	// después (típico: huérfano de un update fallido reteniendo 9090) el
+	// FE apuntaba durante esa ventana al proceso VIEJO que sí contesta en
+	// ese puerto. Con net.Listen primero, un puerto ocupado es un fallo
+	// inmediato y limpio (exit → el manager reintenta/reporta) y el
+	// anuncio nunca miente.
+	ln, err := net.Listen("tcp", "127.0.0.1:"+port)
+	if err != nil {
+		log.Fatalf("bind 127.0.0.1:%s: %v", port, err)
+	}
 	// ADR-003 §2.2: print the port to stdout so Tauri can capture it.
 	fmt.Printf("LISTENING_ON=%s\n", port)
 	log.Printf("tinta-sidecar starting on 127.0.0.1:%s db=%s", port, dbPath)
-	if err := r.Run("127.0.0.1:" + port); err != nil {
+	if err := r.RunListener(ln); err != nil {
 		log.Fatalf("gin: %v", err)
 	}
 }
