@@ -269,6 +269,7 @@ func enqueueCashCloseEvent(stx *sharedDomain.SqlxTransaction, e *cashCloseDomain
 		"counted_cash":       counted,
 		"discrepancy_reason": reason,
 		"closed_by":          e.ClosedBy.String(),
+		"created_at":         e.CreatedAt.UnixMilli(),
 		"updated_at":         e.UpdatedAt.UnixMilli(),
 	})
 	if err != nil {

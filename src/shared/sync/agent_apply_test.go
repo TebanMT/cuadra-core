@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -156,16 +155,16 @@ func TestApplyPullChange_Gym_WithCreatedAt_Succeeds(t *testing.T) {
 	}
 }
 
-// TestApplyPullChange_Gym_MissingCreatedAt_FailsCleanly — pre-fix: el
-// payload omite created_at → ApplyPullChange devuelve el error de NOT NULL
-// (envuelto en el error de la transacción), sin panic. Pin-ea el bug
-// observado en el piloto y previene regresiones si enqueueGym vuelve a
-// omitir la columna.
-func TestApplyPullChange_Gym_MissingCreatedAt_FailsCleanly(t *testing.T) {
+// TestApplyPullChange_Gym_MissingCreatedAt_PreservesLocal — post-fix del
+// full-sync del piloto: un UPDATE cuyo payload omite created_at (enqueues
+// históricos) ya NO rompe NOT NULL — ApplyPullChange rellena created_at
+// con el valor LOCAL verdadero (la fila ya existe) y el resto de la fila
+// sí se actualiza.
+func TestApplyPullChange_Gym_MissingCreatedAt_PreservesLocal(t *testing.T) {
 	gymID := uuid.New()
 	db, uow := freshSidecarDBWithGym(t, gymID)
 
-	// Captura el created_at original para comprobar que no se sobreescribió.
+	// Captura el created_at original para comprobar que se preservó.
 	var originalCreatedAt int64
 	if err := db.Get(&originalCreatedAt, `SELECT created_at FROM gyms WHERE id = ?`, gymID); err != nil {
 		t.Fatalf("read original: %v", err)
@@ -182,21 +181,98 @@ func TestApplyPullChange_Gym_MissingCreatedAt_FailsCleanly(t *testing.T) {
 	err := uow.Command(context.Background(), func(tx sharedDomain.Transaction) error {
 		return syncpkg.ApplyPullChange(context.Background(), tx, change)
 	})
-	if err == nil {
-		t.Fatalf("expected NOT NULL error, got nil")
-	}
-	if !strings.Contains(err.Error(), "NOT NULL") || !strings.Contains(err.Error(), "created_at") {
-		t.Errorf("expected NOT NULL/created_at in error, got: %v", err)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
 	}
 
-	// Verifica que la transacción rollback-eó: el created_at sigue siendo
-	// el original del bootstrap, no NULL.
-	var after int64
-	if err := db.Get(&after, `SELECT created_at FROM gyms WHERE id = ?`, gymID); err != nil {
-		t.Fatalf("read after: %v", err)
+	var row struct {
+		CreatedAt int64  `db:"created_at"`
+		Name      string `db:"name"`
+		Version   int    `db:"version"`
 	}
-	if after != originalCreatedAt {
-		t.Errorf("created_at mutated despite rollback: was %d, now %d", originalCreatedAt, after)
+	if err := db.Get(&row, `SELECT created_at, name, version FROM gyms WHERE id = ?`, gymID); err != nil {
+		t.Fatalf("read gym: %v", err)
+	}
+	if row.Version != 3 || row.Name != "Gym Pull" {
+		t.Errorf("update no aplicó: version=%d name=%q", row.Version, row.Name)
+	}
+	// created_at local NO fue pisado por NULL ni por un fallback inventado.
+	if row.CreatedAt != originalCreatedAt {
+		t.Errorf("created_at mutated: was %d, now %d", originalCreatedAt, row.CreatedAt)
+	}
+}
+
+// TestApplyPullChange_MembershipType_MissingCreatedAt_InsertFallback — el
+// crash exacto del piloto: sidecar FRESCO (full-sync) inserta un
+// membership_types cuyo payload guardado en sync_entities nunca trajo
+// created_at (enqueueMT pre-fix). El apply debe completar usando el
+// updated_at ORIGINAL del payload como created_at — no NULL, no error.
+func TestApplyPullChange_MembershipType_MissingCreatedAt_InsertFallback(t *testing.T) {
+	gymID := uuid.New()
+	db, uow := freshSidecarDBWithGym(t, gymID)
+
+	mtID := uuid.New()
+	wireUpdatedMs := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC).UnixMilli()
+	payload, err := json.Marshal(map[string]any{
+		// Espejo de enqueueMT pre-fix: sin created_at y sin enrollment_fee/
+		// maintenance_fee (payload anterior a la feature de cuotas — el
+		// DEFAULT 0 del esquema debe aplicar, cosa que el NULL explícito
+		// del builder viejo derrotaba). maintenance_frequency viaja como ""
+		// (así serializa enqueueMT un puntero nil) — el CHECK del esquema
+		// exige NULL cuando no hay cuota; pin del espejo de
+		// nullifyEmptyString en extractColumnValue.
+		"id":                    mtID.String(),
+		"gym_id":                gymID.String(),
+		"version":               1,
+		"name":                  "Normal",
+		"price":                 450.0, // pesos en el wire; el apply convierte a centavos
+		"duration_days":         30,
+		"maintenance_frequency": "",
+		"active":                true,
+		"updated_at":            wireUpdatedMs,
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	change := syncpkg.PullChange{
+		EntityType:      "membership_types",
+		EntityID:        mtID.String(),
+		Version:         1,
+		Payload:         payload,
+		ServerUpdatedAt: time.Now().UTC(),
+	}
+	err = uow.Command(context.Background(), func(tx sharedDomain.Transaction) error {
+		return syncpkg.ApplyPullChange(context.Background(), tx, change)
+	})
+	if err != nil {
+		t.Fatalf("apply (full-sync insert): %v", err)
+	}
+
+	var row struct {
+		CreatedAt     int64   `db:"created_at"`
+		Price         int64   `db:"price"`
+		EnrollmentFee int64   `db:"enrollment_fee"`
+		Freq          *string `db:"maintenance_frequency"`
+	}
+	if err := db.Get(&row, `SELECT created_at, price, enrollment_fee, maintenance_frequency FROM membership_types WHERE id = ?`, mtID); err != nil {
+		t.Fatalf("read membership_type: %v", err)
+	}
+	// Fallback = updated_at original del payload (no el server_updated_at,
+	// que es posterior; no NULL).
+	if row.CreatedAt != wireUpdatedMs {
+		t.Errorf("created_at = %d, want fallback %d", row.CreatedAt, wireUpdatedMs)
+	}
+	if row.Price != 45000 {
+		t.Errorf("price = %d centavos, want 45000", row.Price)
+	}
+	// Llave ausente → columna omitida → DEFAULT 0 del esquema.
+	if row.EnrollmentFee != 0 {
+		t.Errorf("enrollment_fee = %d, want DEFAULT 0", row.EnrollmentFee)
+	}
+	// "" del wire → NULL (espejo de nullifyEmptyString); el CHECK del
+	// esquema lo exige cuando maintenance_fee = 0.
+	if row.Freq != nil {
+		t.Errorf("maintenance_frequency = %q, want NULL", *row.Freq)
 	}
 }
 

@@ -187,6 +187,7 @@ func enqueueFingerprint(stx *sharedDomain.SqlxTransaction, f *fpDomain.MemberFin
 		"template_format":    f.TemplateFormat,
 		"quality_score":      f.QualityScore,
 		"registered_by":      f.RegisteredBy.String(),
+		"created_at":         f.CreatedAt.UnixMilli(),
 		"updated_at":         f.UpdatedAt.UnixMilli(),
 		"deleted_at_ms":      deletedAtMillis(f.DeletedAt),
 	})
