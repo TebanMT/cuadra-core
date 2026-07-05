@@ -227,6 +227,7 @@ func enqueueMT(stx *sharedDomain.SqlxTransaction, mt *mtDomain.MembershipType) e
 		"maintenance_fee":       mt.MaintenanceFee,
 		"maintenance_frequency": freq,
 		"active":                mt.Active,
+		"created_at":            mt.CreatedAt.UnixMilli(),
 		"updated_at":            mt.UpdatedAt.UnixMilli(),
 	})
 	if err != nil {

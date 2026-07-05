@@ -40,6 +40,7 @@ func (r *TransferSQLiteRepository) RecordTransfer(tx sharedDomain.Transaction, g
 			"from_user_id": fromUserID.String(),
 			"to_user_id":   toUserID.String(),
 			"executed_at":  nowMs,
+			"created_at":   nowMs,
 			"updated_at":   nowMs,
 		})
 		_ = stx.EnqueueSync(context.Background(), "gym_ownership_transfers", id.String(), "upsert", payload, 1)

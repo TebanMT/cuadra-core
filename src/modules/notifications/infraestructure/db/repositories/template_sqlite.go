@@ -173,6 +173,7 @@ func enqueueTemplate(stx *sharedDomain.SqlxTransaction, o *tplDomain.Override) e
 		"template_key": o.TemplateKey,
 		"body":         o.Body,
 		"enabled":      o.Enabled,
+		"created_at":   o.CreatedAt.UTC().UnixMilli(),
 		"updated_at":   o.UpdatedAt.UTC().UnixMilli(),
 	})
 	if err != nil {

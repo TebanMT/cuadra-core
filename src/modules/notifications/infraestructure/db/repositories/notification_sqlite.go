@@ -317,6 +317,7 @@ func enqueueNotification(stx *sharedDomain.SqlxTransaction, n *notiDomain.Notifi
 		"scheduled_for":       n.ScheduledFor.UTC().UnixMilli(),
 		"idempotency_key":     ptrOrEmpty(n.IdempotencyKey),
 		"provider_message_id": ptrOrEmpty(n.ProviderMessageID),
+		"created_at":          n.CreatedAt.UTC().UnixMilli(),
 		"updated_at":          n.UpdatedAt.UTC().UnixMilli(),
 	})
 	if err != nil {
