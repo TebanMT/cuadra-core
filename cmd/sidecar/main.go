@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -655,10 +656,22 @@ func main() {
 	go agent.Run(syncCtx)
 
 	port := envOrDefault("SIDECAR_PORT", "9090")
+	// Bindear ANTES de anunciar. Imprimir LISTENING_ON con el puerto aún
+	// sin reservar producía un falso "ready": el SidecarManager de Tauri
+	// marca el sidecar como listo al ver la línea, y si el bind fallaba
+	// después (típico: huérfano de un update fallido reteniendo 9090) el
+	// FE apuntaba durante esa ventana al proceso VIEJO que sí contesta en
+	// ese puerto. Con net.Listen primero, un puerto ocupado es un fallo
+	// inmediato y limpio (exit → el manager reintenta/reporta) y el
+	// anuncio nunca miente.
+	ln, err := net.Listen("tcp", "127.0.0.1:"+port)
+	if err != nil {
+		log.Fatalf("bind 127.0.0.1:%s: %v", port, err)
+	}
 	// ADR-003 §2.2: print the port to stdout so Tauri can capture it.
 	fmt.Printf("LISTENING_ON=%s\n", port)
 	log.Printf("tinta-sidecar starting on 127.0.0.1:%s db=%s", port, dbPath)
-	if err := r.Run("127.0.0.1:" + port); err != nil {
+	if err := r.RunListener(ln); err != nil {
 		log.Fatalf("gin: %v", err)
 	}
 }
@@ -777,14 +790,22 @@ func defaultSidecarDataDir() string {
 }
 
 // startParentWatcher launches a goroutine that exits the process when
-// our parent PID changes. On Unix, when our original parent exits we
-// get reparented to PID 1 (init / launchd); on Windows the parent PID
-// becomes invalid (os.FindProcess + Signal returns an error). Either
-// way we treat it as "desktop is gone" and shut ourselves down.
+// our parent (the Tauri desktop) is gone. La detección es per-OS
+// (parentwatch_unix.go / parentwatch_windows.go):
 //
-// We use a 2s polling interval — fast enough that the next desktop
-// launch sees a free port within a couple of seconds, slow enough
-// to be invisible in CPU usage.
+//   - Unix: poll de os.Getppid() cada 2s — al morir el padre nos
+//     re-parenta init/launchd y el PPID cambia.
+//   - Windows: NO hay reparenting — Getppid devuelve el PID viejo
+//     congelado para siempre, así que el poll de PPID nunca detecta
+//     nada (bug histórico: el sidecar huérfano vivía indefinido
+//     reteniendo el puerto 9090 Y bloqueando tinta-sidecar.exe, que
+//     hacía fallar el NSIS del auto-update con "error opening file
+//     for writing"). Ahí abrimos un HANDLE al padre y esperamos
+//     WaitForSingleObject — señal inmediata y sin polling.
+//
+// Este watcher es la red de seguridad para crash/process::exit del
+// desktop (el updater de Tauri sale así, sin RunEvent::Exit); el camino
+// limpio es el shutdown() que el desktop manda al cerrar.
 func startParentWatcher() {
 	originalParent := os.Getppid()
 	if originalParent <= 1 {
@@ -793,20 +814,13 @@ func startParentWatcher() {
 		return
 	}
 	go func() {
-		for {
-			time.Sleep(2 * time.Second)
-			currentParent := os.Getppid()
-			if currentParent != originalParent || currentParent <= 1 {
-				log.Printf("parent PID changed (%d → %d), shutting down sidecar",
-					originalParent, currentParent)
-				// os.Exit instead of log.Fatal so deferred CloseSQLite
-				// runs — actually no, os.Exit also skips defers. We
-				// rely on SQLite's WAL recovery on next boot to clean
-				// up. Exit fast: if we hang here a launchd-reaped
-				// orphan would still hold the port.
-				os.Exit(0)
-			}
-		}
+		waitForParentExit(originalParent)
+		log.Printf("parent process %d gone, shutting down sidecar", originalParent)
+		// os.Exit skips defers — nos apoyamos en el WAL recovery de
+		// SQLite al siguiente boot. Exit rápido: si colgamos acá, el
+		// huérfano retiene el puerto y (en Windows) el .exe que el
+		// instalador del update necesita sobreescribir.
+		os.Exit(0)
 	}()
 }
 
