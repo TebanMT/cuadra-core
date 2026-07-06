@@ -48,6 +48,18 @@ var moneyColumns = map[string]map[string]bool{
 	"applied_promotions": {"discount_amount": true},
 }
 
+// keepEmptyStringColumns — espejo sidecar de notNullStringColumns del
+// projector (cloud): columnas NOT NULL cuyo "" es un valor VÁLIDO del
+// dominio y NO debe colapsar a NULL en el apply. El caso que lo estrenó:
+// notification_templates.body — "" significa "usa el texto default de la
+// librería" (Standard sólo mueve el switch, enqueueTemplate siempre emite
+// ""); anularlo rompía el pull/full-sync de cualquier gym con un toggle
+// ("NOT NULL constraint failed: notification_templates.body").
+var keepEmptyStringColumns = map[string]map[string]bool{
+	"users":                  {"email": true},
+	"notification_templates": {"body": true},
+}
+
 // isMoneyColumn reporta si (table, col) guarda PESOS en el wire pero CENTAVOS
 // en SQLite. promotions.value y applied_promotions.value_snapshot son dinero
 // SÓLO cuando el kind es fixed_amount (en percent es 0-100, en extra_days son
@@ -350,10 +362,14 @@ func extractColumnValue(pl map[string]any, table, col string) any {
 	// String vacío → NULL: espejo exacto de nullifyEmptyString del projector
 	// (cloud). Los enqueues serializan punteros-nil de strings como "" (p.ej.
 	// maintenance_frequency en enqueueMT) y los CHECK del esquema exigen NULL
-	// — chk de membership_types rechaza (maintenance_fee=0 AND freq=''). El
-	// mismo razonamiento del projector aplica acá: ningún enqueue emite ""
-	// para una columna string NOT NULL.
+	// — chk de membership_types rechaza (maintenance_fee=0 AND freq='').
+	// Excepciones en keepEmptyStringColumns: columnas NOT NULL donde "" es
+	// un valor válido del dominio (espejo de notNullStringColumns del
+	// projector).
 	if s, isStr := v.(string); isStr && s == "" {
+		if keepEmptyStringColumns[table][col] {
+			return s
+		}
 		return nil
 	}
 	// Timestamp como string RFC3339 → epoch-ms: espejo de coerceTimestamp

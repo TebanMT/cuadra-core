@@ -226,6 +226,7 @@ func (n *Notification) MarkHeld(reason string, now time.Time) {
 //   - RecipientAddress + Payload: el caso típico del reenvío es "el socio
 //     tenía mal (o no tenía) el teléfono y ya se lo corrigieron" — debe
 //     salir con los datos de HOY, no con los del cobro.
+//
 // RetryCount se conserva como señal histórica, igual que en el retry.
 func (n *Notification) RearmForResend(recipientAddress string, payload map[string]string, now time.Time) {
 	n.Status = StatusPending

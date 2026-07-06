@@ -260,6 +260,23 @@ var SyncedTables = []EntityTable{
 		},
 	},
 	{
+		// notification_templates — overrides por gym (switch on/off + body
+		// Plus). El sidecar los encolaba desde siempre (enqueueTemplate en
+		// template_sqlite.go) pero el tipo NUNCA estuvo registrado aquí →
+		// el push moría con rejected_unknown_type y el cloud jamás se
+		// enteraba de los toggles. Consecuencia visible (dogfood jul-2026):
+		// deshabilitar "recibo de membresía" en Ajustes → Mensajes no
+		// hacía nada — el ÚNICO lugar que respeta enabled es el dispatcher
+		// del CLOUD (dispatch_notification.go, lookupOverride), que leía su
+		// tabla vacía. Caso 7 del patrón de propagación del sync.
+		Type:  "notification_templates",
+		Table: "notification_templates",
+		Columns: []string{
+			"id", "gym_id", "version", "created_at", "updated_at", "deleted_at",
+			"template_key", "body", "enabled",
+		},
+	},
+	{
 		Type:  "audit_log",
 		Table: "audit_log",
 		Columns: []string{
