@@ -62,16 +62,24 @@ type EnqueueReceipt struct {
 	Notifications notiRepo.NotificationRepository
 	Gyms          gymRepo.GymRepository
 	Members       memRepo.MemberRepository
-	UoW           sharedDomain.UnitOfWork
+	// Templates — toggle del gym (Ajustes → Mensajes). Si el dueño
+	// desactivó el template del comprobante, no se encola nada. Nil = sin
+	// gate (tests viejos); los mains lo cablean siempre.
+	Templates notiRepo.TemplateOverrideRepository
+	UoW       sharedDomain.UnitOfWork
 }
 
 func NewEnqueueReceipt(
 	notifications notiRepo.NotificationRepository,
 	gyms gymRepo.GymRepository,
 	members memRepo.MemberRepository,
+	templates notiRepo.TemplateOverrideRepository,
 	uow sharedDomain.UnitOfWork,
 ) *EnqueueReceipt {
-	return &EnqueueReceipt{Notifications: notifications, Gyms: gyms, Members: members, UoW: uow}
+	return &EnqueueReceipt{
+		Notifications: notifications, Gyms: gyms, Members: members,
+		Templates: templates, UoW: uow,
+	}
 }
 
 func (uc *EnqueueReceipt) Execute(ctx context.Context, in EnqueueReceiptInput) (*EnqueueReceiptOutput, error) {
@@ -83,6 +91,31 @@ func (uc *EnqueueReceipt) Execute(ctx context.Context, in EnqueueReceiptInput) (
 		if err != nil {
 			return err
 		}
+
+		// Toggle del gym (Ajustes → Mensajes): con el template del
+		// comprobante desactivado no se encola NADA — ni en el cobro
+		// automático ni en el reenvío manual. El gate del dispatcher cloud
+		// ya lo bloqueaba al despachar ("template deshabilitado por el
+		// gym"), pero eso llegaba tarde para el operador: el botón "Enviar
+		// por WhatsApp" cantaba "en camino" y el envío moría después en
+		// silencio. Chequear aquí (el sidecar tiene la copia local del
+		// toggle, que es donde el dueño lo edita) da la verdad al instante
+		// y evita llenar la bitácora de filas failed. Se chequea antes que
+		// el teléfono a propósito: "la función está apagada" domina sobre
+		// "a este socio le falta teléfono".
+		templateKey := receiptTemplateForConcept(in.Concept)
+		if uc.Templates != nil {
+			override, err := uc.Templates.GetByGymAndKey(tx, in.GymID, templateKey)
+			if err != nil {
+				return sharedDomain.NewUnexpectedError(err)
+			}
+			if override != nil && !override.Enabled {
+				out.Skipped = true
+				out.SkippedReason = "template_disabled"
+				return nil
+			}
+		}
+
 		member, err := uc.Members.GetByID(tx, in.MemberID)
 		if err != nil {
 			return err
@@ -98,7 +131,6 @@ func (uc *EnqueueReceipt) Execute(ctx context.Context, in EnqueueReceiptInput) (
 			return nil
 		}
 
-		templateKey := receiptTemplateForConcept(in.Concept)
 		gymName := ""
 		if gym.Name != nil {
 			gymName = *gym.Name

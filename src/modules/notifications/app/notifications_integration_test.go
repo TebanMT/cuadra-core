@@ -159,7 +159,10 @@ func newFixture(t *testing.T) *fixture {
 	}
 
 	folios := folioSvc.NewGenerator(paymentRepo)
-	enqueueReceipt := notiApp.NewEnqueueReceipt(notificationRepo, gymRepo, memberRepo, uow)
+	enqueueReceipt := notiApp.NewEnqueueReceipt(
+		notificationRepo, gymRepo, memberRepo,
+		notiRepoLite.NewTemplateOverrideSQLiteRepository(), uow,
+	)
 	subscriber := notiApp.NewBillingEventSubscriber(enqueueReceipt)
 	registerUC := billingApp.NewRegisterMembershipPayment(
 		paymentRepo, folios, memberSvc, memberRepo, uow, recorder, subscriber,

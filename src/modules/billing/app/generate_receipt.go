@@ -185,8 +185,14 @@ func (uc *SendReceipt) Execute(ctx context.Context, in SendReceiptInput) (*SendR
 		}, nil
 	case "skipped":
 		note := "No se pudo enviar el comprobante."
-		if outcome.Reason == "no_member_phone" {
+		switch outcome.Reason {
+		case "no_member_phone":
 			note = "El socio no tiene teléfono registrado. Agrégalo en su perfil y vuelve a intentar."
+		case "template_disabled":
+			// El dueño apagó el template del comprobante en Ajustes →
+			// Mensajes. Antes esto se descubría hasta el dispatcher del
+			// cloud y el operador veía un "en camino" mentiroso.
+			note = "Los comprobantes por WhatsApp están desactivados. Actívalos en Ajustes → Mensajes."
 		}
 		return &SendReceiptOutput{Status: "skipped", Note: note}, nil
 	default:

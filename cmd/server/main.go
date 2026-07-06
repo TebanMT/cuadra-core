@@ -280,7 +280,7 @@ func main() {
 	checkinOverride := chkApp.NewOverrideCheckin(memberSvc, checkinRepo, uow, recorder).WithGyms(gymRepo)
 
 	// ── Notifications (Sesión 7) ──────────────────────────────────────────
-	enqueueReceipt := notiApp.NewEnqueueReceipt(notificationRepo, gymRepo, memberRepo, uow)
+	enqueueReceipt := notiApp.NewEnqueueReceipt(notificationRepo, gymRepo, memberRepo, templateRepo, uow)
 	enqueueWelcomePin := notiApp.NewEnqueueWelcomePin(notificationRepo, gymRepo, memberRepo)
 	// Wire la seam de welcome-PIN en los use cases de members que asignan
 	// PIN. La notifications BC implementa el contrato; members lo usa sin

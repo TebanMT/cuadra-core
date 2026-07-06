@@ -13,6 +13,7 @@ import (
 	memRepo "github.com/cuadra/cuadra-core/src/modules/members/domain/repository"
 	notiDomain "github.com/cuadra/cuadra-core/src/modules/notifications/domain/notification"
 	notiRepo "github.com/cuadra/cuadra-core/src/modules/notifications/domain/repository"
+	tplDomain "github.com/cuadra/cuadra-core/src/modules/notifications/domain/template"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 )
 
@@ -52,6 +53,15 @@ func (f *fakeNotiRepo) Create(_ sharedDomain.Transaction, n *notiDomain.Notifica
 func (f *fakeNotiRepo) Update(_ sharedDomain.Transaction, n *notiDomain.Notification) (*notiDomain.Notification, error) {
 	f.updated = append(f.updated, n)
 	return n, nil
+}
+
+type fakeTemplateRepo struct {
+	notiRepo.TemplateOverrideRepository
+	byKey map[string]*tplDomain.Override
+}
+
+func (f *fakeTemplateRepo) GetByGymAndKey(_ sharedDomain.Transaction, _ uuid.UUID, key string) (*tplDomain.Override, error) {
+	return f.byKey[key], nil
 }
 
 type fakeGymRepo struct {
@@ -97,6 +107,8 @@ func receiptFixture(t *testing.T) (uc *EnqueueReceipt, notis *fakeNotiRepo, in E
 		&fakeMemberRepo{member: &memDomain.Member{
 			ID: memberID, GymID: gymID, FullName: "Rosa Robles", Phone: "5522334455",
 		}},
+		// Sin overrides — el default de todo template es enabled.
+		&fakeTemplateRepo{byKey: map[string]*tplDomain.Override{}},
 		fakeUoW{},
 	)
 	in = EnqueueReceiptInput{
@@ -235,5 +247,66 @@ func TestEnqueueReceipt_ResendSinTelefonoReportaSkip(t *testing.T) {
 	}
 	if len(notis.created) != 0 && len(notis.updated) != 0 {
 		t.Error("sin teléfono no debe encolar nada")
+	}
+}
+
+// disableTemplate apaga el template en el fake — equivale al toggle de
+// Ajustes → Mensajes en off (la copia local del sidecar, donde el dueño
+// lo edita).
+func disableTemplate(uc *EnqueueReceipt, key string) {
+	tpls := uc.Templates.(*fakeTemplateRepo)
+	tpls.byKey[key] = &tplDomain.Override{
+		ID: uuid.New(), TemplateKey: key, Enabled: false,
+	}
+}
+
+func TestEnqueueReceipt_ResendConTemplateApagadoReportaSkip(t *testing.T) {
+	uc, notis, in := receiptFixture(t)
+	in.Resend = true
+	disableTemplate(uc, "receipt_membership")
+
+	out, err := uc.Execute(context.Background(), in)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !out.Skipped || out.SkippedReason != "template_disabled" {
+		t.Errorf("toggle apagado → skip explícito template_disabled, got %+v", out)
+	}
+	if len(notis.created) != 0 || len(notis.updated) != 0 {
+		t.Error("con el template apagado no debe encolar ni re-armar nada")
+	}
+}
+
+func TestEnqueueReceipt_AutoConTemplateApagadoNoEncola(t *testing.T) {
+	uc, notis, in := receiptFixture(t)
+	disableTemplate(uc, "receipt_membership")
+
+	out, err := uc.Execute(context.Background(), in) // Resend=false
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !out.Skipped || out.SkippedReason != "template_disabled" {
+		t.Errorf("camino automático también respeta el toggle, got %+v", out)
+	}
+	if len(notis.created) != 0 {
+		t.Error("no debe crear filas — el dispatcher las marcaría failed y ensucian la bitácora")
+	}
+}
+
+func TestEnqueueReceipt_TemplateDeOtroConceptoApagadoNoAfecta(t *testing.T) {
+	uc, notis, in := receiptFixture(t)
+	// El toggle es por template: apagar el de PRODUCTO no bloquea el
+	// comprobante de MEMBRESÍA.
+	disableTemplate(uc, "receipt_product")
+
+	out, err := uc.Execute(context.Background(), in) // Concept: membership
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if out.Skipped {
+		t.Errorf("template de membresía sigue encendido, got skip %q", out.SkippedReason)
+	}
+	if len(notis.created) != 1 {
+		t.Errorf("debe encolar el recibo de membresía, created=%d", len(notis.created))
 	}
 }

@@ -307,7 +307,7 @@ func main() {
 	whatsappMock := notiWhatsApp.NewStdoutProvider()
 	emailMock := notiEmail.NewStdoutProvider()
 	// appBaseURL es la URL pública del frontend (página del comprobante).
-	enqueueReceipt := notiApp.NewEnqueueReceipt(notificationRepo, gymRepo, memberRepo, uow)
+	enqueueReceipt := notiApp.NewEnqueueReceipt(notificationRepo, gymRepo, memberRepo, templateRepo, uow)
 	enqueueWelcomePin := notiApp.NewEnqueueWelcomePin(notificationRepo, gymRepo, memberRepo)
 	createMember.WithWelcomeNotifier(enqueueWelcomePin)
 	createMember.WithReceiptNotifier(notiApp.NewFirstPaymentReceiptNotifier(enqueueReceipt))

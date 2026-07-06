@@ -45,8 +45,8 @@ func (NoopPublisher) PublishPaymentCompleted(context.Context, PaymentCompletedEv
 // (UC-020). Status: "queued" (se encoló un envío nuevo), "already_pending"
 // (el comprobante del pago sigue en la cola sin salir — no duplicamos),
 // "skipped" (no se puede enviar; Reason dice por qué: no_member_phone /
-// cross_gym). El copy para el operador lo arma SendReceipt — acá viaja
-// sólo el hecho.
+// cross_gym / template_disabled). El copy para el operador lo arma
+// SendReceipt — acá viaja sólo el hecho.
 type ReceiptResendOutcome struct {
 	Status string
 	Reason string
