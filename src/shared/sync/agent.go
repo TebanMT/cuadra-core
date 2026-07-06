@@ -509,6 +509,13 @@ func (a *Agent) handlePushResponse(ctx context.Context, batch []PushItem, resp *
 	}
 	return a.uow.Command(ctx, func(tx sharedDomain.Transaction) error {
 		stx := tx.(*sharedDomain.SqlxTransaction)
+		// Un batch con varios server_wins puede traer una cadena FK
+		// intra-tipo en orden adverso (misma razón que ApplyPullPage) —
+		// diferir las FKs al COMMIT la tolera. Per-transaction, sin efecto
+		// fuera de esta tx.
+		if _, err := stx.Exec(ctx, `PRAGMA defer_foreign_keys = ON`); err != nil {
+			return fmt.Errorf("defer_foreign_keys: %w", err)
+		}
 		nowMs := time.Now().UTC().UnixMilli()
 		for _, r := range resp.Results {
 			orig := itemByQID[r.QueueID]
@@ -543,7 +550,8 @@ func (a *Agent) handlePushResponse(ctx context.Context, batch []PushItem, resp *
 						ServerUpdatedAt: *r.ServerUpdatedAt,
 					}
 					if err := ApplyPullChange(ctx, tx, change); err != nil {
-						return err
+						return fmt.Errorf("apply %s/%s (version %d): %w",
+							change.EntityType, change.EntityID, change.Version, err)
 					}
 				}
 				_ = recordLocalConflict(ctx, stx, orig, r, "server_wins")
@@ -619,27 +627,44 @@ func (a *Agent) Pull(ctx context.Context) error {
 	a.mu.RLock()
 	since := a.state.LastPulledAt
 	a.mu.RUnlock()
+	// pending acumula páginas cuyo COMMIT falló por una cadena FK partida
+	// justo en el límite de página (p.ej. la membresía vieja con
+	// replaced_by al final de la página N, la nueva al inicio de la N+1 —
+	// improbable con page size real, pero determinista si pasa: reintentar
+	// la misma página sola re-lee el mismo corte y vuelve a fallar). En
+	// ese caso NO avanzamos last_pulled_at (la tx rollbackeó) y
+	// reintentamos la página UNIDA con la siguiente: con FKs diferidas
+	// (ApplyPullPage) el commit del lote unido cierra la cadena.
+	var pending []PullChange
 	for {
 		resp, err := a.getPull(ctx, since)
 		if err != nil {
 			return err
 		}
-		if len(resp.Changes) == 0 {
+		if len(resp.Changes) == 0 && len(pending) == 0 {
 			return nil
 		}
-		applyErr := a.uow.Command(ctx, func(tx sharedDomain.Transaction) error {
-			for _, ch := range resp.Changes {
-				if err := ApplyPullChange(ctx, tx, ch); err != nil {
-					return err
-				}
-			}
-			lastUpdate := resp.Changes[len(resp.Changes)-1].ServerUpdatedAt
-			return SetLastPulledAt(ctx, tx, lastUpdate)
+		pending = append(pending, resp.Changes...)
+		batch := pending
+		applyErr := ApplyPullPage(ctx, a.uow, batch, func(tx sharedDomain.Transaction) error {
+			return SetLastPulledAt(ctx, tx, batch[len(batch)-1].ServerUpdatedAt)
 		})
 		if applyErr != nil {
+			// El guard len(resp.Changes) > 0 evita loop infinito si el
+			// server reporta has_more con página vacía (since no avanzaría).
+			if isFKConstraintErr(applyErr) && resp.HasMore && len(resp.Changes) > 0 {
+				since = resp.Changes[len(resp.Changes)-1].ServerUpdatedAt
+				continue
+			}
+			if isFKConstraintErr(applyErr) {
+				// FK rota de verdad (el padre no existe en TODO el feed).
+				// SQLite no dice qué fila — el diagnóstico sí.
+				return fmt.Errorf("%w — %s", applyErr, describeFKViolations(ctx, a.uow, batch))
+			}
 			return applyErr
 		}
-		newSince := resp.Changes[len(resp.Changes)-1].ServerUpdatedAt
+		newSince := batch[len(batch)-1].ServerUpdatedAt
+		pending = nil
 		a.mu.Lock()
 		a.state.LastPulledAt = newSince
 		a.mu.Unlock()
@@ -702,17 +727,19 @@ func (a *Agent) FullSync(ctx context.Context) error {
 		return err
 	}
 	a.setStateLabel(StateInitialSyncing)
+	// pending: mismo mecanismo anti "cadena FK partida entre páginas" que
+	// Pull — ver el comentario ahí. Acá el cursor avanza sin persistirse
+	// (SetFullSyncCursor rollbackeó junto con la página), así que un crash
+	// a media juntada re-arranca desde el cursor persistido: idempotente.
+	var pending []PullChange
 	for {
 		resp, err := a.getFull(ctx, cursor)
 		if err != nil {
 			return err
 		}
-		applyErr := a.uow.Command(ctx, func(tx sharedDomain.Transaction) error {
-			for _, ch := range resp.Changes {
-				if err := ApplyPullChange(ctx, tx, ch); err != nil {
-					return err
-				}
-			}
+		pending = append(pending, resp.Changes...)
+		batch := pending
+		applyErr := ApplyPullPage(ctx, a.uow, batch, func(tx sharedDomain.Transaction) error {
 			if resp.HasMore {
 				return SetFullSyncCursor(ctx, tx, resp.NextCursor)
 			}
@@ -727,8 +754,18 @@ func (a *Agent) FullSync(ctx context.Context) error {
 			return SetLastPulledAt(ctx, tx, resp.ServerNow)
 		})
 		if applyErr != nil {
+			if isFKConstraintErr(applyErr) && resp.HasMore {
+				cursor = resp.NextCursor
+				continue
+			}
+			if isFKConstraintErr(applyErr) {
+				// Se acabó el feed y la FK sigue rota: dato huérfano en el
+				// cloud. SQLite no dice qué fila — el diagnóstico sí.
+				return fmt.Errorf("%w — %s", applyErr, describeFKViolations(ctx, a.uow, batch))
+			}
 			return applyErr
 		}
+		pending = nil
 		if !resp.HasMore {
 			a.mu.Lock()
 			a.state.InitialSyncCompletedAt = resp.ServerNow
