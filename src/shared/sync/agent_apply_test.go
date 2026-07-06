@@ -276,6 +276,55 @@ func TestApplyPullChange_MembershipType_MissingCreatedAt_InsertFallback(t *testi
 	}
 }
 
+// TestApplyPullChange_Gym_ISOTimestampString_CoercedToMs — pin del bug del
+// recibo fantasma (jul-2026): enqueueGym pre-fix emitía setup_completed_at
+// como *time.Time crudo → string RFC3339 en el payload guardado en
+// sync_entities. El apply lo escribía TAL CUAL en la columna INTEGER
+// (SQLite dynamic typing lo acepta sin ruido) y todo Scan posterior del gym
+// en esa máquina moría con "converting string to int64" — EnqueueReceipt
+// fallaba y el recibo de WhatsApp nunca se encolaba. El apply ahora coerce
+// strings RFC3339 de columnas *_at a epoch-ms (espejo de coerceTimestamp
+// del projector).
+func TestApplyPullChange_Gym_ISOTimestampString_CoercedToMs(t *testing.T) {
+	gymID := uuid.New()
+	db, uow := freshSidecarDBWithGym(t, gymID)
+
+	var pl map[string]any
+	if err := json.Unmarshal(realisticGymPullPayload(t, gymID, 3, false), &pl); err != nil {
+		t.Fatalf("unmarshal base payload: %v", err)
+	}
+	pl["setup_completed_at"] = "2026-06-28T19:14:04.453Z"
+	payload, err := json.Marshal(pl)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	change := syncpkg.PullChange{
+		EntityType:      "gyms",
+		EntityID:        gymID.String(),
+		Version:         3,
+		Payload:         payload,
+		ServerUpdatedAt: time.Now().UTC(),
+	}
+	err = uow.Command(context.Background(), func(tx sharedDomain.Transaction) error {
+		return syncpkg.ApplyPullChange(context.Background(), tx, change)
+	})
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	// El Scan a int64 ES el pin: con el string crudo en la columna, este
+	// Get reventaba igual que gymRepo.GetByID en producción.
+	var setupMs int64
+	if err := db.Get(&setupMs, `SELECT setup_completed_at FROM gyms WHERE id = ?`, gymID); err != nil {
+		t.Fatalf("read setup_completed_at as int64: %v", err)
+	}
+	want := time.Date(2026, 6, 28, 19, 14, 4, 453_000_000, time.UTC).UnixMilli()
+	if setupMs != want {
+		t.Errorf("setup_completed_at = %d, want %d (epoch-ms del RFC3339)", setupMs, want)
+	}
+}
+
 // subscriptionPullPayload — el payload que el cloud emite en un pull tras un
 // touch de suscripción: el payload guardado del último push, con los campos
 // billing vivos inyectados por gymCanonicalAugmentExpr encima.
