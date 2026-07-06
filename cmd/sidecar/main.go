@@ -389,9 +389,13 @@ func main() {
 		WithSubscriber(notiApp.NewCashCloseAlertSubscriber(enqueueOwnerAlert))
 
 	// ── Reports application layer (Sesión 6) — same use cases as the cloud,
-	// but reading from the local SQLite. The dashboard cache TTL matches the
-	// server build (60s) so the FE behaves identically online/offline.
-	dashboard := reportsApp.NewDashboard(reportsReader, uow, 60*time.Second)
+	// but reading from the local SQLite. TTL corto (5s, vs 60s del cloud):
+	// acá las queries pegan a SQLite local (milisegundos) y un TTL largo
+	// hacía que el dashboard siguiera viejo hasta 60s DESPUÉS de que el FE
+	// refetcheara tras un pull con cambios — el operador lo veía como "el
+	// sync no actualizó nada". 5s sólo coalesce ráfagas (kiosko + dashboard
+	// pidiendo a la vez); el cloud conserva 60s porque ahí protege Postgres.
+	dashboard := reportsApp.NewDashboard(reportsReader, uow, 5*time.Second)
 	attentionRequired := reportsApp.NewAttentionRequired(reportsReader, uow)
 	rangeReport := reportsApp.NewRangeReport(reportsReader, uow)
 	exportReport := reportsApp.NewExportReport(reportsReader, gymRepo, uow, attentionRequired, rangeReport)
