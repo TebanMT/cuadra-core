@@ -66,7 +66,7 @@ func TestApplyPullChange_NotificationTemplates_AterrizaElToggle(t *testing.T) {
 
 // TestApplyPullChange_UsersEmailVacio_SePreserva — bug latente hermano del
 // de body: users.email es NOT NULL en SQLite con unique PARCIAL
-// (WHERE email <> '' — schema 016, diseñado para operadores PIN-only con
+// (WHERE email <> ” — schema 016, diseñado para operadores PIN-only con
 // email ""). El apply colapsaba "" → NULL, así que pull-ear un operador
 // PIN-only desde el cloud (multi-device fase 2, o full-sync de
 // reinstalación) moría con "NOT NULL constraint failed: users.email". El
