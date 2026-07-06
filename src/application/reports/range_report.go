@@ -63,8 +63,10 @@ type RangeReportOutput struct {
 
 // RangeTotals is the FE-facing totals block. Each numeric value carries a
 // previous-window comparison so the StatCards can render deltas. Net is
-// derived: income − inventory_cost − expenses_general (both current and
-// previous so the trend chip is meaningful).
+// derived: income − inventory_cost − expenses_general − refunds (both current
+// and previous so the trend chip is meaningful). Refunds entran al neto
+// porque Income es BRUTO (SumPaymentsBetween excluye concept='refund') — sin
+// restarlas, la "utilidad" del período ignoraba el dinero devuelto.
 type RangeTotals struct {
 	Income          KPI `json:"income"`
 	InventoryCost   KPI `json:"inventory_cost"`
@@ -172,10 +174,12 @@ func (uc *RangeReport) Execute(ctx context.Context, in RangeReportInput) (*Range
 	checkinsPrev, _ := uc.Reader.CountCheckinsBetween(tx, in.GymID, prevFrom, prevTo)
 	out.Totals.Checkins = newKPI(float64(checkinsNow), float64(checkinsPrev))
 
-	// Net = income − inventory_cost − expenses_general. Computed on both
-	// windows so the FE can show a meaningful trend chip.
-	netNow := incomeNow - inventoryNow - expensesNow
-	netPrev := incomePrev - inventoryPrev - expensesPrev
+	// Net = income − inventory_cost − expenses_general − refunds. Computed on
+	// both windows so the FE can show a meaningful trend chip. Income es bruto
+	// (excluye refunds) y SumRefundsBetween devuelve el valor ABSOLUTO — se
+	// resta, no se suma.
+	netNow := incomeNow - inventoryNow - expensesNow - refundsNow
+	netPrev := incomePrev - inventoryPrev - expensesPrev - refundsPrev
 	out.Totals.Net = newKPI(netNow, netPrev)
 
 	// Daily series (charts).

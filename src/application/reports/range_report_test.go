@@ -58,9 +58,12 @@ func TestRangeReport_PopulatesAllTotals(t *testing.T) {
 	if out.Totals.Refunds.Current != 250 {
 		t.Errorf("totals.refunds.current = %.2f, want 250", out.Totals.Refunds.Current)
 	}
-	// Net = income − inventory − expenses = 1500 − 100 − 200 = 1200.
-	if out.Totals.Net.Current != 1200 {
-		t.Errorf("totals.net.current = %.2f, want 1200", out.Totals.Net.Current)
+	// Net = income − inventory − expenses − refunds
+	//     = 1500 − 100 − 200 − 250 = 950. El income es bruto (excluye
+	// refunds), así que las devoluciones se restan del neto — el bug del
+	// dogfood era que la "utilidad" ignoraba el dinero devuelto.
+	if out.Totals.Net.Current != 950 {
+		t.Errorf("totals.net.current = %.2f, want 950", out.Totals.Net.Current)
 	}
 	if out.IncomeByMethod["cash"] != 1000 || out.IncomeByMethod["card"] != 500 {
 		t.Errorf("income_by_method = %+v", out.IncomeByMethod)

@@ -337,8 +337,16 @@ func (a *Agent) bootstrap(ctx context.Context) error {
 			LastPulledAt:           st.LastPulledAt,
 			LastSyncedAt:           st.LastSyncedAt,
 			ConsecutiveFailures:    st.ConsecutiveFailures,
-			NextRetryAt:            st.NextRetryAt,
 			InitialSyncCompletedAt: st.InitialSyncCompletedAt,
+			// NextRetryAt NO se restaura a propósito: el backoff persistido
+			// lo calculó un proceso anterior — posiblemente OTRO binario
+			// (auto-update) cuyo fallo el nuevo justamente arregla. Un
+			// arranque fresco merece un intento inmediato; si el fallo
+			// persiste, ConsecutiveFailures (que sí se restaura) hace que
+			// recordFailure re-arme el backoff directo en el cap, sin
+			// martillar desde 1s. Bug real del dogfood: tras actualizar
+			// v1.0.6→v1.0.7 el sidecar quedó mudo hasta 5 min "esperando"
+			// un retry heredado, sin nada en la UI que lo explicara.
 		}
 		// Restore the persisted Bearer credential so the agent can resume
 		// syncing after a sidecar restart without waiting for the desktop

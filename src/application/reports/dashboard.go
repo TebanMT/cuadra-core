@@ -42,16 +42,19 @@ type DashboardOutput struct {
 	// número estable de "2 dígitos" que el dueño espera ver, no una tendencia.
 	RealizedProfitMarginPct *float64 `json:"realized_profit_margin_pct,omitempty"`
 	// ExpensesMonth — egresos del mes corriente vs mismo rango del mes
-	// anterior. Suma DOS fuentes: mercancía (stock_movements restock con
-	// costo) + gastos generales (BC expenses). Es el número visible en
-	// el dashboard para que "egresos" refleje todo lo que sale, no solo
-	// inventario.
+	// anterior. Suma TRES fuentes: mercancía (stock_movements restock con
+	// costo) + gastos generales (BC expenses) + devoluciones (payments
+	// concept='refund', en absoluto). Es el número visible en el dashboard
+	// para que "egresos" refleje todo lo que sale — un refund es dinero que
+	// salió del cajón igual que un gasto (mismo criterio que el corte de
+	// caja, ver cash_close.NetTotal).
 	ExpensesMonth KPI `json:"expenses_month"`
-	// InventoryCostMonth y GeneralExpensesMonth — sub-KPIs (no expuestos
-	// en el wire hoy, solo el agregado). Existen para que un futuro
-	// desglose en UI no requiera tocar el use case.
+	// InventoryCostMonth, GeneralExpensesMonth y RefundsMonth — sub-KPIs
+	// (no expuestos en el wire hoy, solo el agregado). Existen para que un
+	// futuro desglose en UI no requiera tocar el use case.
 	InventoryCostMonth   KPI                `json:"-"`
 	GeneralExpensesMonth KPI                `json:"-"`
+	RefundsMonth         KPI                `json:"-"`
 	ExpiringThisWeek     int                `json:"expiring_this_week"`
 	RecoverableExpired   int                `json:"recoverable_expired"`
 	TodayCash            map[string]float64 `json:"today_cash_by_method"`
@@ -176,6 +179,17 @@ func (uc *Dashboard) Execute(ctx context.Context, in DashboardInput) (*Dashboard
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}
+	// Devoluciones del rango (valor absoluto). IncomeMonth es bruto —
+	// SumPaymentsBetween excluye refunds — así que el dinero devuelto sólo
+	// aparece en el dashboard si lo contamos como egreso.
+	refundsMonth, err := uc.Reader.SumRefundsBetween(tx, in.GymID, monthStart, today)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
+	refundsPrev, err := uc.Reader.SumRefundsBetween(tx, in.GymID, prevMonthStart, prevMonthEnd)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
 
 	// Ganancia realizada de productos (Standard): revenue − COGS sobre las
 	// ventas no reembolsadas del rango. Mismo windowing que ingresos para
@@ -257,9 +271,10 @@ func (uc *Dashboard) Execute(ctx context.Context, in DashboardInput) (*Dashboard
 		RealizedProfitMarginPct: realizedMarginPct(realizedNow),
 		InventoryCostMonth:      newKPI(inventoryCostMonth, inventoryCostPrev),
 		GeneralExpensesMonth:    newKPI(generalExpensesMonth, generalExpensesPrev),
+		RefundsMonth:            newKPI(refundsMonth, refundsPrev),
 		ExpensesMonth: newKPI(
-			inventoryCostMonth+generalExpensesMonth,
-			inventoryCostPrev+generalExpensesPrev,
+			inventoryCostMonth+generalExpensesMonth+refundsMonth,
+			inventoryCostPrev+generalExpensesPrev+refundsPrev,
 		),
 		ExpiringThisWeek:   expiringWeek,
 		RecoverableExpired: recoverable,
