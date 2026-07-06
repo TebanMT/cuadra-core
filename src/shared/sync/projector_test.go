@@ -554,3 +554,47 @@ func mustJSON(t *testing.T, v any) []byte {
 	}
 	return b
 }
+
+// TestBuildProjectorUpsert_NotificationTemplates — pin del caso 7 del gap
+// de propagación: el sidecar SIEMPRE encoló los overrides de plantillas
+// (enqueueTemplate), pero el tipo no estaba en SyncedTables → el push
+// moría en rejected_unknown_type y deshabilitar un mensaje en Ajustes →
+// Mensajes no apagaba nada (el dispatcher del cloud, único que respeta
+// `enabled`, leía su tabla vacía). El payload de este test es EXACTO al
+// que emite template_sqlite.enqueueTemplate.
+func TestBuildProjectorUpsert_NotificationTemplates(t *testing.T) {
+	gymID := uuid.New()
+	entityID := uuid.New()
+	payload := json.RawMessage(`{
+		"id":"` + entityID.String() + `",
+		"gym_id":"` + gymID.String() + `",
+		"version":2,
+		"template_key":"receipt_membership",
+		"body":"",
+		"enabled":false,
+		"created_at":1751800000000,
+		"updated_at":1751800300000
+	}`)
+
+	tbl := FindTable("notification_templates")
+	if tbl == nil {
+		t.Fatal("notification_templates no está registrado en SyncedTables — el push vuelve a morir en rejected_unknown_type")
+	}
+	q, args, err := buildProjectorUpsert(*tbl, gymID, entityID, payload)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if !strings.Contains(q, "INSERT INTO notification_templates") {
+		t.Errorf("SQL no apunta a notification_templates: %s", q)
+	}
+	for _, want := range []string{"template_key", "body", "enabled", "created_at", "updated_at"} {
+		if !strings.Contains(q, want) {
+			t.Errorf("falta la columna %q en el SQL: %s", want, q)
+		}
+	}
+	// 8 columnas del payload (id, gym_id, version, template_key, body,
+	// enabled, created_at, updated_at) — deleted_at ausente se omite.
+	if got := len(args); got != 8 {
+		t.Errorf("args = %d, want 8", got)
+	}
+}

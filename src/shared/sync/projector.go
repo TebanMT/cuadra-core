@@ -88,6 +88,11 @@ var timestamptzColumns = map[string]map[string]bool{
 // envía como `""` cuando es opcional en el dominio, debe vivir aquí.
 var notNullStringColumns = map[string]map[string]bool{
 	"users": {"email": true},
+	// body: NOT NULL con "" como valor VÁLIDO y común — significa "usa el
+	// texto default de la librería" (Standard nunca edita el body, sólo el
+	// switch; enqueueTemplate siempre emite ""). Nullificarlo rompía la
+	// proyección de todo toggle con 23502.
+	"notification_templates": {"body": true},
 }
 
 // projectors is the dispatch table. Every entry in SyncedTables must have a
@@ -98,7 +103,7 @@ var notNullStringColumns = map[string]map[string]bool{
 // without touching the rest.
 var projectors = func() map[string]Projector {
 	m := make(map[string]Projector, len(SyncedTables))
-	var membershipsTable, membersTable, usersTable EntityTable
+	var membershipsTable, membersTable, usersTable, templatesTable EntityTable
 	for i := range SyncedTables {
 		t := SyncedTables[i]
 		if t.Type == "memberships" {
@@ -109,6 +114,9 @@ var projectors = func() map[string]Projector {
 		}
 		if t.Type == "users" {
 			usersTable = t
+		}
+		if t.Type == "notification_templates" {
+			templatesTable = t
 		}
 		m[t.Type] = func(g *gorm.DB, gymID, entityID uuid.UUID, payload []byte) error {
 			return projectGeneric(g, t, gymID, entityID, payload)
@@ -139,8 +147,38 @@ var projectors = func() map[string]Projector {
 	m["users"] = func(g *gorm.DB, gymID, entityID uuid.UUID, payload []byte) error {
 		return projectUser(g, usersTable, gymID, entityID, payload)
 	}
+	// notification_templates — mismo pre-step que memberships pero sobre
+	// el índice parcial `uq_notification_templates_gym_key` (UNA fila viva
+	// por (gym, template_key)). Si el cloud ya tiene un override vivo de
+	// esa llave con OTRO id (creado cloud-side, o carrera de dos devices
+	// offline), el INSERT del entrante choca 23505 y ese item del push se
+	// atora reintentando para siempre. Last write wins el slot: soft-delete
+	// del otro antes de proyectar.
+	m["notification_templates"] = func(g *gorm.DB, gymID, entityID uuid.UUID, payload []byte) error {
+		return projectTemplateOverride(g, templatesTable, gymID, entityID, payload)
+	}
 	return m
 }()
+
+// projectTemplateOverride desaloja al override vivo que ocupe el slot
+// (gym, template_key) con un id distinto y delega en projectGeneric. Ver
+// el comentario del registro en projectors.
+func projectTemplateOverride(g *gorm.DB, table EntityTable, gymID, entityID uuid.UUID, payload []byte) error {
+	var raw map[string]any
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return fmt.Errorf("projector notification_templates: payload not a JSON object: %w", err)
+	}
+	if key, ok := raw["template_key"].(string); ok && key != "" {
+		if err := g.Exec(`
+			UPDATE notification_templates
+			   SET deleted_at = NOW(), updated_at = NOW(), version = version + 1
+			 WHERE gym_id = ? AND template_key = ? AND id <> ? AND deleted_at IS NULL`,
+			gymID, key, entityID).Error; err != nil {
+			return fmt.Errorf("projector notification_templates: desalojar slot %q: %w", key, err)
+		}
+	}
+	return projectGeneric(g, table, gymID, entityID, payload)
+}
 
 // projectUser envuelve projectGeneric con una salvaguarda de credenciales.
 // IMPORTANTE: esta función sólo corre en el CLOUD, al aplicar un PUSH del
