@@ -318,6 +318,20 @@ func enqueueGym(stx *sharedDomain.SqlxTransaction, g *gymDomain.Gym) error {
 	if kioskSettings == nil {
 		kioskSettings = map[string]any{}
 	}
+	// setup_completed_at en epoch-ms nullable, como TODOS los timestamps
+	// del wire. El bug histórico: iba como *time.Time crudo → json.Marshal
+	// lo serializaba RFC3339 ("2026-06-28T19:14:04.453Z") → el payload
+	// quedaba así en sync_entities → el apply de un sidecar que pull-eara
+	// el gym escribía el string en la columna INTEGER (SQLite dynamic
+	// typing lo acepta) → todo Scan posterior del gym en esa máquina
+	// tronaba y los recibos/bienvenidas morían en "enqueue receipt failed".
+	// El projector del cloud toleraba el string (coerceTimestamp), por eso
+	// el bug sólo se veía sidecar-side. extractColumnValue ahora coerce
+	// strings RFC3339 en columnas *_at como red para payloads ya guardados.
+	var setupCompletedMs any
+	if g.SetupCompletedAt != nil {
+		setupCompletedMs = g.SetupCompletedAt.UnixMilli()
+	}
 	payload, err := json.Marshal(map[string]any{
 		"id":                 g.ID.String(),
 		"gym_id":             g.ID.String(),
@@ -328,7 +342,7 @@ func enqueueGym(stx *sharedDomain.SqlxTransaction, g *gymDomain.Gym) error {
 		"country":            g.Country,
 		"timezone":           g.Timezone,
 		"payment_methods":    g.PaymentMethods,
-		"setup_completed_at": g.SetupCompletedAt,
+		"setup_completed_at": setupCompletedMs,
 		"charge_settings":    chargeSettings,
 		"kiosk_settings":     kioskSettings,
 		"created_at":         g.CreatedAt.UnixMilli(),

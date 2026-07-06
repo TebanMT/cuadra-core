@@ -235,6 +235,20 @@ func extractColumnValue(pl map[string]any, table, col string) any {
 	if s, isStr := v.(string); isStr && s == "" {
 		return nil
 	}
+	// Timestamp como string RFC3339 → epoch-ms: espejo de coerceTimestamp
+	// del projector (quinta vez del patrón "el cloud es tolerante, el
+	// sidecar no"). Bug concreto: enqueueGym emitía setup_completed_at como
+	// *time.Time crudo → "2026-06-28T19:14:04.453Z" quedó en payloads de
+	// sync_entities → el apply lo escribía tal cual en la columna INTEGER
+	// (SQLite dynamic typing lo acepta sin ruido) → todo Scan posterior del
+	// gym en esa máquina moría con "converting string to int64" y los
+	// recibos/bienvenidas fallaban en el enqueue. Toda columna *_at del
+	// esquema SQLite guarda epoch-ms — la coerción es segura por sufijo.
+	if s, isStr := v.(string); isStr && strings.HasSuffix(col, "_at") {
+		if t, terr := time.Parse(time.RFC3339Nano, s); terr == nil {
+			return t.UnixMilli()
+		}
+	}
 	// JSON booleans → 0/1 for SQLite columns that store INTEGER.
 	if b, ok := v.(bool); ok {
 		if b {
