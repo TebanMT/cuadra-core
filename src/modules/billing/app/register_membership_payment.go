@@ -20,6 +20,7 @@ import (
 	folioSvc "github.com/cuadra/cuadra-core/src/modules/billing/domain/folio"
 	paymentDomain "github.com/cuadra/cuadra-core/src/modules/billing/domain/payment"
 	billingRepo "github.com/cuadra/cuadra-core/src/modules/billing/domain/repository"
+	gymRepo "github.com/cuadra/cuadra-core/src/modules/gyms/domain/repository"
 	memApp "github.com/cuadra/cuadra-core/src/modules/members/app"
 	memberDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/member"
 	mtDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/membership_type"
@@ -128,6 +129,9 @@ type RegisterMembershipPayment struct {
 	// activa al socio por PRIMERA vez (membresía pasa de pending/inexistente
 	// a active). Nil = no se manda (tests/builds sin notifications).
 	Welcome memApp.WelcomeNotifier
+	// Gyms (opcional) → default de PaymentDate en el día LOCAL del gym
+	// cuando el caller no manda fecha. Nil = día UTC (tests viejos).
+	Gyms gymRepo.GymRepository
 }
 
 func NewRegisterMembershipPayment(
@@ -168,11 +172,15 @@ func (uc *RegisterMembershipPayment) WithWelcomeNotifier(n memApp.WelcomeNotifie
 	return uc
 }
 
+// WithGyms cablea el repo de gyms para anclar el default de PaymentDate
+// al día calendario del gym en SU zona horaria (ver gymLocalPaymentDate).
+func (uc *RegisterMembershipPayment) WithGyms(g gymRepo.GymRepository) *RegisterMembershipPayment {
+	uc.Gyms = g
+	return uc
+}
+
 func (uc *RegisterMembershipPayment) Execute(ctx context.Context, in RegisterMembershipPaymentInput) (*RegisterMembershipPaymentOutput, error) {
 	now := time.Now().UTC()
-	if in.PaymentDate.IsZero() {
-		in.PaymentDate = now
-	}
 	if in.Method == "" {
 		return nil, sharedDomain.NewValidationError(billingErrors.ErrPaymentMethodMissing)
 	}
@@ -182,6 +190,14 @@ func (uc *RegisterMembershipPayment) Execute(ctx context.Context, in RegisterMem
 		evt PaymentCompletedEvent
 	)
 	err := uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
+		// 0. Default de fecha: el día LOCAL del gym, no el día UTC. Un
+		// cobro a las 10 PM de CDMX pertenece al día en curso — anclarlo
+		// en UTC corría el vencimiento de la renovación +1 día y mandaba
+		// el pago a la caja del día siguiente.
+		if in.PaymentDate.IsZero() {
+			in.PaymentDate = gymLocalPaymentDate(tx, uc.Gyms, in.GymID, now)
+		}
+
 		// 1. Member sanity check: must exist + belong to gym.
 		member, err := uc.Members.GetByID(tx, in.MemberID)
 		if err != nil {

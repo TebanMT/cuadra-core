@@ -12,6 +12,7 @@ import (
 	paymentDomain "github.com/cuadra/cuadra-core/src/modules/billing/domain/payment"
 	billingRepo "github.com/cuadra/cuadra-core/src/modules/billing/domain/repository"
 	saleDomain "github.com/cuadra/cuadra-core/src/modules/billing/domain/sale"
+	gymRepo "github.com/cuadra/cuadra-core/src/modules/gyms/domain/repository"
 	memRepo "github.com/cuadra/cuadra-core/src/modules/members/domain/repository"
 	prodApp "github.com/cuadra/cuadra-core/src/modules/products/app"
 	promoApp "github.com/cuadra/cuadra-core/src/modules/promotions/app"
@@ -104,11 +105,21 @@ type RegisterSale struct {
 	Audit      audit.Recorder
 	Publisher  EventPublisher
 	Promotions *promoApp.ApplyPromotion // opcional; nil → no se aplican promos
+	// Gyms (opcional) → default de PaymentDate en el día LOCAL del gym
+	// (ver gymLocalPaymentDate). Nil = día UTC (tests viejos).
+	Gyms gymRepo.GymRepository
 }
 
 // WithPromotions engancha el use case de promociones.
 func (uc *RegisterSale) WithPromotions(p *promoApp.ApplyPromotion) *RegisterSale {
 	uc.Promotions = p
+	return uc
+}
+
+// WithGyms cablea el repo de gyms para anclar el default de PaymentDate
+// al día calendario del gym en SU zona horaria.
+func (uc *RegisterSale) WithGyms(g gymRepo.GymRepository) *RegisterSale {
+	uc.Gyms = g
 	return uc
 }
 
@@ -141,9 +152,6 @@ func (uc *RegisterSale) Execute(ctx context.Context, in RegisterSaleInput) (*Reg
 		return nil, sharedDomain.NewValidationError(billingErrors.ErrPaymentMethodMissing)
 	}
 	now := time.Now().UTC()
-	if in.PaymentDate.IsZero() {
-		in.PaymentDate = now
-	}
 
 	// Reserve sale_item ids upfront so we can pass them to the products service
 	// (the stock_movement row references sale_item_id; we want a single tx that
@@ -158,6 +166,12 @@ func (uc *RegisterSale) Execute(ctx context.Context, in RegisterSaleInput) (*Reg
 		evt PaymentCompletedEvent
 	)
 	err := uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
+		// Default de fecha: el día LOCAL del gym, no el día UTC — una venta
+		// a las 10 PM pertenece a la caja del día en curso.
+		if in.PaymentDate.IsZero() {
+			in.PaymentDate = gymLocalPaymentDate(tx, uc.Gyms, in.GymID, now)
+		}
+
 		// Optional member sanity check.
 		if in.MemberID != nil {
 			m, err := uc.Members.GetByID(tx, *in.MemberID)

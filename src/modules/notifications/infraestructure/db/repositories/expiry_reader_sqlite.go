@@ -5,6 +5,7 @@ package repositories
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -20,11 +21,12 @@ type ExpirySQLiteReader struct{}
 
 func NewExpirySQLiteReader() *ExpirySQLiteReader { return &ExpirySQLiteReader{} }
 
-func (r *ExpirySQLiteReader) FindExpiringOn(tx sharedDomain.Transaction, targetDate time.Time) ([]notiApp.ExpiryCandidate, error) {
+func (r *ExpirySQLiteReader) FindDueForStage(tx sharedDomain.Transaction, now time.Time, offsetDays int) ([]notiApp.ExpiryCandidate, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	type row struct {
 		GymID          string         `db:"gym_id"`
 		GymName        sql.NullString `db:"gym_name"`
+		GymTimezone    sql.NullString `db:"gym_timezone"`
 		MemberID       string         `db:"member_id"`
 		FullName       string         `db:"full_name"`
 		Phone          string         `db:"phone"`
@@ -32,10 +34,14 @@ func (r *ExpirySQLiteReader) FindExpiringOn(tx sharedDomain.Transaction, targetD
 		ExpiryDate     string         `db:"expiry_date"`
 	}
 	var rows []row
+	// SQLite no trae base de zonas horarias; 'localtime' usa la tz de la
+	// MÁQUINA — que en el sidecar es la PC del gym, o sea exactamente la
+	// tz del gym. Etapa K: expiry = hoy_local - K días.
 	const q = `
 		SELECT
 		    g.id   AS gym_id,
 		    g.name AS gym_name,
+		    g.timezone AS gym_timezone,
 		    m.id   AS member_id,
 		    m.full_name,
 		    m.phone,
@@ -46,9 +52,11 @@ func (r *ExpirySQLiteReader) FindExpiringOn(tx sharedDomain.Transaction, targetD
 		JOIN gyms g ON g.id = m.gym_id AND g.deleted_at IS NULL
 		WHERE m.deleted_at IS NULL
 		  AND m.status = 'active'
-		  AND ms.expiry_date = ?
+		  AND ms.expiry_date = date(?, 'localtime', ?)
 	`
-	if err := stx.Select(context.Background(), &rows, q, targetDate.UTC().Format("2006-01-02")); err != nil {
+	modifier := fmt.Sprintf("%d days", -offsetDays)
+	nowArg := now.UTC().Format("2006-01-02 15:04:05")
+	if err := stx.Select(context.Background(), &rows, q, nowArg, modifier); err != nil {
 		return nil, err
 	}
 	out := make([]notiApp.ExpiryCandidate, 0, len(rows))
@@ -66,6 +74,9 @@ func (r *ExpirySQLiteReader) FindExpiringOn(tx sharedDomain.Transaction, targetD
 		}
 		if x.GymName.Valid {
 			c.GymName = x.GymName.String
+		}
+		if x.GymTimezone.Valid {
+			c.GymTimezone = x.GymTimezone.String
 		}
 		out = append(out, c)
 	}

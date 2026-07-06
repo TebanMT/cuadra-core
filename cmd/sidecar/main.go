@@ -359,13 +359,15 @@ func main() {
 	// `folios` se construyó arriba (lo reusa createMember). Mismo generator.
 	registerPayment := billingApp.NewRegisterMembershipPayment(paymentRepo, folios, memberSvc, memberRepo, uow, recorder, billingSubscriber).
 		WithPromotions(applyPromo).
-		WithWelcomeNotifier(enqueueWelcomePin)
+		WithWelcomeNotifier(enqueueWelcomePin).
+		WithGyms(gymRepo)
 	settlePayment := billingApp.NewSettlePendingBalance(paymentRepo, folios, uow, recorder)
 	receiptPayment := billingApp.NewGenerateReceipt(paymentRepo, gymRepo, memberRepo, uow)
 	sendReceipt := billingApp.NewSendReceipt(paymentRepo, uow).WithPublisher(billingSubscriber).WithResender(billingSubscriber)
 	listMemberPayments := billingApp.NewListMemberPayments(paymentRepo, memberRepo, uow)
 	listGymPayments := billingApp.NewListGymPayments(paymentRepo, memberRepo, uow)
-	refundPayment := billingApp.NewRefundPayment(paymentRepo, folios, memberSvc, uow, recorder)
+	refundPayment := billingApp.NewRefundPayment(paymentRepo, folios, memberSvc, uow, recorder).
+		WithGyms(gymRepo)
 
 	// ── Products + Billing pt.2 (Sesión 4) ────────────────────────────────
 	productSvc := prodApp.NewProductService(productRepo, stockMovementRepo)
@@ -381,7 +383,8 @@ func main() {
 	deleteExpense := expApp.NewDeleteExpense(expenseRepo, uow, recorder)
 	listExpenses := expApp.NewListExpenses(expenseRepo, uow)
 	registerSale := billingApp.NewRegisterSale(paymentRepo, saleRepo, saleItemRepo, folios, productSvc, memberRepo, uow, recorder, billingSubscriber).
-		WithPromotions(applyPromo)
+		WithPromotions(applyPromo).
+		WithGyms(gymRepo)
 	refundSale := billingApp.NewRefundSale(saleRepo, refundPayment, uow)
 	cashClose := reportsApp.NewCashClose(cashCloseReader, cashCloseEventRepo, uow, recorder).
 		WithExpenses(expenseRepo).
