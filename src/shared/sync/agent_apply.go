@@ -7,10 +7,14 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
+
+	sqlite3 "github.com/mattn/go-sqlite3"
 
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 )
@@ -204,6 +208,123 @@ func ApplyPullChange(ctx context.Context, tx sharedDomain.Transaction, change Pu
 	)
 	_, err = stx.Exec(ctx, stmt, args...)
 	return err
+}
+
+// ApplyPullPage aplica una página de cambios del cloud en UNA transacción,
+// con las FKs DIFERIDAS al COMMIT y errores por-fila con contexto. Es el
+// camino único de aterrizaje de páginas para Pull y FullSync.
+//
+// Por qué diferir las FKs: el cloud ordena cada página por
+// (server_updated_at, entity_id) — un orden ciego a la dirección de las FKs
+// intra-tipo. El caso real que rompió el full-sync del piloto: Renew marca
+// la membresía vieja con replaced_by = <id de la nueva> y crea la nueva en
+// la misma tx del cloud, así que ambas llegan con timestamps a
+// microsegundos; si la vieja se aplica primero, su INSERT viola la self-FK
+// memberships.replaced_by → "FOREIGN KEY constraint failed" y el full-sync
+// muere determinista (el cursor re-lee el mismo corte). Con
+// defer_foreign_keys la validación corre al COMMIT, cuando toda la página
+// ya aterrizó y la cadena está cerrada — cubre por construcción TODA FK
+// intra-tipo (replaced_by, payments.parent_payment_id,
+// challenge_measurements.superseded_by_id) sin importar el orden interno.
+//
+// `tail` corre al final, dentro de la misma tx (avance de cursor / estado).
+func ApplyPullPage(
+	ctx context.Context,
+	uow sharedDomain.UnitOfWork,
+	changes []PullChange,
+	tail func(tx sharedDomain.Transaction) error,
+) error {
+	return uow.Command(ctx, func(tx sharedDomain.Transaction) error {
+		stx := tx.(*sharedDomain.SqlxTransaction)
+		// defer_foreign_keys es per-transaction en SQLite (se apaga solo en
+		// COMMIT/ROLLBACK) y sólo tiene efecto emitido DESPUÉS del BEGIN —
+		// fuera de una tx no difiere nada. No toca estado global.
+		if _, err := stx.Exec(ctx, `PRAGMA defer_foreign_keys = ON`); err != nil {
+			return fmt.Errorf("defer_foreign_keys: %w", err)
+		}
+		for _, ch := range changes {
+			if err := ApplyPullChange(ctx, tx, ch); err != nil {
+				// Nunca más un error opaco: el próximo fallo dice QUÉ fila.
+				return fmt.Errorf("apply %s/%s (version %d): %w",
+					ch.EntityType, ch.EntityID, ch.Version, err)
+			}
+		}
+		if tail == nil {
+			return nil
+		}
+		return tail(tx)
+	})
+}
+
+// isFKConstraintErr detecta la violación de FK diferida que SQLite reporta
+// al COMMIT (mattn hace ROLLBACK tras un COMMIT fallido, así que la
+// conexión queda limpia). Chequeo tipado primero; el fallback de string es
+// el mensaje canónico de SQLite, estable desde hace décadas.
+func isFKConstraintErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var serr sqlite3.Error
+	if errors.As(err, &serr) {
+		return serr.ExtendedCode == sqlite3.ErrConstraintForeignKey
+	}
+	return strings.Contains(err.Error(), "FOREIGN KEY constraint failed")
+}
+
+// describeFKViolations nombra las filas que rompen una FK al COMMIT de una
+// página. SQLite no dice qué fila violó una FK diferida, así que re-aplica
+// la página en una tx desechable (mismo defer), corre PRAGMA
+// foreign_key_check acotado a las tablas tocadas, y rollbackea siempre.
+// Sólo corre en el camino de fallo terminal — el happy path no paga nada.
+func describeFKViolations(ctx context.Context, uow sharedDomain.UnitOfWork, changes []PullChange) string {
+	var report []string
+	errRollback := errors.New("fk-diagnóstico: rollback intencional")
+	_ = uow.Command(ctx, func(tx sharedDomain.Transaction) error {
+		stx := tx.(*sharedDomain.SqlxTransaction)
+		if _, err := stx.Exec(ctx, `PRAGMA defer_foreign_keys = ON`); err != nil {
+			return errRollback
+		}
+		tables := make(map[string]bool)
+		for _, ch := range changes {
+			if t := FindTable(ch.EntityType); t != nil {
+				tables[t.Table] = true
+			}
+			// Best-effort: los errores inmediatos ya salieron con contexto
+			// desde ApplyPullPage; acá sólo interesa reproducir el estado.
+			_ = ApplyPullChange(ctx, tx, ch)
+		}
+		for tbl := range tables {
+			var viols []struct {
+				Table  string        `db:"table"`
+				RowID  sql.NullInt64 `db:"rowid"`
+				Parent string        `db:"parent"`
+				FKID   int64         `db:"fkid"`
+			}
+			// tbl viene del registry (FindTable), no de input externo.
+			if err := stx.Select(ctx, &viols, `PRAGMA foreign_key_check(`+tbl+`)`); err != nil {
+				continue
+			}
+			for _, v := range viols {
+				id := "?"
+				if v.RowID.Valid {
+					var s string
+					if err := stx.Get(ctx, &s,
+						fmt.Sprintf(`SELECT id FROM %s WHERE rowid = ?`, v.Table),
+						v.RowID.Int64); err == nil {
+						id = s
+					}
+				}
+				report = append(report, fmt.Sprintf(
+					"%s/%s referencia una fila de %s que no existe", v.Table, id, v.Parent))
+			}
+		}
+		return errRollback
+	})
+	if len(report) == 0 {
+		return "foreign_key_check no reprodujo la violación (¿condición transitoria?)"
+	}
+	sort.Strings(report)
+	return strings.Join(report, "; ")
 }
 
 // extractColumnValue pulls a single column out of an unmarshalled JSON
