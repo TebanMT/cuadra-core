@@ -804,9 +804,12 @@ func (r *PostgresReader) ListExpensesBetween(tx sharedDomain.Transaction, gymID 
 }
 
 // ExpensesDailySeries — total egresado por día sumando expenses + restocks
-// con costo. Hacemos las dos queries por separado y mergeamos en memoria
-// (los gyms tienen pocos días por ventana — O(días) keys), evita un UNION
-// complejo y mantiene el filtro por fecha homogéneo entre las dos fuentes.
+// con costo + devoluciones (payments concept='refund', en absoluto).
+// Hacemos las queries por separado y mergeamos en memoria (los gyms tienen
+// pocos días por ventana — O(días) keys), evita un UNION complejo y
+// mantiene el filtro por fecha homogéneo entre las fuentes. Las
+// devoluciones van aquí para que la serie cuadre con Totals.Net (que
+// también las resta).
 func (r *PostgresReader) ExpensesDailySeries(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) ([]reports.DailyAmount, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	type row struct {
@@ -842,6 +845,21 @@ func (r *PostgresReader) ExpensesDailySeries(tx sharedDomain.Transaction, gymID 
 		return nil, err
 	}
 	for _, x := range invRows {
+		bucket[x.Day.Format(dateFmt)] += x.Total
+	}
+
+	var refRows []row
+	if err := gormTx.Raw(`
+		SELECT payment_date AS day, COALESCE(SUM(ABS(amount)), 0) AS total
+		FROM payments
+		WHERE gym_id = ? AND deleted_at IS NULL
+		  AND concept = 'refund'
+		  AND payment_date >= ? AND payment_date <= ?
+		GROUP BY payment_date`,
+		gymID, from.Format(dateFmt), to.Format(dateFmt)).Scan(&refRows).Error; err != nil {
+		return nil, err
+	}
+	for _, x := range refRows {
 		bucket[x.Day.Format(dateFmt)] += x.Total
 	}
 

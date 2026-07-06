@@ -980,9 +980,11 @@ func (r *SQLiteReader) ListExpensesBetween(tx sharedDomain.Transaction, gymID uu
 }
 
 // ExpensesDailySeries — egresos por día = expenses (expense_date) +
-// stock_movements restock con costo (created_at). Suma en memoria por día
-// porque cada fuente vive en una tabla con un tipo de fecha distinto y un
-// UNION complicaría el binding.
+// stock_movements restock con costo (created_at) + devoluciones
+// (payments concept='refund', payment_date, en absoluto). Suma en memoria
+// por día porque cada fuente vive en una tabla con un tipo de fecha
+// distinto y un UNION complicaría el binding. Las devoluciones van aquí
+// para que la serie cuadre con Totals.Net (que también las resta).
 func (r *SQLiteReader) ExpensesDailySeries(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) ([]reports.DailyAmount, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	bucket := map[string]int64{}
@@ -1025,6 +1027,25 @@ func (r *SQLiteReader) ExpensesDailySeries(tx sharedDomain.Transaction, gymID uu
 		return nil, err
 	}
 	for _, x := range invRows {
+		bucket[x.Day] += x.Total
+	}
+
+	type refRow struct {
+		Day   string `db:"day"`
+		Total int64  `db:"total"`
+	}
+	var refRows []refRow
+	if err := stx.Select(context.Background(), &refRows, `
+		SELECT payment_date AS day, COALESCE(SUM(ABS(amount)), 0) AS total
+		FROM payments
+		WHERE gym_id = ? AND deleted_at IS NULL
+		  AND concept = 'refund'
+		  AND payment_date >= ? AND payment_date <= ?
+		GROUP BY payment_date`,
+		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt)); err != nil {
+		return nil, err
+	}
+	for _, x := range refRows {
 		bucket[x.Day] += x.Total
 	}
 

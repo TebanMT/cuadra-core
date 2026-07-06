@@ -196,13 +196,16 @@ func (fakeUoW) Command(ctx context.Context, fn func(sharedDomain.Transaction) er
 
 func TestDashboard_ComposesKPIs(t *testing.T) {
 	reader := &fakeReader{
-		activeNow:    100,
-		activePrev:   80,
-		incomeNow:    50000,
-		incomePrev:   40000,
-		expiringWeek: 12,
-		recoverable:  9,
-		todayCash:    map[string]float64{"cash": 1500, "card": 800},
+		activeNow:       100,
+		activePrev:      80,
+		incomeNow:       50000,
+		incomePrev:      40000,
+		expiringWeek:    12,
+		recoverable:     9,
+		inventoryCost:   300,
+		generalExpenses: 700,
+		refundsAmount:   250,
+		todayCash:       map[string]float64{"cash": 1500, "card": 800},
 		series: []reports.DailyIncome{
 			{Date: time.Now().UTC(), Total: 500},
 		},
@@ -233,6 +236,16 @@ func TestDashboard_ComposesKPIs(t *testing.T) {
 	}
 	if got := out.TodayCash["cash"]; got != 1500 {
 		t.Errorf("cash bucket = %.2f, want 1500", got)
+	}
+	// Egresos del mes = mercancía + gastos generales + devoluciones
+	//                 = 300 + 700 + 250 = 1250. Las devoluciones son dinero
+	// que salió del cajón — si no entran aquí, el dashboard las ignora por
+	// completo (IncomeMonth es bruto y no las resta).
+	if out.ExpensesMonth.Current != 1250 {
+		t.Errorf("expenses_month.current = %.2f, want 1250", out.ExpensesMonth.Current)
+	}
+	if out.RefundsMonth.Current != 250 {
+		t.Errorf("refunds_month.current = %.2f, want 250", out.RefundsMonth.Current)
 	}
 }
 
