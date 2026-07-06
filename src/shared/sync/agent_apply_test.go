@@ -325,6 +325,40 @@ func TestApplyPullChange_Gym_ISOTimestampString_CoercedToMs(t *testing.T) {
 	}
 }
 
+// TestMigration027_HealsPoisonedSetupCompletedAt — la migración de
+// reparación debe convertir un setup_completed_at TEXT RFC3339 (escrito
+// por el apply pre-fix) al epoch-ms exacto, in-place y de forma
+// idempotente. Se envenena la fila a mano con el string EXACTO observado
+// en producción y se re-aplica el archivo 027 (que ya corrió una vez al
+// crear la DB del test — la re-aplicación también pin-ea la idempotencia).
+func TestMigration027_HealsPoisonedSetupCompletedAt(t *testing.T) {
+	gymID := uuid.New()
+	db, _ := freshSidecarDBWithGym(t, gymID)
+
+	if _, err := db.Exec(
+		`UPDATE gyms SET setup_completed_at = '2026-06-28T19:14:04.453Z' WHERE id = ?`, gymID,
+	); err != nil {
+		t.Fatalf("poison row: %v", err)
+	}
+
+	sqlBytes, err := os.ReadFile("../../../db_migrations/sqlite/027_repair_gym_setup_completed_at.sql")
+	if err != nil {
+		t.Fatalf("read migration: %v", err)
+	}
+	if _, err := db.Exec(string(sqlBytes)); err != nil {
+		t.Fatalf("apply migration 027: %v", err)
+	}
+
+	var ms int64
+	if err := db.Get(&ms, `SELECT setup_completed_at FROM gyms WHERE id = ?`, gymID); err != nil {
+		t.Fatalf("read healed row as int64: %v", err)
+	}
+	want := time.Date(2026, 6, 28, 19, 14, 4, 453_000_000, time.UTC).UnixMilli()
+	if ms != want {
+		t.Errorf("setup_completed_at = %d, want %d", ms, want)
+	}
+}
+
 // subscriptionPullPayload — el payload que el cloud emite en un pull tras un
 // touch de suscripción: el payload guardado del último push, con los campos
 // billing vivos inyectados por gymCanonicalAugmentExpr encima.
