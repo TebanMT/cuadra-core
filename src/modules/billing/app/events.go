@@ -40,3 +40,25 @@ type EventPublisher interface {
 type NoopPublisher struct{}
 
 func (NoopPublisher) PublishPaymentCompleted(context.Context, PaymentCompletedEvent) {}
+
+// ReceiptResendOutcome — veredicto del reenvío manual de comprobante
+// (UC-020). Status: "queued" (se encoló un envío nuevo), "already_pending"
+// (el comprobante del pago sigue en la cola sin salir — no duplicamos),
+// "skipped" (no se puede enviar; Reason dice por qué: no_member_phone /
+// cross_gym). El copy para el operador lo arma SendReceipt — acá viaja
+// sólo el hecho.
+type ReceiptResendOutcome struct {
+	Status string
+	Reason string
+}
+
+// ReceiptResender es el camino de RETORNO del reenvío manual. A diferencia
+// de PublishPaymentCompleted (fire-and-forget: el cobro ya commiteó y un
+// fallo del recibo no debe romperlo), el operador que aprieta "Enviar por
+// WhatsApp" espera saber qué pasó — el "éxito" ciego de antes escondía el
+// dedup por-pago y el skip por socio-sin-teléfono, y el botón parecía no
+// hacer nada. Lo implementa el mismo BillingEventSubscriber del BC de
+// notifications; billing sólo conoce este seam.
+type ReceiptResender interface {
+	ResendReceipt(ctx context.Context, evt PaymentCompletedEvent) (ReceiptResendOutcome, error)
+}

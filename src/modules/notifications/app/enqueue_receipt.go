@@ -32,13 +32,23 @@ type EnqueueReceiptInput struct {
 	// recibo antes hardcodeaba "Mensual" y aproximaba hoy+30d.
 	MembershipTypeName string
 	NewExpiry          *time.Time
+	// Resend — true en el reenvío manual (UC-020). Cambia la semántica de
+	// idempotencia: el camino automático dedupea por pago para siempre
+	// (un cobro = un recibo); el reenvío respeta un envío EN VUELO (no
+	// duplica un pending) pero sí encola de nuevo cuando el último intento
+	// ya salió (sent) o murió sin llegar (held/failed).
+	Resend bool
 }
 
-// EnqueueReceiptOutput is mostly for tests — the caller is the event bus,
-// not the user.
+// EnqueueReceiptOutput is mostly for tests and the manual-resend path —
+// the automatic caller is the event bus, which ignores it.
 type EnqueueReceiptOutput struct {
-	Skipped        bool
-	SkippedReason  string
+	Skipped       bool
+	SkippedReason string
+	// AlreadyPending — el recibo del pago sigue en la cola sin despachar;
+	// en modo Resend NO se duplica y se reporta para que el operador sepa
+	// que ya va en camino.
+	AlreadyPending bool
 	NotificationID *uuid.UUID
 }
 
@@ -114,7 +124,11 @@ func (uc *EnqueueReceipt) Execute(ctx context.Context, in EnqueueReceiptInput) (
 		}
 
 		// Idempotency: one receipt per payment. If this fires twice (e.g. a
-		// bus replay) the unique index keeps us honest.
+		// bus replay) the unique index keeps us honest. El reenvío manual
+		// NO crea filas nuevas: re-arma esta misma (una fila por pago,
+		// siempre) — así los reenvíos repetidos, p.ej. hechos offline, no
+		// se apilan en la cola ni le llegan N veces al socio al volver el
+		// internet.
 		idempKey := fmt.Sprintf("receipt:%s", in.PaymentID.String())
 		existing, err := uc.Notifications.GetByIdempotencyKey(tx, in.GymID, idempKey)
 		if err != nil {
@@ -123,6 +137,23 @@ func (uc *EnqueueReceipt) Execute(ctx context.Context, in EnqueueReceiptInput) (
 		if existing != nil {
 			id := existing.ID
 			out.NotificationID = &id
+			if !in.Resend {
+				// Camino automático: un cobro = un recibo, para siempre.
+				return nil
+			}
+			if existing.Status == notiDomain.StatusPending {
+				// Sigue en vuelo — duplicarlo mandaría dos WhatsApps (y
+				// doble costo del número maestro). Se reporta al operador.
+				out.AlreadyPending = true
+				return nil
+			}
+			// sent/held/failed/cancelled → el operador quiere OTRO envío
+			// real: re-arm de la misma fila (patrón de RetryNotification)
+			// con teléfono y vars de HOY.
+			existing.RearmForResend(member.Phone, vars, now)
+			if _, err := uc.Notifications.Update(tx, existing); err != nil {
+				return sharedDomain.NewUnexpectedError(err)
+			}
 			return nil
 		}
 

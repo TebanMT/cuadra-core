@@ -77,10 +77,11 @@ func (uc *GenerateReceipt) Execute(ctx context.Context, in GenerateReceiptInput)
 }
 
 // SendReceiptInput backs the manual UC-020 "Reenviar comprobante" call. El
-// envío se delega al seam de notificaciones (EventPublisher →
-// BillingEventSubscriber → EnqueueReceipt), el MISMO que dispara el cobro
-// automático. Channel/Recipient quedan para overrides futuros (otro número /
-// email); hoy el envío default es WhatsApp al socio del pago vía master sender.
+// envío se delega al seam de notificaciones (ReceiptResender →
+// BillingEventSubscriber → EnqueueReceipt en modo resend), el MISMO mapeo
+// que dispara el cobro automático pero con veredicto de vuelta.
+// Channel/Recipient quedan para overrides futuros (otro número / email);
+// hoy el envío default es WhatsApp al socio del pago vía master sender.
 type SendReceiptInput struct {
 	GymID     uuid.UUID
 	PaymentID uuid.UUID
@@ -96,6 +97,7 @@ type SendReceiptOutput struct {
 type SendReceipt struct {
 	Payments  billingRepo.PaymentRepository
 	Publisher EventPublisher
+	Resender  ReceiptResender
 	UoW       sharedDomain.UnitOfWork
 }
 
@@ -110,6 +112,16 @@ func NewSendReceipt(payments billingRepo.PaymentRepository, uow sharedDomain.Uni
 func (uc *SendReceipt) WithPublisher(p EventPublisher) *SendReceipt {
 	if p != nil {
 		uc.Publisher = p
+	}
+	return uc
+}
+
+// WithResender inyecta el camino con retorno del reenvío manual. Cuando
+// está cableado, Execute reporta el veredicto real (encolado / ya en
+// camino / sin teléfono) en lugar del "queued" ciego del publisher.
+func (uc *SendReceipt) WithResender(r ReceiptResender) *SendReceipt {
+	if r != nil {
+		uc.Resender = r
 	}
 	return uc
 }
@@ -133,14 +145,18 @@ func (uc *SendReceipt) Execute(ctx context.Context, in SendReceiptInput) (*SendR
 			Note:   "El pago no tiene socio asociado.",
 		}, nil
 	}
-	// Reusa el MISMO seam que el cobro automático (EventPublisher →
-	// BillingEventSubscriber → EnqueueReceipt). Idempotente por pago (idemp
-	// key receipt:<paymentID>): si el comprobante ya se encoló al cobrar, esto
-	// NO duplica; si nunca salió (p.ej. el socio no tenía teléfono al cobrar y
-	// se lo agregaron después), lo encola ahora. El dispatcher resuelve el
-	// `from` por tier (master sender en Standard). Query() arriba devuelve un
-	// tx read-only sin lock (Tx=nil), así que el Command de EnqueueReceipt no choca.
-	uc.Publisher.PublishPaymentCompleted(ctx, PaymentCompletedEvent{
+	// Reusa el MISMO mapeo de evento que el cobro automático, pero por el
+	// camino CON retorno (ReceiptResender → EnqueueReceipt en modo resend):
+	// si el comprobante del pago sigue pendiente en la cola no duplica ("ya
+	// en camino"); si ya salió (o quedó held/failed) encola un envío NUEVO;
+	// si el socio no tiene teléfono lo dice en vez de fingir éxito. El
+	// dedup ciego de antes (idemp key receipt:<paymentID> a secas) hacía
+	// que el botón "Enviar por WhatsApp" fuera un no-op silencioso para
+	// cualquier pago cuyo recibo automático ya hubiera salido. El
+	// dispatcher resuelve el `from` por tier (master sender en Standard).
+	// Query() arriba devuelve un tx read-only sin lock (Tx=nil), así que el
+	// Command de EnqueueReceipt no choca.
+	evt := PaymentCompletedEvent{
 		GymID:      p.GymID,
 		PaymentID:  in.PaymentID,
 		MemberID:   p.MemberID,
@@ -148,11 +164,37 @@ func (uc *SendReceipt) Execute(ctx context.Context, in SendReceiptInput) (*SendR
 		Amount:     p.Amount,
 		Folio:      p.Folio,
 		OperatorID: p.OperatorID,
-	})
-	return &SendReceiptOutput{
-		Status: "queued",
-		Note:   "Comprobante encolado para envío por WhatsApp.",
-	}, nil
+	}
+	if uc.Resender == nil {
+		// Fallback sin resender cableado (tests viejos): fire-and-forget.
+		uc.Publisher.PublishPaymentCompleted(ctx, evt)
+		return &SendReceiptOutput{
+			Status: "queued",
+			Note:   "Comprobante encolado para envío por WhatsApp.",
+		}, nil
+	}
+	outcome, err := uc.Resender.ResendReceipt(ctx, evt)
+	if err != nil {
+		return nil, err
+	}
+	switch outcome.Status {
+	case "already_pending":
+		return &SendReceiptOutput{
+			Status: "already_pending",
+			Note:   "El comprobante ya está en camino — le llega por WhatsApp en unos minutos.",
+		}, nil
+	case "skipped":
+		note := "No se pudo enviar el comprobante."
+		if outcome.Reason == "no_member_phone" {
+			note = "El socio no tiene teléfono registrado. Agrégalo en su perfil y vuelve a intentar."
+		}
+		return &SendReceiptOutput{Status: "skipped", Note: note}, nil
+	default:
+		return &SendReceiptOutput{
+			Status: "queued",
+			Note:   "Comprobante enviado a la cola — le llega por WhatsApp en unos minutos.",
+		}, nil
+	}
 }
 
 // ---------------------------------------------------------------------------

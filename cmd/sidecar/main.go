@@ -362,7 +362,7 @@ func main() {
 		WithWelcomeNotifier(enqueueWelcomePin)
 	settlePayment := billingApp.NewSettlePendingBalance(paymentRepo, folios, uow, recorder)
 	receiptPayment := billingApp.NewGenerateReceipt(paymentRepo, gymRepo, memberRepo, uow)
-	sendReceipt := billingApp.NewSendReceipt(paymentRepo, uow).WithPublisher(billingSubscriber)
+	sendReceipt := billingApp.NewSendReceipt(paymentRepo, uow).WithPublisher(billingSubscriber).WithResender(billingSubscriber)
 	listMemberPayments := billingApp.NewListMemberPayments(paymentRepo, memberRepo, uow)
 	listGymPayments := billingApp.NewListGymPayments(paymentRepo, memberRepo, uow)
 	refundPayment := billingApp.NewRefundPayment(paymentRepo, folios, memberSvc, uow, recorder)
