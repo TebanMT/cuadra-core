@@ -358,7 +358,7 @@ func main() {
 	// El dispatcher genera el PDF del comprobante (reusa GenerateReceipt),
 	// lo sube a R2 y mete la URL en el template de recibo ({receipt_url}).
 	dispatchNoti.Receipt = receiptPDFRenderer{gen: receiptPayment}
-	sendReceipt := billingApp.NewSendReceipt(paymentRepo, uow).WithPublisher(billingSubscriber)
+	sendReceipt := billingApp.NewSendReceipt(paymentRepo, uow).WithPublisher(billingSubscriber).WithResender(billingSubscriber)
 	listMemberPayments := billingApp.NewListMemberPayments(paymentRepo, memberRepo, uow)
 	listGymPayments := billingApp.NewListGymPayments(paymentRepo, memberRepo, uow)
 	refundPayment := billingApp.NewRefundPayment(paymentRepo, folios, memberSvc, uow, recorder)

@@ -212,6 +212,35 @@ func (n *Notification) MarkHeld(reason string, now time.Time) {
 	n.UpdatedAt = now
 }
 
+// RearmForResend re-encola la MISMA fila para un reenvío manual del
+// comprobante (UC-020) desde cualquier estado ya despachado o muerto
+// (sent/held/failed/cancelled). Reutilizar la fila — en vez de crear otra
+// con la idemp key sufijada — mantiene el invariante "una fila por pago":
+// mientras esté pending, EnqueueReceipt reporta "ya en camino" y no toca
+// nada, así los reenvíos repetidos (p.ej. hechos offline) no se apilan ni
+// le llegan N veces al socio al volver el internet. Mismo re-arm que el
+// retry manual (RetryNotification), más dos refresh propios del reenvío:
+//   - CreatedAt → now: el guard anti-stale del dispatcher ancla ahí; sin
+//     refrescarlo, reenviar un recibo de hace 2+ días caería a `held` al
+//     instante. El reenvío es una intención NUEVA del operador, de hoy.
+//   - RecipientAddress + Payload: el caso típico del reenvío es "el socio
+//     tenía mal (o no tenía) el teléfono y ya se lo corrigieron" — debe
+//     salir con los datos de HOY, no con los del cobro.
+// RetryCount se conserva como señal histórica, igual que en el retry.
+func (n *Notification) RearmForResend(recipientAddress string, payload map[string]string, now time.Time) {
+	n.Status = StatusPending
+	n.ScheduledFor = now
+	n.CreatedAt = now
+	n.SentAt = nil
+	n.FailedAt = nil
+	n.ErrorMessage = nil
+	n.ProviderMessageID = nil
+	n.RecipientAddress = strings.TrimSpace(recipientAddress)
+	n.Payload = payload
+	n.Version++
+	n.UpdatedAt = now
+}
+
 // IsPending is a convenience for the dispatcher.
 func (n *Notification) IsPending() bool { return n.Status == StatusPending }
 
