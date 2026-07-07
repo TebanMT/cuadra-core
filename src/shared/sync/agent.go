@@ -148,6 +148,17 @@ type AgentSnapshot struct {
 	// recién cuando un sync exitoso confirma que la nueva versión sí
 	// negocia el schema (= update aplicado).
 	SchemaUpgradeRequired bool
+	// LocalApplyError — true cuando el último fallo fue al APLICAR datos
+	// localmente (ErrLocalApply), no de red. Refleja el ÚLTIMO intento:
+	// se prende con un fallo de aplicación y se apaga con un fallo de red
+	// o un éxito. La UI lo muestra como "Hay un problema al guardar
+	// cambios" (accionable: actualizar/reportar), NO como "Sin internet".
+	LocalApplyError bool
+	// QuarantinedCount — filas que el pull SALTÓ tras fallar el umbral de
+	// intentos (ver agent_quarantine.go). >0 significa "sync fluye pero
+	// hay N cambios que no pudieron aplicarse" — el estado lo muestra como
+	// StateSyncError para que saltar nunca sea silencioso.
+	QuarantinedCount int
 }
 
 func NewAgent(cfg AgentConfig, db *sqlx.DB, uow sharedDomain.UnitOfWork) *Agent {
@@ -355,6 +366,12 @@ func (a *Agent) bootstrap(ctx context.Context) error {
 		if st.SidecarToken != "" {
 			a.token = st.SidecarToken
 		}
+		// Restaura el conteo de cuarentena para que, tras un restart, el
+		// estado refleje filas ya saltadas (y quarantineNonEmpty gatee el
+		// clear-on-apply). Best-effort dentro del bootstrap tx.
+		if n, err := countQuarantined(ctx, tx.(*sharedDomain.SqlxTransaction)); err == nil {
+			a.state.QuarantinedCount = n
+		}
 		a.mu.Unlock()
 		return nil
 	})
@@ -403,7 +420,10 @@ func (a *Agent) Push(ctx context.Context) error {
 			return err
 		}
 		if err := a.handlePushResponse(ctx, batch, resp); err != nil {
-			return err
+			// El write-back de un push aceptado (stamp local / server-wins)
+			// es aplicación local, no red — mismo trato de estado que el
+			// pull para no mentir con "Sin internet".
+			return localApplyErr(err)
 		}
 		a.markPushedAt(time.Now().UTC())
 		if len(batch) < a.cfg.BatchSize {
@@ -535,7 +555,7 @@ func (a *Agent) handlePushResponse(ctx context.Context, batch []PushItem, resp *
 					return err
 				}
 				if r.ServerVersion > 0 && r.ServerUpdatedAt != nil {
-					if err := stampLocalSynced(ctx, stx, orig.EntityType, orig.EntityID, r.ServerVersion, r.ServerUpdatedAt.UnixMilli()); err != nil {
+					if err := stampLocalSynced(ctx, stx, orig, r.ServerVersion, r.ServerUpdatedAt.UnixMilli()); err != nil {
 						return err
 					}
 				}
@@ -585,13 +605,25 @@ func (a *Agent) handlePushResponse(ctx context.Context, batch []PushItem, resp *
 	})
 }
 
-func stampLocalSynced(ctx context.Context, stx *sharedDomain.SqlxTransaction, entityType, entityID string, serverVersion int, serverUpdatedMs int64) error {
-	t := FindTable(entityType)
+func stampLocalSynced(ctx context.Context, stx *sharedDomain.SqlxTransaction, orig PushItem, serverVersion int, serverUpdatedMs int64) error {
+	t := FindTable(orig.EntityType)
 	if t == nil {
 		return nil
 	}
-	stmt := fmt.Sprintf(`UPDATE %s SET synced_at = ?, version = ?, updated_at = ? WHERE id = ?`, t.Table)
-	_, err := stx.Exec(ctx, stmt, time.Now().UTC().UnixMilli(), serverVersion, serverUpdatedMs, entityID)
+	// Las tablas de llave compuesta (owner_alert_configs) no tienen columna
+	// `id`; se ubican por su llave natural leída del payload que ya se
+	// pusheó. Ver localKeyPredicate — sin esto, el stamp reventaba con
+	// "no such column: id" y hacía rollback de TODO el batch (el error que
+	// vio el operador al crear una promo/socio con un toggle de alerta
+	// atascado en la cola).
+	var pl map[string]any
+	if len(orig.Payload) > 0 {
+		_ = json.Unmarshal(orig.Payload, &pl)
+	}
+	whereClause, whereArgs := localKeyPredicate(t, orig.EntityID, pl)
+	stmt := fmt.Sprintf(`UPDATE %s SET synced_at = ?, version = ?, updated_at = ? WHERE %s`, t.Table, whereClause)
+	args := append([]any{time.Now().UTC().UnixMilli(), serverVersion, serverUpdatedMs}, whereArgs...)
+	_, err := stx.Exec(ctx, stmt, args...)
 	return err
 }
 
@@ -654,9 +686,10 @@ func (a *Agent) Pull(ctx context.Context) error {
 		}
 		pending = append(pending, resp.Changes...)
 		batch := pending
-		applyErr := ApplyPullPage(ctx, a.uow, batch, func(tx sharedDomain.Transaction) error {
+		advanceCursor := func(tx sharedDomain.Transaction) error {
 			return SetLastPulledAt(ctx, tx, batch[len(batch)-1].ServerUpdatedAt)
-		})
+		}
+		applyErr := ApplyPullPage(ctx, a.uow, batch, advanceCursor)
 		if applyErr != nil {
 			// El guard len(resp.Changes) > 0 evita loop infinito si el
 			// server reporta has_more con página vacía (since no avanzaría).
@@ -667,9 +700,34 @@ func (a *Agent) Pull(ctx context.Context) error {
 			if isFKConstraintErr(applyErr) {
 				// FK rota de verdad (el padre no existe en TODO el feed).
 				// SQLite no dice qué fila — el diagnóstico sí.
-				return fmt.Errorf("%w — %s", applyErr, describeFKViolations(ctx, a.uow, batch))
+				return localApplyErr(fmt.Errorf("%w — %s", applyErr, describeFKViolations(ctx, a.uow, batch)))
 			}
-			return applyErr
+			// Error de aplicación NO-FK: una fila no se puede aplicar (bug de
+			// esquema, CHECK, dato imposible). En vez de wedge-ear TODO el
+			// sync para siempre, intentamos aislarla y saltarla tras el
+			// umbral de intentos (self-heal). Ver agent_quarantine.go.
+			handled, qErr := a.quarantineAndRetry(ctx, batch, advanceCursor)
+			if qErr != nil {
+				return localApplyErr(qErr)
+			}
+			if !handled {
+				// Aún no toca saltar (veneno bajo umbral, o no aislable):
+				// devolver el error → backoff → reintento. El estado ya
+				// queda marcado como local-apply (no "Sin internet").
+				return localApplyErr(applyErr)
+			}
+			// Saltamos el veneno y la página limpia aterrizó: el cursor ya
+			// avanzó (advanceCursor corrió dentro del re-apply). Seguimos
+			// como si hubiera sido un apply normal.
+			a.refreshQuarantinedCount(ctx)
+		} else if a.quarantineNonEmpty() {
+			// Apply normal exitoso: si había cuarentena, alguna de estas
+			// filas pudo haberse curado (el cloud subió su version con el
+			// dato corregido) — límpialas para que el conteo baje.
+			_ = a.uow.Command(ctx, func(tx sharedDomain.Transaction) error {
+				return clearQuarantineForApplied(ctx, tx.(*sharedDomain.SqlxTransaction), batch)
+			})
+			a.refreshQuarantinedCount(ctx)
 		}
 		newSince := batch[len(batch)-1].ServerUpdatedAt
 		pending = nil
@@ -681,6 +739,15 @@ func (a *Agent) Pull(ctx context.Context) error {
 			return nil
 		}
 	}
+}
+
+// quarantineNonEmpty — lectura barata del conteo en memoria, para gatear
+// el clear-on-apply sólo cuando hay algo en cuarentena (el install sano no
+// paga el DELETE por página).
+func (a *Agent) quarantineNonEmpty() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.state.QuarantinedCount > 0
 }
 
 func (a *Agent) getPull(ctx context.Context, since time.Time) (*PullResponse, error) {
@@ -769,9 +836,9 @@ func (a *Agent) FullSync(ctx context.Context) error {
 			if isFKConstraintErr(applyErr) {
 				// Se acabó el feed y la FK sigue rota: dato huérfano en el
 				// cloud. SQLite no dice qué fila — el diagnóstico sí.
-				return fmt.Errorf("%w — %s", applyErr, describeFKViolations(ctx, a.uow, batch))
+				return localApplyErr(fmt.Errorf("%w — %s", applyErr, describeFKViolations(ctx, a.uow, batch)))
 			}
-			return applyErr
+			return localApplyErr(applyErr)
 		}
 		pending = nil
 		if !resp.HasMore {
@@ -850,6 +917,7 @@ func (a *Agent) recordSuccess(ctx context.Context) {
 	a.state.AuthInvalid = false
 	a.state.WaitingForAuth = false
 	a.state.SchemaUpgradeRequired = false
+	a.state.LocalApplyError = false
 	a.mu.Unlock()
 	_ = a.uow.Command(ctx, func(tx sharedDomain.Transaction) error {
 		_ = SetLastSyncedAt(ctx, tx, now)
@@ -867,6 +935,10 @@ func (a *Agent) recordFailure(ctx context.Context, phase string, err error) {
 	a.mu.Lock()
 	a.state.ConsecutiveFailures++
 	a.state.LastError = phase + ": " + err.Error()
+	// Refleja la naturaleza del ÚLTIMO fallo: aplicación local vs red. Un
+	// fallo de red posterior limpia el flag (el operador SÍ debe ver "Sin
+	// internet" entonces).
+	a.state.LocalApplyError = errors.Is(err, ErrLocalApply)
 	wait := backoff(a.state.ConsecutiveFailures)
 	if authInvalid {
 		// La credencial está muerta hasta que el operador re-loguee. Los
@@ -944,7 +1016,24 @@ func (a *Agent) setStateLabel(label string) {
 var (
 	ErrSchemaUpgradeRequired = errors.New("schema upgrade required by server")
 	ErrUnauthorized          = errors.New("sync auth rejected (token expired?)")
+	// ErrLocalApply marca un fallo al APLICAR datos en el SQLite local
+	// (pull/full-sync que aterriza, o el write-back de un push aceptado),
+	// distinto de una falla de red/transporte. Es load-bearing para el
+	// estado que ve el operador: un "no such column" o un CHECK que
+	// rebota NO es "Sin internet" — el request llegó y el cloud respondió;
+	// lo que falló es el guardado local. Sin esta distinción, un bug de
+	// aplicación se disfrazaba de problema de conexión y el operador
+	// perseguía el router en vez de reportar el error real.
+	ErrLocalApply = errors.New("local apply failed")
 )
+
+// localApplyErr envuelve un error de aplicación local con ErrLocalApply,
+// preservando la cadena original (Go 1.20+ multi-%w) para que
+// isFKConstraintErr (errors.As sqlite3.Error) y los mensajes de
+// diagnóstico sigan funcionando aguas abajo.
+func localApplyErr(err error) error {
+	return fmt.Errorf("%w: %w", ErrLocalApply, err)
+}
 
 // isAuthError returns true when err signals "el cloud rechazó nuestras
 // credenciales", de manera que recordFailure pueda transicionar el agente

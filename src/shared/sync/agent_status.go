@@ -104,6 +104,8 @@ func buildStatusResponse(snap AgentSnapshot, now time.Time) StatusResponse {
 		InitialSyncDone:       !snap.InitialSyncCompletedAt.IsZero(),
 		AuthInvalid:           snap.AuthInvalid || snap.WaitingForAuth,
 		SchemaUpgradeRequired: snap.SchemaUpgradeRequired,
+		LocalApplyError:       snap.LocalApplyError,
+		QuarantinedCount:      snap.QuarantinedCount,
 	}
 	if !snap.LastSyncedAt.IsZero() {
 		t := snap.LastSyncedAt
@@ -140,6 +142,19 @@ func buildStatusResponse(snap AgentSnapshot, now time.Time) StatusResponse {
 	// "Sin internet".
 	if snap.AuthInvalid {
 		r.State = StateAuthInvalid
+		return r
+	}
+
+	// El último fallo fue al APLICAR datos localmente (no de red), o hay
+	// filas en cuarentena (saltadas tras fallar el umbral). El request
+	// llegó y el cloud respondió; lo que rebotó fue el guardado local
+	// (bug de esquema, CHECK, dato huérfano). Mostrarlo como "Sin
+	// internet" mandaría al operador a revisar el router — el problema es
+	// del sistema, no de la conexión. El conteo de cuarentena mantiene
+	// este estado aunque el resto del sync fluya: saltar cambios nunca es
+	// silencioso. Prioridad por encima de la clasificación offline.
+	if snap.LocalApplyError || snap.QuarantinedCount > 0 {
+		r.State = StateSyncError
 		return r
 	}
 
