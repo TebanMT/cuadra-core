@@ -68,6 +68,7 @@ import (
 	subPay "github.com/cuadra/cuadra-core/src/modules/subscriptions/infraestructure/payments"
 	subCtrl "github.com/cuadra/cuadra-core/src/modules/subscriptions/interfaces/controllers"
 
+	"errors"
 	releasesApp "github.com/cuadra/cuadra-core/src/application/releases"
 	releasesInfra "github.com/cuadra/cuadra-core/src/application/releases/infraestructure"
 	releasesCtrl "github.com/cuadra/cuadra-core/src/application/releases/interfaces"
@@ -87,6 +88,8 @@ import (
 	"github.com/cuadra/cuadra-core/src/shared/runtime"
 	"github.com/cuadra/cuadra-core/src/shared/sidecartoken"
 	syncShared "github.com/cuadra/cuadra-core/src/shared/sync"
+	"os/signal"
+	"syscall"
 )
 
 // version es la versión del build, estampada al compilar vía
@@ -259,7 +262,7 @@ func main() {
 	updatePromo := promoApp.NewUpdatePromotion(promotionRepo, uow, recorder)
 	deactivatePromo := promoApp.NewDeactivatePromotion(promotionRepo, uow, recorder)
 	reactivatePromo := promoApp.NewReactivatePromotion(promotionRepo, uow, recorder)
-	listPromos := promoApp.NewListPromotions(promotionRepo, uow)
+	listPromos := promoApp.NewListPromotions(promotionRepo, uow).WithGyms(gymRepo)
 	getPromoByCode := promoApp.NewGetPromotionByCode(promotionRepo, appliedPromoRepo, uow)
 	applyPromo := promoApp.NewApplyPromotion(promotionRepo, appliedPromoRepo)
 	listAppliedByMonth := promoApp.NewListAppliedByMonth(appliedPromoRepo, uow)
@@ -385,14 +388,15 @@ func main() {
 	cashClose := reportsApp.NewCashClose(cashCloseReader, cashCloseEventRepo, uow, recorder).
 		WithExpenses(expenseRepo).
 		WithUsers(userRepo).
-		WithSubscriber(notiApp.NewCashCloseAlertSubscriber(enqueueOwnerAlert))
+		WithSubscriber(notiApp.NewCashCloseAlertSubscriber(enqueueOwnerAlert)).
+		WithGyms(gymRepo)
 
 	// ── Reports application layer (Sesión 6) ─────────────────────────────
-	dashboard := reportsApp.NewDashboard(reportsReader, uow, 60*time.Second)
-	attentionRequired := reportsApp.NewAttentionRequired(reportsReader, uow)
+	dashboard := reportsApp.NewDashboard(reportsReader, uow, 60*time.Second).WithGyms(gymRepo)
+	attentionRequired := reportsApp.NewAttentionRequired(reportsReader, uow).WithGyms(gymRepo)
 	rangeReport := reportsApp.NewRangeReport(reportsReader, uow)
 	exportReport := reportsApp.NewExportReport(reportsReader, gymRepo, uow, attentionRequired, rangeReport)
-	genderReport := reportsApp.NewGenderReport(reportsReader, uow)
+	genderReport := reportsApp.NewGenderReport(reportsReader, uow).WithGyms(gymRepo)
 	markContacted := memApp.NewMarkContacted(memberRepo, contactAttemptRepo, uow, recorder)
 	markLost := memApp.NewMarkLost(memberRepo, uow, recorder)
 	// PIN use cases for cloud-side POST/DELETE /auth/me/pin. The dashboard
@@ -631,9 +635,44 @@ func main() {
 
 	port := envOrDefault("PORT", "8080")
 	log.Printf("tinta-server starting on :%s", port)
-	if err := r.Run(":" + port); err != nil {
-		log.Fatalf("gin: %v", err)
+
+	// Graceful shutdown: cada release reinicia el proceso, y matarlo en
+	// seco a media entrega abre la ventana de duplicado del dispatcher
+	// (Twilio ya aceptó el mensaje pero markSent no alcanzó a commitear →
+	// al reiniciar, pasado el claimWindow, la fila vuelve a elegible y el
+	// socio recibe el WhatsApp DOS veces). Con SIGTERM: dejamos de aceptar
+	// requests, cancelamos los loops de los workers y ESPERAMOS a que el
+	// tick en vuelo termine (los ticks corren con WithoutCancel — el
+	// cancel para el loop, nunca aborta la llamada al provider a medias).
+	srv := &http.Server{Addr: ":" + port, Handler: r}
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("gin: %v", err)
+		}
+	}()
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	<-stop
+	log.Printf("tinta-server: señal de apagado — drenando workers y requests en vuelo…")
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelShutdown()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("tinta-server: http shutdown: %v", err)
 	}
+	cancelBg()
+	for _, done := range []<-chan struct{}{
+		dispatchWorker.Done(),
+		expiryScheduler.Done(),
+		oxxoWorker.Done(),
+	} {
+		select {
+		case <-done:
+		case <-shutdownCtx.Done():
+		}
+	}
+	log.Printf("tinta-server: apagado limpio")
 }
 
 func mustEnv(key string) string {

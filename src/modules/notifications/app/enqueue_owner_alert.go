@@ -14,6 +14,7 @@ import (
 	notiRepo "github.com/cuadra/cuadra-core/src/modules/notifications/domain/repository"
 	usersRepo "github.com/cuadra/cuadra-core/src/modules/users/domain/repository"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
+	"github.com/cuadra/cuadra-core/src/shared/tz"
 )
 
 // OwnerAlertKind aliases the canonical alertconfig.Key — keeping the
@@ -146,7 +147,11 @@ func (uc *EnqueueOwnerAlert) Execute(ctx context.Context, in EnqueueOwnerAlertIn
 			vars[k] = v
 		}
 
-		idempKey := fmt.Sprintf("owner_alert:%s:%s", in.Kind, defaultStr(in.IdempotencyKeySuffix, now.Format("2006-01-02")))
+		// El sufijo default (la fecha del día) usa el día LOCAL del gym:
+		// con la fecha UTC, la "alerta diaria" cambiaba de llave a las
+		// 6 PM de CDMX y el dueño podía recibirla DOS veces el mismo día.
+		localDay := tz.LocalToday(gym.Timezone, now).Format("2006-01-02")
+		idempKey := fmt.Sprintf("owner_alert:%s:%s", in.Kind, defaultStr(in.IdempotencyKeySuffix, localDay))
 		existing, err := uc.Notifications.GetByIdempotencyKey(tx, in.GymID, idempKey)
 		if err != nil {
 			return sharedDomain.NewUnexpectedError(err)

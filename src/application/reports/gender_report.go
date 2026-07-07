@@ -17,6 +17,7 @@ import (
 
 	"github.com/google/uuid"
 
+	gymRepo "github.com/cuadra/cuadra-core/src/modules/gyms/domain/repository"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 )
 
@@ -42,10 +43,19 @@ type GenderReportOutput struct {
 type GenderReport struct {
 	Reader Reader
 	UoW    sharedDomain.UnitOfWork
+	// Gyms (opcional) → "hoy" en el día LOCAL del gym (ver localToday).
+	Gyms gymRepo.GymRepository
 }
 
 func NewGenderReport(reader Reader, uow sharedDomain.UnitOfWork) *GenderReport {
 	return &GenderReport{Reader: reader, UoW: uow}
+}
+
+// WithGyms cablea el repo de gyms para anclar el "hoy" del reporte al día
+// calendario del gym en SU zona horaria.
+func (uc *GenderReport) WithGyms(g gymRepo.GymRepository) *GenderReport {
+	uc.Gyms = g
+	return uc
 }
 
 const defaultGenderReportDaysBack = 30
@@ -56,7 +66,7 @@ func (uc *GenderReport) Execute(ctx context.Context, in GenderReportInput) (*Gen
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}
 	now := time.Now().UTC()
-	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	today := localToday(tx, uc.Gyms, in.GymID, now)
 	daysBack := in.DaysBack
 	if daysBack <= 0 {
 		daysBack = defaultGenderReportDaysBack

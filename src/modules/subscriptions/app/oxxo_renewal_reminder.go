@@ -376,14 +376,16 @@ func NewOXXORenewalWorker(reminder *RunOXXORenewalReminders, cancel *CancelExpir
 func (w *OXXORenewalWorker) Start(ctx context.Context) {
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
-	w.runOnce(ctx)
+	// WithoutCancel: el shutdown para el loop, no la corrida en curso
+	// (mismo criterio que el Worker del dispatcher de notificaciones).
+	w.runOnce(context.WithoutCancel(ctx))
 	for {
 		select {
 		case <-ctx.Done():
 			w.stopOnce.Do(func() { close(w.done) })
 			return
 		case <-ticker.C:
-			w.runOnce(ctx)
+			w.runOnce(context.WithoutCancel(ctx))
 		}
 	}
 }

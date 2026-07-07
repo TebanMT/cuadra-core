@@ -191,7 +191,7 @@ func (s *Scheduler) Start(ctx context.Context) {
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
 	// Fire once at startup so dev iterations don't have to wait an hour.
-	if n, err := s.uc.Tick(ctx, s.now()); err != nil {
+	if n, err := s.uc.Tick(context.WithoutCancel(ctx), s.now()); err != nil {
 		log.Printf("[notifications/scheduler] startup tick err=%v", err)
 	} else if n > 0 {
 		log.Printf("[notifications/scheduler] startup tick enqueued=%d", n)
@@ -202,7 +202,9 @@ func (s *Scheduler) Start(ctx context.Context) {
 			s.stopOnce.Do(func() { close(s.done) })
 			return
 		case <-ticker.C:
-			n, err := s.uc.Tick(ctx, s.now())
+			// WithoutCancel: el shutdown para el loop, no el tick en
+			// curso (mismo criterio que el Worker del dispatcher).
+			n, err := s.uc.Tick(context.WithoutCancel(ctx), s.now())
 			if err != nil {
 				log.Printf("[notifications/scheduler] tick err=%v", err)
 				continue

@@ -279,7 +279,7 @@ func main() {
 	updatePromo := promoApp.NewUpdatePromotion(promotionRepo, uow, recorder)
 	deactivatePromo := promoApp.NewDeactivatePromotion(promotionRepo, uow, recorder)
 	reactivatePromo := promoApp.NewReactivatePromotion(promotionRepo, uow, recorder)
-	listPromos := promoApp.NewListPromotions(promotionRepo, uow)
+	listPromos := promoApp.NewListPromotions(promotionRepo, uow).WithGyms(gymRepo)
 	getPromoByCode := promoApp.NewGetPromotionByCode(promotionRepo, appliedPromoRepo, uow)
 	applyPromo := promoApp.NewApplyPromotion(promotionRepo, appliedPromoRepo)
 	listAppliedByMonth := promoApp.NewListAppliedByMonth(appliedPromoRepo, uow)
@@ -389,7 +389,8 @@ func main() {
 	cashClose := reportsApp.NewCashClose(cashCloseReader, cashCloseEventRepo, uow, recorder).
 		WithExpenses(expenseRepo).
 		WithUsers(userRepo).
-		WithSubscriber(notiApp.NewCashCloseAlertSubscriber(enqueueOwnerAlert))
+		WithSubscriber(notiApp.NewCashCloseAlertSubscriber(enqueueOwnerAlert)).
+		WithGyms(gymRepo)
 
 	// ── Reports application layer (Sesión 6) — same use cases as the cloud,
 	// but reading from the local SQLite. TTL corto (5s, vs 60s del cloud):
@@ -398,11 +399,11 @@ func main() {
 	// refetcheara tras un pull con cambios — el operador lo veía como "el
 	// sync no actualizó nada". 5s sólo coalesce ráfagas (kiosko + dashboard
 	// pidiendo a la vez); el cloud conserva 60s porque ahí protege Postgres.
-	dashboard := reportsApp.NewDashboard(reportsReader, uow, 5*time.Second)
-	attentionRequired := reportsApp.NewAttentionRequired(reportsReader, uow)
+	dashboard := reportsApp.NewDashboard(reportsReader, uow, 5*time.Second).WithGyms(gymRepo)
+	attentionRequired := reportsApp.NewAttentionRequired(reportsReader, uow).WithGyms(gymRepo)
 	rangeReport := reportsApp.NewRangeReport(reportsReader, uow)
 	exportReport := reportsApp.NewExportReport(reportsReader, gymRepo, uow, attentionRequired, rangeReport)
-	genderReport := reportsApp.NewGenderReport(reportsReader, uow)
+	genderReport := reportsApp.NewGenderReport(reportsReader, uow).WithGyms(gymRepo)
 	markContacted := memApp.NewMarkContacted(memberRepo, contactAttemptRepo, uow, recorder)
 	markLost := memApp.NewMarkLost(memberRepo, uow, recorder)
 

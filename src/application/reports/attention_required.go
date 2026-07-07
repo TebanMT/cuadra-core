@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	gymRepo "github.com/cuadra/cuadra-core/src/modules/gyms/domain/repository"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 )
 
@@ -41,10 +42,19 @@ type AttentionRequiredOutput struct {
 type AttentionRequired struct {
 	Reader Reader
 	UoW    sharedDomain.UnitOfWork
+	// Gyms (opcional) → "hoy" en el día LOCAL del gym (ver localToday).
+	Gyms gymRepo.GymRepository
 }
 
 func NewAttentionRequired(reader Reader, uow sharedDomain.UnitOfWork) *AttentionRequired {
 	return &AttentionRequired{Reader: reader, UoW: uow}
+}
+
+// WithGyms cablea el repo de gyms para anclar el "hoy" de la lista de
+// atención al día calendario del gym en SU zona horaria.
+func (uc *AttentionRequired) WithGyms(g gymRepo.GymRepository) *AttentionRequired {
+	uc.Gyms = g
+	return uc
 }
 
 func (uc *AttentionRequired) Execute(ctx context.Context, in AttentionRequiredInput) (*AttentionRequiredOutput, error) {
@@ -53,7 +63,9 @@ func (uc *AttentionRequired) Execute(ctx context.Context, in AttentionRequiredIn
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}
 	now := time.Now().UTC()
-	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	// Día LOCAL del gym — con el día UTC, los por-vencer/vencidos se
+	// adelantaban 6 horas cada noche.
+	today := localToday(tx, uc.Gyms, in.GymID, now)
 
 	expiring, err := uc.Reader.ListExpiringSoon(tx, in.GymID, today, expiringSoonDays)
 	if err != nil {

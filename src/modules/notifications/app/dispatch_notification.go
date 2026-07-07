@@ -594,7 +594,13 @@ func (w *Worker) Start(ctx context.Context) {
 			w.stopOnce.Do(func() { close(w.done) })
 			return
 		case <-ticker.C:
-			if _, err := w.uc.Tick(ctx, time.Now().UTC()); err != nil {
+			// WithoutCancel: el shutdown (cancel del ctx) debe parar el
+			// LOOP, no abortar el Tick en vuelo — cancelar el HTTP a
+			// Twilio a media llamada es justo la ventana que produce
+			// mensajes duplicados (Twilio aceptó, nosotros no marcamos
+			// sent). El drain del main espera Done(), que sólo cierra
+			// cuando el Tick en curso terminó.
+			if _, err := w.uc.Tick(context.WithoutCancel(ctx), time.Now().UTC()); err != nil {
 				log.Printf("[notifications/dispatch] tick err=%v", err)
 			}
 		}
