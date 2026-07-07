@@ -94,22 +94,30 @@ func ApplyPullChange(ctx context.Context, tx sharedDomain.Transaction, change Pu
 		return nil
 	}
 
+	var pl map[string]any
+	if err := json.Unmarshal(change.Payload, &pl); err != nil {
+		return fmt.Errorf("payload not a JSON object: %w", err)
+	}
+
+	// Cómo ubicar la fila local: casi todas las tablas usan el id surrogate
+	// (= entity_id); las de llave compuesta (owner_alert_configs, sin
+	// columna id, PK = gym_id+alert_key) se ubican por su llave natural
+	// leída del payload — espejo del path CompositeKey del projector cloud.
+	// Se parsea el payload ANTES del LWW check porque el predicado compuesto
+	// lo necesita.
+	whereClause, whereArgs := localKeyPredicate(table, change.EntityID, pl)
+
 	// LWW idempotency check.
 	var localVer sql.NullInt64
 	err := stx.Get(ctx, &localVer,
-		fmt.Sprintf(`SELECT version FROM %s WHERE id = ?`, table.Table),
-		change.EntityID,
+		fmt.Sprintf(`SELECT version FROM %s WHERE %s`, table.Table, whereClause),
+		whereArgs...,
 	)
 	if err != nil && err != sql.ErrNoRows {
 		return err
 	}
 	if localVer.Valid && int(localVer.Int64) >= change.Version {
 		return nil
-	}
-
-	var pl map[string]any
-	if err := json.Unmarshal(change.Payload, &pl); err != nil {
-		return fmt.Errorf("payload not a JSON object: %w", err)
 	}
 
 	// Server timestamp wins for updated_at + synced_at.
@@ -147,8 +155,8 @@ func ApplyPullChange(ctx context.Context, tx sharedDomain.Transaction, change Pu
 		if localVer.Valid {
 			var localCreated sql.NullInt64
 			gerr := stx.Get(ctx, &localCreated,
-				fmt.Sprintf(`SELECT created_at FROM %s WHERE id = ?`, table.Table),
-				change.EntityID,
+				fmt.Sprintf(`SELECT created_at FROM %s WHERE %s`, table.Table, whereClause),
+				whereArgs...,
 			)
 			if gerr == nil && localCreated.Valid {
 				pl["created_at"] = localCreated.Int64
@@ -198,10 +206,12 @@ func ApplyPullChange(ctx context.Context, tx sharedDomain.Transaction, change Pu
 
 	placeholders := strings.Repeat("?,", len(cols)-1) + "?"
 
-	// Build "DO UPDATE SET" excluding the primary key.
+	// Build "DO UPDATE SET" excluding the primary key column(s) — el id
+	// surrogate, o las columnas de la llave compuesta (que además son el
+	// target del ON CONFLICT).
 	setParts := make([]string, 0, len(cols)-1)
 	for _, c := range cols {
-		if c == "id" {
+		if isPrimaryKeyColumn(table, c) {
 			continue
 		}
 		setParts = append(setParts, fmt.Sprintf("%s = excluded.%s", c, c))
@@ -210,11 +220,12 @@ func ApplyPullChange(ctx context.Context, tx sharedDomain.Transaction, change Pu
 	stmt := fmt.Sprintf(`
 		INSERT INTO %s (%s)
 		VALUES (%s)
-		ON CONFLICT(id) DO UPDATE SET %s
+		ON CONFLICT(%s) DO UPDATE SET %s
 		WHERE excluded.version > %s.version`,
 		table.Table,
 		strings.Join(cols, ","),
 		placeholders,
+		conflictTarget(table),
 		strings.Join(setParts, ","),
 		table.Table,
 	)
@@ -342,6 +353,50 @@ func describeFKViolations(ctx context.Context, uow sharedDomain.UnitOfWork, chan
 // extractColumnValue pulls a single column out of an unmarshalled JSON
 // payload, applying type-fixups the sqlite3 driver doesn't do for us
 // (base64 → blob, pesos → centavos para columnas de dinero, missing key → nil).
+// localKeyPredicate builds the WHERE clause (+ args) that locates a synced
+// table's row in local SQLite. Surrogate-id tables use entity_id; tablas de
+// llave compuesta (owner_alert_configs — sin columna `id`, PK =
+// gym_id+alert_key) se ubican por su llave natural leída del payload,
+// espejo de cómo el projector cloud las upsertea (projector.go, path
+// CompositeKey). Sin esto, stamp/apply hacían `WHERE id = ?` y reventaban
+// con "no such column: id": el row quedaba atascado en sync_queue y
+// envenenaba TODO push posterior (el write-back del batch entero hace
+// rollback), aunque las otras filas del batch fueran válidas.
+func localKeyPredicate(t *EntityTable, entityID string, pl map[string]any) (string, []any) {
+	if len(t.CompositeKey) == 0 {
+		return "id = ?", []any{entityID}
+	}
+	clauses := make([]string, 0, len(t.CompositeKey))
+	args := make([]any, 0, len(t.CompositeKey))
+	for _, c := range t.CompositeKey {
+		clauses = append(clauses, c+" = ?")
+		args = append(args, extractColumnValue(pl, t.Table, c))
+	}
+	return strings.Join(clauses, " AND "), args
+}
+
+// conflictTarget names the ON CONFLICT column(s) for a table's upsert.
+func conflictTarget(t *EntityTable) string {
+	if len(t.CompositeKey) > 0 {
+		return strings.Join(t.CompositeKey, ",")
+	}
+	return "id"
+}
+
+// isPrimaryKeyColumn reports whether col forms part of the table's primary
+// key (excluded from the DO UPDATE SET of the upsert).
+func isPrimaryKeyColumn(t *EntityTable, col string) bool {
+	if len(t.CompositeKey) == 0 {
+		return col == "id"
+	}
+	for _, c := range t.CompositeKey {
+		if c == col {
+			return true
+		}
+	}
+	return false
+}
+
 func extractColumnValue(pl map[string]any, table, col string) any {
 	v, ok := pl[col]
 	if !ok || v == nil {

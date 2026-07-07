@@ -535,7 +535,7 @@ func (a *Agent) handlePushResponse(ctx context.Context, batch []PushItem, resp *
 					return err
 				}
 				if r.ServerVersion > 0 && r.ServerUpdatedAt != nil {
-					if err := stampLocalSynced(ctx, stx, orig.EntityType, orig.EntityID, r.ServerVersion, r.ServerUpdatedAt.UnixMilli()); err != nil {
+					if err := stampLocalSynced(ctx, stx, orig, r.ServerVersion, r.ServerUpdatedAt.UnixMilli()); err != nil {
 						return err
 					}
 				}
@@ -585,13 +585,25 @@ func (a *Agent) handlePushResponse(ctx context.Context, batch []PushItem, resp *
 	})
 }
 
-func stampLocalSynced(ctx context.Context, stx *sharedDomain.SqlxTransaction, entityType, entityID string, serverVersion int, serverUpdatedMs int64) error {
-	t := FindTable(entityType)
+func stampLocalSynced(ctx context.Context, stx *sharedDomain.SqlxTransaction, orig PushItem, serverVersion int, serverUpdatedMs int64) error {
+	t := FindTable(orig.EntityType)
 	if t == nil {
 		return nil
 	}
-	stmt := fmt.Sprintf(`UPDATE %s SET synced_at = ?, version = ?, updated_at = ? WHERE id = ?`, t.Table)
-	_, err := stx.Exec(ctx, stmt, time.Now().UTC().UnixMilli(), serverVersion, serverUpdatedMs, entityID)
+	// Las tablas de llave compuesta (owner_alert_configs) no tienen columna
+	// `id`; se ubican por su llave natural leída del payload que ya se
+	// pusheó. Ver localKeyPredicate — sin esto, el stamp reventaba con
+	// "no such column: id" y hacía rollback de TODO el batch (el error que
+	// vio el operador al crear una promo/socio con un toggle de alerta
+	// atascado en la cola).
+	var pl map[string]any
+	if len(orig.Payload) > 0 {
+		_ = json.Unmarshal(orig.Payload, &pl)
+	}
+	whereClause, whereArgs := localKeyPredicate(t, orig.EntityID, pl)
+	stmt := fmt.Sprintf(`UPDATE %s SET synced_at = ?, version = ?, updated_at = ? WHERE %s`, t.Table, whereClause)
+	args := append([]any{time.Now().UTC().UnixMilli(), serverVersion, serverUpdatedMs}, whereArgs...)
+	_, err := stx.Exec(ctx, stmt, args...)
 	return err
 }
 
