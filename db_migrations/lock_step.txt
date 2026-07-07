@@ -81,3 +81,4 @@ sqlite_fix_only: sqlite=021_fix_memberships_self_fk.sql reason="fix idempotente 
 sqlite_fix_only: sqlite=026_checkin_pin_queue_fix.sql reason="reescribe payloads 'pin'→'number' pendientes en sync_queue (tabla sólo del sidecar) tras la purga 025/030; Postgres no tiene sync_queue"
 pair: pg=032_notification_held_status.sql sqlite=028_notification_held_status.sql
 sqlite_fix_only: sqlite=027_repair_gym_setup_completed_at.sql reason="repara in-place el setup_completed_at TEXT (RFC3339) que el apply pre-v1.0.6 escribió en la columna INTEGER; Postgres nunca tuvo el veneno porque su columna es TIMESTAMPTZ y el projector coerce ISO nativo"
+sqlite_fix_only: sqlite=029_sync_quarantine.sql reason="registro de filas del pull que no se pudieron aplicar tras el umbral de intentos (self-heal del sync); vive SÓLO en el sidecar, igual que sync_queue — Postgres no tiene cuarentena de aplicación"
