@@ -19,3 +19,9 @@ node_modules/
 .DS_Store
 coverage.out
 *.test
+
+# Binarios de `go build ./cmd/...` en la raíz. NUNCA se commitean —
+# los builds de CI/release se cross-compilan en el workflow.
+/server
+/sidecar
+*.exe
