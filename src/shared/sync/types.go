@@ -121,6 +121,14 @@ type StatusResponse struct {
 	// Mayor prioridad que cualquier offline_*: aunque haya internet, el
 	// cliente está roto hasta que actualice.
 	SchemaUpgradeRequired bool `json:"schema_upgrade_required,omitempty"`
+	// LocalApplyError — el último fallo fue al aplicar datos localmente,
+	// no de red. El FE lo usa para mostrar un mensaje accionable en lugar
+	// de "Sin internet" (ver StateSyncError).
+	LocalApplyError bool `json:"local_apply_error,omitempty"`
+	// QuarantinedCount — filas que el pull saltó tras fallar el umbral de
+	// intentos. >0 mantiene el estado en StateSyncError aunque el resto
+	// del sync fluya, para que saltar cambios NUNCA sea silencioso.
+	QuarantinedCount int `json:"quarantined_count,omitempty"`
 }
 
 // State values returned by /sync/status, per UC-044.
@@ -140,4 +148,12 @@ const (
 	// El binario quedó atrás; ningún retry recupera. UI dispara modal
 	// bloqueante "Tu versión ya no es compatible".
 	StateSchemaUpgradeRequired = "schema_upgrade_required"
+	// StateSyncError — el último fallo fue al APLICAR datos localmente
+	// (ErrLocalApply), no de red: el request llegó y el cloud respondió,
+	// pero el guardado local rebotó (bug de esquema, CHECK, dato huérfano).
+	// La UI lo muestra accionable ("Hay un problema al guardar cambios —
+	// actualiza o reporta"), NUNCA "Sin internet": el operador que persigue
+	// el router no lo va a arreglar. Prioridad debajo de auth/schema (otros
+	// bloqueos) y encima de la clasificación offline.
+	StateSyncError = "sync_error"
 )

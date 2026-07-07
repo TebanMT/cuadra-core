@@ -127,6 +127,39 @@ func TestStatusThresholds(t *testing.T) {
 			},
 			wantState: StateSchemaUpgradeRequired,
 		},
+		{
+			// Un fallo de aplicación local NO es "Sin internet": el request
+			// llegó, el guardado local rebotó. Pisa la clasificación offline.
+			name: "LocalApplyError → sync_error, no offline",
+			snap: AgentSnapshot{
+				LastSyncedAt:           now.Add(-2 * time.Minute),
+				InitialSyncCompletedAt: now.Add(-time.Hour),
+				ConsecutiveFailures:    5, // suficientes para offline_medium
+				LocalApplyError:        true,
+				LastError:              "pull: local apply failed: no such column: id",
+			},
+			wantState: StateSyncError,
+		},
+		{
+			// Filas en cuarentena: sync fluye pero saltó cambios → el estado
+			// lo refleja (no silencioso) aunque el último ciclo fuera OK.
+			name: "QuarantinedCount>0 → sync_error aunque no haya fallo activo",
+			snap: AgentSnapshot{
+				LastSyncedAt:           now.Add(-1 * time.Minute),
+				InitialSyncCompletedAt: now.Add(-time.Hour),
+				QuarantinedCount:       2,
+			},
+			wantState: StateSyncError,
+		},
+		{
+			// Auth invalid pisa sync_error: re-login es el bloqueo real.
+			name: "AuthInvalid tiene prioridad sobre LocalApplyError",
+			snap: AgentSnapshot{
+				AuthInvalid:     true,
+				LocalApplyError: true,
+			},
+			wantState: StateAuthInvalid,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
