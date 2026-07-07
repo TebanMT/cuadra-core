@@ -15,6 +15,7 @@ import (
 	notiRepo "github.com/cuadra/cuadra-core/src/modules/notifications/domain/repository"
 	"github.com/cuadra/cuadra-core/src/shared/audit"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
+	"github.com/cuadra/cuadra-core/src/shared/tz"
 )
 
 // BroadcastFilter selects the audience. MVP supports the two filters listed
@@ -161,8 +162,12 @@ func (uc *Broadcast) Execute(ctx context.Context, in BroadcastInput) (*Broadcast
 		}
 
 		// Envíos ya hechos este mes (sólo importa cuando hay tope = Standard).
+		// La frontera de mes es la del CALENDARIO DEL GYM: con la frontera
+		// UTC, el tope se reseteaba a las 6 PM locales del último día del
+		// mes (CDMX) y un gym Standard podía colar un tercer envío.
 		if uc.AuditReader != nil && out.MonthlyLimit > 0 {
-			monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+			localToday := tz.LocalToday(gym.Timezone, now)
+			monthStart := time.Date(localToday.Year(), localToday.Month(), 1, 0, 0, 0, 0, time.UTC)
 			if _, used, lerr := uc.AuditReader.List(tx, audit.ListQuery{
 				GymID:      in.GymID,
 				EntityType: "broadcasts",

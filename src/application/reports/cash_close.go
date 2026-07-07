@@ -23,6 +23,7 @@ import (
 	billingRepo "github.com/cuadra/cuadra-core/src/modules/billing/domain/repository"
 	expenseDomain "github.com/cuadra/cuadra-core/src/modules/expenses/domain/expense"
 	expenseRepo "github.com/cuadra/cuadra-core/src/modules/expenses/domain/repository"
+	gymRepo "github.com/cuadra/cuadra-core/src/modules/gyms/domain/repository"
 	userRepo "github.com/cuadra/cuadra-core/src/modules/users/domain/repository"
 	"github.com/cuadra/cuadra-core/src/shared/audit"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
@@ -124,6 +125,9 @@ type CashClose struct {
 	UoW         sharedDomain.UnitOfWork
 	Audit       audit.Recorder
 	Subscribers []CashCloseSubscriber
+	// Gyms (opcional) → default del "día de la caja" en el día LOCAL del
+	// gym cuando el caller no manda fecha (ver localToday).
+	Gyms gymRepo.GymRepository
 }
 
 func NewCashClose(reader billingRepo.CashCloseReader, events billingRepo.CashCloseEventRepository,
@@ -134,6 +138,12 @@ func NewCashClose(reader billingRepo.CashCloseReader, events billingRepo.CashClo
 // WithExpenses wires the expenses BC repository — once provided, Report()
 // includes gastos del día. Kept as a fluent setter so existing test fixtures
 // keep working with the zero value (no expenses surfaced).
+// WithGyms cablea el repo de gyms para el default de fecha del reporte.
+func (uc *CashClose) WithGyms(g gymRepo.GymRepository) *CashClose {
+	uc.Gyms = g
+	return uc
+}
+
 func (uc *CashClose) WithExpenses(repo expenseRepo.ExpenseRepository) *CashClose {
 	uc.Expenses = repo
 	return uc
@@ -159,6 +169,13 @@ func (uc *CashClose) Report(ctx context.Context, in CashCloseReportInput) (*Cash
 	tx, err := uc.UoW.Query(ctx)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
+	}
+	// Default de fecha: el día LOCAL del gym. El desktop siempre manda la
+	// fecha; este fallback cubre callers sin query param — con el default
+	// UTC anterior, pedir "la caja de hoy" después de las 6 PM devolvía
+	// la caja (vacía) de mañana.
+	if in.Date.IsZero() {
+		in.Date = localToday(tx, uc.Gyms, in.GymID, time.Now().UTC())
 	}
 	totals, err := uc.Reader.Aggregate(tx, billingRepo.CashCloseQuery{
 		GymID: in.GymID, Date: in.Date,

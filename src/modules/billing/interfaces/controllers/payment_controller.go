@@ -797,11 +797,16 @@ func (ctrl *PaymentController) handleRefundSale(c *gin.Context) {
 
 func (ctrl *PaymentController) handleCashCloseReport(c *gin.Context) {
 	gymID, _ := middleware.GetGymID(c)
-	dateStr := c.DefaultQuery("date", time.Now().UTC().Format("2006-01-02"))
-	date, err := time.Parse("2006-01-02", dateStr)
-	if err != nil {
-		utils.ErrorResponse(c, http.StatusBadRequest, err)
-		return
+	// Sin ?date= el use case resuelve "hoy" en el día LOCAL del gym (el
+	// default UTC de antes devolvía la caja de mañana desde las 6 PM).
+	var date time.Time
+	if dateStr := c.Query("date"); dateStr != "" {
+		var err error
+		date, err = time.Parse("2006-01-02", dateStr)
+		if err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, err)
+			return
+		}
 	}
 	out, err := ctrl.CashClose.Report(c.Request.Context(), reportsApp.CashCloseReportInput{
 		GymID: gymID, Date: date,

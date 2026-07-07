@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	gymRepo "github.com/cuadra/cuadra-core/src/modules/gyms/domain/repository"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 )
 
@@ -104,7 +105,10 @@ type KPI struct {
 type Dashboard struct {
 	Reader Reader
 	UoW    sharedDomain.UnitOfWork
-	cache  *dashboardCache
+	// Gyms (opcional) → "hoy" y fronteras de mes en el día LOCAL del gym
+	// (ver localToday). Nil = día UTC (tests viejos).
+	Gyms  gymRepo.GymRepository
+	cache *dashboardCache
 }
 
 // NewDashboard builds the use case with a 60s cache (DA-33.3). Pass ttl=0 to
@@ -114,6 +118,13 @@ func NewDashboard(reader Reader, uow sharedDomain.UnitOfWork, ttl time.Duration)
 		ttl = time.Second // smallest non-zero so Get always returns false
 	}
 	return &Dashboard{Reader: reader, UoW: uow, cache: newDashboardCache(ttl)}
+}
+
+// WithGyms cablea el repo de gyms para anclar el "hoy" del dashboard al
+// día calendario del gym en SU zona horaria.
+func (uc *Dashboard) WithGyms(g gymRepo.GymRepository) *Dashboard {
+	uc.Gyms = g
+	return uc
 }
 
 // InvalidateCache drops the cached entry for a gym. Wired to the persecución
@@ -132,7 +143,9 @@ func (uc *Dashboard) Execute(ctx context.Context, in DashboardInput) (*Dashboard
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}
 	now := time.Now().UTC()
-	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	// Día y mes del GYM, no de UTC — desde las 6 PM de CDMX el dashboard
+	// mostraba los KPIs del día siguiente.
+	today := localToday(tx, uc.Gyms, in.GymID, now)
 	monthStart := time.Date(today.Year(), today.Month(), 1, 0, 0, 0, 0, time.UTC)
 	prevMonthStart := monthStart.AddDate(0, -1, 0)
 	prevMonthEnd := monthStart.AddDate(0, 0, -1)
