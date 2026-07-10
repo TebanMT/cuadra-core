@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,14 +23,18 @@ import (
 //     llave de siempre.
 
 // fakeExpiryReader devuelve candidatos fijos por offset y registra qué
-// offsets pidió el tick.
+// offsets pidió el tick. errByOffset simula una etapa rota.
 type fakeExpiryReader struct {
 	byOffset     map[int][]ExpiryCandidate
+	errByOffset  map[int]error
 	offsetsAsked []int
 }
 
 func (f *fakeExpiryReader) FindDueForStage(_ sharedDomain.Transaction, _ time.Time, offsetDays int) ([]ExpiryCandidate, error) {
 	f.offsetsAsked = append(f.offsetsAsked, offsetDays)
+	if err := f.errByOffset[offsetDays]; err != nil {
+		return nil, err
+	}
 	return f.byOffset[offsetDays], nil
 }
 
@@ -145,6 +151,34 @@ func TestTick_IdempotenciaPorMiembroEtapaYFecha(t *testing.T) {
 	}
 	if n != 0 || len(notis.created) != 1 {
 		t.Errorf("segundo tick insertó %d (created=%d), want 0/1", n, len(notis.created))
+	}
+}
+
+// Lección del incidente 42883 (jul-2026): un error determinista en la
+// etapa -3 abortaba el tick entero y callaba también a "vence hoy" y a la
+// persecución +5, en CADA tick, durante días. Una etapa rota no debe
+// silenciar a las demás.
+func TestTick_UnaEtapaRotaNoCallaALasDemas(t *testing.T) {
+	expiry := time.Date(2026, 7, 9, 0, 0, 0, 0, time.UTC)
+	uc, notis, reader := expiryFixture(map[int][]ExpiryCandidate{
+		0: {candidate("America/Mexico_City", expiry)},
+	})
+	reader.errByOffset = map[int]error{-3: errors.New("boom 42883")}
+
+	now := time.Date(2026, 7, 6, 16, 0, 0, 0, time.UTC)
+	n, err := uc.Tick(context.Background(), now)
+
+	// El error de la etapa -3 se REPORTA (el Scheduler lo loguea)…
+	if err == nil || !strings.Contains(err.Error(), "stage -3") {
+		t.Errorf("err = %v, want error de stage -3", err)
+	}
+	// …pero las etapas 0 y +5 corrieron igual, y la 0 encoló su fila.
+	wantOffsets := []int{-3, 0, 5}
+	if len(reader.offsetsAsked) != len(wantOffsets) {
+		t.Fatalf("offsets pedidos = %v, want %v", reader.offsetsAsked, wantOffsets)
+	}
+	if n != 1 || len(notis.created) != 1 {
+		t.Errorf("inserted=%d created=%d, want 1/1 (la etapa 0 no debió callarse)", n, len(notis.created))
 	}
 }
 

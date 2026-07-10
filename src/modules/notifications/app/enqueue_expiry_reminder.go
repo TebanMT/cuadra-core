@@ -62,16 +62,23 @@ func defaultExpiryStages() []expiryStage {
 // Tick runs one pass of the scheduler. `now` is normally time.Now().UTC()
 // — accepted as a parameter so tests can drive the clock. Returns the
 // number of rows inserted.
+//
+// Una etapa que falla NO aborta a las demás: cada etapa corre en su propia
+// tx, así que continuar es seguro, y el primer error se reporta al final
+// (el Scheduler lo loguea). Lección del incidente 42883 (jul-2026): el
+// `return` temprano hacía que un error determinista en la etapa -3 callara
+// también a "vence hoy" y a la persecución +5 en CADA tick.
 func (uc *EnqueueExpiryReminder) Tick(ctx context.Context, now time.Time) (int, error) {
 	inserted := 0
+	var firstErr error
 	for _, stage := range defaultExpiryStages() {
 		n, err := uc.tickStage(ctx, now, stage)
-		if err != nil {
-			return inserted, err
-		}
 		inserted += n
+		if err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("stage %+d: %w", stage.OffsetDays, err)
+		}
 	}
-	return inserted, nil
+	return inserted, firstErr
 }
 
 func (uc *EnqueueExpiryReminder) tickStage(ctx context.Context, now time.Time, stage expiryStage) (int, error) {
