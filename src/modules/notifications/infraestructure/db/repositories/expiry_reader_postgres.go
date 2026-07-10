@@ -37,6 +37,17 @@ func (r *ExpiryPostgresReader) FindDueForStage(tx sharedDomain.Transaction, now 
 	// expiry_date = hoy_local - K (para K=-3 → hoy+3, "vence en 3 días").
 	// COALESCE/NULLIF: un gym sin tz configurada cae a UTC (comportamiento
 	// previo) en vez de reventar la query de TODOS los gyms del tick.
+	//
+	// OJO con el `?::int` del offset — NO es opcional. Sin el cast,
+	// Postgres no conoce el tipo del parámetro bindeado y en `date - ?`
+	// la resolución de operadores prefiere `date - date` (mismo tipo en
+	// ambos lados) sobre `date - integer` → el resultado es integer →
+	// `expiry_date = integer` truena AL PLANEAR con 42883. Esto tumbó los
+	// recordatorios de TODOS los gyms del 8 al 10 de julio de 2026: cada
+	// tick moría antes de encolar nada. El bug no se reproduce con
+	// literales (un `- 3` a pelo sí se tipa integer), sólo a través del
+	// driver — por eso el test de integración de este reader bindea de
+	// verdad (expiry_reader_postgres_integration_test.go).
 	q := `
 		SELECT
 		    g.id   AS gym_id,
@@ -52,7 +63,7 @@ func (r *ExpiryPostgresReader) FindDueForStage(tx sharedDomain.Transaction, now 
 		JOIN gyms g ON g.id = m.gym_id AND g.deleted_at IS NULL
 		WHERE m.deleted_at IS NULL
 		  AND m.status = 'active'
-		  AND ms.expiry_date = ((?::timestamptz AT TIME ZONE COALESCE(NULLIF(g.timezone, ''), 'UTC'))::date - ?)
+		  AND ms.expiry_date = ((?::timestamptz AT TIME ZONE COALESCE(NULLIF(g.timezone, ''), 'UTC'))::date - ?::int)
 	`
 	if err := gormTx.Raw(q, now.UTC(), offsetDays).Scan(&rows).Error; err != nil {
 		return nil, err
