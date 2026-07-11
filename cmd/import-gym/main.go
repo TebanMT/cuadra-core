@@ -1160,28 +1160,62 @@ func uuidStrOrNil(p *uuid.UUID) any {
 // ── importer ────────────────────────────────────────────────────────────────
 
 func wipeGym(tx *gorm.DB, gymID uuid.UUID) error {
-	// Order matters: child rows first to satisfy FKs. Audit log + sync_queue
-	// rows are left alone — they can carry stale FKs without breaking
-	// anything since all queries filter by gym_id.
+	// Order matters: child rows first to satisfy FKs (casi todas RESTRICT).
+	// La lista original se quedó corta contra el esquema actual y el wipe
+	// reventaba con datos reales: applied_promotions (FK RESTRICT →
+	// payments/promotions/members) bloqueaba el DELETE de payments,
+	// member_fingerprints el de members, y challenges el de members vía
+	// participants. Audit log + conflict_log se dejan (pueden cargar FKs
+	// stale sin romper nada — todas las queries filtran por gym_id).
+	//
+	// SOBREVIVEN a propósito (identidad + config del gym, no datos
+	// operativos): gyms, users, gym_keys (GMK biométrica), sidecar_
+	// credentials, subscription_events (billing Tinta↔gym),
+	// notification_templates y owner_alert_configs (toggles), releases,
+	// whatsapp_opt_outs (cumplimiento Meta).
 	tables := []string{
+		"whatsapp_events", // ruido de webhooks (filas con gym_id NULL quedan)
+		"notification_queue",
+		"challenge_measurements",
+		"challenge_participants",
+		"challenge_categories", // FK → challenges: van ANTES que su reto
+		"challenges",
+		"applied_promotions",
 		"sale_items",
 		"sales",
 		"stock_movements",
+		"member_fingerprints",
 		"checkins",
 		"contact_attempts",
 		"membership_adjustments",
 		"memberships",
 		"payments",
+		"promotions",
 		"members",
 		"products",
 		"membership_types",
+		"expenses",
 		"cash_close_events",
-		"sync_entities", // canonical sync log — must reset alongside domain data
+		"gym_ownership_transfers",
 	}
 	for _, t := range tables {
 		if err := tx.Exec(fmt.Sprintf("DELETE FROM %s WHERE gym_id = ?", t), gymID).Error; err != nil {
 			return fmt.Errorf("wipe %s: %w", t, err)
 		}
+	}
+	// sync_entities (el journal del que sale todo pull/full-sync) se limpia
+	// SELECTIVAMENTE: se borran las entradas de los tipos borrados arriba
+	// (si quedaran, un full-sync resucitaría a los socios de prueba en el
+	// sidecar) pero se CONSERVAN las de los tipos que sobreviven — sin el
+	// journal de notification_templates/owner_alert_configs, un sidecar
+	// fresco no recibiría los toggles y mostraría defaults que el cloud no
+	// honra (drift silencioso).
+	const keepTypes = `('gyms','users','notification_templates','owner_alert_configs','subscription_events')`
+	if err := tx.Exec(
+		`DELETE FROM sync_entities WHERE gym_id = ? AND entity_type NOT IN `+keepTypes,
+		gymID,
+	).Error; err != nil {
+		return fmt.Errorf("wipe sync_entities: %w", err)
 	}
 	return nil
 }
