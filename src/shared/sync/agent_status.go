@@ -107,6 +107,7 @@ func buildStatusResponse(snap AgentSnapshot, now time.Time) StatusResponse {
 		LocalApplyError:       snap.LocalApplyError,
 		QuarantinedCount:      snap.QuarantinedCount,
 		QueueStuckCount:       snap.StuckPushCount,
+		QueueStuckItems:       snap.StuckItems,
 	}
 	// Los rechazos per-item viven en la FILA (sync_queue.last_error), no en
 	// el LastError global (el ciclo HTTP fue "exitoso"). Si el global está

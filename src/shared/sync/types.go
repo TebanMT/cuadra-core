@@ -35,6 +35,16 @@ const (
 	// reloj con NTP. Sin esta validación, un BIOS adelantado 6h hace que
 	// el cliente gane TODOS los conflictos contra cambios cloud legítimos.
 	StatusRejectedClockSkew = "rejected_clock_skew"
+	// StatusRejectedDuplicate — la proyección chocó con un unique index de
+	// la nube (SQLSTATE 23505): otro device (o el propio cloud) ya ocupa el
+	// valor — p.ej. dos recepciones crean el plan "Mensual" cada una.
+	// Permanente por diseño: reintentar el MISMO payload jamás va a entrar;
+	// lo que destraba es que el operador EDITE el registro local (renombrar
+	// re-encola el snapshot nuevo por coalescing y el siguiente push pasa).
+	// Error viaja ya legible en español (ver server_duplicates.go) — el
+	// texto aterriza en sync_queue.last_error y de ahí al indicador del
+	// desktop con CTA de resolución.
+	StatusRejectedDuplicate = "rejected_duplicate"
 )
 
 // PushItem is one entry of a push batch. Payload is kept as raw JSON so the
@@ -134,6 +144,47 @@ type StatusResponse struct {
 	// indicador decía "Sincronizado" con la cola pudriéndose). >0 también
 	// mantiene StateSyncError.
 	QueueStuckCount int `json:"queue_stuck_count,omitempty"`
+	// QueueStuckItems — detalle de las filas atoradas (cap a
+	// maxStuckItemsInStatus, ordenadas por castigo). Antes el status sólo
+	// traía el conteo + UN last_error de muestra; el operador veía "2
+	// cambios rechazados" sin saber CUÁLES ni cómo destrabarlos. Con el
+	// detalle, el desktop puede ofrecer acción por fila (p.ej. un rechazo
+	// kind=duplicate sobre membership_types abre el plan para renombrarlo).
+	QueueStuckItems []StuckQueueItem `json:"queue_stuck_items,omitempty"`
+}
+
+// Kind de un StuckQueueItem — clasificación gruesa del rechazo para que el
+// FE decida qué acción ofrecer sin parsear mensajes.
+const (
+	// StuckKindDuplicate: unique violation en la nube. Permanente hasta que
+	// el operador edite el registro local — renombrar re-encola (coalescing
+	// de sync_queue) y el siguiente push entra limpio.
+	StuckKindDuplicate = "duplicate"
+	// StuckKindOther: cualquier otro rechazo persistente (FK huérfana,
+	// schema, etc.) — visible pero sin acción directa de UI.
+	StuckKindOther = "other"
+)
+
+// StuckQueueItem — una fila de sync_queue que el server rechazó per-item
+// stuckPushThreshold+ veces. Viaja dentro de /sync/status (sidecar local)
+// para que el desktop muestre QUÉ está atorado, POR QUÉ (Message ya
+// legible cuando el cloud es reciente) y ofrezca resolución.
+type StuckQueueItem struct {
+	QueueID    string `json:"queue_id"`
+	EntityType string `json:"entity_type"`
+	EntityID   string `json:"entity_id"`
+	Operation  string `json:"operation"`
+	RetryCount int    `json:"retry_count"`
+	// Kind — StuckKindDuplicate | StuckKindOther.
+	Kind string `json:"kind"`
+	// Message — razón del rechazo, sin el prefijo de status. Para clouds
+	// viejos que aún mandan el error crudo de Postgres, viaja tal cual
+	// (la clasificación por SQLSTATE sigue funcionando).
+	Message string `json:"message"`
+	// EntityLabel — identificador humano extraído del payload encolado
+	// ("Mensual", "Agua Ciel 1L", folio…) para que la lista del desktop
+	// no muestre UUIDs.
+	EntityLabel string `json:"entity_label,omitempty"`
 }
 
 // State values returned by /sync/status, per UC-044.

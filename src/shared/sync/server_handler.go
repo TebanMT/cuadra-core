@@ -233,8 +233,19 @@ func (h *Handler) processOne(ctx context.Context, gymID, clientID uuid.UUID, ite
 	if err != nil {
 		// Distinguish auth-style rejections (returned from UpsertOne with
 		// status=rejected_unauthorized and nil err) from real DB failures.
-		out.Status = StatusRejectedInternal
-		out.Error = err.Error()
+		//
+		// Unique violations (23505) reciben trato aparte: son PERMANENTES
+		// (el mismo payload jamás va a entrar) y tienen salida conocida —
+		// que el operador edite/renombre su registro. Viajan como
+		// rejected_duplicate con mensaje en español en vez del error crudo
+		// de Postgres, que era indescifrable en el indicador del desktop.
+		if msg, isDup := mapUniqueViolation(err, item); isDup {
+			out.Status = StatusRejectedDuplicate
+			out.Error = msg
+		} else {
+			out.Status = StatusRejectedInternal
+			out.Error = err.Error()
+		}
 	}
 	return out
 }
