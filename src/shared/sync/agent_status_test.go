@@ -160,6 +160,20 @@ func TestStatusThresholds(t *testing.T) {
 			},
 			wantState: StateAuthInvalid,
 		},
+		{
+			// Filas de subida rechazadas per-item: el ciclo global es
+			// "exitoso" (sin LastError, sin ConsecutiveFailures) pero la
+			// cola se pudre — el indicador decía "Sincronizado" con 6
+			// filas atoradas (caso real post-migración HDLEON).
+			name: "StuckPushCount>0 → sync_error aunque el ciclo sea exitoso",
+			snap: AgentSnapshot{
+				LastSyncedAt:           now.Add(-30 * time.Second),
+				InitialSyncCompletedAt: now.Add(-time.Hour),
+				PendingCount:           6,
+				StuckPushCount:         6,
+			},
+			wantState: StateSyncError,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -240,5 +254,38 @@ func TestBackoffSequence(t *testing.T) {
 		if got := backoff(i); got != w {
 			t.Errorf("backoff(%d) = %v, want %v", i, got, w)
 		}
+	}
+}
+
+// TestStatusResponse_StuckPushSurfacesRowError — los rechazos per-item viven
+// en la fila (sync_queue.last_error), no en el LastError global; el detalle
+// del indicador decía "Último error: Ninguno" con la cola atorada. El status
+// sube el error de la fila más castigada cuando el global está vacío.
+func TestStatusResponse_StuckPushSurfacesRowError(t *testing.T) {
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	got := buildStatusResponse(AgentSnapshot{
+		LastSyncedAt:   now.Add(-time.Minute),
+		StuckPushCount: 6,
+		StuckPushError: "rejected_internal_error: fk members",
+	}, now)
+	if got.State != StateSyncError {
+		t.Errorf("state = %q, want sync_error", got.State)
+	}
+	if got.QueueStuckCount != 6 {
+		t.Errorf("queue_stuck_count = %d, want 6", got.QueueStuckCount)
+	}
+	want := "push (fila atorada): rejected_internal_error: fk members"
+	if got.LastError != want {
+		t.Errorf("last_error = %q, want %q", got.LastError, want)
+	}
+
+	// Y si el global YA trae error, no se pisa.
+	got = buildStatusResponse(AgentSnapshot{
+		LastError:      "pull: timeout",
+		StuckPushCount: 1,
+		StuckPushError: "boom",
+	}, now)
+	if got.LastError != "pull: timeout" {
+		t.Errorf("last_error = %q, no debía pisarse", got.LastError)
 	}
 }

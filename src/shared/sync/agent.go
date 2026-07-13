@@ -159,6 +159,16 @@ type AgentSnapshot struct {
 	// hay N cambios que no pudieron aplicarse" — el estado lo muestra como
 	// StateSyncError para que saltar nunca sea silencioso.
 	QuarantinedCount int
+	// StuckPushCount — filas de sync_queue que el server rechazó per-item
+	// N+ veces (retry_count >= stuckPushThreshold) mientras el CICLO
+	// global "tiene éxito" (HTTP 200 con statuses de rechazo por fila).
+	// Sin esto el indicador decía "Sincronizado" con la cola pudriéndose
+	// — caso real post-migración: 6 filas de socios pre-corte rechazadas
+	// por FKs contra un mundo que el wipe borró. StuckPushError guarda el
+	// last_error de la fila más castigada para que el detalle del
+	// indicador diga POR QUÉ sin abrir sqlite.
+	StuckPushCount int
+	StuckPushError string
 }
 
 func NewAgent(cfg AgentConfig, db *sqlx.DB, uow sharedDomain.UnitOfWork) *Agent {
@@ -991,6 +1001,11 @@ func (a *Agent) markPushedAt(t time.Time) {
 	a.mu.Unlock()
 }
 
+// stuckPushThreshold — cuántos rechazos per-item acumula una fila de la
+// cola antes de considerarla ATORADA (y pintar sync_error). >1 para no
+// alarmar por un blip transitorio: cada ciclo la reintenta.
+const stuckPushThreshold = 3
+
 func (a *Agent) refreshPendingCount(ctx context.Context) {
 	tx, err := a.uow.Query(ctx)
 	if err != nil {
@@ -998,11 +1013,24 @@ func (a *Agent) refreshPendingCount(ctx context.Context) {
 	}
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	var n int
-	if err := stx.Get(ctx, &n, `SELECT COUNT(*) FROM sync_queue WHERE synced_at IS NULL`); err == nil {
-		a.mu.Lock()
-		a.state.PendingCount = n
-		a.mu.Unlock()
+	if err := stx.Get(ctx, &n, `SELECT COUNT(*) FROM sync_queue WHERE synced_at IS NULL`); err != nil {
+		return
 	}
+	var stuck int
+	_ = stx.Get(ctx, &stuck,
+		`SELECT COUNT(*) FROM sync_queue WHERE synced_at IS NULL AND retry_count >= ?`,
+		stuckPushThreshold)
+	var sample sql.NullString
+	_ = stx.Get(ctx, &sample, `
+		SELECT last_error FROM sync_queue
+		WHERE synced_at IS NULL AND retry_count >= ? AND last_error IS NOT NULL
+		ORDER BY retry_count DESC LIMIT 1`,
+		stuckPushThreshold)
+	a.mu.Lock()
+	a.state.PendingCount = n
+	a.state.StuckPushCount = stuck
+	a.state.StuckPushError = sample.String
+	a.mu.Unlock()
 }
 
 func (a *Agent) setStateLabel(label string) {

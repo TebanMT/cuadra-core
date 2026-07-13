@@ -106,6 +106,14 @@ func buildStatusResponse(snap AgentSnapshot, now time.Time) StatusResponse {
 		SchemaUpgradeRequired: snap.SchemaUpgradeRequired,
 		LocalApplyError:       snap.LocalApplyError,
 		QuarantinedCount:      snap.QuarantinedCount,
+		QueueStuckCount:       snap.StuckPushCount,
+	}
+	// Los rechazos per-item viven en la FILA (sync_queue.last_error), no en
+	// el LastError global (el ciclo HTTP fue "exitoso"). Si el global está
+	// vacío pero hay filas atoradas, subimos el error de la más castigada —
+	// sin esto el detalle decía "Último error: Ninguno" con 6 filas rotas.
+	if r.LastError == "" && snap.StuckPushCount > 0 && snap.StuckPushError != "" {
+		r.LastError = "push (fila atorada): " + snap.StuckPushError
 	}
 	if !snap.LastSyncedAt.IsZero() {
 		t := snap.LastSyncedAt
@@ -153,7 +161,7 @@ func buildStatusResponse(snap AgentSnapshot, now time.Time) StatusResponse {
 	// del sistema, no de la conexión. El conteo de cuarentena mantiene
 	// este estado aunque el resto del sync fluya: saltar cambios nunca es
 	// silencioso. Prioridad por encima de la clasificación offline.
-	if snap.LocalApplyError || snap.QuarantinedCount > 0 {
+	if snap.LocalApplyError || snap.QuarantinedCount > 0 || snap.StuckPushCount > 0 {
 		r.State = StateSyncError
 		return r
 	}
