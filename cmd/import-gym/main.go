@@ -122,8 +122,15 @@ func main() {
 		return
 	}
 
+	var importVersion int
 	if err := db.Transaction(func(tx *gorm.DB) error {
 		if err := ensureGymAndOwner(tx, src, gymID, ownerID, *createMissing, *gymNameOverride, *ownerEmailFlag, *ownerPwdFlag); err != nil {
+			return err
+		}
+		// Antes del wipe: el máximo sale de las filas que el wipe borra.
+		var err error
+		importVersion, err = nextImportVersion(tx, gymID)
+		if err != nil {
 			return err
 		}
 		if *reset {
@@ -131,11 +138,11 @@ func main() {
 				return fmt.Errorf("reset: %w", err)
 			}
 		}
-		return importAll(tx, src, gymID, ownerID)
+		return importAll(tx, src, gymID, ownerID, importVersion)
 	}); err != nil {
 		log.Fatalf("import: %v", err)
 	}
-	log.Printf("import: ok — gym_id=%s owner_id=%s", gymID, ownerID)
+	log.Printf("import: ok — gym_id=%s owner_id=%s version=%d", gymID, ownerID, importVersion)
 }
 
 // backfillProjector replays every sync_entities row for the gym through the
@@ -1052,8 +1059,9 @@ func durationDays(meses, semanas, dias int) int {
 // half, sidecars stay empty even though the cloud is populated.
 //
 // Payload shape mirrors what a sidecar push would have looked like — wire
-// column names, money in cents (integer) so the sidecar's apply path lands
-// it back in SQLite's INTEGER-cents columns cleanly, dates as YYYY-MM-DD,
+// column names, money in PESOS (exactamente lo que la columna NUMERIC del
+// cloud guarda; el apply del sidecar convierte pesos→centavos al aterrizar
+// en SQLite — moneyColumns, agent_apply.go), dates as YYYY-MM-DD,
 // timestamps as unix milliseconds.
 
 // syncEmitSeq da a cada fila de sync_entities un server_updated_at único y
@@ -1208,9 +1216,8 @@ func wipeGym(tx *gorm.DB, gymID uuid.UUID) error {
 	// journal de notification_templates/owner_alert_configs, un sidecar
 	// fresco no recibiría los toggles y mostraría defaults que el cloud no
 	// honra (drift silencioso).
-	const keepTypes = `('gyms','users','notification_templates','owner_alert_configs','subscription_events')`
 	if err := tx.Exec(
-		`DELETE FROM sync_entities WHERE gym_id = ? AND entity_type NOT IN `+keepTypes,
+		`DELETE FROM sync_entities WHERE gym_id = ? AND entity_type NOT IN `+keepJournalTypes,
 		gymID,
 	).Error; err != nil {
 		return fmt.Errorf("wipe sync_entities: %w", err)
@@ -1218,7 +1225,56 @@ func wipeGym(tx *gorm.DB, gymID uuid.UUID) error {
 	return nil
 }
 
-func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
+// keepJournalTypes: tipos cuyo journal SOBREVIVE al wipe (identidad + config
+// del gym; ver el comentario de wipeGym). Compartido con nextImportVersion:
+// esos tipos no se re-emiten, así que sus versiones (p.ej. gyms, que TouchGym
+// bumpea seguido) no deben inflar la versión base del import.
+const keepJournalTypes = `('gyms','users','notification_templates','owner_alert_configs','subscription_events')`
+
+// importVersionHeadroom cubre ediciones locales AÚN no pusheadas en un
+// sidecar viejo: cada edición local bumpea version en +1 sobre lo último
+// pulleado, así que superar el máximo del journal por exactamente +1 no
+// basta si hay pushes pendientes. Más de 5 ediciones encoladas sobre la
+// MISMA fila implica un sidecar con el push atascado — eso se repara con
+// wipe manual, no con headroom.
+const importVersionHeadroom = 5
+
+// nextImportVersion decide la versión con la que importAll emite dominio y
+// journal. Primer import (journal vacío para los tipos re-emitidos): 1, como
+// siempre. Re-import: MAX(version) previa + headroom, para que TODO sidecar
+// existente se auto-corrija en su siguiente pull incremental (los re-emits
+// llevan server_updated_at nuevo, así que el cursor los recoge; con la
+// versión mayor, el LWW local los acepta y pisa la fila envenenada). El
+// push pendiente de un sidecar stale queda además rechazado por el LWW del
+// cloud (version <= journal) — visible como sync_error, no corrupción.
+//
+// Se calcula ANTES de wipeGym: el wipe borra las filas del journal de las
+// que sale el máximo.
+func nextImportVersion(tx *gorm.DB, gymID uuid.UUID) (int, error) {
+	var maxVersion int
+	if err := tx.Raw(
+		`SELECT COALESCE(MAX(version), 0) FROM sync_entities
+		  WHERE gym_id = ? AND entity_type NOT IN `+keepJournalTypes,
+		gymID,
+	).Scan(&maxVersion).Error; err != nil {
+		return 0, fmt.Errorf("next import version: %w", err)
+	}
+	if maxVersion == 0 {
+		return 1, nil
+	}
+	return maxVersion + importVersionHeadroom, nil
+}
+
+// importAll escribe el dominio Y emite el journal con `version` uniforme.
+// La versión NO es siempre 1: en un re-import (--reset) debe SUPERAR
+// cualquier versión que un sidecar ya-aterrizado tenga localmente, porque
+// el LWW del apply (excluded.version > version) descarta versiones
+// no-mayores — re-emitir con version=1 hacía que un sidecar con datos
+// envenenados (incidente ×100 de la migración HDLEON, jul-2026) NO se
+// corrigiera con el pull: la única recuperación era un wipe manual de
+// AppData, y si ese wipe fallaba (o había un segundo equipo en el gym),
+// el dato inflado sobrevivía en silencio. Ver nextImportVersion.
+func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID, version int) error {
 	now := time.Now().UTC()
 
 	// 1. membership_types
@@ -1231,7 +1287,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 			deletedAt = &now
 		}
 		row := memModels.MembershipTypeModel{
-			ID: id, GymID: gymID, Version: 1,
+			ID: id, GymID: gymID, Version: version,
 			CreatedAt:    derefTime(m.FechaCreacion, now),
 			UpdatedAt:    now,
 			DeletedAt:    deletedAt,
@@ -1243,7 +1299,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 		if err := tx.Create(&row).Error; err != nil {
 			return fmt.Errorf("membresia %d: %w", m.ID, err)
 		}
-		if err := emitSyncEntity(tx, gymID, id, "membership_types", 1, deletedAt, now, map[string]any{
+		if err := emitSyncEntity(tx, gymID, id, "membership_types", version, deletedAt, now, map[string]any{
 			"created_at":      row.CreatedAt.UnixMilli(),
 			"updated_at":      row.UpdatedAt.UnixMilli(),
 			"name":            row.Name,
@@ -1272,7 +1328,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 			deletedAt = &now
 		}
 		row := prodModels.ProductModel{
-			ID: id, GymID: gymID, Version: 1,
+			ID: id, GymID: gymID, Version: version,
 			CreatedAt:    derefTime(p.FechaCreacion, now),
 			UpdatedAt:    now,
 			DeletedAt:    deletedAt,
@@ -1285,7 +1341,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 		if err := tx.Create(&row).Error; err != nil {
 			return fmt.Errorf("producto %d: %w", p.ID, err)
 		}
-		if err := emitSyncEntity(tx, gymID, id, "products", 1, deletedAt, now, map[string]any{
+		if err := emitSyncEntity(tx, gymID, id, "products", version, deletedAt, now, map[string]any{
 			"created_at":    row.CreatedAt.UnixMilli(),
 			"updated_at":    row.UpdatedAt.UnixMilli(),
 			"name":          row.Name,
@@ -1334,7 +1390,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 			phone = "—"
 		}
 		row := memModels.MemberModel{
-			ID: id, GymID: gymID, Version: 1,
+			ID: id, GymID: gymID, Version: version,
 			CreatedAt: derefTime(s.FechaCreacion, now),
 			UpdatedAt: now,
 			Folio:     fmt.Sprintf("%05d", s.ID),
@@ -1354,7 +1410,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 		if row.Birthdate != nil {
 			bd = dateStr(*row.Birthdate)
 		}
-		if err := emitSyncEntity(tx, gymID, id, "members", 1, nil, now, map[string]any{
+		if err := emitSyncEntity(tx, gymID, id, "members", version, nil, now, map[string]any{
 			"created_at":      row.CreatedAt.UnixMilli(),
 			"updated_at":      row.UpdatedAt.UnixMilli(),
 			"folio":           row.Folio,
@@ -1426,7 +1482,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 			legacyID:     sm.ID,
 			legacyEstado: sm.Estado,
 			row: memModels.MembershipModel{
-				ID: id, GymID: gymID, Version: 1,
+				ID: id, GymID: gymID, Version: version,
 				CreatedAt:            derefTime(sm.FechaCreacion, now),
 				UpdatedAt:            now,
 				MemberID:             memberID,
@@ -1469,7 +1525,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 		if err := tx.Create(&row).Error; err != nil {
 			return fmt.Errorf("sociomembresia %d: %w", p.legacyID, err)
 		}
-		if err := emitSyncEntity(tx, gymID, row.ID, "memberships", 1, nil, now, map[string]any{
+		if err := emitSyncEntity(tx, gymID, row.ID, "memberships", version, nil, now, map[string]any{
 			"created_at":             row.CreatedAt.UnixMilli(),
 			"updated_at":             row.UpdatedAt.UnixMilli(),
 			"member_id":              row.MemberID.String(),
@@ -1506,7 +1562,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 		paymentID := legacyID("sociomembresia_pago", p.ID)
 		row := billingModels.PaymentModel{
 			ID:    paymentID,
-			GymID: gymID, Version: 1,
+			GymID: gymID, Version: version,
 			CreatedAt:     derefTime(p.Fecha, now),
 			UpdatedAt:     now,
 			DeletedAt:     deletedAt,
@@ -1521,7 +1577,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 		if err := tx.Create(&row).Error; err != nil {
 			return fmt.Errorf("sociomembresia_pago %d: %w", p.ID, err)
 		}
-		if err := emitSyncEntity(tx, gymID, paymentID, "payments", 1, deletedAt, now, map[string]any{
+		if err := emitSyncEntity(tx, gymID, paymentID, "payments", version, deletedAt, now, map[string]any{
 			"created_at":      row.CreatedAt.UnixMilli(),
 			"updated_at":      row.UpdatedAt.UnixMilli(),
 			"folio":           row.Folio,
@@ -1561,7 +1617,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 			deletedAt = &now
 		}
 		payment := billingModels.PaymentModel{
-			ID: paymentID, GymID: gymID, Version: 1,
+			ID: paymentID, GymID: gymID, Version: version,
 			CreatedAt: derefTime(s.FechaCreacion, now),
 			UpdatedAt: now,
 			DeletedAt: deletedAt,
@@ -1579,7 +1635,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 		if err := tx.Create(&payment).Error; err != nil {
 			return fmt.Errorf("salida payment %d: %w", s.ID, err)
 		}
-		if err := emitSyncEntity(tx, gymID, paymentID, "payments", 1, deletedAt, now, map[string]any{
+		if err := emitSyncEntity(tx, gymID, paymentID, "payments", version, deletedAt, now, map[string]any{
 			"created_at":      payment.CreatedAt.UnixMilli(),
 			"updated_at":      payment.UpdatedAt.UnixMilli(),
 			"folio":           payment.Folio,
@@ -1612,7 +1668,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 			subtotal += g.price * float64(g.qty)
 		}
 		sale := billingModels.SaleModel{
-			ID: saleID, GymID: gymID, Version: 1,
+			ID: saleID, GymID: gymID, Version: version,
 			CreatedAt: derefTime(s.FechaCreacion, now),
 			UpdatedAt: now,
 			DeletedAt: deletedAt,
@@ -1623,7 +1679,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 		if err := tx.Create(&sale).Error; err != nil {
 			return fmt.Errorf("salida sale %d: %w", s.ID, err)
 		}
-		if err := emitSyncEntity(tx, gymID, saleID, "sales", 1, deletedAt, now, map[string]any{
+		if err := emitSyncEntity(tx, gymID, saleID, "sales", version, deletedAt, now, map[string]any{
 			"created_at": sale.CreatedAt.UnixMilli(),
 			"updated_at": sale.UpdatedAt.UnixMilli(),
 			"payment_id": sale.PaymentID.String(),
@@ -1641,7 +1697,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 				continue
 			}
 			item := billingModels.SaleItemModel{
-				ID: itemID, GymID: gymID, Version: 1,
+				ID: itemID, GymID: gymID, Version: version,
 				CreatedAt:           derefTime(s.FechaCreacion, now),
 				UpdatedAt:           now,
 				DeletedAt:           deletedAt,
@@ -1655,7 +1711,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 			if err := tx.Create(&item).Error; err != nil {
 				return fmt.Errorf("salida item %d/%d: %w", s.ID, prodID, err)
 			}
-			if err := emitSyncEntity(tx, gymID, itemID, "sale_items", 1, deletedAt, now, map[string]any{
+			if err := emitSyncEntity(tx, gymID, itemID, "sale_items", version, deletedAt, now, map[string]any{
 				"created_at":            item.CreatedAt.UnixMilli(),
 				"updated_at":            item.UpdatedAt.UnixMilli(),
 				"sale_id":               item.SaleID.String(),
@@ -1672,7 +1728,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 			movID := legacyID("salida_mov", int(itemID.ID()))
 			mov := prodModels.StockMovementModel{
 				ID:    movID,
-				GymID: gymID, Version: 1,
+				GymID: gymID, Version: version,
 				CreatedAt:    derefTime(s.FechaCreacion, now),
 				UpdatedAt:    now,
 				DeletedAt:    deletedAt,
@@ -1685,7 +1741,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 			if err := tx.Create(&mov).Error; err != nil {
 				return fmt.Errorf("sale stock_mov %d/%d: %w", s.ID, prodID, err)
 			}
-			if err := emitSyncEntity(tx, gymID, movID, "stock_movements", 1, deletedAt, now, map[string]any{
+			if err := emitSyncEntity(tx, gymID, movID, "stock_movements", version, deletedAt, now, map[string]any{
 				"created_at":    mov.CreatedAt.UnixMilli(),
 				"updated_at":    mov.UpdatedAt.UnixMilli(),
 				"product_id":    mov.ProductID.String(),
@@ -1733,7 +1789,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 			movID := legacyID(fmt.Sprintf("entrada_mov_%d", e.ID), prodID)
 			mov := prodModels.StockMovementModel{
 				ID:    movID,
-				GymID: gymID, Version: 1,
+				GymID: gymID, Version: version,
 				CreatedAt:    derefTime(e.FechaCreacion, now),
 				UpdatedAt:    now,
 				ProductID:    pUUID,
@@ -1745,7 +1801,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 			if err := tx.Create(&mov).Error; err != nil {
 				return fmt.Errorf("entrada_mov %d/%d: %w", e.ID, prodID, err)
 			}
-			if err := emitSyncEntity(tx, gymID, movID, "stock_movements", 1, nil, now, map[string]any{
+			if err := emitSyncEntity(tx, gymID, movID, "stock_movements", version, nil, now, map[string]any{
 				"created_at":    mov.CreatedAt.UnixMilli(),
 				"updated_at":    mov.UpdatedAt.UnixMilli(),
 				"product_id":    mov.ProductID.String(),
@@ -1786,7 +1842,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 		if err := tx.First(&pr, "id = ?", sr.ID).Error; err != nil {
 			return fmt.Errorf("read product %s: %w", sr.ID, err)
 		}
-		if err := emitSyncEntity(tx, gymID, sr.ID, "products", 1, pr.DeletedAt, now, map[string]any{
+		if err := emitSyncEntity(tx, gymID, sr.ID, "products", version, pr.DeletedAt, now, map[string]any{
 			"created_at":    pr.CreatedAt.UnixMilli(),
 			"updated_at":    pr.UpdatedAt.UnixMilli(),
 			"name":          pr.Name,
@@ -1813,7 +1869,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 		chkID := legacyID("visita", v.ID)
 		row := chkModels.CheckinModel{
 			ID:    chkID,
-			GymID: gymID, Version: 1,
+			GymID: gymID, Version: version,
 			CreatedAt:  derefTime(v.FechaCreacion, now),
 			UpdatedAt:  now,
 			MemberID:   mid,
@@ -1825,7 +1881,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 		if err := tx.Create(&row).Error; err != nil {
 			return fmt.Errorf("visita %d: %w", v.ID, err)
 		}
-		if err := emitSyncEntity(tx, gymID, chkID, "checkins", 1, nil, now, map[string]any{
+		if err := emitSyncEntity(tx, gymID, chkID, "checkins", version, nil, now, map[string]any{
 			"created_at":      row.CreatedAt.UnixMilli(),
 			"updated_at":      row.UpdatedAt.UnixMilli(),
 			"member_id":       row.MemberID.String(),
@@ -1856,7 +1912,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 		ccID := legacyID("cut", c.ID)
 		row := billingModels.CashCloseEventModel{
 			ID:    ccID,
-			GymID: gymID, Version: 1,
+			GymID: gymID, Version: version,
 			CreatedAt:         derefTime(c.Date, now),
 			UpdatedAt:         now,
 			DeletedAt:         deletedAt,
@@ -1868,7 +1924,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 		if err := tx.Create(&row).Error; err != nil {
 			return fmt.Errorf("cut %d: %w", c.ID, err)
 		}
-		if err := emitSyncEntity(tx, gymID, ccID, "cash_close_events", 1, deletedAt, now, map[string]any{
+		if err := emitSyncEntity(tx, gymID, ccID, "cash_close_events", version, deletedAt, now, map[string]any{
 			"created_at":      row.CreatedAt.UnixMilli(),
 			"updated_at":      row.UpdatedAt.UnixMilli(),
 			"close_date":      dateStr(row.CloseDate),
