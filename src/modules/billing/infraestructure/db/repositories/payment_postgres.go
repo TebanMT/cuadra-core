@@ -96,6 +96,18 @@ func (r *PaymentPostgresRepository) ListByMember(tx sharedDomain.Transaction, q 
 	return out, int(total), nil
 }
 
+// SumPendingByMember — agregado server-side (ver el porqué en la interfaz):
+// el NUMERIC del cloud ya está en pesos, va directo.
+func (r *PaymentPostgresRepository) SumPendingByMember(tx sharedDomain.Transaction, gymID, memberID uuid.UUID) (float64, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	var total float64
+	err := gormTx.Model(&models.PaymentModel{}).
+		Where("gym_id = ? AND member_id = ? AND deleted_at IS NULL", gymID, memberID).
+		Select("COALESCE(SUM(balance_pending), 0)").
+		Scan(&total).Error
+	return total, err
+}
+
 func (r *PaymentPostgresRepository) ListByGymBetweenDates(tx sharedDomain.Transaction, q billingRepo.ListByGymQuery) ([]*paymentDomain.Payment, int, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	page, pageSize := normalizePage(q.Page, q.PageSize)

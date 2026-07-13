@@ -31,6 +31,11 @@ type ListMemberPaymentsOutput struct {
 	Total    int
 	Page     int
 	PageSize int
+	// TotalPending: SUM(balance_pending) de TODOS los pagos del socio, sin
+	// respetar filtros ni paginación — es el "cuánto debe" que pintan el
+	// banner del perfil y el chip de deuda del POS. Sumar en el FE la página
+	// visible escondería deudas viejas.
+	TotalPending float64
 }
 
 type ListMemberPayments struct {
@@ -76,10 +81,15 @@ func (uc *ListMemberPayments) Execute(ctx context.Context, in ListMemberPayments
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}
+	pending, err := uc.Payments.SumPendingByMember(tx, in.GymID, in.MemberID)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
 	return &ListMemberPaymentsOutput{
-		Items:    rows,
-		Total:    total,
-		Page:     page,
-		PageSize: pageSize,
+		Items:        rows,
+		Total:        total,
+		Page:         page,
+		PageSize:     pageSize,
+		TotalPending: pending,
 	}, nil
 }

@@ -31,6 +31,11 @@ type PaymentRepository interface {
 	// none exists. Implementations MUST take a row lock so concurrent
 	// transactions serialise (Postgres: FOR UPDATE).
 	MaxFolioForConcept(tx sharedDomain.Transaction, gymID uuid.UUID, concept string) (string, error)
+	// SumPendingByMember suma balance_pending de TODOS los pagos vivos del
+	// socio (cualquier concepto). Es un agregado del lado del repo porque el
+	// historial se pagina: sumar en el FE sólo la página visible escondería
+	// deudas viejas — mismo razonamiento que total_paid en el listado de gym.
+	SumPendingByMember(tx sharedDomain.Transaction, gymID, memberID uuid.UUID) (float64, error)
 }
 
 // ListByMemberQuery backs UC-021. ConceptFilter is one of "" (all),

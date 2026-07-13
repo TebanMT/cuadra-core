@@ -35,6 +35,9 @@ func (stubPaymentRepo) ListByGymBetweenDates(_ sharedDomain.Transaction, _ billi
 func (stubPaymentRepo) HasRefundFor(_ sharedDomain.Transaction, _ uuid.UUID) (bool, error) {
 	return false, nil
 }
+func (stubPaymentRepo) SumPendingByMember(_ sharedDomain.Transaction, _, _ uuid.UUID) (float64, error) {
+	return 0, nil
+}
 
 func TestGenerator_Next(t *testing.T) {
 	gym := uuid.New()

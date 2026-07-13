@@ -149,6 +149,18 @@ func (r *PaymentSQLiteRepository) ListByMember(tx sharedDomain.Transaction, q bi
 	return out, total, nil
 }
 
+// SumPendingByMember — agregado del lado del repo (ver interfaz). SQLite
+// guarda centavos; el dominio habla pesos → fromCents a la salida.
+func (r *PaymentSQLiteRepository) SumPendingByMember(tx sharedDomain.Transaction, gymID, memberID uuid.UUID) (float64, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	var cents int64
+	err := stx.Get(context.Background(), &cents,
+		`SELECT COALESCE(SUM(balance_pending), 0) FROM payments
+		  WHERE gym_id = ? AND member_id = ? AND deleted_at IS NULL`,
+		gymID.String(), memberID.String())
+	return fromCents(cents), err
+}
+
 func (r *PaymentSQLiteRepository) ListByGymBetweenDates(tx sharedDomain.Transaction, q billingRepo.ListByGymQuery) ([]*paymentDomain.Payment, int, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	page, pageSize := normalizePage(q.Page, q.PageSize)

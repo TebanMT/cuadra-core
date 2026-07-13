@@ -482,3 +482,51 @@ func TestUC027_Close_OptionalCountedCash(t *testing.T) {
 		t.Errorf("no count → no discrepancy expected, got %v", *out.Discrepancy)
 	}
 }
+
+// Pin del contrato total_pending (UC-021): el FE tipaba
+// PaymentHistoryResponse.total_pending desde siempre, pero ningún handler
+// lo emitía — el banner de deuda del perfil y el chip del POS nunca
+// prendían. El rollup debe sumar TODA la deuda del socio (cualquier
+// concepto) ignorando filtros y paginación: sumar sólo la página visible
+// escondería deudas viejas.
+func TestUC021_ListMemberPayments_TotalPendingRollup(t *testing.T) {
+	f := setupSales(t)
+	p := f.seedProduct(t, "Agua", 63, 10)
+	mid := f.memberID
+	paid := 30.0 // total 63 → deben quedar 33 a deber
+	if _, err := f.registerSale().Execute(context.Background(), billingApp.RegisterSaleInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, Method: "cash",
+		MemberID: &mid, Paid: &paid,
+		Items: []billingApp.SaleLineInput{{ProductID: p, Quantity: 1}},
+	}); err != nil {
+		t.Fatalf("fiado: %v", err)
+	}
+
+	list := billingApp.NewListMemberPayments(f.paymentRepo, f.memberRepo, f.uow)
+
+	out, err := list.Execute(context.Background(), billingApp.ListMemberPaymentsInput{
+		GymID: f.gymID, MemberID: mid, Page: 1, PageSize: 25,
+	})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if out.TotalPending != 33 {
+		t.Errorf("total_pending = %v, want 33", out.TotalPending)
+	}
+
+	// El rollup ignora el filtro por concepto: aunque la página venga
+	// vacía (filtro membership sobre una deuda de venta), la deuda total
+	// del socio se sigue reportando.
+	filtered, err := list.Execute(context.Background(), billingApp.ListMemberPaymentsInput{
+		GymID: f.gymID, MemberID: mid, ConceptFilter: "membership", Page: 1, PageSize: 25,
+	})
+	if err != nil {
+		t.Fatalf("list filtrado: %v", err)
+	}
+	if len(filtered.Items) != 0 {
+		t.Errorf("items con filtro membership = %d, want 0 (la deuda es de venta)", len(filtered.Items))
+	}
+	if filtered.TotalPending != 33 {
+		t.Errorf("total_pending con filtro = %v, want 33 (el rollup no respeta filtros)", filtered.TotalPending)
+	}
+}
