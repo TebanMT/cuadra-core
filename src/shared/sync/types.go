@@ -129,6 +129,11 @@ type StatusResponse struct {
 	// intentos. >0 mantiene el estado en StateSyncError aunque el resto
 	// del sync fluya, para que saltar cambios NUNCA sea silencioso.
 	QuarantinedCount int `json:"quarantined_count,omitempty"`
+	// QueueStuckCount — filas de subida que el server rechazó per-item
+	// varias veces (el ciclo global "exitoso" las dejaba invisibles: el
+	// indicador decía "Sincronizado" con la cola pudriéndose). >0 también
+	// mantiene StateSyncError.
+	QueueStuckCount int `json:"queue_stuck_count,omitempty"`
 }
 
 // State values returned by /sync/status, per UC-044.
