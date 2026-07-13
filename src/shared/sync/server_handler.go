@@ -194,6 +194,7 @@ func (h *Handler) processOne(ctx context.Context, gymID, clientID uuid.UUID, ite
 		}
 		// Apply LWW & build wire response.
 		out.Status = ur.Status
+		out.Error = ur.Error
 		out.ServerVersion = ur.ServerVersion
 		if !ur.ServerUpdatedAt.IsZero() {
 			t := ur.ServerUpdatedAt

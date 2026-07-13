@@ -27,6 +27,9 @@ type UpsertResult struct {
 	PreviousServerVersion int
 	PreviousServerPayload json.RawMessage
 	IsConflict            bool
+	// Error: razón legible de un rechazo (viaja al sidecar y aterriza en
+	// sync_queue.last_error → visible en "Estado de sincronización").
+	Error string
 }
 
 // Store is the cloud persistence surface used by the sync handlers. The
@@ -178,21 +181,34 @@ func (s *PostgresStore) UpsertOne(
 		return UpsertResult{Status: StatusRejectedUnauthorized}, nil
 	}
 
-	// Clock skew check. The LWW algorithm uses payload.updated_at as the
-	// authoritative client timestamp; if the sidecar's reloj está fuera de
-	// rango (BIOS desincronizado, batería CMOS muerta) ese cliente ganaría
-	// todos los conflictos contra cambios cloud legítimos. Rechazamos
-	// permanente y dejamos que el operador alinee NTP — la alternativa
-	// (silent-clamp-to-now) corrompe el orden de operaciones del propio
-	// sidecar.
+	// Clock skew check — SÓLO hacia el FUTURO. El LWW usa payload.updated_at
+	// como timestamp autoritativo del cliente; un reloj ADELANTADO (BIOS
+	// desincronizado, batería CMOS muerta) ganaría todos los conflictos
+	// contra cambios cloud legítimos — eso sí se rechaza, permanente, y que
+	// el operador alinee NTP (clamp-to-now corrompería el orden de
+	// operaciones del propio sidecar).
+	//
+	// Un updated_at en el PASADO es lo contrario de un problema: es la
+	// operación offline normal. La versión anterior rechazaba por |drift|,
+	// así que cualquier cambio hecho sin conexión (o con el cloud caído)
+	// por más de 5 minutos quedaba imposible de subir PARA SIEMPRE — la
+	// fila se atoraba en sync_queue con reintentos infinitos, rompiendo la
+	// promesa central del producto ("la operación diaria nunca depende de
+	// internet"). Un payload viejo no gana nada injustamente: el LWW lo
+	// resuelve solo.
 	if s.MaxClockSkew > 0 {
 		if ct := extractUpdatedAt(pl); !ct.IsZero() {
-			drift := ct.Sub(time.Now().UTC())
-			if drift < 0 {
-				drift = -drift
-			}
-			if drift > s.MaxClockSkew {
-				return UpsertResult{Status: StatusRejectedClockSkew}, nil
+			if drift := ct.Sub(time.Now().UTC()); drift > s.MaxClockSkew {
+				return UpsertResult{
+					Status: StatusRejectedClockSkew,
+					// Con razón legible: antes viajaba sin mensaje y el
+					// sidecar guardaba last_error vacío — el indicador
+					// decía "Último error: Ninguno" con filas atoradas,
+					// indiagnosticable en campo.
+					Error: fmt.Sprintf(
+						"updated_at del payload está %s en el futuro (máximo %s): revisa el reloj de la computadora",
+						drift.Round(time.Second), s.MaxClockSkew),
+				}, nil
 			}
 		}
 	}

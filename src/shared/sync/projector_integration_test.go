@@ -612,3 +612,71 @@ func TestPushRejectsCrossGymAtProjector(t *testing.T) {
 	}
 	_ = context.TODO() // silence import if not used elsewhere
 }
+
+// Pin del fix de clock skew (jul-2026): el check rechazaba por |drift|, así
+// que cualquier cambio hecho OFFLINE por más de MaxClockSkew quedaba
+// imposible de subir para siempre (la fila se atoraba en sync_queue con
+// reintentos infinitos y last_error vacío) — rompiendo la promesa central
+// del offline-first. Un updated_at viejo es la operación offline normal y
+// el LWW lo resuelve solo; sólo el drift hacia el FUTURO (reloj adelantado
+// que ganaría todos los conflictos) se rechaza, y ahora CON razón legible.
+// Run with -tags 'server integration'.
+func TestPush_ClockSkew_RechazaSoloFuturo(t *testing.T) {
+	db := projectorTestDB(t)
+	gymID, userID := seedGymAndOwner(t, db)
+	r, tokens := newRealHandler(t, db)
+	tok, err := tokens.GenerateAccessToken(userID, gymID, "owner")
+	if err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
+
+	push := func(t *testing.T, updatedAt time.Time) PushItemResult {
+		t.Helper()
+		id := uuid.New()
+		payload := map[string]any{
+			"id":         id.String(),
+			"gym_id":     gymID.String(),
+			"version":    1,
+			"created_at": updatedAt.UnixMilli(),
+			"updated_at": updatedAt.UnixMilli(),
+			"name":       "Skew " + id.String()[:8],
+			"price":      18,
+			"stock":      1,
+			"active":     true,
+		}
+		pb, _ := json.Marshal(payload)
+		req := PushRequest{
+			ClientID: uuid.NewString(), ClientNow: time.Now(), SchemaVersion: 1,
+			Batch: []PushItem{{
+				QueueID: uuid.NewString(), EntityType: "products", EntityID: id.String(),
+				Operation: OpUpsertStr, ClientVersion: 1, Payload: pb, EnqueuedAt: time.Now(),
+			}},
+		}
+		resp := doJSONReq(t, r, "POST", "/api/v1/sync/push", tok, req)
+		if resp.Code != 200 {
+			t.Fatalf("status %d: %s", resp.Code, resp.Body.String())
+		}
+		var pr PushResponse
+		if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if len(pr.Results) != 1 {
+			t.Fatalf("results: %+v", pr.Results)
+		}
+		return pr.Results[0]
+	}
+
+	// Cambio hecho hace una hora (venta capturada sin internet): ACEPTA.
+	if res := push(t, time.Now().Add(-time.Hour)); res.Status != StatusAccepted {
+		t.Errorf("payload viejo (offline normal) = %s (%s), want accepted", res.Status, res.Error)
+	}
+	// Reloj adelantado una hora: RECHAZA, con razón legible (antes viajaba
+	// sin mensaje y el sidecar mostraba "Último error: Ninguno").
+	res := push(t, time.Now().Add(time.Hour))
+	if res.Status != StatusRejectedClockSkew {
+		t.Errorf("payload futuro = %s, want rejected_clock_skew", res.Status)
+	}
+	if res.Error == "" {
+		t.Errorf("el rechazo por skew debe traer razón legible, vino vacío")
+	}
+}
