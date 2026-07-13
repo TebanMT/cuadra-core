@@ -1125,8 +1125,6 @@ func jsonMarshal(v any) ([]byte, error) {
 	return json.Marshal(v)
 }
 
-func toCents(dollars float64) int64 { return int64(dollars*100 + 0.5) }
-
 func dateStr(t time.Time) string { return t.UTC().Format("2006-01-02") }
 
 func milliPtr(t *time.Time) any {
@@ -1249,7 +1247,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 			"created_at":      row.CreatedAt.UnixMilli(),
 			"updated_at":      row.UpdatedAt.UnixMilli(),
 			"name":            row.Name,
-			"price":           toCents(row.Price),
+			"price":           row.Price,
 			"duration_days":   row.DurationDays,
 			"enrollment_fee":  0,
 			"maintenance_fee": 0,
@@ -1291,7 +1289,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 			"created_at":    row.CreatedAt.UnixMilli(),
 			"updated_at":    row.UpdatedAt.UnixMilli(),
 			"name":          row.Name,
-			"price":         toCents(row.Price),
+			"price":         row.Price,
 			"stock":         0,
 			"stock_minimum": 0,
 			"active":        row.Active,
@@ -1477,7 +1475,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 			"member_id":              row.MemberID.String(),
 			"membership_type_id":     row.MembershipTypeID.String(),
 			"type_name_snapshot":     row.TypeNameSnapshot,
-			"price_snapshot":         toCents(row.PriceSnapshot),
+			"price_snapshot":         row.PriceSnapshot,
 			"duration_days_snapshot": row.DurationDaysSnapshot,
 			"start_date":             dateStr(row.StartDate),
 			"expiry_date":            dateStr(*row.ExpiryDate),
@@ -1528,7 +1526,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 			"updated_at":      row.UpdatedAt.UnixMilli(),
 			"folio":           row.Folio,
 			"member_id":       uuidStrOrNil(row.MemberID),
-			"amount":          toCents(row.Amount),
+			"amount":          row.Amount,
 			"payment_method":  row.PaymentMethod,
 			"concept":         row.Concept,
 			"discount_amount": 0,
@@ -1585,7 +1583,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 			"created_at":      payment.CreatedAt.UnixMilli(),
 			"updated_at":      payment.UpdatedAt.UnixMilli(),
 			"folio":           payment.Folio,
-			"amount":          toCents(payment.Amount),
+			"amount":          payment.Amount,
 			"payment_method":  payment.PaymentMethod,
 			"concept":         payment.Concept,
 			"discount_amount": 0,
@@ -1629,9 +1627,9 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 			"created_at": sale.CreatedAt.UnixMilli(),
 			"updated_at": sale.UpdatedAt.UnixMilli(),
 			"payment_id": sale.PaymentID.String(),
-			"subtotal":   toCents(sale.Subtotal),
+			"subtotal":   sale.Subtotal,
 			"discount":   0,
-			"total":      toCents(sale.Total),
+			"total":      sale.Total,
 		}); err != nil {
 			return fmt.Errorf("emit sale %d: %w", s.ID, err)
 		}
@@ -1663,9 +1661,9 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 				"sale_id":               item.SaleID.String(),
 				"product_id":            item.ProductID.String(),
 				"product_name_snapshot": item.ProductNameSnapshot,
-				"unit_price_snapshot":   toCents(item.UnitPriceSnapshot),
+				"unit_price_snapshot":   item.UnitPriceSnapshot,
 				"quantity":              item.Quantity,
-				"line_total":            toCents(item.LineTotal),
+				"line_total":            item.LineTotal,
 			}); err != nil {
 				return fmt.Errorf("emit sale_item %d/%d: %w", s.ID, prodID, err)
 			}
@@ -1753,7 +1751,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 				"product_id":    mov.ProductID.String(),
 				"movement_type": mov.MovementType,
 				"delta":         mov.Delta,
-				"cost":          toCents(cost),
+				"cost":          cost,
 				"operator_id":   mov.OperatorID.String(),
 			}); err != nil {
 				return fmt.Errorf("emit entrada_mov %d/%d: %w", e.ID, prodID, err)
@@ -1792,7 +1790,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 			"created_at":    pr.CreatedAt.UnixMilli(),
 			"updated_at":    pr.UpdatedAt.UnixMilli(),
 			"name":          pr.Name,
-			"price":         toCents(pr.Price),
+			"price":         pr.Price,
 			"stock":         sr.Stock,
 			"stock_minimum": pr.StockMinimum,
 			"active":        pr.Active,
@@ -1874,7 +1872,7 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID) error {
 			"created_at":      row.CreatedAt.UnixMilli(),
 			"updated_at":      row.UpdatedAt.UnixMilli(),
 			"close_date":      dateStr(row.CloseDate),
-			"calculated_cash": toCents(row.CalculatedCash),
+			"calculated_cash": row.CalculatedCash,
 			"closed_by":       row.ClosedBy.String(),
 		}); err != nil {
 			return fmt.Errorf("emit cash_close %d: %w", c.ID, err)
