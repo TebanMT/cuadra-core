@@ -203,7 +203,7 @@ func TestImportEmitsMoneyInPesos(t *testing.T) {
 			Estado: 1, Importe: 550, IDTypePayment: 1}},
 	}
 	if err := db.Transaction(func(tx *gorm.DB) error {
-		return importAll(tx, src, gymID, ownerID)
+		return importAll(tx, src, gymID, ownerID, 1)
 	}); err != nil {
 		t.Fatalf("importAll: %v", err)
 	}
