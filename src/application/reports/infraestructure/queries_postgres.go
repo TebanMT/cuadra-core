@@ -308,25 +308,26 @@ func (r *PostgresReader) ListPendingBalances(tx sharedDomain.Transaction, gymID 
 		PaymentDate    time.Time
 	}
 	var rows []row
-	// "Pending balance" = the most recent payment row for the member that
-	// still carries balance_pending > 0 AND has not been settled by a
-	// later 'balance_settlement' row. We approximate "open balance" by
-	// taking the latest payment per member with balance_pending > 0
-	// where no later settlement exists.
+	// Deuda viva TOTAL por socio: SUM(balance_pending) de todos sus pagos
+	// vivos — mismo predicado que billing.SumPendingByMember (el total del
+	// perfil del socio), para que esta lista y ese número nunca discrepen.
+	// La versión anterior tomaba sólo el pago MÁS RECIENTE (DISTINCT ON):
+	// un pago nuevo saldado escondía la deuda vieja, y deudas repartidas
+	// en varios pagos mostraban sólo la última. balance_pending > 0
+	// pre-GROUP basta porque el dominio nunca produce balances negativos,
+	// y deja que MIN(payment_date) sea la deuda abierta más vieja (el
+	// "debe desde" del wire).
 	if err := gormTx.Raw(`
-		WITH latest AS (
-		    SELECT DISTINCT ON (p.member_id) p.member_id, p.balance_pending, p.payment_date
-		    FROM payments p
-		    WHERE p.gym_id = ? AND p.deleted_at IS NULL
-		      AND p.member_id IS NOT NULL
-		      AND p.concept <> 'refund'
-		    ORDER BY p.member_id, p.payment_date DESC, p.created_at DESC
-		)
-		SELECT l.member_id, m.full_name, m.phone, l.balance_pending, l.payment_date
-		FROM latest l
-		JOIN members m ON m.id = l.member_id AND m.deleted_at IS NULL
-		WHERE l.balance_pending > 0
-		ORDER BY l.balance_pending DESC`,
+		SELECT p.member_id, m.full_name, m.phone,
+		       SUM(p.balance_pending) AS balance_pending,
+		       MIN(p.payment_date)    AS payment_date
+		FROM payments p
+		JOIN members m ON m.id = p.member_id AND m.deleted_at IS NULL
+		WHERE p.gym_id = ? AND p.deleted_at IS NULL
+		  AND p.member_id IS NOT NULL
+		  AND p.balance_pending > 0
+		GROUP BY p.member_id, m.full_name, m.phone
+		ORDER BY SUM(p.balance_pending) DESC, m.full_name ASC`,
 		gymID).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
