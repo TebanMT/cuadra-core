@@ -191,11 +191,17 @@ type paymentResp struct {
 	CreatedAt       time.Time  `json:"created_at"`
 }
 
-type listPaymentsResp struct {
-	Items    []paymentResp `json:"items"`
-	Total    int           `json:"total"`
-	Page     int           `json:"page"`
-	PageSize int           `json:"page_size"`
+// listMemberPaymentsResp agrega el rollup `total_pending` (cuánto debe el
+// socio en TOTAL, sin paginación ni filtros) — espejo del razonamiento de
+// total_paid en listGymPaymentsResp. El FE ya tipaba este campo
+// (PaymentHistoryResponse.total_pending) pero ningún handler lo emitía: el
+// banner de deuda del perfil nunca prendía.
+type listMemberPaymentsResp struct {
+	Items        []paymentResp `json:"items"`
+	Total        int           `json:"total"`
+	Page         int           `json:"page"`
+	PageSize     int           `json:"page_size"`
+	TotalPending float64       `json:"total_pending"`
 }
 
 // listGymPaymentsResp adds a `total_paid` rollup to the listPaymentsResp
@@ -435,8 +441,9 @@ func (ctrl *PaymentController) handleListByMember(c *gin.Context) {
 	for _, p := range out.Items {
 		items = append(items, toPaymentResp(p))
 	}
-	utils.JsonResponse(c, http.StatusOK, listPaymentsResp{
+	utils.JsonResponse(c, http.StatusOK, listMemberPaymentsResp{
 		Items: items, Total: out.Total, Page: out.Page, PageSize: out.PageSize,
+		TotalPending: out.TotalPending,
 	})
 }
 
