@@ -4,6 +4,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -159,5 +160,71 @@ func TestWipeGym_FullGraphNoFKExplosion(t *testing.T) {
 	}
 	if journalTemplates != 1 {
 		t.Errorf("sync_entities/notification_templates = %d, want 1 (los toggles deben viajar al sidecar fresco)", journalTemplates)
+	}
+}
+
+// Pin del incidente ×100 post-migración (10-jul-2026): el import emitía los
+// campos de dinero del journal en CENTAVOS (toCents), pero el wire de sync
+// transporta PESOS — el apply del sidecar multiplica ×100 al aterrizar en
+// SQLite (moneyColumns), así que el full-sync del gym migrado mostró todos
+// los montos ×100 (ingresos del mes de $6,250 como $625,000). La regla: el
+// payload de sync_entities lleva EXACTAMENTE lo que la columna NUMERIC del
+// cloud guarda — pesos.
+func TestImportEmitsMoneyInPesos(t *testing.T) {
+	db := testutil.OpenPostgres(t)
+	gymID := uuid.New()
+	ownerID := uuid.New()
+
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if err := db.Exec(q, args...).Error; err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	exec(`INSERT INTO gyms (id, gym_id, version, created_at, updated_at, name, country, timezone)
+	      VALUES (?, ?, 1, NOW(), NOW(), 'Money Test Gym', 'MX', 'America/Mexico_City')`, gymID, gymID)
+	exec(`INSERT INTO users (id, gym_id, version, created_at, updated_at, full_name, role, email)
+	      VALUES (?, ?, 1, NOW(), NOW(), 'Owner', 'owner', ?)`, ownerID, gymID, uuid.NewString()+"@t.mx")
+	t.Cleanup(func() {
+		for _, tbl := range []string{"sync_entities", "payments", "memberships", "membership_types",
+			"members", "users", "gyms"} {
+			_ = db.Exec("DELETE FROM "+tbl+" WHERE gym_id = ?", gymID).Error
+		}
+	})
+
+	// Dump sintético mínimo: plan → socio → sociomembresia → pago de $550.
+	when := time.Now().Add(-24 * time.Hour)
+	src := sourceData{
+		memberships: []srcMembresia{{ID: 1, Nombre: "Mensual", Estado: 1, Precio: 550, Meses: 1}},
+		socios:      []srcSocio{{ID: 1, Estado: 1, Nombre: "Rosa", Paterno: "Robles", Telefono: "4151112233", FechaCreacion: &when}},
+		socioMembs: []srcSocioMembresia{{ID: 1, Estado: 1, IDSocio: 1, IDMembresia: 1, Precio: 550,
+			FechaInicioMembresia: &when, Meses: 1, Vencimiento: &when}},
+		socioMembsPagos: []srcSocioMembresiaPago{{ID: 1, Folio: 1, IDSocioMembresia: 1, Fecha: &when,
+			Estado: 1, Importe: 550, IDTypePayment: 1}},
+	}
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		return importAll(tx, src, gymID, ownerID)
+	}); err != nil {
+		t.Fatalf("importAll: %v", err)
+	}
+
+	// El dominio (NUMERIC pesos) y el journal deben decir LO MISMO: 550.
+	var domainAmount float64
+	if err := db.Raw(`SELECT amount FROM payments WHERE gym_id = ? AND concept = 'membership'`, gymID).
+		Scan(&domainAmount).Error; err != nil {
+		t.Fatalf("domain amount: %v", err)
+	}
+	if domainAmount != 550 {
+		t.Errorf("payments.amount = %v, want 550 (pesos)", domainAmount)
+	}
+	var wireAmount float64
+	if err := db.Raw(`
+		SELECT (payload->>'amount')::float FROM sync_entities
+		WHERE gym_id = ? AND entity_type = 'payments'`, gymID).
+		Scan(&wireAmount).Error; err != nil {
+		t.Fatalf("wire amount: %v", err)
+	}
+	if wireAmount != 550 {
+		t.Errorf("journal amount = %v, want 550 (PESOS — el apply del sidecar hace la conversión a centavos; con toCents aquí el desktop mostraba ×100)", wireAmount)
 	}
 }
