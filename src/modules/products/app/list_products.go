@@ -54,9 +54,14 @@ func (uc *ListProducts) Execute(ctx context.Context, in ListProductsInput) (*Lis
 	if page < 1 {
 		page = 1
 	}
+	// Clamp-al-cap, no reset-al-default: pedir de más devuelve el máximo
+	// (200), no 50. Ver prodRepo.MaxPageSize para el porqué.
 	pageSize := in.PageSize
-	if pageSize < 1 || pageSize > 200 {
-		pageSize = 50
+	if pageSize < 1 {
+		pageSize = prodRepo.DefaultPageSize
+	}
+	if pageSize > prodRepo.MaxPageSize {
+		pageSize = prodRepo.MaxPageSize
 	}
 	listQuery := prodRepo.ListQuery{
 		GymID:        in.GymID,

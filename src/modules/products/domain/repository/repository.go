@@ -82,6 +82,21 @@ const (
 	SortDirDesc = "desc"
 )
 
+// Paging bounds for ListQuery.PageSize. Shared by the list use case and both
+// repo implementations (via normalizePage) so the clamp semantics stay
+// identical across every layer.
+//
+//   - PageSize below 1 falls back to DefaultPageSize.
+//   - PageSize above MaxPageSize is CAPPED at MaxPageSize — never reset to the
+//     default. Asking for "as many as possible" (e.g. the venta grid / global
+//     search pulling the whole active catalogue) must never yield FEWER than
+//     the cap. Antes un page_size=500 caía a 50 y ocultaba productos vendibles
+//     en gyms con >50 activos. Callers que necesitan TODO paginan hasta agotar.
+const (
+	DefaultPageSize = 50
+	MaxPageSize     = 200
+)
+
 // ListQuery is the input for UC-023 (list products). Filters are intentionally
 // minimal — the recepcionist UI is the main caller, the dashboard is secondary.
 type ListQuery struct {

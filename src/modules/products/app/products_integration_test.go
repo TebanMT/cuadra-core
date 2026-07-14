@@ -5,6 +5,7 @@ package app_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	gymRepoLite "github.com/cuadra/cuadra-core/src/modules/gyms/infraestructure/db/repositories"
 	prodApp "github.com/cuadra/cuadra-core/src/modules/products/app"
 	prodErrors "github.com/cuadra/cuadra-core/src/modules/products/domain/errors"
+	prodRepo "github.com/cuadra/cuadra-core/src/modules/products/domain/repository"
 	prodRepoLite "github.com/cuadra/cuadra-core/src/modules/products/infraestructure/db/repositories"
 	usersApp "github.com/cuadra/cuadra-core/src/modules/users/app"
 	usersRepoLite "github.com/cuadra/cuadra-core/src/modules/users/infraestructure/db/repositories"
@@ -304,6 +306,74 @@ func TestUC023_List_LowStockFilter(t *testing.T) {
 	low, _ := f.listUC().Execute(context.Background(), prodApp.ListProductsInput{GymID: f.gymID, LowStockOnly: true})
 	if low.Total != 1 || low.Items[0].Name != "Bajo" {
 		t.Errorf("low_stock = %d items, items[0]=%v", low.Total, low.Items)
+	}
+}
+
+// Round-trip del bug de paginación: la venta rápida / buscador global piden
+// "todos los activos" con un page_size grande. Antes el clamp reseteaba
+// cualquier page_size > 200 a 50, así que un gym con >50 productos activos
+// perdía el resto — invisibles y no-vendibles en el picker. Con el
+// clamp-al-cap, pedir de más devuelve HASTA el cap (200) en un request, y
+// el frontend pagina para juntar todo. Este test crea 60 activos y prueba
+// las dos mitades: (a) un page_size grande ya no cae a 50, y (b) paginar
+// junta el catálogo completo.
+func TestUC023_List_LargePageSizeReturnsAllActive(t *testing.T) {
+	f := setupProducts(t)
+	create := f.createProductUC()
+	const nProducts = 60
+	for i := 0; i < nProducts; i++ {
+		if _, err := create.Execute(context.Background(), prodApp.CreateProductInput{
+			GymID: f.gymID, ActorUserID: f.ownerID,
+			Name: fmt.Sprintf("Producto %03d", i), Price: 10, InitialStock: 5, StockMinimum: 1,
+		}); err != nil {
+			t.Fatalf("create %d: %v", i, err)
+		}
+	}
+
+	// (a) Un page_size por encima del cap ya NO colapsa a 50: devuelve
+	// exactamente el cap (200), que en este catálogo alcanza para los 60.
+	big, err := f.listUC().Execute(context.Background(), prodApp.ListProductsInput{
+		GymID: f.gymID, ActiveFilter: "active", Page: 1, PageSize: 500,
+	})
+	if err != nil {
+		t.Fatalf("list big page: %v", err)
+	}
+	if big.Total != nProducts {
+		t.Errorf("total = %d, want %d", big.Total, nProducts)
+	}
+	if big.PageSize != prodRepo.MaxPageSize {
+		t.Errorf("page_size reportado = %d, want cap %d (no el default 50)", big.PageSize, prodRepo.MaxPageSize)
+	}
+	if len(big.Items) != nProducts {
+		t.Fatalf("items = %d, want %d — el clamp seguía ocultando activos", len(big.Items), nProducts)
+	}
+
+	// (b) Con un page_size chico, paginar hasta agotar junta los 60 sin
+	// duplicados (espeja fetchAllActiveProducts del desktop).
+	seen := map[string]bool{}
+	pageSize := 25
+	for page := 1; ; page++ {
+		res, err := f.listUC().Execute(context.Background(), prodApp.ListProductsInput{
+			GymID: f.gymID, ActiveFilter: "active", Page: page, PageSize: pageSize,
+		})
+		if err != nil {
+			t.Fatalf("list page %d: %v", page, err)
+		}
+		for _, p := range res.Items {
+			if seen[p.ID.String()] {
+				t.Errorf("producto duplicado entre páginas: %s", p.ID)
+			}
+			seen[p.ID.String()] = true
+		}
+		if len(seen) >= res.Total || len(res.Items) < pageSize {
+			break
+		}
+		if page > 10 {
+			t.Fatal("paginación no terminó — posible loop")
+		}
+	}
+	if len(seen) != nProducts {
+		t.Errorf("paginando junté %d únicos, want %d", len(seen), nProducts)
 	}
 }
 
