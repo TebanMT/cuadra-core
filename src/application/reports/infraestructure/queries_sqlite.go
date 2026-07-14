@@ -16,8 +16,6 @@
 //   - Money is stored in cents (INTEGER); we divide by 100 at the edge to
 //     match the float64 contract on Reader.
 //   - `EXTRACT(MONTH/DAY FROM birthdate)` becomes `strftime('%m'/'%d', …)`.
-//   - Postgres `DISTINCT ON` is rewritten as a `ROW_NUMBER() OVER (...)`
-//     window function (SQLite ≥3.25 has these).
 package infraestructure
 
 import (
@@ -346,30 +344,26 @@ func (r *SQLiteReader) ListPendingBalances(tx sharedDomain.Transaction, gymID uu
 		PaymentDate    string `db:"payment_date"`
 	}
 	var rows []row
-	// Equivalent of Postgres' DISTINCT ON: pick the latest payment per member
-	// (by payment_date DESC, then created_at DESC) then keep only the ones
-	// whose latest still has balance_pending > 0.
+	// Deuda viva TOTAL por socio: SUM(balance_pending) de todos sus pagos
+	// vivos — mismo predicado que billing.SumPendingByMember (el total del
+	// perfil del socio), para que esta lista y ese número nunca discrepen.
+	// La versión anterior tomaba sólo el pago MÁS RECIENTE (rn=1): un pago
+	// nuevo saldado escondía la deuda vieja, y deudas repartidas en varios
+	// pagos mostraban sólo la última. balance_pending > 0 pre-GROUP basta
+	// porque el dominio nunca produce balances negativos, y deja que
+	// MIN(payment_date) sea la deuda abierta más vieja (el "debe desde"
+	// del wire).
 	if err := stx.Select(context.Background(), &rows, `
-		WITH ranked AS (
-		    SELECT
-		        p.member_id,
-		        p.balance_pending,
-		        p.payment_date,
-		        ROW_NUMBER() OVER (
-		            PARTITION BY p.member_id
-		            ORDER BY p.payment_date DESC, p.created_at DESC
-		        ) AS rn
-		    FROM payments p
-		    WHERE p.gym_id = ? AND p.deleted_at IS NULL
-		      AND p.member_id IS NOT NULL
-		      AND p.concept <> 'refund'
-		)
-		SELECT r.member_id, m.full_name, m.phone,
-		       r.balance_pending, r.payment_date
-		FROM ranked r
-		JOIN members m ON m.id = r.member_id AND m.deleted_at IS NULL
-		WHERE r.rn = 1 AND r.balance_pending > 0
-		ORDER BY r.balance_pending DESC`,
+		SELECT p.member_id, m.full_name, m.phone,
+		       SUM(p.balance_pending) AS balance_pending,
+		       MIN(p.payment_date)    AS payment_date
+		FROM payments p
+		JOIN members m ON m.id = p.member_id AND m.deleted_at IS NULL
+		WHERE p.gym_id = ? AND p.deleted_at IS NULL
+		  AND p.member_id IS NOT NULL
+		  AND p.balance_pending > 0
+		GROUP BY p.member_id, m.full_name, m.phone
+		ORDER BY SUM(p.balance_pending) DESC, m.full_name ASC`,
 		gymID.String()); err != nil {
 		return nil, err
 	}

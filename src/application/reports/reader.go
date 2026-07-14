@@ -250,7 +250,10 @@ type ProductLowStockRow struct {
 	StockMinimum int
 }
 
-// PendingBalanceRow — última fila de payments con balance_pending > 0 por socio.
+// PendingBalanceRow — deuda viva TOTAL del socio: SUM(balance_pending) de
+// todos sus pagos vivos (mismo agregado que billing.SumPendingByMember).
+// PaymentDate es la fecha del pago con deuda más viejo — el "debe desde"
+// que muestran dashboard y atención requerida.
 type PendingBalanceRow struct {
 	MemberID       uuid.UUID
 	FullName       string
