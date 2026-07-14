@@ -165,10 +165,17 @@ type AgentSnapshot struct {
 	// Sin esto el indicador decía "Sincronizado" con la cola pudriéndose
 	// — caso real post-migración: 6 filas de socios pre-corte rechazadas
 	// por FKs contra un mundo que el wipe borró. StuckPushError guarda el
-	// last_error de la fila más castigada para que el detalle del
-	// indicador diga POR QUÉ sin abrir sqlite.
+	// last_error (ya clasificado/limpio) de la fila más castigada para que
+	// el detalle del indicador diga POR QUÉ sin abrir sqlite.
 	StuckPushCount int
 	StuckPushError string
+	// StuckItems — detalle de las filas atoradas (cap a
+	// maxStuckItemsInStatus, retry_count DESC). Cada una viene clasificada
+	// (kind duplicate/other) y con label humano extraído del payload, para
+	// que /sync/status pueda ofrecer resolución por fila en el desktop.
+	// Tratado como INMUTABLE una vez publicado: refreshPendingCount siempre
+	// asigna un slice fresco, nunca muta el existente.
+	StuckItems []StuckQueueItem
 }
 
 func NewAgent(cfg AgentConfig, db *sqlx.DB, uow sharedDomain.UnitOfWork) *Agent {
@@ -221,7 +228,15 @@ func (a *Agent) TriggerNow() {
 func (a *Agent) Snapshot() AgentSnapshot {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return a.state
+	snap := a.state
+	// Copia defensiva del slice: el struct se copia por valor pero el
+	// backing array sería compartido — un refresh concurrente publica un
+	// slice nuevo (no muta), aun así el copy mantiene la garantía sin
+	// depender de esa disciplina.
+	if len(a.state.StuckItems) > 0 {
+		snap.StuckItems = append([]StuckQueueItem(nil), a.state.StuckItems...)
+	}
+	return snap
 }
 
 // Run is the main agent loop. Blocks until ctx is cancelled. Safe to call
@@ -436,7 +451,22 @@ func (a *Agent) Push(ctx context.Context) error {
 			return localApplyErr(err)
 		}
 		a.markPushedAt(time.Now().UTC())
-		if len(batch) < a.cfg.BatchSize {
+		// progress = el server resolvió AL MENOS un item (accepted o
+		// conflict_*): esas filas ya tienen synced_at y salen de la cola.
+		// Sin progreso en un batch COMPLETO, re-tomar la cola devolvería
+		// exactamente el mismo batch (synced_at sigue NULL, mismo orden por
+		// rowid) → loop caliente infinito martillando al cloud dentro de un
+		// solo RunOnce. Con >= BatchSize filas todas atoradas (p.ej. una
+		// cola envejecida de rechazos permanentes) hay que salir y dejar
+		// que el próximo tick reintente como cualquier rechazo.
+		progress := false
+		for _, r := range resp.Results {
+			switch r.Status {
+			case StatusAccepted, StatusConflictClientWins, StatusConflictServerWins:
+				progress = true
+			}
+		}
+		if len(batch) < a.cfg.BatchSize || !progress {
 			a.refreshPendingCount(ctx)
 			return nil
 		}
@@ -595,9 +625,14 @@ func (a *Agent) handlePushResponse(ctx context.Context, batch []PushItem, resp *
 				_ = recordLocalConflict(ctx, stx, orig, r, "server_wins")
 			case StatusRejectedUnauthorized,
 				StatusRejectedSchema,
-				StatusRejectedUnknownType:
+				StatusRejectedUnknownType,
+				StatusRejectedDuplicate:
 				// Hard-rejected — keep the queue row, bump retry_count, log.
 				// Operator's UI will eventually surface this via /sync/status.
+				// El prefijo de status en last_error es load-bearing para
+				// rejected_duplicate: classifyStuckError lo usa para marcar
+				// la fila como kind=duplicate y que el desktop ofrezca el
+				// CTA de renombrar (el mensaje ya viene legible del cloud).
 				if _, err := stx.Exec(ctx, `
 					UPDATE sync_queue SET retry_count = retry_count + 1, last_error = ?
 					WHERE id = ?`, r.Status+": "+r.Error, r.QueueID); err != nil {
@@ -1006,6 +1041,11 @@ func (a *Agent) markPushedAt(t time.Time) {
 // alarmar por un blip transitorio: cada ciclo la reintenta.
 const stuckPushThreshold = 3
 
+// maxStuckItemsInStatus — cap del detalle de filas atoradas que viaja en
+// /sync/status. Suficiente para cualquier caso real (los atorones vienen
+// de a unas cuantas filas); el conteo StuckPushCount sí es total.
+const maxStuckItemsInStatus = 20
+
 func (a *Agent) refreshPendingCount(ctx context.Context) {
 	tx, err := a.uow.Query(ctx)
 	if err != nil {
@@ -1020,17 +1060,100 @@ func (a *Agent) refreshPendingCount(ctx context.Context) {
 	_ = stx.Get(ctx, &stuck,
 		`SELECT COUNT(*) FROM sync_queue WHERE synced_at IS NULL AND retry_count >= ?`,
 		stuckPushThreshold)
-	var sample sql.NullString
-	_ = stx.Get(ctx, &sample, `
-		SELECT last_error FROM sync_queue
-		WHERE synced_at IS NULL AND retry_count >= ? AND last_error IS NOT NULL
-		ORDER BY retry_count DESC LIMIT 1`,
-		stuckPushThreshold)
+	items := a.loadStuckItems(ctx, stx)
+	// StuckPushError conserva su rol (muestra de la fila más castigada en
+	// el detalle del indicador) pero ahora ya viene clasificado — sin el
+	// prefijo "rejected_duplicate:" que sólo era jerga para el operador.
+	var sample string
+	for _, it := range items {
+		if it.Message != "" {
+			sample = it.Message
+			break
+		}
+	}
 	a.mu.Lock()
 	a.state.PendingCount = n
 	a.state.StuckPushCount = stuck
-	a.state.StuckPushError = sample.String
+	a.state.StuckPushError = sample
+	a.state.StuckItems = items
 	a.mu.Unlock()
+}
+
+// loadStuckItems lee el detalle de las filas atoradas de sync_queue y las
+// clasifica para el status. Best-effort: un error de lectura devuelve nil y
+// el status degrada al comportamiento previo (sólo conteos).
+func (a *Agent) loadStuckItems(ctx context.Context, stx *sharedDomain.SqlxTransaction) []StuckQueueItem {
+	rows, err := stx.Ext().QueryxContext(ctx, `
+		SELECT id, entity_type, entity_id, operation, retry_count,
+		       COALESCE(last_error, ''), payload
+		  FROM sync_queue
+		 WHERE synced_at IS NULL AND retry_count >= ?
+		 ORDER BY retry_count DESC, rowid ASC
+		 LIMIT ?`,
+		stuckPushThreshold, maxStuckItemsInStatus)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []StuckQueueItem
+	for rows.Next() {
+		var (
+			id, entityType, entityID, op, lastErr, payload string
+			retryCount                                     int
+		)
+		if err := rows.Scan(&id, &entityType, &entityID, &op, &retryCount, &lastErr, &payload); err != nil {
+			return nil
+		}
+		kind, msg := classifyStuckError(lastErr)
+		out = append(out, StuckQueueItem{
+			QueueID:     id,
+			EntityType:  entityType,
+			EntityID:    entityID,
+			Operation:   op,
+			RetryCount:  retryCount,
+			Kind:        kind,
+			Message:     msg,
+			EntityLabel: entityLabelFromPayload([]byte(payload)),
+		})
+	}
+	return out
+}
+
+// classifyStuckError deriva (kind, mensaje limpio) del last_error persistido
+// en sync_queue:
+//
+//   - "rejected_duplicate: <msg>" — cloud nuevo; el prefijo se quita y el
+//     mensaje ya viene legible en español (server_duplicates.go).
+//   - error crudo de Postgres con SQLSTATE 23505 — cloud viejo que aún no
+//     mapea duplicados; se clasifica igual (el CTA del desktop funciona)
+//     aunque el texto quede crudo.
+//   - cualquier otra cosa — kind other, texto tal cual.
+func classifyStuckError(lastError string) (kind, message string) {
+	if rest, ok := strings.CutPrefix(lastError, StatusRejectedDuplicate+": "); ok {
+		return StuckKindDuplicate, rest
+	}
+	if strings.Contains(lastError, "SQLSTATE 23505") ||
+		strings.Contains(lastError, "duplicate key value violates unique constraint") {
+		return StuckKindDuplicate, lastError
+	}
+	return StuckKindOther, lastError
+}
+
+// entityLabelFromPayload extrae un identificador humano del snapshot
+// encolado para que la lista de atorados no muestre UUIDs. El orden de
+// llaves cubre los tipos con más probabilidad de atorarse (catálogos con
+// nombre, socios, pagos con folio, overrides de plantillas).
+func entityLabelFromPayload(payload []byte) string {
+	var pl map[string]any
+	if err := json.Unmarshal(payload, &pl); err != nil {
+		return ""
+	}
+	for _, k := range []string{"name", "full_name", "code", "folio", "template_key", "email"} {
+		if s, ok := pl[k].(string); ok && strings.TrimSpace(s) != "" {
+			return strings.TrimSpace(s)
+		}
+	}
+	return ""
 }
 
 func (a *Agent) setStateLabel(label string) {
