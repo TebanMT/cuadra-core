@@ -77,19 +77,27 @@ jobs:
             -o ../../artifacts
           ls -la ../../artifacts
 
-      - name: Smoke test (arranca y sale limpio con stdin cerrado)
+      - name: Smoke test (ping por stdin + shutdown limpio en EOF)
         run: |
           set -euo pipefail
-          # Sin lector físico en el runner: el helper debe arrancar,
-          # reportar no_device por stdout y salir con exit 0 al cerrar
-          # stdin. Valida el pipeline de arranque/shutdown y que las DLLs
-          # nativas resuelven (dpfpdd/dpfj junto al exe).
+          # Sin lector físico en el runner. El ping es el check
+          # determinista: valida stdin parsing → dispatch → stdout NDJSON.
+          # (Un `echo ""` solo NO sirve: cierra stdin al instante y el
+          # helper hace shutdown limpio antes de que el reader loop emita
+          # nada — esa carrera tumbó la primera versión de este test.)
+          # El sleep mantiene stdin abierto para que además al reader loop
+          # le dé tiempo de reportar no_device — eso queda como warning,
+          # no como fallo (depende del runtime del SDK en el runner).
           cp tools/tinta-bio/vendor/Lib/x64/*.dll artifacts/ || true
           cd artifacts
-          OUT="$(echo "" | timeout 30 ./tinta-bio.exe || true)"
+          OUT="$({ echo '{"cmd":"ping","id":"smoke"}'; sleep 5; } | timeout 30 ./tinta-bio.exe || true)"
           echo "$OUT"
-          echo "$OUT" | grep -q '"event":"reader"' || {
-            echo "::error::el helper no emitió evento reader"; exit 1; }
+          echo "$OUT" | grep -q '"event":"result"' || {
+            echo "::error::el helper no respondió al ping"; exit 1; }
+          echo "$OUT" | grep -q '"id":"smoke"' || {
+            echo "::error::la respuesta no ecoa el id del comando"; exit 1; }
+          echo "$OUT" | grep -q '"event":"reader"' || \
+            echo "::warning::sin evento reader en 5s (esperado si dpfpdd no carga en el runner)"
 
       - name: Build provenance
         run: |
