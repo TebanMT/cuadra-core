@@ -28,6 +28,8 @@
 // redistribuidos bajo el EULA del DigitalPersona Biometric SDK.
 
 using System.Collections.Concurrent;
+using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -68,6 +70,7 @@ internal static class Program
     private static int Main(string[] args)
     {
         Console.OutputEncoding = Encoding.UTF8;
+        InstallNativeResolver();
         Log($"tinta-bio start pid={Environment.ProcessId}");
 
         if (args.Contains("--list"))
@@ -389,6 +392,55 @@ internal static class Program
 
     private static Fmd UnpackFmd(string packed) =>
         Fmd.DeserializeXml(Encoding.UTF8.GetString(Convert.FromBase64String(packed)));
+
+    // ── resolución de DLLs nativas del SDK ──────────────────────────────────
+    //
+    // dpfpdd.dll NO es autosuficiente: su enumeración de dispositivos
+    // depende de la capa de soporte que instala el RTE (dpusbada, dpdevctl,
+    // dpdevdat, módulos dpd*/dpi*, blobs de firmware…). Copiar sólo las
+    // DLLs de Lib/x64 junto al exe le hace SOMBRA al runtime completo del
+    // sistema y enumera cero lectores (visto en campo: no_device con el
+    // sample funcionando en la misma máquina). Regla: NUNCA shippear
+    // nativas del SDK junto al exe. Este resolver sólo ayuda a ENCONTRAR
+    // el runtime instalado cuando el loader no lo tiene en su búsqueda
+    // default (PATH sin registrar, instalaciones custom): resuelve los
+    // DllImport de DPUruNet hacia el directorio de instalación del RTE,
+    // para que dpfpdd cargue DESDE su casa, con toda su capa alrededor.
+    private static void InstallNativeResolver()
+    {
+        NativeLibrary.SetDllImportResolver(typeof(Reader).Assembly, (name, assembly, searchPath) =>
+        {
+            // Primero la búsqueda default (PATH, System32, app dir) — si el
+            // sistema ya resuelve, no interferimos.
+            if (NativeLibrary.TryLoad(name, assembly, searchPath, out var handle))
+                return handle;
+
+            var file = name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? name : name + ".dll";
+            foreach (var dir in NativeDirCandidates())
+            {
+                var candidate = Path.Combine(dir, file);
+                if (File.Exists(candidate) && NativeLibrary.TryLoad(candidate, out handle))
+                {
+                    Log($"native {file} <- {dir}");
+                    return handle;
+                }
+            }
+            return IntPtr.Zero; // que el error original suba con claridad
+        });
+    }
+
+    private static IEnumerable<string> NativeDirCandidates()
+    {
+        // Override explícito para diagnóstico/instalaciones raras.
+        var env = Environment.GetEnvironmentVariable("TINTA_BIO_NATIVE_DIR");
+        if (!string.IsNullOrEmpty(env)) yield return env;
+
+        // Rutas de instalación conocidas del RTE / SDK (x64).
+        var pf = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        yield return Path.Combine(pf, "DigitalPersona", "Bin");
+        yield return Path.Combine(pf, "DigitalPersona", "U.are.U SDK", "Windows", "Lib", "x64");
+        yield return Path.Combine(pf, "HID Global", "DigitalPersona", "Bin");
+    }
 
     // ── plumbing ────────────────────────────────────────────────────────────
 

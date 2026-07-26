@@ -28,14 +28,16 @@ CI: `.github/workflows/build-tinta-bio-windows.yml` — baja el zip de
 ## Deployment en la PC del gym
 
 1. El instalador de Tinta corre el **RTE** del SDK en silencio
-   (`RTE/x64/setup.exe` con flags silent, o `InstallOnly.bat`): instala
-   el DRIVER del lector. Las DLLs nativas NO se le confían al PATH.
+   (`RTE/x64/setup.exe` silent / `InstallOnly.bat`): instala el driver
+   del lector Y el runtime nativo completo (dpfpdd + capa de soporte:
+   dpusbada, dpdevctl, dpdevdat, módulos dpd*/dpi*, firmware). El RTE es
+   la ÚNICA fuente del runtime nativo.
 2. `tinta-bio.exe` (self-contained, sin dependencia de .NET runtime)
-   viaja en `bundle.resources` de Tauri JUNTO con las DLLs nativas del
-   SDK (dpfpdd, dpfpdd_4k, dpfj, tfm, …) en el mismo directorio — el
-   probing de single-file resuelve del app dir, cero dependencia del
-   estado del sistema. El release asset `tinta-bio-win-x64.zip` ya trae
-   todo junto.
+   viaja SOLO en `bundle.resources` de Tauri. REGLA: nunca copiar DLLs
+   de Lib/x64 junto al exe — un subconjunto le hace sombra al runtime
+   instalado y dpfpdd enumera cero lectores sin error visible. El
+   DllImportResolver del helper localiza la instalación del RTE si el
+   PATH no la registra (override: env TINTA_BIO_NATIVE_DIR).
 3. Sin RTE instalado el helper arranca pero reporta
    `reader.disconnected` — la app degrada a PIN/manual, igual que hoy.
 
