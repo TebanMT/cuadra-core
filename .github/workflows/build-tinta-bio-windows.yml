@@ -77,6 +77,20 @@ jobs:
             -o ../../artifacts
           ls -la ../../artifacts
 
+      - name: Stage native SDK DLLs junto al exe
+        run: |
+          set -euo pipefail
+          # El single-file embebe lo administrado (DPUruNet), pero los
+          # P/Invoke resuelven dpfpdd/dpfj/etc. por búsqueda estándar de
+          # Windows. Shippearlas JUNTO al exe (probing incluye el app dir
+          # en single-file desde .NET 5) elimina la dependencia del PATH
+          # del sistema — sin esto, el exe truena con "DLL not found" en
+          # cualquier máquina donde el RTE no haya registrado las rutas.
+          # dpfpdd_4k.dll es el plugin de la serie 4000 (nuestro 4500).
+          # Redistribución permitida: EULA §1.1(c), como parte de la app.
+          cp tools/tinta-bio/vendor/Lib/x64/*.dll artifacts/
+          ls -la artifacts/
+
       - name: Smoke test (ping por stdin + shutdown limpio en EOF)
         run: |
           set -euo pipefail
@@ -88,7 +102,6 @@ jobs:
           # El sleep mantiene stdin abierto para que además al reader loop
           # le dé tiempo de reportar no_device — eso queda como warning,
           # no como fallo (depende del runtime del SDK en el runner).
-          cp tools/tinta-bio/vendor/Lib/x64/*.dll artifacts/ || true
           cd artifacts
           OUT="$({ echo '{"cmd":"ping","id":"smoke"}'; sleep 5; } | timeout 30 ./tinta-bio.exe || true)"
           echo "$OUT"
@@ -110,19 +123,22 @@ jobs:
           } > artifacts/BUILD_INFO.txt
           cat artifacts/BUILD_INFO.txt
 
+      - name: Pack bundle (exe + DLLs nativas + provenance)
+        run: |
+          set -euo pipefail
+          cd artifacts
+          7z a tinta-bio-win-x64.zip tinta-bio.exe ./*.dll BUILD_INFO.txt
+          7z l tinta-bio-win-x64.zip
+
       - name: Upload artifact (workflow_dispatch)
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: tinta-bio-win-x64
-          path: |
-            artifacts/tinta-bio.exe
-            artifacts/BUILD_INFO.txt
+          path: artifacts/tinta-bio-win-x64.zip
 
       - name: Release (tag tinta-bio-v*)
         if: startsWith(github.ref, 'refs/tags/tinta-bio-v')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            artifacts/tinta-bio.exe
-            artifacts/BUILD_INFO.txt
+          files: artifacts/tinta-bio-win-x64.zip
