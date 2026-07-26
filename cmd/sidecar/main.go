@@ -201,10 +201,11 @@ func main() {
 	emailSender := email.NewStdoutSender()
 	trialDays := envInt("TRIAL_DURATION_DAYS", 30)
 
-	// Biometric reader (UC-028, UC-029, UC-031). The sidecar build wires the
-	// NBIS matcher (mindtct + bozorth3 subprocesses, ADR-004-bis); the mock
-	// lives behind `bio_mock` for tests and is consumed via NewMockReader in
-	// the test fixtures, not here.
+	// Biometric engine (UC-028, UC-029, UC-031). The sidecar spawns the
+	// tinta-bio helper (captura + FingerJet extract/identify/enroll,
+	// NDJSON stdio — tools/tinta-bio/PROTOCOL.md) resolved alongside this
+	// executable, override con TINTA_BIO_PATH. En dev sin helper (mac) el
+	// engine queda en "no disponible" y el kiosko cae a PIN/manual.
 	//
 	// GMKs go to the OS keychain (Windows Credential Manager / macOS
 	// Keychain) per ADR-006 §2.6 so a sidecar restart doesn't orphan every
@@ -219,7 +220,7 @@ func main() {
 	} else {
 		gmkProvider = bcrypto.NewKeyringGMKProvider()
 	}
-	bioReader := biometric.NewDigitalPersonaReader().WithGMK(gmkProvider)
+	bioEngine := biometric.NewEngine(biometric.EngineConfig{Logger: log.Default()})
 
 	// Sidecar use cases — password-reset / refresh-blacklist flows (UC-003,
 	// UC-004, UC-008/9 token revocation) live cloud-side, so the sidecar
@@ -285,21 +286,29 @@ func main() {
 	listAppliedByMonth := promoApp.NewListAppliedByMonth(appliedPromoRepo, uow)
 	createMember.WithPromotions(applyPromo, memberSvc)
 
-	// ── Biometric + Checkins (Sesión 5) ───────────────────────────────────
-	// Sidecar wires the real Reader so UC-028's pre-enrollment collision
-	// check runs (production enrollment lives here, not in cloud).
-	registerFingerprint := memApp.NewRegisterFingerprint(memberRepo, fingerprintRepo, gmkProvider, uow, recorder).WithReader(bioReader)
+	// ── Biometric + Checkins (Sesión 5 / paso 3 tinta-bio) ────────────────
+	// El hub es la máquina de estados biométrica: recibe los dedazos del
+	// helper, identifica contra la galería (que él mismo descifra con la GMK
+	// y le cachea al helper con epoch), corre UC-029 y empuja eventos SSE.
+	// En modo enroll acumula 3 samples y persiste vía RegisterFingerprint,
+	// cuyo collision check apunta de vuelta al hub (WithMatcher).
+	registerFingerprint := memApp.NewRegisterFingerprint(memberRepo, fingerprintRepo, gmkProvider, uow, recorder)
 	deleteFingerprint := memApp.NewDeleteFingerprint(memberRepo, fingerprintRepo, uow, recorder)
 	checkinManual := chkApp.NewCheckinManual(memberSvc, checkinRepo, uow, recorder).WithGyms(gymRepo)
 	checkinNumber := chkApp.NewCheckinByNumber(memberSvc, memberRepo, checkinRepo, uow, recorder, nil).WithGyms(gymRepo)
 	checkinOverride := chkApp.NewOverrideCheckin(memberSvc, checkinRepo, uow, recorder).WithGyms(gymRepo)
-	checkinFingerprint := chkApp.NewCheckinByFingerprint(memberSvc, checkinRepo, bioReader, uow, recorder).WithGyms(gymRepo)
-	kioskEvents := chkApp.NewKioskBroadcaster()
-	// kioskGymID is left zero until the operator logs in — the kiosko start
-	// endpoint sets it from the auth context. For now we wire a placeholder
-	// loop with uuid.Nil; Start() will be called by the controller with the
-	// real gym ID. (TODO Sesión 6: bind GymID at Start time.)
-	kioskLoop := chkApp.NewKioskLoop(uuid.Nil, bioReader, checkinFingerprint, kioskEvents)
+	checkinFingerprint := chkApp.NewCheckinByFingerprint(memberSvc, checkinRepo, uow, recorder).WithGyms(gymRepo)
+	bioEvents := chkApp.NewBioBroadcaster()
+	// Outbound access-granted webhook (Fase 1 differentiator: lets the gym
+	// drive any turnstile / cerradura over HTTP). URL + HMAC secret live in
+	// gyms.kiosk_settings; dispatcher reads them per-call. Lo comparten el
+	// hub (checkin por dedazo) y los endpoints manual/número.
+	accessWebhook := accesswebhook.NewHTTPDispatcher(uow, gymRepo)
+	bioHub := chkApp.NewBiometricHub(bioEngine, checkinFingerprint, registerFingerprint,
+		memberRepo, fingerprintRepo, gmkProvider, uow, bioEvents).
+		WithWebhook(accessWebhook)
+	registerFingerprint.WithMatcher(bioHub)
+	bioEngine.SetHandler(bioHub)
 
 	// ── Notifications (Sesión 7) — sidecar enqueues only; cloud worker
 	// drains the synced rows. The mock WhatsApp provider keeps connect
@@ -473,27 +482,22 @@ func main() {
 	// SyncTrigger se setea más abajo cuando el agente está construido
 	// (orden temporal: el agente necesita el cloudURL y la config, que
 	// llegan después de los controllers).
-	fingerprintCtrl := memCtrl.NewFingerprintController(registerFingerprint, deleteFingerprint, tokens)
+	// WithOnChange: cualquier alta/baja de huella por HTTP re-manda la
+	// galería al helper (que la cachea completa para el 1:N).
+	fingerprintCtrl := memCtrl.NewFingerprintController(registerFingerprint, deleteFingerprint, tokens).
+		WithOnChange(bioHub.NotifyFingerprintsChanged)
 	paymentCtrl := billingCtrl.NewPaymentController(registerPayment, settlePayment, receiptPayment, sendReceipt, listMemberPayments, listGymPayments, refundPayment, registerSale, refundSale, cashClose, tokens)
 	paymentCtrl.PlanGate = plusGate
 	productCtrl := prodCtrl.NewProductController(createProduct, updateProduct, deactivateProduct, reactivateProduct, listProducts, adjustStock, tokens)
 	expenseController := expCtrl.NewExpenseController(createExpense, updateExpense, deleteExpense, listExpenses, tokens)
 	expenseController.PlanGate = plusGate
-	fingerprintAvailable := func() bool { return bioReader.Available(context.Background()) }
-	// Outbound access-granted webhook (Fase 1 differentiator: lets the gym
-	// drive any turnstile / cerradura over HTTP). URL + HMAC secret live in
-	// gyms.kiosk_settings; dispatcher reads them per-call.
-	accessWebhook := accesswebhook.NewHTTPDispatcher(uow, gymRepo)
+	fingerprintAvailable := bioHub.Available
 	checkinCtrl := chkCtrl.NewCheckinController(checkinManual, checkinNumber, checkinOverride, checkinRepo, uow, fingerprintAvailable, tokens).
 		WithWebhook(accessWebhook)
-	kioskCtrl := chkCtrl.NewKioskController(checkinFingerprint, kioskLoop, bioReader, tokens).
-		WithSibling(checkinCtrl)
-	// New PNG-in HTTP surface per ADR-004-bis: the Tauri frontend captures
-	// via the DigitalPersona JS SDK and POSTs the raw image; the sidecar
-	// runs ExtractTemplate + the use case here. The base64-in routes on
-	// fingerprintCtrl + kioskCtrl stay for kiosk-loop and test callers.
-	biometricCtrl := chkCtrl.NewBiometricController(bioReader, registerFingerprint, checkinFingerprint, tokens).
-		WithSibling(checkinCtrl)
+	// Superficie biométrica nueva (paso 3 tinta-bio): SSE de eventos +
+	// sesión de enroll + status. Los endpoints multipart de imagen y el
+	// loop de captura del kiosko murieron — la captura vive en el helper.
+	biometricCtrl := chkCtrl.NewBiometricController(bioHub, tokens)
 	// Connect/Disconnect nil → el controller compartido NO registra las
 	// rutas del ceremony; las cubre el WhatsAppSidecarProxy (proxy al cloud).
 	notificationsCtrl := notiCtrl.NewController(nil, nil, whatsappStatus, listTemplates, updateTemplate, broadcast, listNotifications, retryNotification, listOwnerAlerts, updateOwnerAlert, whatsappMock, tokens)
@@ -591,15 +595,16 @@ func main() {
 			return loginGymIDFromCache(uow)
 		},
 	})
-	// Bind the biometric matcher's active gym to the auth flow so Identify
-	// can fetch the right GMK without each request having to pass it in.
-	// Logout passes uuid.Nil and the matcher refuses to decrypt.
-	authProxy.OnActiveGymChanged = bioReader.SetActiveGym
-	// Seed the matcher with whatever gym this sidecar is currently paired
-	// to (cached_login row) so the kiosk loop works right after sidecar
-	// restart, before any operator re-logs in.
+	// Bind the biometric hub's active gym to the auth flow so the gallery
+	// (descifrada con la GMK del gym) siga la sesión del operador. Logout
+	// passes uuid.Nil and the hub clears the helper's gallery.
+	authProxy.OnActiveGymChanged = bioHub.SetActiveGym
+	// Seed the hub with whatever gym this sidecar is currently paired to
+	// (cached_login row) so el check-in por dedazo funciona right after
+	// sidecar restart, before any operator re-logs in. El helper aún no
+	// está arriba aquí — HandleHelperUp re-manda la galería al arrancar.
 	if gymID := loginGymIDFromCache(uow); gymID != uuid.Nil {
-		bioReader.SetActiveGym(gymID)
+		bioHub.SetActiveGym(gymID)
 	}
 	authProxy.RegisterRoutes(r)
 	authCtrl.RegisterMeRoute(r)
@@ -615,7 +620,6 @@ func main() {
 	productCtrl.RegisterRoutes(r)
 	expenseController.RegisterRoutes(r)
 	checkinCtrl.RegisterRoutes(r)
-	kioskCtrl.RegisterRoutes(r)
 	biometricCtrl.RegisterRoutes(r)
 	notificationsCtrl.RegisterRoutes(r)
 	// Ceremony de WhatsApp (UC-037) → proxy al cloud con el sk_live_* del
@@ -662,6 +666,13 @@ func main() {
 	syncCtx, cancelSync := context.WithCancel(context.Background())
 	defer cancelSync()
 	go agent.Run(syncCtx)
+
+	// Arrancar el motor biométrico: spawn/supervisión de tinta-bio.exe con
+	// restart+backoff, y el refresh periódico de galería del hub (red de
+	// seguridad para cambios que llegan por sync pull, sin hook local).
+	bioEngine.Start(syncCtx)
+	defer bioEngine.Stop()
+	go bioHub.Run(syncCtx)
 
 	port := envOrDefault("SIDECAR_PORT", "9090")
 	// Bindear ANTES de anunciar. Imprimir LISTENING_ON con el puerto aún

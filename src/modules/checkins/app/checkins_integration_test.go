@@ -30,8 +30,9 @@ import (
 )
 
 // fixture wires a fresh SQLite DB with schema applied + an owner+gym signed
-// up + one membership type + one member with an active membership. Returns
-// everything the checkins use cases need.
+// up + one membership type + one member with an active membership, plus the
+// tinta-bio stack in mock form: MockEngine + BiometricHub + use cases. En
+// mock-land un dedo ES su string de FMD (ver biometric.MockEngine).
 type checkinsFixture struct {
 	t        *testing.T
 	uow      sharedDomain.UnitOfWork
@@ -41,12 +42,18 @@ type checkinsFixture struct {
 	memberID uuid.UUID
 
 	memberRepo      *memRepoLite.MemberSQLiteRepository
+	membershipRepo  *memRepoLite.MembershipSQLiteRepository
+	mtID            uuid.UUID
 	fingerprintRepo *memRepoLite.FingerprintSQLiteRepository
 	checkinRepo     *chkRepoLite.CheckinSQLiteRepository
 	memberSvc       *memApp.MemberService
 
 	gmkProvider *bcrypto.InMemoryGMKProvider
-	reader      *biometric.MockReader
+	engine      *biometric.MockEngine
+	events      *chkApp.BioBroadcaster
+	hub         *chkApp.BiometricHub
+	registerFP  *memApp.RegisterFingerprint
+	checkinFP   *chkApp.CheckinByFingerprint
 }
 
 func setupCheckinsFixture(t *testing.T) *checkinsFixture {
@@ -122,160 +129,483 @@ func setupCheckinsFixture(t *testing.T) *checkinsFixture {
 		t.Fatalf("createMT: %v", err)
 	}
 
-	createMember := memApp.NewCreateMember(memberRepo, membershipRepo, mtRepo, uow, recorder)
-	mOut, err := createMember.Execute(context.Background(), memApp.CreateMemberInput{
-		GymID: out.GymID, ActorUserID: out.UserID,
-		FullName: "Juan Pérez", Phone: "5551234567",
-		MembershipTypeID: mtOut.ID, StartDate: time.Now().UTC(),
-	})
-	if err != nil {
-		t.Fatalf("createMember: %v", err)
-	}
-	// El socio nace en pending_payment (sin ChargeFirstPayment). Para
-	// estos tests necesitamos la membresía activa — la activamos vía
-	// el seam de members.RenewMembershipForPayment, que detecta el
-	// estado pending y llama Membership.Activate() en lugar de renovar.
-	if err := uow.Command(context.Background(), func(tx sharedDomain.Transaction) error {
-		_, err := memberSvc.RenewMembershipForPayment(context.Background(), tx, memApp.RenewMembershipForPaymentInput{
-			MemberID: mOut.MemberID, MembershipTypeID: mtOut.ID, PaymentDate: time.Now().UTC(),
-		}, time.Now().UTC())
-		return err
-	}); err != nil {
-		t.Fatalf("activate membership: %v", err)
-	}
-
 	gmkProvider := bcrypto.NewInMemoryGMKProvider()
 	gmkProvider.SetDeterministic(out.GymID, "test-gmk-seed")
 
-	reader := biometric.NewMockReader()
-	reader.GMK = gmkProvider
-	reader.GymID = out.GymID
+	engine := biometric.NewMockEngine()
+	events := chkApp.NewBioBroadcaster()
+	registerFP := memApp.NewRegisterFingerprint(memberRepo, fpRepo, gmkProvider, uow, recorder)
+	checkinFP := chkApp.NewCheckinByFingerprint(memberSvc, checkinRepo, uow, recorder)
+	hub := chkApp.NewBiometricHub(engine, checkinFP, registerFP, memberRepo, fpRepo, gmkProvider, uow, events)
+	registerFP.WithMatcher(hub)
 
-	return &checkinsFixture{
+	f := &checkinsFixture{
 		t:               t,
 		uow:             uow,
 		recorder:        recorder,
 		gymID:           out.GymID,
 		ownerID:         out.UserID,
-		memberID:        mOut.MemberID,
 		memberRepo:      memberRepo,
+		membershipRepo:  membershipRepo,
+		mtID:            mtOut.ID,
 		fingerprintRepo: fpRepo,
 		checkinRepo:     checkinRepo,
 		memberSvc:       memberSvc,
 		gmkProvider:     gmkProvider,
-		reader:          reader,
+		engine:          engine,
+		events:          events,
+		hub:             hub,
+		registerFP:      registerFP,
+		checkinFP:       checkinFP,
+	}
+	f.memberID = f.addActiveMember("Juan Pérez", "5551234567")
+
+	// El hub sigue la sesión del operador: gym activo → galería al helper
+	// (vacía todavía — nadie enrolado).
+	hub.SetActiveGym(out.GymID)
+	return f
+}
+
+// addActiveMember creates a member and activates their membership (el alta
+// nace pending_payment; lo activamos vía el seam RenewMembershipForPayment).
+func (f *checkinsFixture) addActiveMember(name, phone string) uuid.UUID {
+	f.t.Helper()
+	createMember := memApp.NewCreateMember(f.memberRepo, f.membershipRepo,
+		memRepoLite.NewMembershipTypeSQLiteRepository(), f.uow, f.recorder)
+	mOut, err := createMember.Execute(context.Background(), memApp.CreateMemberInput{
+		GymID: f.gymID, ActorUserID: f.ownerID,
+		FullName: name, Phone: phone,
+		MembershipTypeID: f.mtID, StartDate: time.Now().UTC(),
+	})
+	if err != nil {
+		f.t.Fatalf("createMember %s: %v", name, err)
+	}
+	if err := f.uow.Command(context.Background(), func(tx sharedDomain.Transaction) error {
+		_, err := f.memberSvc.RenewMembershipForPayment(context.Background(), tx, memApp.RenewMembershipForPaymentInput{
+			MemberID: mOut.MemberID, MembershipTypeID: f.mtID, PaymentDate: time.Now().UTC(),
+		}, time.Now().UTC())
+		return err
+	}); err != nil {
+		f.t.Fatalf("activate membership %s: %v", name, err)
+	}
+	return mOut.MemberID
+}
+
+// enrollViaSession walks the full session flow for a member: start → N
+// dedazos → enroll_completed. Returns the completed event.
+func (f *checkinsFixture) enrollViaSession(memberID uuid.UUID, fmd string) chkApp.BioEvent {
+	f.t.Helper()
+	sub, cancel := f.events.Subscribe()
+	defer cancel()
+
+	if _, err := f.hub.StartEnroll(context.Background(), chkApp.StartEnrollInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: memberID, ConsentAccepted: true,
+	}); err != nil {
+		f.t.Fatalf("StartEnroll: %v", err)
+	}
+	for i := 0; i < f.hub.RequiredSamples; i++ {
+		f.hub.HandleSample(fmd, "DP_QUALITY_GOOD")
+	}
+	evt, ok := waitForEvent(sub, chkApp.BioEnrollCompleted, time.Second)
+	if !ok {
+		f.t.Fatalf("enroll_completed no llegó")
+	}
+	return evt
+}
+
+// waitForEvent drains sub until it sees `want` or the timeout fires.
+func waitForEvent(sub <-chan chkApp.BioEvent, want chkApp.BioEventType, timeout time.Duration) (chkApp.BioEvent, bool) {
+	deadline := time.After(timeout)
+	for {
+		select {
+		case evt := <-sub:
+			if evt.Type == want {
+				return evt, true
+			}
+		case <-deadline:
+			return chkApp.BioEvent{}, false
+		}
 	}
 }
 
-// TestUC028AndUC029_FingerprintEnrollmentAndCheckin walks the full flow:
-// register a fingerprint (UC-028), then check in via the mock reader (UC-029).
-// Verifies that the matched checkin row has the expected method, result, and
-// no operator (auto checkin).
-func TestUC028AndUC029_FingerprintEnrollmentAndCheckin(t *testing.T) {
+// ───────────────────────── enroll + checkin (UC-028 / UC-029) ─────────────────
+
+// TestUC028AndUC029_EnrollSessionAndCheckin walks the inverted flow end to
+// end: sesión de enroll (3 dedazos → FMD de enrollment → cifrado + guardado
+// + galería nueva) y luego un dedazo del mismo dedo → identify → checkin.
+func TestUC028AndUC029_EnrollSessionAndCheckin(t *testing.T) {
 	f := setupCheckinsFixture(t)
 	ctx := context.Background()
+	fingerJuan := "fmd-opaco-juan-0001"
 
-	// UC-028: register a fingerprint with a deterministic plaintext template.
-	templatePlain := []byte("template-bytes-juan-perez-0001")
-	registerFP := memApp.NewRegisterFingerprint(f.memberRepo, f.fingerprintRepo, f.gmkProvider, f.uow, f.recorder)
-	regOut, err := registerFP.Execute(ctx, memApp.RegisterFingerprintInput{
-		GymID:           f.gymID,
-		ActorUserID:     f.ownerID,
-		MemberID:        f.memberID,
-		ConsentAccepted: true,
-		Captures: []*biometric.CaptureResult{{
-			Bytes:        append([]byte{}, templatePlain...), // copy — register zeroes the input
-			Format:       biometric.CaptureResult{}.Format,
-			QualityScore: 92,
-		}},
-	})
-	if err != nil {
-		t.Fatalf("RegisterFingerprint: %v", err)
+	sub, cancelSub := f.events.Subscribe()
+	defer cancelSub()
+
+	completed := f.enrollViaSession(f.memberID, fingerJuan)
+	if completed.Enroll == nil || completed.Enroll.MemberID != f.memberID {
+		t.Fatalf("enroll_completed payload raro: %+v", completed.Enroll)
 	}
-	if regOut.MemberID != f.memberID {
-		t.Errorf("RegisterFingerprint memberID mismatch")
+	if len(completed.Enroll.FingerprintIDs) != 1 {
+		t.Errorf("esperaba 1 fingerprint id, got %d", len(completed.Enroll.FingerprintIDs))
 	}
 
-	// Re-registering should be rejected (DA-28.2 — 1 huella por socio en MVP).
-	_, err = registerFP.Execute(ctx, memApp.RegisterFingerprintInput{
-		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: f.memberID,
-		ConsentAccepted: true,
-		Captures: []*biometric.CaptureResult{{
-			Bytes: append([]byte{}, templatePlain...), QualityScore: 92,
-		}},
-	})
-	if err == nil {
-		t.Errorf("expected error on second enrollment")
+	// El template quedó cifrado con la GMK y el contenido es el FMD opaco.
+	tx, _ := f.uow.Query(ctx)
+	rows, err := f.fingerprintRepo.ListByMember(tx, f.memberID)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("fingerprints persistidas: %d err=%v", len(rows), err)
+	}
+	if rows[0].TemplateFormat != biometric.FormatFMD {
+		t.Errorf("template_format = %q, want %q", rows[0].TemplateFormat, biometric.FormatFMD)
+	}
+	gmk, _ := f.gmkProvider.GetGMK(ctx, f.gymID)
+	plain, err := bcrypto.DecryptTemplate(gmk, rows[0].TemplateEncrypted)
+	if err != nil || string(plain) != fingerJuan {
+		t.Errorf("template descifrado = %q err=%v, want %q", plain, err, fingerJuan)
 	}
 
-	// UC-029: stage the same plaintext as the next capture, then run the
-	// fingerprint use case. Mock matches by exact plaintext equality.
-	checkin := chkApp.NewCheckinByFingerprint(f.memberSvc, f.checkinRepo, f.reader, f.uow, f.recorder)
-	f.reader.QueueCapture(&biometric.CaptureResult{
-		Bytes:        append([]byte{}, templatePlain...),
-		QualityScore: 88,
-	})
-	view, err := checkin.Execute(ctx, chkApp.CheckinByFingerprintInput{
-		GymID:   f.gymID,
-		Capture: &biometric.CaptureResult{Bytes: append([]byte{}, templatePlain...), QualityScore: 90},
-	})
-	if err != nil {
-		t.Fatalf("CheckinByFingerprint: %v", err)
+	// La galería del helper ya trae al socio (ref = fingerprint id).
+	if len(f.engine.Gallery) != 1 || f.engine.Gallery[0].FMD != fingerJuan {
+		t.Fatalf("galería del mock no refrescada: %+v", f.engine.Gallery)
 	}
-	if view.MemberID != f.memberID {
-		t.Errorf("checkin matched wrong member: %v vs %v", view.MemberID, f.memberID)
+
+	// UC-029: dedazo del mismo dedo → identify → checkin registrado.
+	f.hub.HandleSample(fingerJuan, "DP_QUALITY_GOOD")
+	evt, ok := waitForEvent(sub, chkApp.BioCheckinResult, time.Second)
+	if !ok {
+		t.Fatalf("checkin_result no llegó")
+	}
+	view := evt.Checkin
+	if view == nil || view.MemberID != f.memberID {
+		t.Fatalf("checkin de socio equivocado: %+v", view)
 	}
 	if view.Method != "fingerprint" {
-		t.Errorf("expected method=fingerprint, got %s", view.Method)
+		t.Errorf("method = %s, want fingerprint", view.Method)
 	}
-	// New member with fresh 30-day membership → AllowedActive (>7 days).
-	if view.AccessStatus != access.AllowedActive {
-		t.Errorf("expected AllowedActive, got %s", view.AccessStatus)
-	}
-	if view.Result != "allowed_active" {
-		t.Errorf("expected result allowed_active, got %s", view.Result)
+	if view.AccessStatus != access.AllowedActive || view.Result != "allowed_active" {
+		t.Errorf("acceso = %s/%s, want allowed_active", view.AccessStatus, view.Result)
 	}
 
-	// Checkin should be persisted.
-	tx, err := f.uow.Query(ctx)
-	if err != nil {
-		t.Fatalf("query tx: %v", err)
-	}
-	got, err := f.checkinRepo.GetByID(tx, view.CheckinID)
-	if err != nil {
-		t.Fatalf("get checkin: %v", err)
-	}
-	if got.MemberID != f.memberID || got.Method != "fingerprint" {
-		t.Errorf("persisted checkin mismatch: %+v", got)
+	// Persistido de verdad.
+	tx2, _ := f.uow.Query(ctx)
+	got, err := f.checkinRepo.GetByID(tx2, view.CheckinID)
+	if err != nil || got.MemberID != f.memberID || got.Method != "fingerprint" {
+		t.Errorf("checkin persistido mal: %+v err=%v", got, err)
 	}
 }
 
-// TestUC029_NoMatch_ReturnsBusinessError verifies that a capture that doesn't
-// match any enrolled template fails cleanly.
-func TestUC029_NoMatch_ReturnsBusinessError(t *testing.T) {
+// TestUC029_NoMatch_PublishesEventWithoutRow: dedo desconocido → evento
+// checkin_no_match y CERO filas (UC-029 sin coincidencia no registra).
+func TestUC029_NoMatch_PublishesEventWithoutRow(t *testing.T) {
 	f := setupCheckinsFixture(t)
-	ctx := context.Background()
+	f.enrollViaSession(f.memberID, "fmd-juan")
 
-	// Enroll a fingerprint.
-	registerFP := memApp.NewRegisterFingerprint(f.memberRepo, f.fingerprintRepo, f.gmkProvider, f.uow, f.recorder)
-	if _, err := registerFP.Execute(ctx, memApp.RegisterFingerprintInput{
-		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: f.memberID,
-		ConsentAccepted: true,
-		Captures:        []*biometric.CaptureResult{{Bytes: []byte("template-A"), QualityScore: 85}},
-	}); err != nil {
-		t.Fatalf("enroll: %v", err)
+	sub, cancel := f.events.Subscribe()
+	defer cancel()
+	f.hub.HandleSample("fmd-de-un-desconocido", "DP_QUALITY_GOOD")
+	if _, ok := waitForEvent(sub, chkApp.BioCheckinNoMatch, time.Second); !ok {
+		t.Fatalf("checkin_no_match no llegó")
 	}
 
-	// Try a different plaintext.
-	checkin := chkApp.NewCheckinByFingerprint(f.memberSvc, f.checkinRepo, f.reader, f.uow, f.recorder)
-	_, err := checkin.Execute(ctx, chkApp.CheckinByFingerprintInput{
-		GymID:   f.gymID,
-		Capture: &biometric.CaptureResult{Bytes: []byte("template-DIFFERENT"), QualityScore: 90},
-	})
-	if err == nil {
-		t.Fatalf("expected ErrNoFingerprintMatch (wrapped)")
+	tx, _ := f.uow.Query(context.Background())
+	n, err := f.checkinRepo.CountTodayByGym(tx, f.gymID, time.Now().UTC())
+	if err != nil || n != 0 {
+		t.Errorf("no-match no debe registrar checkin, count=%d err=%v", n, err)
 	}
 }
+
+// TestHub_SamplesDuringEnrollDoNotIdentify: con sesión abierta, un dedazo de
+// un socio YA enrolado se acumula para el enroll en lugar de hacer checkin.
+func TestHub_SamplesDuringEnrollDoNotIdentify(t *testing.T) {
+	f := setupCheckinsFixture(t)
+	f.enrollViaSession(f.memberID, "fmd-juan")
+	otherID := f.addActiveMember("Pedro Soto", "5559998888")
+
+	sub, cancel := f.events.Subscribe()
+	defer cancel()
+	if _, err := f.hub.StartEnroll(context.Background(), chkApp.StartEnrollInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: otherID, ConsentAccepted: true,
+	}); err != nil {
+		t.Fatalf("StartEnroll: %v", err)
+	}
+	// Dedazo del dedo de Juan (enrolado) — debe ir a la sesión de Pedro, no
+	// al kiosko. (Al final colisionará, pero eso es exactamente el punto.)
+	f.hub.HandleSample("fmd-juan", "DP_QUALITY_GOOD")
+	if evt, ok := waitForEvent(sub, chkApp.BioEnrollProgress, time.Second); !ok || evt.Enroll.Captured != 1 {
+		t.Fatalf("el sample no se acumuló en la sesión: %+v", evt)
+	}
+
+	tx, _ := f.uow.Query(context.Background())
+	n, _ := f.checkinRepo.CountTodayByGym(tx, f.gymID, time.Now().UTC())
+	if n != 0 {
+		t.Errorf("un sample durante enroll jamás debe registrar checkin, count=%d", n)
+	}
+}
+
+// TestHub_EnrollCollision: el FMD de enrollment matchea a OTRO socio → evento
+// enroll_failed con el contrato fingerprint_collision (id + nombre) y nada
+// persistido para el segundo socio.
+func TestHub_EnrollCollision(t *testing.T) {
+	f := setupCheckinsFixture(t)
+	f.enrollViaSession(f.memberID, "fmd-juan")
+	otherID := f.addActiveMember("Pedro Soto", "5559998888")
+
+	sub, cancel := f.events.Subscribe()
+	defer cancel()
+	if _, err := f.hub.StartEnroll(context.Background(), chkApp.StartEnrollInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: otherID, ConsentAccepted: true,
+	}); err != nil {
+		t.Fatalf("StartEnroll: %v", err)
+	}
+	for i := 0; i < f.hub.RequiredSamples; i++ {
+		f.hub.HandleSample("fmd-juan", "DP_QUALITY_GOOD")
+	}
+	evt, ok := waitForEvent(sub, chkApp.BioEnrollFailed, time.Second)
+	if !ok {
+		t.Fatalf("enroll_failed no llegó")
+	}
+	if evt.Code != chkApp.EnrollFailCollision {
+		t.Fatalf("code = %q, want fingerprint_collision", evt.Code)
+	}
+	if evt.Enroll == nil || evt.Enroll.Data["existing_member_id"] != f.memberID.String() {
+		t.Errorf("payload de colisión sin existing_member_id: %+v", evt.Enroll)
+	}
+	if evt.Enroll.Data["existing_member_name"] != "Juan Pérez" {
+		t.Errorf("payload de colisión sin existing_member_name: %+v", evt.Enroll.Data)
+	}
+
+	tx, _ := f.uow.Query(context.Background())
+	rows, _ := f.fingerprintRepo.ListByMember(tx, otherID)
+	if len(rows) != 0 {
+		t.Errorf("la colisión no debe persistir huella, got %d", len(rows))
+	}
+	if f.hub.Enrolling() {
+		t.Errorf("la sesión debe cerrarse tras la colisión")
+	}
+}
+
+// TestHub_EnrollTimeout: sesión sin dedazos suficientes expira sola y el
+// siguiente sample vuelve al modo check-in.
+func TestHub_EnrollTimeout(t *testing.T) {
+	f := setupCheckinsFixture(t)
+	f.enrollViaSession(f.memberID, "fmd-juan")
+	otherID := f.addActiveMember("Pedro Soto", "5559998888")
+
+	f.hub.EnrollTTL = 50 * time.Millisecond
+	sub, cancel := f.events.Subscribe()
+	defer cancel()
+	if _, err := f.hub.StartEnroll(context.Background(), chkApp.StartEnrollInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: otherID, ConsentAccepted: true,
+	}); err != nil {
+		t.Fatalf("StartEnroll: %v", err)
+	}
+	evt, ok := waitForEvent(sub, chkApp.BioEnrollFailed, time.Second)
+	if !ok || evt.Code != chkApp.EnrollFailTimeout {
+		t.Fatalf("esperaba enroll_failed timeout, got %+v ok=%v", evt, ok)
+	}
+
+	// De vuelta en modo check-in: el dedo de Juan identifica normal.
+	f.hub.HandleSample("fmd-juan", "DP_QUALITY_GOOD")
+	if _, ok := waitForEvent(sub, chkApp.BioCheckinResult, time.Second); !ok {
+		t.Fatalf("tras timeout el kiosko debe volver a identificar")
+	}
+}
+
+// TestHub_EnrollCancel: cancelación explícita cierra la sesión y publica el
+// evento; cancelar sin sesión regresa error de negocio.
+func TestHub_EnrollCancel(t *testing.T) {
+	f := setupCheckinsFixture(t)
+	sub, cancel := f.events.Subscribe()
+	defer cancel()
+
+	if _, err := f.hub.StartEnroll(context.Background(), chkApp.StartEnrollInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: f.memberID, ConsentAccepted: true,
+	}); err != nil {
+		t.Fatalf("StartEnroll: %v", err)
+	}
+	if err := f.hub.CancelEnroll(context.Background()); err != nil {
+		t.Fatalf("CancelEnroll: %v", err)
+	}
+	evt, ok := waitForEvent(sub, chkApp.BioEnrollFailed, time.Second)
+	if !ok || evt.Code != chkApp.EnrollFailCancelled {
+		t.Fatalf("esperaba enroll_failed cancelled, got %+v", evt)
+	}
+	if err := f.hub.CancelEnroll(context.Background()); err == nil {
+		t.Errorf("cancelar sin sesión debe fallar")
+	}
+}
+
+// TestHub_EnrollRequiresConsentAndSingleSession: validaciones fail-fast del
+// start (consentimiento, sesión duplicada, huella previa).
+func TestHub_EnrollStartValidations(t *testing.T) {
+	f := setupCheckinsFixture(t)
+
+	// Sin consentimiento.
+	if _, err := f.hub.StartEnroll(context.Background(), chkApp.StartEnrollInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: f.memberID,
+	}); err == nil {
+		t.Errorf("start sin consentimiento debe fallar")
+	}
+
+	// Sesión duplicada.
+	if _, err := f.hub.StartEnroll(context.Background(), chkApp.StartEnrollInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: f.memberID, ConsentAccepted: true,
+	}); err != nil {
+		t.Fatalf("primer start: %v", err)
+	}
+	if _, err := f.hub.StartEnroll(context.Background(), chkApp.StartEnrollInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: f.memberID, ConsentAccepted: true,
+	}); err == nil {
+		t.Errorf("segunda sesión simultánea debe fallar")
+	}
+	_ = f.hub.CancelEnroll(context.Background())
+
+	// Huella previa → delete-first (mismo contrato que RegisterFingerprint).
+	f.enrollViaSession(f.memberID, "fmd-juan")
+	if _, err := f.hub.StartEnroll(context.Background(), chkApp.StartEnrollInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: f.memberID, ConsentAccepted: true,
+	}); err == nil {
+		t.Errorf("start con huella existente debe fallar (delete-first)")
+	}
+}
+
+// TestHub_GalleryEpochRace: el helper contesta identify con un epoch viejo
+// (carrera enroll-vs-identify / helper recién reiniciado) → el hub re-manda
+// la galería y reintenta — el checkin sale bien en el segundo intento.
+func TestHub_GalleryEpochRace(t *testing.T) {
+	f := setupCheckinsFixture(t)
+	f.enrollViaSession(f.memberID, "fmd-juan")
+
+	// Desincronizar: el mock reporta OTRA galería (epoch distinto y vacía),
+	// como un helper que se reinició con cache viejo.
+	f.engine.GalleryEpoch = "epoch-viejo"
+	saved := f.engine.Gallery
+	f.engine.Gallery = nil
+	callsBefore := f.engine.SetGalleryCalls
+	_ = saved
+
+	sub, cancel := f.events.Subscribe()
+	defer cancel()
+	f.hub.HandleSample("fmd-juan", "DP_QUALITY_GOOD")
+	evt, ok := waitForEvent(sub, chkApp.BioCheckinResult, time.Second)
+	if !ok {
+		t.Fatalf("checkin_result no llegó tras la carrera de epoch")
+	}
+	if evt.Checkin.MemberID != f.memberID {
+		t.Errorf("socio equivocado tras retry: %+v", evt.Checkin)
+	}
+	if f.engine.SetGalleryCalls <= callsBefore {
+		t.Errorf("el hub debió re-mandar la galería (calls %d → %d)", callsBefore, f.engine.SetGalleryCalls)
+	}
+}
+
+// TestHub_HelperRestartMidEnroll: el helper muere y revive a media sesión —
+// la galería se re-manda al volver y los FMDs ya acumulados siguen valiendo.
+func TestHub_HelperRestartMidEnroll(t *testing.T) {
+	f := setupCheckinsFixture(t)
+	otherFinger := "fmd-pedro"
+	otherID := f.addActiveMember("Pedro Soto", "5559998888")
+
+	sub, cancel := f.events.Subscribe()
+	defer cancel()
+	if _, err := f.hub.StartEnroll(context.Background(), chkApp.StartEnrollInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: otherID, ConsentAccepted: true,
+	}); err != nil {
+		t.Fatalf("StartEnroll: %v", err)
+	}
+	f.hub.HandleSample(otherFinger, "DP_QUALITY_GOOD")
+
+	// Crash + respawn del helper (los eventos llegan serializados del engine).
+	callsBefore := f.engine.SetGalleryCalls
+	f.hub.HandleHelperDown("proceso murió")
+	f.hub.HandleHelperUp()
+	if f.engine.SetGalleryCalls <= callsBefore {
+		t.Errorf("HandleHelperUp debe re-mandar la galería")
+	}
+
+	// La sesión sigue viva: dos dedazos más completan el enroll.
+	f.hub.HandleSample(otherFinger, "DP_QUALITY_GOOD")
+	f.hub.HandleSample(otherFinger, "DP_QUALITY_GOOD")
+	if _, ok := waitForEvent(sub, chkApp.BioEnrollCompleted, time.Second); !ok {
+		t.Fatalf("la sesión debió sobrevivir el restart del helper")
+	}
+}
+
+// TestHub_EnrollInvalidSet: el helper rechaza el set (DP_ENROLLMENT_INVALID_
+// SET) → enroll_failed enrollment_invalid, los samples se descartan y la
+// MISMA sesión acepta otros 3 dedazos.
+func TestHub_EnrollInvalidSet(t *testing.T) {
+	f := setupCheckinsFixture(t)
+
+	sub, cancel := f.events.Subscribe()
+	defer cancel()
+	if _, err := f.hub.StartEnroll(context.Background(), chkApp.StartEnrollInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: f.memberID, ConsentAccepted: true,
+	}); err != nil {
+		t.Fatalf("StartEnroll: %v", err)
+	}
+	f.engine.EnrollErr = &biometric.CommandError{Code: "DP_ENROLLMENT_INVALID_SET"}
+	for i := 0; i < f.hub.RequiredSamples; i++ {
+		f.hub.HandleSample("fmd-borroso", "DP_QUALITY_GOOD")
+	}
+	evt, ok := waitForEvent(sub, chkApp.BioEnrollFailed, time.Second)
+	if !ok || evt.Code != chkApp.EnrollFailInvalidSet {
+		t.Fatalf("esperaba enrollment_invalid, got %+v", evt)
+	}
+	if !f.hub.Enrolling() {
+		t.Fatalf("la sesión debe seguir viva tras set inválido")
+	}
+
+	// Segundo intento con el helper ya cooperando.
+	f.engine.EnrollErr = nil
+	for i := 0; i < f.hub.RequiredSamples; i++ {
+		f.hub.HandleSample("fmd-juan", "DP_QUALITY_GOOD")
+	}
+	if _, ok := waitForEvent(sub, chkApp.BioEnrollCompleted, time.Second); !ok {
+		t.Fatalf("el reintento dentro de la misma sesión debió completar")
+	}
+}
+
+// TestHub_ReaderStateEvents: hot-plug del lector fluye a los subscribers
+// (reemplaza al viejo test del KioskLoop).
+func TestHub_ReaderStateEvents(t *testing.T) {
+	f := setupCheckinsFixture(t)
+	sub, cancel := f.events.Subscribe()
+	defer cancel()
+
+	f.hub.HandleReaderState(false, "", "")
+	if _, ok := waitForEvent(sub, chkApp.BioReaderDisconnected, time.Second); !ok {
+		t.Errorf("reader_disconnected no llegó")
+	}
+	f.hub.HandleReaderState(true, "U.are.U 4500", "S123")
+	evt, ok := waitForEvent(sub, chkApp.BioReaderConnected, time.Second)
+	if !ok || evt.ReaderName != "U.are.U 4500" {
+		t.Errorf("reader_connected sin nombre: %+v", evt)
+	}
+}
+
+// TestHub_LogoutClearsGallery: gym Nil (logout) manda galería vacía y los
+// dedazos dejan de identificar sin tirar errores.
+func TestHub_LogoutClearsGallery(t *testing.T) {
+	f := setupCheckinsFixture(t)
+	f.enrollViaSession(f.memberID, "fmd-juan")
+
+	f.hub.SetActiveGym(uuid.Nil)
+	if len(f.engine.Gallery) != 0 {
+		t.Fatalf("logout debe limpiar la galería del helper, got %d", len(f.engine.Gallery))
+	}
+
+	sub, cancel := f.events.Subscribe()
+	defer cancel()
+	f.hub.HandleSample("fmd-juan", "DP_QUALITY_GOOD")
+	select {
+	case evt := <-sub:
+		t.Errorf("sin gym activo no debe haber eventos de checkin, got %+v", evt)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// ───────────────────────── checkin manual / número / override ─────────────────
 
 // TestUC030_ManualCheckin_Allowed records a manual checkin for a member with
 // an active membership. Verifies the operator is captured.
@@ -406,58 +736,31 @@ func TestDA29_2_OverrideAfterDenied(t *testing.T) {
 	}
 }
 
-// TestKioskLoop_ConnectDisconnectEvents verifies the broadcaster fires the
-// expected events when the mock reader simulates hotplug.
-func TestKioskLoop_BroadcastsHotplugEvents(t *testing.T) {
+// El checkin por huella con socio inactivo sí identifica (la galería filtra
+// por status, pero puede estar desactualizada) — la decisión de acceso al
+// momento del checkin es la autoridad y devuelve denied.
+func TestHub_StaleGalleryStillDeniesInactiveMember(t *testing.T) {
 	f := setupCheckinsFixture(t)
+	f.enrollViaSession(f.memberID, "fmd-juan")
 
-	checkin := chkApp.NewCheckinByFingerprint(f.memberSvc, f.checkinRepo, f.reader, f.uow, f.recorder)
-	events := chkApp.NewKioskBroadcaster()
-	loop := chkApp.NewKioskLoop(f.gymID, f.reader, checkin, events)
-	loop.CaptureBackoff = 5 * time.Millisecond
+	// Toggle a inactivo SIN refrescar galería (simula la ventana entre el
+	// toggle y el refresh periódico — el mock conserva el candidato).
+	toggleMember := memApp.NewToggleMemberStatus(f.memberRepo, f.uow, f.recorder)
+	if _, err := toggleMember.Execute(context.Background(), memApp.ToggleMemberStatusInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: f.memberID,
+		NewStatus: "inactive", Reason: "baja temporal",
+	}); err != nil {
+		t.Fatalf("toggle: %v", err)
+	}
 
-	sub, cancel := events.Subscribe()
+	sub, cancel := f.events.Subscribe()
 	defer cancel()
-
-	ctx, ctxCancel := context.WithCancel(context.Background())
-	defer ctxCancel()
-
-	if err := loop.Start(ctx); err != nil {
-		t.Fatalf("start: %v", err)
+	f.hub.HandleSample("fmd-juan", "DP_QUALITY_GOOD")
+	evt, ok := waitForEvent(sub, chkApp.BioCheckinResult, time.Second)
+	if !ok {
+		t.Fatalf("checkin_result no llegó")
 	}
-	defer loop.Stop()
-
-	// Wait for the kiosk_started event.
-	select {
-	case evt := <-sub:
-		if evt.Type != chkApp.EventKioskStarted {
-			t.Errorf("first event should be kiosk_started, got %s", evt.Type)
-		}
-	case <-time.After(time.Second):
-		t.Fatalf("timeout waiting for kiosk_started")
-	}
-
-	// Simulate disconnect — should fan out reader_disconnected.
-	f.reader.SimulateDisconnect()
-	if !waitForEvent(sub, chkApp.EventReaderDisconnected, time.Second) {
-		t.Errorf("reader_disconnected not received")
-	}
-	f.reader.SimulateConnect()
-	if !waitForEvent(sub, chkApp.EventReaderConnected, time.Second) {
-		t.Errorf("reader_connected not received")
-	}
-}
-
-func waitForEvent(sub <-chan chkApp.KioskEvent, want chkApp.KioskEventType, timeout time.Duration) bool {
-	deadline := time.After(timeout)
-	for {
-		select {
-		case evt := <-sub:
-			if evt.Type == want {
-				return true
-			}
-		case <-deadline:
-			return false
-		}
+	if evt.Checkin.Result != "denied_inactive" {
+		t.Errorf("galería vieja no debe regalar acceso: result=%s", evt.Checkin.Result)
 	}
 }

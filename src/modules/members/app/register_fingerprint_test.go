@@ -132,34 +132,21 @@ func (r *fpFakeFpRepo) ListByGym(_ sharedDomain.Transaction, gymID uuid.UUID) ([
 	return r.byGym[gymID], nil
 }
 
-// stubReader is a minimal biometric.Reader for unit tests. It returns a
-// pre-staged result from Identify; everything else is unused.
-type stubReader struct {
-	match *biometric.MatchResult
+// stubMatcher is a minimal app.FingerprintMatcher for unit tests: returns a
+// pre-staged member id (uuid.Nil = no match) or error from IdentifyFMD.
+type stubMatcher struct {
+	match uuid.UUID
 	err   error
 	calls int
 }
 
-func (s *stubReader) Info() biometric.ReaderInfo { return biometric.ReaderInfo{} }
-func (s *stubReader) OnConnect(func())           {}
-func (s *stubReader) OnDisconnect(func())        {}
-func (s *stubReader) Capture(context.Context) (*biometric.CaptureResult, error) {
-	return nil, biometric.ErrNotAvailable
-}
-func (s *stubReader) Enroll(context.Context, int) (*biometric.CaptureResult, error) {
-	return nil, biometric.ErrNotAvailable
-}
-func (s *stubReader) ExtractTemplate(context.Context, []byte) (*biometric.CaptureResult, error) {
-	return nil, biometric.ErrNotAvailable
-}
-func (s *stubReader) Identify(_ context.Context, _ *biometric.CaptureResult, _ []biometric.EncryptedTemplate, _ float64) (*biometric.MatchResult, error) {
+func (s *stubMatcher) IdentifyFMD(_ context.Context, _ string) (uuid.UUID, error) {
 	s.calls++
 	if s.err != nil {
-		return nil, s.err
+		return uuid.Nil, s.err
 	}
 	return s.match, nil
 }
-func (s *stubReader) Available(context.Context) bool { return true }
 
 // ─── helpers ───────────────────────────────────────────────────────────────
 
@@ -167,7 +154,7 @@ type fixture struct {
 	uc        *app.RegisterFingerprint
 	members   *fpFakeMemberRepo
 	fps       *fpFakeFpRepo
-	reader    *stubReader
+	matcher   *stubMatcher
 	gym       uuid.UUID
 	actor     uuid.UUID
 	memberID  uuid.UUID
@@ -175,7 +162,7 @@ type fixture struct {
 	otherName string
 }
 
-func newFixture(t *testing.T, reader biometric.Reader) *fixture {
+func newFixture(t *testing.T, matcher *stubMatcher) *fixture {
 	t.Helper()
 	gymID := uuid.New()
 	actor := uuid.New()
@@ -202,15 +189,11 @@ func newFixture(t *testing.T, reader biometric.Reader) *fixture {
 	gmk.SetDeterministic(gymID, "unit-test-seed")
 
 	uc := app.NewRegisterFingerprint(members, fps, gmk, fpFakeUoW{}, &fpFakeAudit{})
-	var sr *stubReader
-	if r, ok := reader.(*stubReader); ok {
-		sr = r
-	}
-	if reader != nil {
-		uc.WithReader(reader)
+	if matcher != nil {
+		uc.WithMatcher(matcher)
 	}
 	return &fixture{
-		uc: uc, members: members, fps: fps, reader: sr,
+		uc: uc, members: members, fps: fps, matcher: matcher,
 		gym: gymID, actor: actor, memberID: memberID,
 		otherID: otherID, otherName: other.FullName,
 	}
@@ -232,20 +215,13 @@ func validInput(f *fixture, plain []byte) app.RegisterFingerprintInput {
 
 // ─── tests ─────────────────────────────────────────────────────────────────
 
-// Reader returns a match → use case must abort with ErrFingerprintCollision
-// and surface the existing member's id+name in the CustomError data so the
-// controller can build the modal payload.
+// Matcher returns another member → use case must abort with
+// ErrFingerprintCollision and surface the existing member's id+name in the
+// CustomError data so the controller/hub can build the modal payload.
 func TestRegisterFingerprint_Collision_BlocksAndCarriesPayload(t *testing.T) {
-	reader := &stubReader{match: &biometric.MatchResult{Score: 0.95}}
-	f := newFixture(t, reader)
-	// Reader matches the OTHER member.
-	reader.match.MemberID = f.otherID.String()
-	// Seed an enrolled template for the other member so the candidate set
-	// is non-empty (Identify is only invoked when there are candidates).
-	f.fps.byGym[f.gym] = []*fpDomain.MemberFingerprint{
-		{ID: uuid.New(), GymID: f.gym, MemberID: f.otherID,
-			TemplateEncrypted: []byte("juan-template-enc"), TemplateFormat: fpDomain.FormatDP},
-	}
+	f := newFixture(t, &stubMatcher{})
+	// Matcher matches the OTHER member.
+	f.matcher.match = f.otherID
 
 	_, err := f.uc.Execute(context.Background(), validInput(f, []byte("template-pedro-dedo-de-juan")))
 	if err == nil {
@@ -269,17 +245,10 @@ func TestRegisterFingerprint_Collision_BlocksAndCarriesPayload(t *testing.T) {
 	}
 }
 
-// Reader returns ErrNoMatch → use case proceeds normally and persists.
+// Matcher returns no match (uuid.Nil) → use case proceeds normally and
+// persists.
 func TestRegisterFingerprint_NoMatch_PersistsNormally(t *testing.T) {
-	reader := &stubReader{err: biometric.ErrNoMatch}
-	f := newFixture(t, reader)
-	// Pre-seed an "other" template so the candidate set is non-empty (forces
-	// the Reader.Identify call).
-	encrypted := []byte("ciphertext-of-juan")
-	f.fps.byGym[f.gym] = []*fpDomain.MemberFingerprint{
-		{ID: uuid.New(), GymID: f.gym, MemberID: f.otherID,
-			TemplateEncrypted: encrypted, TemplateFormat: fpDomain.FormatDP},
-	}
+	f := newFixture(t, &stubMatcher{})
 
 	out, err := f.uc.Execute(context.Background(), validInput(f, []byte("template-pedro-dedo-propio")))
 	if err != nil {
@@ -288,53 +257,34 @@ func TestRegisterFingerprint_NoMatch_PersistsNormally(t *testing.T) {
 	if out == nil || out.MemberID != f.memberID {
 		t.Errorf("unexpected output: %+v", out)
 	}
-	if reader.calls != 1 {
-		t.Errorf("expected exactly 1 Identify call, got %d", reader.calls)
+	if f.matcher.calls != 1 {
+		t.Errorf("expected exactly 1 IdentifyFMD call, got %d", f.matcher.calls)
 	}
 	if len(f.fps.created) != 1 {
 		t.Errorf("expected fingerprint persisted, got %d rows", len(f.fps.created))
 	}
 }
 
-// Re-enrollment of a member that already has a fingerprint: the candidate
-// set must exclude the target member's row so Identify isn't invoked with a
-// self-match. Today the re-enroll itself is blocked by ErrFingerprintAlreadySet
-// — this test guards the exclusion logic so a future re-enroll flow won't
-// regress into self-collision.
-func TestRegisterFingerprint_Collision_ExcludesSelfFromCandidates(t *testing.T) {
-	reader := &stubReader{err: biometric.ErrNoMatch}
-	f := newFixture(t, reader)
-	// Member's own template lives in the gym set — must be filtered out.
-	f.fps.byGym[f.gym] = []*fpDomain.MemberFingerprint{
-		{ID: uuid.New(), GymID: f.gym, MemberID: f.memberID,
-			TemplateEncrypted: []byte("self-template"), TemplateFormat: fpDomain.FormatDP},
-	}
-	// Self is already enrolled → today this returns ErrFingerprintAlreadySet
-	// AFTER the collision check skipped (empty candidate set means Identify
-	// is never called).
-	f.fps.byMember[f.memberID] = f.fps.byGym[f.gym]
+// A self-match (the matcher resolves the probe to the TARGET member) is not
+// a collision — guards the future re-enroll flow against self-collision now
+// that the helper's gallery can't exclude the target per-call.
+func TestRegisterFingerprint_Collision_SelfMatchIsNotCollision(t *testing.T) {
+	f := newFixture(t, &stubMatcher{})
+	f.matcher.match = f.memberID
 
-	_, err := f.uc.Execute(context.Background(), validInput(f, []byte("template-pedro-mismo")))
-	if err == nil {
-		t.Fatalf("expected ErrFingerprintAlreadySet, got nil")
+	out, err := f.uc.Execute(context.Background(), validInput(f, []byte("template-pedro-mismo")))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
 	}
-	if !errors.Is(err, fpDomain.ErrFingerprintAlreadySet) {
-		t.Fatalf("expected ErrFingerprintAlreadySet, got %v", err)
-	}
-	if reader.calls != 0 {
-		t.Errorf("Reader.Identify must NOT be called when candidate set is empty after self-exclusion, got %d calls", reader.calls)
+	if out == nil || len(f.fps.created) != 1 {
+		t.Errorf("self-match must persist normally, got out=%+v rows=%d", out, len(f.fps.created))
 	}
 }
 
-// Reader nil → use case skips collision check entirely. Validates the cloud
-// build path (no SDK wired, enrollment still functional for dashboard/tests).
-func TestRegisterFingerprint_ReaderNil_SkipsCollisionCheck(t *testing.T) {
-	f := newFixture(t, nil) // no reader
-	// Even with another member's template present, no Identify runs.
-	f.fps.byGym[f.gym] = []*fpDomain.MemberFingerprint{
-		{ID: uuid.New(), GymID: f.gym, MemberID: f.otherID,
-			TemplateEncrypted: []byte("juan-template"), TemplateFormat: fpDomain.FormatDP},
-	}
+// Matcher nil → use case skips collision check entirely. Validates the cloud
+// build path (no engine wired, enrollment still functional for dashboard/tests).
+func TestRegisterFingerprint_MatcherNil_SkipsCollisionCheck(t *testing.T) {
+	f := newFixture(t, nil) // no matcher
 
 	out, err := f.uc.Execute(context.Background(), validInput(f, []byte("template-pedro")))
 	if err != nil {
@@ -345,15 +295,10 @@ func TestRegisterFingerprint_ReaderNil_SkipsCollisionCheck(t *testing.T) {
 	}
 }
 
-// Reader returns ErrNotAvailable (SDK absent at runtime) → check skipped,
-// enrollment proceeds. Same behavior as Reader nil, just at a different layer.
-func TestRegisterFingerprint_ReaderNotAvailable_SkipsCollisionCheck(t *testing.T) {
-	reader := &stubReader{err: biometric.ErrNotAvailable}
-	f := newFixture(t, reader)
-	f.fps.byGym[f.gym] = []*fpDomain.MemberFingerprint{
-		{ID: uuid.New(), GymID: f.gym, MemberID: f.otherID,
-			TemplateEncrypted: []byte("juan-template"), TemplateFormat: fpDomain.FormatDP},
-	}
+// Matcher returns ErrNotAvailable (engine down at runtime) → check skipped,
+// enrollment proceeds. Same behavior as Matcher nil, just at a different layer.
+func TestRegisterFingerprint_MatcherNotAvailable_SkipsCollisionCheck(t *testing.T) {
+	f := newFixture(t, &stubMatcher{err: biometric.ErrNotAvailable})
 
 	out, err := f.uc.Execute(context.Background(), validInput(f, []byte("template-pedro")))
 	if err != nil {
@@ -362,20 +307,21 @@ func TestRegisterFingerprint_ReaderNotAvailable_SkipsCollisionCheck(t *testing.T
 	if out == nil {
 		t.Fatalf("expected output, got nil")
 	}
-	if reader.calls != 1 {
-		t.Errorf("expected 1 Identify call (returning ErrNotAvailable), got %d", reader.calls)
+	if f.matcher.calls != 1 {
+		t.Errorf("expected 1 IdentifyFMD call (returning ErrNotAvailable), got %d", f.matcher.calls)
 	}
 	if len(f.fps.created) != 1 {
-		t.Errorf("expected fingerprint persisted despite reader-unavailable, got %d rows", len(f.fps.created))
+		t.Errorf("expected fingerprint persisted despite engine-unavailable, got %d rows", len(f.fps.created))
 	}
 }
 
 // Enrolling with 3 captures of the same finger persists all 3 as separate
 // templates in one atomic call — the data model behind UC-028 best-of-3
 // matching. Output carries every id and the best quality across captures.
+// (El flujo de sesión tinta-bio manda 1 solo FMD de enrollment, pero el use
+// case sigue aceptando 1..MaxFingerprintsPerMember.)
 func TestRegisterFingerprint_ThreeCaptures_PersistsAll(t *testing.T) {
-	reader := &stubReader{err: biometric.ErrNoMatch}
-	f := newFixture(t, reader)
+	f := newFixture(t, &stubMatcher{})
 
 	in := validInput(f, []byte("template-pedro"))
 	in.Captures = []*biometric.CaptureResult{

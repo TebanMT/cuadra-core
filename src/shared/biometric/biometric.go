@@ -1,120 +1,107 @@
-// Package biometric exposes a thin Reader interface around the matching
-// engine (ADR-004 + ADR-004-bis). The cloud build wires the Mock
-// implementation; the sidecar build wires the NBIS adapter
-// (mindtct + bozorth3 subprocesses, ANSI INCITS 378 templates).
+// Package biometric wraps the tinta-bio helper — the native biometric engine
+// (C#/.NET 8, DigitalPersona SDK + FingerJet) that owns capture, extraction,
+// enrollment and 1:N identification (ADR-004, pivote jul-2026 a Ruta A).
 //
-// Capture (talking to the U.are.U 4500) lives in the Tauri frontend via
-// @digitalpersona/fingerprint per ADR-004-bis §2 — the sidecar receives a
-// raw PNG over HTTP and turns it into a template via ExtractTemplate. The
-// Capture / Enroll methods on Reader remain on the interface for older
-// callers but return ErrCaptureMovedToFrontend on the NBIS implementation.
+// The sidecar spawns tinta-bio.exe as a child process and speaks NDJSON over
+// stdin/stdout (contract: tools/tinta-bio/PROTOCOL.md). Engine in this package
+// is that process manager: spawn + supervise + restart with backoff, command
+// round-trips (ping / gallery / identify / enroll) and spontaneous events
+// (reader hot-plug, samples) fanned out to a Handler.
 //
-// Everything heavier — template encryption, GMK lookup, persistence — lives
-// one layer up so this package can be swapped for any matcher that consumes
-// ANSI 378 templates (ADR-004 §4.3, ADR-004-bis §6).
+// FMDs (FingerJet templates, ANSI 378 inside) are OPAQUE strings — base64 of
+// the SDK's XML serialization. This package never parses them; the layer
+// above encrypts them with the GMK (shared/biometric/crypto), persists them
+// and hands them back verbatim as gallery candidates.
+//
+// Orchestration (gallery ownership, enroll sessions, check-in flow) lives in
+// the checkins application layer (BiometricHub) — this package stays a dumb,
+// swappable pipe to the engine process.
 package biometric
 
-import (
-	"context"
-	"errors"
-)
+import "errors"
 
-// Template is an opaque biometric template (post-extraction, before the
-// gym-master-key encryption layer in ADR-006).
+// Template is an opaque biometric template as stored (pre-GMK-encryption).
+// In the tinta-bio pipeline it is the raw bytes of the FMD string.
 type Template []byte
 
-// CaptureResult is what ExtractTemplate hands back after turning a raw
-// fingerprint image into a feature-extracted template. Bytes are the
-// *plaintext* template — callers MUST encrypt before persisting (see
-// shared/biometric/crypto). QualityScore is the matcher's own 0-100
-// self-assessment based on minutiae count and distribution; UC-028 rejects
-// samples below QualityScoreFloor.
-//
-// In the NBIS pipeline (ADR-004-bis) Bytes is the UTF-8 contents of an .xyt
-// file as produced by `mindtct -m1` — one minutia per line, "x y theta
-// quality", coordinates following ANSI INCITS 378-2004 conventions. Bozorth3
-// reads the same shape with `-m1`, so probe and gallery never need conversion.
+// FormatFMD is the template_format stamped on member_fingerprints rows
+// produced by the tinta-bio helper: base64 of the DigitalPersona SDK's XML
+// FMD serialization (ANSI 378 minutiae inside). Legacy formats (dp_uareu,
+// xyt_m1) never reached production — no migration path is needed.
+const FormatFMD = "fmd_xml_b64"
+
+// DefaultFarDivisor mirrors the helper's default: target FAR = 1/divisor on
+// identify. Same value as the official SDK sample.
+const DefaultFarDivisor = 100_000
+
+// CaptureResult is one extracted template handed to the members use cases
+// (RegisterFingerprint). Bytes is the *plaintext* template — callers MUST
+// encrypt before persisting (see shared/biometric/crypto). QualityScore is
+// optional (0 = not reported); the helper reports categorical quality
+// (DP_QUALITY_GOOD) rather than a 0-100 score, so FMD captures leave it 0.
 type CaptureResult struct {
 	Bytes        Template
-	Format       string // "xyt_m1" in the NBIS pipeline (ANSI INCITS 378 coords)
+	Format       string
 	QualityScore int
 }
 
-// EncryptedTemplate is one row from member_fingerprints handed to Identify.
-// Decryption happens inside the Reader implementation so the plaintext never
-// crosses the use-case boundary (DA-29 §"100% offline + en memoria").
-type EncryptedTemplate struct {
-	MemberID string
-	Bytes    []byte // [version][IV][ciphertext][tag] per ADR-006 §2.1
-	Format   string
+// GalleryCandidate is one entry of the helper's cached 1:N gallery. Ref is
+// the member_fingerprints.id — the sidecar resolves ref→member after a
+// match. FMD is the decrypted opaque template string.
+type GalleryCandidate struct {
+	Ref string `json:"ref"`
+	FMD string `json:"fmd"`
 }
 
-// MatchResult is what Identify returns. Score is implementation-defined; the
-// caller (UC-029) compares against a threshold from gyms.kiosk_settings.
-type MatchResult struct {
-	MemberID string
-	Score    float64
-}
-
-// ReaderInfo is what `GET /api/v1/biometric/status` exposes. The sidecar
-// queries it on boot + on every connect callback so the UI can hide the
-// fingerprint option when no device is plugged in (UC-032 DA-32.4).
+// ReaderInfo is what `GET /api/v1/biometric/status` exposes. Model/DeviceID
+// come from the helper's reader events (name + serial).
 type ReaderInfo struct {
 	DeviceID  string
-	Vendor    string // e.g. "HID/Crossmatch"
-	Model     string // e.g. "U.are.U 4500"
+	Vendor    string
+	Model     string
 	Connected bool
 }
 
-// Reader is the surface the use cases use. Sidecar wires the real SDK; cloud
-// + tests wire the mock.
-type Reader interface {
-	// Info returns vendor/model/connected. Cheap; safe to call frequently.
-	Info() ReaderInfo
-
-	// OnConnect / OnDisconnect register hot-plug callbacks. The kiosk loop uses
-	// them to surface banners ("Lector conectado / desconectado") to the UI
-	// without polling. Implementations should fire callbacks on a goroutine so
-	// the SDK thread is never blocked.
-	OnConnect(cb func())
-	OnDisconnect(cb func())
-
-	// Capture is a no-op on the NBIS implementation — capture lives in the
-	// Tauri frontend (ADR-004-bis §2). Kept on the interface so older code
-	// paths (cloud build, tests) compile unchanged; the NBIS matcher returns
-	// ErrCaptureMovedToFrontend. Mock + cloud implementations still honor it
-	// for unit tests that don't care about hardware origin.
-	Capture(ctx context.Context) (*CaptureResult, error)
-
-	// Enroll, like Capture, is now driven by the frontend (multi-sample
-	// loop in JS, ADR-004-bis §2). Same fallback contract as Capture.
-	Enroll(ctx context.Context, samples int) (*CaptureResult, error)
-
-	// ExtractTemplate turns a raw fingerprint image (PNG bytes from the
-	// frontend's PngImage capture, ~170 KB) into a feature-extracted template
-	// ready for Identify / persistence. The NBIS implementation invokes
-	// `mindtct -m1` as a subprocess; the mock returns a deterministic stub.
-	//
-	// Returns ErrQualityThreshold if the matcher can't extract enough
-	// minutiae for a usable template (typical threshold: ≥20 minutiae).
-	ExtractTemplate(ctx context.Context, image []byte) (*CaptureResult, error)
-
-	// Identify performs a 1:N match against the provided enrolled blobs. The
-	// Reader is responsible for decrypting `enrolled` (using the GMKProvider
-	// passed at construction). Returns the highest-scoring entry above the
-	// threshold, or ErrNoMatch if nothing crosses it.
-	Identify(ctx context.Context, input *CaptureResult, enrolled []EncryptedTemplate, threshold float64) (*MatchResult, error)
-
-	// Available is a fast yes/no — the kiosk loop polls it on start and any
-	// time it suspects the SDK lost the device between callbacks.
-	Available(ctx context.Context) bool
+// Handler receives the engine's spontaneous notifications. Implemented by
+// the BiometricHub (checkins app layer). Calls are delivered one at a time
+// from a single dispatch goroutine, in arrival order — implementations may
+// block briefly (identify + DB work) and rely on that serialization.
+type Handler interface {
+	// HandleSample fires per successful capture+extraction (a "dedazo").
+	HandleSample(fmd, quality string)
+	// HandleSampleRejected fires when a capture happened but quality or
+	// extraction failed — feedback for "vuelve a apoyar el dedo".
+	HandleSampleRejected(code, quality string)
+	// HandleReaderState reflects reader hot-plug. name/serial are only
+	// meaningful when connected.
+	HandleReaderState(connected bool, name, serial string)
+	// HandleHelperUp fires after the helper process (re)spawns. The hub
+	// re-sends the gallery here — a fresh helper starts with an empty one.
+	HandleHelperUp()
+	// HandleHelperDown fires when the helper process dies (it will be
+	// restarted with backoff unless the engine is stopping).
+	HandleHelperDown(reason string)
 }
 
 var (
-	ErrNotAvailable           = errors.New("biometric reader not available")
-	ErrNoMatch                = errors.New("no fingerprint match above threshold")
-	ErrQualityThreshold       = errors.New("fingerprint quality below threshold")
-	ErrNoFingerDetected       = errors.New("no finger detected on reader")
-	ErrCaptureMovedToFrontend = errors.New("capture lives in frontend per ADR-004-bis; call ExtractTemplate with image bytes")
-	ErrTemplateExtractFailed  = errors.New("mindtct could not extract a usable template from the image")
+	// ErrNotAvailable — the engine process isn't running/responsive (helper
+	// missing, restarting, or stopped).
+	ErrNotAvailable = errors.New("motor biométrico no disponible")
+
+	// ErrHelperRestarted — the in-flight command died with the helper
+	// process; the caller may retry after the next HandleHelperUp.
+	ErrHelperRestarted = errors.New("el motor biométrico se reinició a media operación")
 )
+
+// CommandError is a helper-reported command failure ({"ok":false,...}), e.g.
+// DP_ENROLLMENT_INVALID_SET when the enroll FMD set doesn't converge.
+type CommandError struct {
+	Code string
+}
+
+func (e *CommandError) Error() string {
+	if e.Code == "" {
+		return "el motor biométrico rechazó el comando"
+	}
+	return "el motor biométrico rechazó el comando: " + e.Code
+}

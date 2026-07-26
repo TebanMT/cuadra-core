@@ -3,284 +3,267 @@
 package controllers
 
 import (
+	"encoding/json"
 	"errors"
-	"io"
+	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
 	chkApp "github.com/cuadra/cuadra-core/src/modules/checkins/app"
-	memApp "github.com/cuadra/cuadra-core/src/modules/members/app"
-	fpDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/fingerprint"
+	chkErrors "github.com/cuadra/cuadra-core/src/modules/checkins/domain/errors"
 	"github.com/cuadra/cuadra-core/src/shared/auth"
-	"github.com/cuadra/cuadra-core/src/shared/biometric"
-	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 	"github.com/cuadra/cuadra-core/src/shared/middleware"
 	"github.com/cuadra/cuadra-core/src/shared/utils"
 )
 
-// maxFingerprintImageBytes caps the multipart `image` field. PNG captures
-// from `@digitalpersona/fingerprint` are ~170 KB; 2 MB is a generous ceiling
-// that still rejects anyone trying to upload a real photo by mistake.
-const maxFingerprintImageBytes int64 = 2 << 20
-
-// BiometricController exposes the ADR-004-bis HTTP surface — the sidecar
-// receives raw PNG captures from the Tauri frontend (where the
-// DigitalPersona JS SDK lives) and runs `mindtct` + the appropriate use
-// case here.
+// BiometricController is the sidecar's FE-facing biometric surface after the
+// tinta-bio inversion: los dedazos LLEGAN al sidecar desde el helper y el FE
+// sólo escucha resultados. Cuatro rutas:
 //
-// Two routes:
-//   - POST /api/v1/biometric/enroll  → UC-028 (register fingerprint).
-//   - POST /api/v1/biometric/checkin → UC-029 (1:N checkin).
+//   - GET  /api/v1/biometric/status        → {connected, available, ...}
+//   - GET  /api/v1/biometric/events        → SSE: reader state, feedback de
+//     sample, resultado de check-in (mismo wire CheckinEvent que los
+//     endpoints), progreso/fin de enroll.
+//   - POST /api/v1/biometric/enroll/start  → abre sesión de enroll {member_id}
+//   - POST /api/v1/biometric/enroll/cancel → cancela la sesión activa
 //
-// The existing JSON-body endpoints (POST /members/:id/fingerprint and
-// POST /checkins/fingerprint) stay around for callers that already have a
-// base64 template (kiosk loop, integration tests). These are additive.
+// Los endpoints multipart de imagen (PNG del FE) murieron con NBIS — la
+// captura ya no cruza HTTP.
 type BiometricController struct {
-	Reader  biometric.Reader
-	Enroll  *memApp.RegisterFingerprint
-	Checkin *chkApp.CheckinByFingerprint
-	Tokens  auth.TokenService
-	// Sibling lets the checkin path fire the access webhook on allowed
-	// results — same wire as KioskController. Optional; nil → skip.
-	Sibling *CheckinController
+	Hub    *chkApp.BiometricHub
+	Tokens auth.TokenService
 }
 
-func NewBiometricController(
-	reader biometric.Reader,
-	enroll *memApp.RegisterFingerprint,
-	checkin *chkApp.CheckinByFingerprint,
-	tokens auth.TokenService,
-) *BiometricController {
-	return &BiometricController{
-		Reader: reader, Enroll: enroll, Checkin: checkin, Tokens: tokens,
-	}
-}
-
-// WithSibling wires the regular CheckinController so the biometric checkin
-// path reuses its access-webhook dispatch (turnstile / cerradura).
-func (c *BiometricController) WithSibling(s *CheckinController) *BiometricController {
-	c.Sibling = s
-	return c
+func NewBiometricController(hub *chkApp.BiometricHub, tokens auth.TokenService) *BiometricController {
+	return &BiometricController{Hub: hub, Tokens: tokens}
 }
 
 func (c *BiometricController) RegisterRoutes(r *gin.Engine) {
 	api := r.Group("/api/v1")
 	api.Use(middleware.AuthMiddleware(c.Tokens))
 	{
-		api.POST("/biometric/enroll", c.handleEnroll)
-		api.POST("/biometric/checkin", c.handleCheckin)
+		api.GET("/biometric/status", c.handleStatus)
+		api.GET("/biometric/events", c.handleEvents)
+		api.POST("/biometric/enroll/start", c.handleEnrollStart)
+		api.POST("/biometric/enroll/cancel", c.handleEnrollCancel)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// DTOs
+// ---------------------------------------------------------------------------
+
+// biometricStatusResp conserva el shape histórico {connected, available} que
+// el FE ya consume; available = helper vivo + lector conectado.
+type biometricStatusResp struct {
+	DeviceID  string `json:"device_id"`
+	Vendor    string `json:"vendor"`
+	Model     string `json:"model"`
+	Connected bool   `json:"connected"`
+	Available bool   `json:"available"`
+	Enrolling bool   `json:"enrolling"`
+}
+
+type enrollStartReq struct {
+	MemberID        string `json:"member_id" binding:"required"`
+	ConsentAccepted bool   `json:"consent_accepted"`
+}
+
+type enrollStartResp struct {
+	SessionID       uuid.UUID `json:"session_id"`
+	MemberID        uuid.UUID `json:"member_id"`
+	ExpiresAt       string    `json:"expires_at"`
+	RequiredSamples int       `json:"required_samples"`
+}
+
+// bioEventWire is the SSE `data:` payload. Type se repite adentro del JSON
+// para que el FE pueda multiplexar con un solo onmessage si quiere.
+type bioEventWire struct {
+	Type      string            `json:"type"`
+	Timestamp time.Time         `json:"timestamp"`
+	Message   string            `json:"message,omitempty"`
+	Code      string            `json:"code,omitempty"`
+	Quality   string            `json:"quality,omitempty"`
+	Reader    *readerWire       `json:"reader,omitempty"`
+	Checkin   *checkinEventWire `json:"checkin,omitempty"`
+	Enroll    *enrollEventWire  `json:"enroll,omitempty"`
+}
+
+type readerWire struct {
+	Name   string `json:"name,omitempty"`
+	Serial string `json:"serial,omitempty"`
+}
+
+type enrollEventWire struct {
+	SessionID      string   `json:"session_id"`
+	MemberID       string   `json:"member_id"`
+	Captured       int      `json:"captured"`
+	Required       int      `json:"required"`
+	ExpiresAt      string   `json:"expires_at,omitempty"`
+	FingerprintIDs []string `json:"fingerprint_ids,omitempty"`
+	// Contrato de colisión (mismos campos que el 409 fingerprint_collision).
+	ExistingMemberID   string `json:"existing_member_id,omitempty"`
+	ExistingMemberName string `json:"existing_member_name,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
 
-func (c *BiometricController) handleEnroll(ctx *gin.Context) {
+func (c *BiometricController) handleStatus(ctx *gin.Context) {
+	utils.JsonResponse(ctx, http.StatusOK, c.statusSnapshot())
+}
+
+func (c *BiometricController) statusSnapshot() biometricStatusResp {
+	info := c.Hub.Engine.Info()
+	return biometricStatusResp{
+		DeviceID:  info.DeviceID,
+		Vendor:    info.Vendor,
+		Model:     info.Model,
+		Connected: c.Hub.Engine.Connected(),
+		Available: c.Hub.Available(),
+		Enrolling: c.Hub.Enrolling(),
+	}
+}
+
+func (c *BiometricController) handleEnrollStart(ctx *gin.Context) {
 	gymID, _ := middleware.GetGymID(ctx)
 	actor, _ := middleware.GetUserID(ctx)
-
-	memberIDStr := ctx.PostForm("member_id")
-	memberID, err := uuid.Parse(memberIDStr)
+	var req enrollStartReq
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		utils.ErrorResponse(ctx, http.StatusBadRequest, err)
+		return
+	}
+	memberID, err := uuid.Parse(req.MemberID)
 	if err != nil {
 		utils.ErrorResponse(ctx, http.StatusBadRequest, errors.New("member_id inválido"))
 		return
 	}
-	consent := parseBool(ctx.PostForm("consent_accepted"))
-
-	images, err := readImageFields(ctx)
-	if err != nil {
-		utils.ErrorResponse(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	captures := make([]*biometric.CaptureResult, 0, len(images))
-	for _, img := range images {
-		capture, err := c.Reader.ExtractTemplate(ctx.Request.Context(), img)
-		if err != nil {
-			utils.ErrorResponse(ctx, extractErrorCode(err), err)
-			return
-		}
-		captures = append(captures, capture)
-	}
-
-	out, err := c.Enroll.Execute(ctx.Request.Context(), memApp.RegisterFingerprintInput{
+	out, err := c.Hub.StartEnroll(ctx.Request.Context(), chkApp.StartEnrollInput{
 		GymID:           gymID,
 		ActorUserID:     actor,
 		MemberID:        memberID,
-		Captures:        captures,
-		ConsentAccepted: consent,
+		ConsentAccepted: req.ConsentAccepted,
 	})
 	if err != nil {
-		if errors.Is(err, fpDomain.ErrFingerprintCollision) {
-			writeCollisionResp(ctx, err)
+		if errors.Is(err, chkErrors.ErrEnrollSessionActive) {
+			utils.ErrorResponse(ctx, http.StatusConflict, err)
 			return
 		}
 		utils.ErrorResponse(ctx, utils.DomainErrorToHttpCode(err), err)
 		return
 	}
-	utils.JsonResponse(ctx, http.StatusCreated, gin.H{
-		"fingerprint_ids": out.FingerprintIDs,
-		"member_id":       out.MemberID,
-		"quality_score":   out.QualityScore,
-		"count":           len(out.FingerprintIDs),
-		"registered_at":   out.RegisteredAt.UTC().Format("2006-01-02T15:04:05Z"),
-		"status":          "success",
+	utils.JsonResponse(ctx, http.StatusAccepted, enrollStartResp{
+		SessionID:       out.SessionID,
+		MemberID:        out.MemberID,
+		ExpiresAt:       out.ExpiresAt.UTC().Format(time.RFC3339),
+		RequiredSamples: out.RequiredSamples,
 	})
 }
 
-func (c *BiometricController) handleCheckin(ctx *gin.Context) {
-	// gym_id defaults to the operator's active gym (JWT). The optional form
-	// field is honored for the rare cross-gym tooling case; we still validate
-	// it parses, but we don't enforce it matches the JWT — that's the
-	// middleware's job once we add multi-gym operators.
-	gymID, _ := middleware.GetGymID(ctx)
-	if override := ctx.PostForm("gym_id"); override != "" {
-		if parsed, err := uuid.Parse(override); err == nil {
-			gymID = parsed
+func (c *BiometricController) handleEnrollCancel(ctx *gin.Context) {
+	if err := c.Hub.CancelEnroll(ctx.Request.Context()); err != nil {
+		if errors.Is(err, chkErrors.ErrEnrollSessionNotFound) {
+			utils.ErrorResponse(ctx, http.StatusNotFound, err)
+			return
 		}
-	}
-
-	imageBytes, err := readImageField(ctx)
-	if err != nil {
-		utils.ErrorResponse(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	capture, err := c.Reader.ExtractTemplate(ctx.Request.Context(), imageBytes)
-	if err != nil {
-		utils.ErrorResponse(ctx, extractErrorCode(err), err)
-		return
-	}
-
-	view, err := c.Checkin.Execute(ctx.Request.Context(), chkApp.CheckinByFingerprintInput{
-		GymID:   gymID,
-		Capture: capture,
-	})
-	if err != nil {
 		utils.ErrorResponse(ctx, utils.DomainErrorToHttpCode(err), err)
 		return
 	}
-	if c.Sibling != nil {
-		c.Sibling.dispatchAccessWebhook(ctx, view)
+	utils.JsonResponse(ctx, http.StatusOK, gin.H{"cancelled": true})
+}
+
+// handleEvents is the SSE stream. Auth middleware normal (mismo bearer que
+// el resto de la API — el FE lo consume con fetch+ReadableStream, no con
+// EventSource pelón). Cada evento va como `event: <type>` + `data: <json>`;
+// un comentario `: hb` cada 15s mantiene vivos proxies y detecta clientes
+// idos. Al conectar se manda un snapshot `status` para que el FE arranque
+// sincronizado sin esperar el primer evento real.
+func (c *BiometricController) handleEvents(ctx *gin.Context) {
+	w := ctx.Writer
+	h := w.Header()
+	h.Set("Content-Type", "text/event-stream")
+	h.Set("Cache-Control", "no-store")
+	h.Set("Connection", "keep-alive")
+	h.Set("X-Accel-Buffering", "no")
+
+	sub, cancel := c.Hub.Subscribe()
+	defer cancel()
+
+	writeSSE(w, "status", c.statusSnapshot())
+	w.Flush()
+
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+	clientGone := ctx.Request.Context().Done()
+
+	for {
+		select {
+		case <-clientGone:
+			return
+		case <-heartbeat.C:
+			_, _ = fmt.Fprint(w, ": hb\n\n")
+			w.Flush()
+		case evt, ok := <-sub:
+			if !ok {
+				return
+			}
+			writeSSE(w, string(evt.Type), toBioEventWire(evt))
+			w.Flush()
+		}
 	}
-	utils.JsonResponse(ctx, http.StatusCreated, toCheckinResp(view))
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Wire mapping
 // ---------------------------------------------------------------------------
 
-// readImageField pulls the multipart `image` field as raw bytes and rejects
-// anything over maxFingerprintImageBytes. The Reader does the format-sniff;
-// here we only care that *some* bytes arrived.
-func readImageField(ctx *gin.Context) ([]byte, error) {
-	if err := ctx.Request.ParseMultipartForm(maxFingerprintImageBytes); err != nil {
-		return nil, errors.New("multipart inválido o demasiado grande")
-	}
-	file, header, err := ctx.Request.FormFile("image")
+func writeSSE(w gin.ResponseWriter, event string, payload any) {
+	data, err := json.Marshal(payload)
 	if err != nil {
-		return nil, errors.New("campo `image` requerido")
+		return
 	}
-	defer file.Close()
-	if header != nil && header.Size > maxFingerprintImageBytes {
-		return nil, errors.New("imagen demasiado grande")
-	}
-	bytes, err := io.ReadAll(io.LimitReader(file, maxFingerprintImageBytes+1))
-	if err != nil {
-		return nil, errors.New("no se pudo leer la imagen")
-	}
-	if len(bytes) == 0 {
-		return nil, errors.New("imagen vacía")
-	}
-	if int64(len(bytes)) > maxFingerprintImageBytes {
-		return nil, errors.New("imagen demasiado grande")
-	}
-	return bytes, nil
+	_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data)
 }
 
-// readImageFields pulls every multipart `image` part as raw bytes. The enroll
-// flow sends up to MaxFingerprintsPerMember samples of the same finger under
-// the repeated `image` field. Each part is size-capped; empty or oversized
-// parts are rejected.
-func readImageFields(ctx *gin.Context) ([][]byte, error) {
-	maxTotal := maxFingerprintImageBytes * int64(fpDomain.MaxFingerprintsPerMember)
-	if err := ctx.Request.ParseMultipartForm(maxTotal); err != nil {
-		return nil, errors.New("multipart inválido o demasiado grande")
+func toBioEventWire(evt chkApp.BioEvent) bioEventWire {
+	out := bioEventWire{
+		Type:      string(evt.Type),
+		Timestamp: evt.Timestamp,
+		Message:   evt.Message,
+		Code:      evt.Code,
+		Quality:   evt.Quality,
 	}
-	form := ctx.Request.MultipartForm
-	if form == nil || len(form.File["image"]) == 0 {
-		return nil, errors.New("campo `image` requerido")
+	if evt.ReaderName != "" || evt.ReaderSerial != "" {
+		out.Reader = &readerWire{Name: evt.ReaderName, Serial: evt.ReaderSerial}
 	}
-	headers := form.File["image"]
-	if len(headers) > fpDomain.MaxFingerprintsPerMember {
-		return nil, errors.New("máximo 3 imágenes por registro")
+	if evt.Checkin != nil {
+		w := toCheckinResp(evt.Checkin)
+		out.Checkin = &w
 	}
-	out := make([][]byte, 0, len(headers))
-	for _, h := range headers {
-		if h.Size > maxFingerprintImageBytes {
-			return nil, errors.New("imagen demasiado grande")
+	if evt.Enroll != nil {
+		e := &enrollEventWire{
+			SessionID: evt.Enroll.SessionID.String(),
+			MemberID:  evt.Enroll.MemberID.String(),
+			Captured:  evt.Enroll.Captured,
+			Required:  evt.Enroll.Required,
 		}
-		f, err := h.Open()
-		if err != nil {
-			return nil, errors.New("no se pudo leer la imagen")
+		if !evt.Enroll.ExpiresAt.IsZero() {
+			e.ExpiresAt = evt.Enroll.ExpiresAt.UTC().Format(time.RFC3339)
 		}
-		bytes, err := io.ReadAll(io.LimitReader(f, maxFingerprintImageBytes+1))
-		_ = f.Close()
-		if err != nil {
-			return nil, errors.New("no se pudo leer la imagen")
+		for _, id := range evt.Enroll.FingerprintIDs {
+			e.FingerprintIDs = append(e.FingerprintIDs, id.String())
 		}
-		if len(bytes) == 0 {
-			return nil, errors.New("imagen vacía")
+		if v, ok := evt.Enroll.Data["existing_member_id"].(string); ok {
+			e.ExistingMemberID = v
 		}
-		if int64(len(bytes)) > maxFingerprintImageBytes {
-			return nil, errors.New("imagen demasiado grande")
+		if v, ok := evt.Enroll.Data["existing_member_name"].(string); ok {
+			e.ExistingMemberName = v
 		}
-		out = append(out, bytes)
+		out.Enroll = e
 	}
-	return out, nil
-}
-
-// extractErrorCode maps the sentinel errors returned by ExtractTemplate to
-// HTTP status. Quality / no-finger errors are 400 (operator should retry);
-// ErrNotAvailable is 503 (matcher not wired — NBIS binaries missing).
-func extractErrorCode(err error) int {
-	switch {
-	case errors.Is(err, biometric.ErrNotAvailable):
-		return http.StatusServiceUnavailable
-	case errors.Is(err, biometric.ErrQualityThreshold),
-		errors.Is(err, biometric.ErrNoFingerDetected),
-		errors.Is(err, biometric.ErrTemplateExtractFailed):
-		return http.StatusBadRequest
-	default:
-		return http.StatusInternalServerError
-	}
-}
-
-// writeCollisionResp mirrors fingerprint_controller.writeCollision so the
-// desktop's collision modal works against either endpoint.
-func writeCollisionResp(ctx *gin.Context, err error) {
-	body := gin.H{
-		"status_code": http.StatusConflict,
-		"message":     "CONFLICT",
-		"exception":   "fingerprint_collision",
-	}
-	var ce sharedDomain.CustomError
-	if errors.As(err, &ce) {
-		for k, v := range ce.Data {
-			body[k] = v
-		}
-	}
-	ctx.JSON(http.StatusConflict, body)
-}
-
-func parseBool(s string) bool {
-	switch s {
-	case "true", "1", "yes", "on":
-		return true
-	default:
-		return false
-	}
+	return out
 }

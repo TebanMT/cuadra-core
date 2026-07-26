@@ -24,6 +24,11 @@ var (
 	ErrFingerprintNotEnrolled = errors.New("ningún socio tiene huella registrada")
 	ErrNoFingerprintMatch     = errors.New("no identifiqué la huella; intenta de nuevo o pasa con recepción")
 
+	// Sesión de enroll biométrico (UC-028 vía tinta-bio: los dedazos llegan
+	// al sidecar; el FE sólo abre/cancela la sesión y escucha eventos)
+	ErrEnrollSessionActive   = errors.New("ya hay un registro de huella en curso; cancélalo o espera a que termine")
+	ErrEnrollSessionNotFound = errors.New("no hay registro de huella en curso")
+
 	// Número de socio (UC-032 — ADR-010, antes "PIN de acceso")
 	ErrNumberIncorrect       = errors.New("número de socio incorrecto. Intenta de nuevo")
 	ErrNumberTooManyAttempts = errors.New("demasiados intentos; espera un minuto y vuelve a intentar")

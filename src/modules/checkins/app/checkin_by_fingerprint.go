@@ -4,7 +4,6 @@ package app
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/google/uuid"
@@ -14,44 +13,27 @@ import (
 	gymRepo "github.com/cuadra/cuadra-core/src/modules/gyms/domain/repository"
 	memApp "github.com/cuadra/cuadra-core/src/modules/members/app"
 	"github.com/cuadra/cuadra-core/src/shared/audit"
-	"github.com/cuadra/cuadra-core/src/shared/biometric"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 )
 
-// FingerprintMatchThresholdDefault is what UC-029 uses when the gym hasn't
-// overridden it via gyms.kiosk_settings (UC-029 DA-29.4). It is a raw
-// bozorth3 score, NOT a 0-1 ratio — Identify compares the matcher's integer
-// score directly against it. bozorth3 scores unrelated fingers 3-7 and the
-// same finger anywhere from ~25 (off-center placement) up to ~55, so 25
-// keeps the door permissive enough for real placement variation while
-// staying well clear of the unrelated-finger band. Tune from the
-// `[biometric] identify:` score logs. Lower = more permissive.
-const FingerprintMatchThresholdDefault = 25
-
-// CheckinByFingerprintInput. The Capture is a *plaintext* template that the
-// caller (kiosko loop or manual flow) just got from biometric.Reader.Capture.
-// Threshold 0 falls back to the default.
+// CheckinByFingerprintInput. Identification already happened upstream — the
+// BiometricHub ran the sample through the tinta-bio helper (1:N against its
+// cached gallery) and resolved ref → member_fingerprints → socio. This use
+// case owns what comes AFTER the match: access decision, checkin record,
+// audit and sync (UC-029 pasos 5+).
 type CheckinByFingerprintInput struct {
-	GymID     uuid.UUID
-	Capture   *biometric.CaptureResult
-	Threshold float64
-	Now       time.Time
+	GymID    uuid.UUID
+	MemberID uuid.UUID
+	Now      time.Time
 }
 
-// CheckinByFingerprint runs the UC-029 flow:
-//
-//  1. Load active fingerprint blobs for the gym (via members service).
-//  2. Ask the Reader to identify the capture against the candidate set.
-//  3. On hit, evaluate access status + record checkin (no operator).
-//  4. On miss, return ErrNoFingerprintMatch — caller surfaces "no
-//     identificado, pasa con recepción".
-//
-// Both reader operations and the DB tx happen serially: we read before opening
-// the tx to keep the tx short (no SDK call inside Postgres/SQLite tx).
+// CheckinByFingerprint runs the post-identification half of UC-029: evaluate
+// access status + record the checkin (no operator — the socio se registra
+// solo con el dedazo). "No identificado" never reaches this use case; the
+// hub surfaces it as an event without touching the DB.
 type CheckinByFingerprint struct {
 	Members *memApp.MemberService
 	Repo    chkRepo.CheckinRepository
-	Reader  biometric.Reader
 	UoW     sharedDomain.UnitOfWork
 	Audit   audit.Recorder
 	// Gyms (opcional) → evaluar la vigencia en la zona horaria del gym.
@@ -61,13 +43,11 @@ type CheckinByFingerprint struct {
 func NewCheckinByFingerprint(
 	members *memApp.MemberService,
 	repo chkRepo.CheckinRepository,
-	reader biometric.Reader,
 	uow sharedDomain.UnitOfWork,
 	recorder audit.Recorder,
 ) *CheckinByFingerprint {
 	return &CheckinByFingerprint{
-		Members: members, Repo: repo, Reader: reader,
-		UoW: uow, Audit: recorder,
+		Members: members, Repo: repo, UoW: uow, Audit: recorder,
 	}
 }
 
@@ -78,63 +58,18 @@ func (uc *CheckinByFingerprint) WithGyms(g gymRepo.GymRepository) *CheckinByFing
 }
 
 func (uc *CheckinByFingerprint) Execute(ctx context.Context, in CheckinByFingerprintInput) (*CheckinView, error) {
-	if uc.Reader == nil {
-		return nil, sharedDomain.NewBusinessError(chkErrors.ErrReaderNotAvailable, "")
-	}
-	if in.Capture == nil || len(in.Capture.Bytes) == 0 {
-		return nil, sharedDomain.NewValidationError(chkErrors.ErrNoFingerprintMatch)
+	if in.MemberID == uuid.Nil {
+		return nil, sharedDomain.NewValidationError(chkErrors.ErrMemberRequired)
 	}
 	now := in.Now
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	threshold := in.Threshold
-	if threshold <= 0 {
-		threshold = FingerprintMatchThresholdDefault
-	}
 
-	// Phase 1 — read the candidate set via a query tx (no writes).
-	queryTx, err := uc.UoW.Query(ctx)
-	if err != nil {
-		return nil, sharedDomain.NewUnexpectedError(err)
-	}
-	loaded, err := uc.Members.LoadFingerprintsForGym(ctx, queryTx, memApp.LoadFingerprintsForGymInput{GymID: in.GymID})
-	if err != nil {
-		return nil, err
-	}
-	if len(loaded.Templates) == 0 {
-		return nil, sharedDomain.NewBusinessError(chkErrors.ErrFingerprintNotEnrolled, "")
-	}
-	enrolled := make([]biometric.EncryptedTemplate, 0, len(loaded.Templates))
-	for _, t := range loaded.Templates {
-		enrolled = append(enrolled, biometric.EncryptedTemplate{
-			MemberID: t.MemberID.String(),
-			Bytes:    t.Encrypted,
-			Format:   t.Format,
-		})
-	}
-
-	// Phase 2 — identify. The Reader handles GMK lookup + decrypt internally.
-	match, err := uc.Reader.Identify(ctx, in.Capture, enrolled, threshold)
-	if err != nil {
-		if errors.Is(err, biometric.ErrNoMatch) {
-			return nil, sharedDomain.NewBusinessError(chkErrors.ErrNoFingerprintMatch, "")
-		}
-		if errors.Is(err, biometric.ErrNotAvailable) {
-			return nil, sharedDomain.NewBusinessError(chkErrors.ErrReaderNotAvailable, "")
-		}
-		return nil, sharedDomain.NewUnexpectedError(err)
-	}
-	memberID, perr := uuid.Parse(match.MemberID)
-	if perr != nil {
-		return nil, sharedDomain.NewUnexpectedError(perr)
-	}
-
-	// Phase 3 — record the checkin in a Command tx.
 	var view *CheckinView
-	err = uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
+	err := uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
 		v, err := recordCheckin(ctx, tx, uc.Members, uc.Gyms, uc.Repo, uc.Audit,
-			in.GymID, memberID, "fingerprint", nil, now)
+			in.GymID, in.MemberID, "fingerprint", nil, now)
 		if err != nil {
 			return err
 		}

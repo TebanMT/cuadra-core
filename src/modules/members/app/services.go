@@ -264,49 +264,6 @@ func (s *MemberService) GetAccessStatus(ctx context.Context, tx sharedDomain.Tra
 	}, nil
 }
 
-// LoadFingerprintsForGymInput is consumed by the kiosko at boot (UC-029
-// step 4 needs the full candidate set in memory before Identify can run).
-type LoadFingerprintsForGymInput struct {
-	GymID uuid.UUID
-}
-
-// LoadFingerprintsForGymOutput carries the per-member encrypted blobs ready
-// to feed biometric.Reader.Identify.
-type LoadFingerprintsForGymOutput struct {
-	Templates []EncryptedFingerprint
-}
-
-// EncryptedFingerprint is the cross-BC view checkins consumes. It mirrors
-// biometric.EncryptedTemplate but lives in the members BC so checkins doesn't
-// have to depend on the biometric package directly.
-type EncryptedFingerprint struct {
-	MemberID  uuid.UUID
-	Encrypted []byte
-	Format    string
-}
-
-// LoadFingerprintsForGym returns every active fingerprint blob in the gym.
-// Caller (sidecar kiosko goroutine) decrypts on its side via the GMK kept in
-// keychain.
-func (s *MemberService) LoadFingerprintsForGym(ctx context.Context, tx sharedDomain.Transaction, in LoadFingerprintsForGymInput) (*LoadFingerprintsForGymOutput, error) {
-	if s.Fingerprints == nil {
-		return &LoadFingerprintsForGymOutput{}, nil
-	}
-	rows, err := s.Fingerprints.ListByGym(tx, in.GymID)
-	if err != nil {
-		return nil, sharedDomain.NewUnexpectedError(err)
-	}
-	out := &LoadFingerprintsForGymOutput{Templates: make([]EncryptedFingerprint, 0, len(rows))}
-	for _, fp := range rows {
-		out.Templates = append(out.Templates, EncryptedFingerprint{
-			MemberID:  fp.MemberID,
-			Encrypted: fp.TemplateEncrypted,
-			Format:    fp.TemplateFormat,
-		})
-	}
-	return out, nil
-}
-
 // ApplyMembershipAdjustmentInput es lo que el flujo de promo extra_days
 // pasa para extender el expiry de una membresía dentro de la misma tx
 // del cobro. Reason debe ser >= 5 chars (validación del dominio del
