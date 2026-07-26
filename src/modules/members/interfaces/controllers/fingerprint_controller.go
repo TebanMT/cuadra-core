@@ -30,10 +30,27 @@ type FingerprintController struct {
 	Register *memApp.RegisterFingerprint
 	Delete   *memApp.DeleteFingerprint
 	Tokens   auth.TokenService
+	// OnChange fires after a successful register/delete. The sidecar wires
+	// the biometric hub's gallery refresh here (the tinta-bio helper caches
+	// the 1:N gallery and must be told when rows change); cloud leaves nil.
+	OnChange func()
 }
 
 func NewFingerprintController(register *memApp.RegisterFingerprint, deleteUC *memApp.DeleteFingerprint, tokens auth.TokenService) *FingerprintController {
 	return &FingerprintController{Register: register, Delete: deleteUC, Tokens: tokens}
+}
+
+// WithOnChange wires the post-mutation hook. Builder-style, returns receiver.
+func (c *FingerprintController) WithOnChange(fn func()) *FingerprintController {
+	c.OnChange = fn
+	return c
+}
+
+// notifyChange invokes the hook if wired.
+func (c *FingerprintController) notifyChange() {
+	if c.OnChange != nil {
+		c.OnChange()
+	}
 }
 
 func (c *FingerprintController) RegisterRoutes(r *gin.Engine) {
@@ -93,6 +110,7 @@ func (c *FingerprintController) handleRegister(ctx *gin.Context) {
 		utils.ErrorResponse(ctx, utils.DomainErrorToHttpCode(err), err)
 		return
 	}
+	c.notifyChange()
 	utils.JsonResponse(ctx, http.StatusCreated, registerFingerprintResp{
 		FingerprintID: out.FingerprintIDs[0],
 		MemberID:      out.MemberID,
@@ -120,6 +138,7 @@ func (c *FingerprintController) handleDelete(ctx *gin.Context) {
 		utils.ErrorResponse(ctx, utils.DomainErrorToHttpCode(err), err)
 		return
 	}
+	c.notifyChange()
 	ctx.Status(http.StatusNoContent)
 }
 
