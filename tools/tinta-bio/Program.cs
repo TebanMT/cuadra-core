@@ -169,11 +169,16 @@ internal static class Program
 
                 while (!Shutdown.IsCancellationRequested)
                 {
+                    // OJO con el orden: en el Capture SÍNCRONO el timeout va
+                    // TERCERO y la resolución CUARTA — al revés que en
+                    // CaptureAsync(format, processing, resolution). Pasarlos
+                    // volteados = pedir 5000 DPI = DP_INVALID_PARAMETER en
+                    // loop (mordió en hardware real; docs XML del assembly).
                     var capture = reader.Capture(
                         Constants.Formats.Fid.ANSI,
                         Constants.CaptureProcessing.DP_IMG_PROC_DEFAULT,
-                        resolution,
-                        CaptureTimeoutMs);
+                        CaptureTimeoutMs,
+                        resolution);
 
                     if (Shutdown.IsCancellationRequested) break;
                     if (capture == null) continue;
