@@ -27,8 +27,6 @@
 // DigitalPersona. (c) HID Global — componentes FingerJet/DPUruNet
 // redistribuidos bajo el EULA del DigitalPersona Biometric SDK.
 
-using System.Collections.Concurrent;
-using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -82,9 +80,12 @@ internal static class Program
             return 0;
         }
 
-        // Loop del lector en background; stdin es el hilo principal.
+        // Loop del lector en su propio thread (LongRunning: el Capture
+        // bloqueante lo ocupa permanentemente); stdin es el hilo principal.
         // stdin EOF = el sidecar murió o nos pidió salir → shutdown limpio.
-        var readerLoop = Task.Run(ReaderLoop);
+        var readerLoop = Task.Factory.StartNew(
+            ReaderLoop, CancellationToken.None,
+            TaskCreationOptions.LongRunning, TaskScheduler.Default);
         try
         {
             string? line;
@@ -108,26 +109,38 @@ internal static class Program
         return 0;
     }
 
-    // ── Lector: enumerar → abrir → armar captura → monitorear ──────────────
+    // ── Lector: enumerar → abrir → loop de captura BLOQUEANTE ──────────────
+    //
+    // Se usa Reader.Capture (síncrono, con timeout) en un thread dedicado,
+    // NO CaptureAsync/On_Captured: la entrega de eventos del SDK está
+    // pensada para apps WinForms con message pump — en este proceso de
+    // consola los On_Captured nunca dispararon (visto en hardware real:
+    // reader connected, dedazo, silencio). El bloqueante es determinista:
+    // capture → resultado → procesar → volver a capturar. El timeout de
+    // cada vuelta funge además de checkpoint de vida del dispositivo (un
+    // lector desconectado hace fallar el Capture → reabrimos con backoff).
 
-    private static async Task ReaderLoop()
+    private const int CaptureTimeoutMs = 5000;
+
+    private static void ReaderLoop()
     {
         var backoffMs = 1000;
         while (!Shutdown.IsCancellationRequested)
         {
+            Reader? reader = null;
             try
             {
                 var wanted = Environment.GetEnvironmentVariable("TINTA_BIO_READER");
                 // Cast explícito: ReaderCollection sólo expone IEnumerable
                 // no genérico (verificado contra el XML doc del assembly).
-                var reader = ReaderCollection.GetReaders().Cast<Reader>().FirstOrDefault(r =>
+                reader = ReaderCollection.GetReaders().Cast<Reader>().FirstOrDefault(r =>
                     string.IsNullOrEmpty(wanted) ||
                     string.Equals(r.Description.SerialNumber, wanted, StringComparison.OrdinalIgnoreCase));
 
                 if (reader == null)
                 {
                     Emit(new Evt { Event = "reader", State = "disconnected", Code = "no_device" });
-                    await Delay(backoffMs);
+                    Sleep(backoffMs);
                     backoffMs = Math.Min(backoffMs * 2, 8000);
                     continue;
                 }
@@ -137,20 +150,14 @@ internal static class Program
                 {
                     Emit(new Evt { Event = "reader", State = "disconnected", Code = rc.ToString() });
                     reader.Dispose();
-                    await Delay(backoffMs);
+                    Sleep(backoffMs);
                     backoffMs = Math.Min(backoffMs * 2, 8000);
                     continue;
                 }
 
                 _reader = reader;
                 backoffMs = 1000;
-
-                // PAD (anti-dedo-falso) donde el hardware lo soporte; el
-                // 4500 no lo trae — el error se ignora a propósito.
-                try { reader.SetPAD(true); } catch { /* not supported */ }
-
-                reader.On_Captured += OnCaptured;
-                Arm(reader);
+                var resolution = reader.Capabilities.Resolutions[0];
 
                 Emit(new Evt
                 {
@@ -160,66 +167,63 @@ internal static class Program
                     Serial = reader.Description.SerialNumber,
                 });
 
-                // Monitoreo: GetStatus periódico. Si el lector se
-                // desconecta (USB out) esto falla → cerrar y re-entrar al
-                // loop de enumeración.
                 while (!Shutdown.IsCancellationRequested)
                 {
-                    await Delay(2000);
-                    var status = reader.GetStatus();
-                    if (status != Constants.ResultCode.DP_SUCCESS)
+                    var capture = reader.Capture(
+                        Constants.Formats.Fid.ANSI,
+                        Constants.CaptureProcessing.DP_IMG_PROC_DEFAULT,
+                        resolution,
+                        CaptureTimeoutMs);
+
+                    if (Shutdown.IsCancellationRequested) break;
+                    if (capture == null) continue;
+
+                    if (capture.ResultCode != Constants.ResultCode.DP_SUCCESS)
                     {
-                        Log($"GetStatus={status} — reopening");
+                        // El Capture bloqueante reporta la desconexión del
+                        // device como fallo — salir a re-enumerar/reabrir.
+                        Log($"capture rc={capture.ResultCode} — reopening");
                         break;
                     }
-                }
 
-                try { reader.On_Captured -= OnCaptured; } catch { }
-                try { reader.CancelCapture(); } catch { }
-                try { reader.Dispose(); } catch { }
-                _reader = null;
-                if (!Shutdown.IsCancellationRequested)
-                    Emit(new Evt { Event = "reader", State = "disconnected", Code = "status_failed" });
+                    HandleSample(capture);
+                }
             }
             catch (Exception ex)
             {
                 Log($"reader loop: {ex.Message}");
                 Emit(new Evt { Event = "reader", State = "disconnected", Code = "exception", Detail = ex.Message });
-                try { _reader?.Dispose(); } catch { }
-                _reader = null;
-                await Delay(backoffMs);
+                Sleep(backoffMs);
                 backoffMs = Math.Min(backoffMs * 2, 8000);
+            }
+            finally
+            {
+                try { reader?.CancelCapture(); } catch { }
+                try { reader?.Dispose(); } catch { }
+                if (_reader != null && !Shutdown.IsCancellationRequested)
+                    Emit(new Evt { Event = "reader", State = "disconnected", Code = "reopening" });
+                _reader = null;
             }
         }
     }
 
-    private static void Arm(Reader reader)
-    {
-        // ANSI FID + procesamiento default + la primera resolución soportada
-        // (mismo trío que el sample oficial). Un re-arme sobre un capture ya
-        // armado puede devolver error — benigno, ver header.
-        var rc = reader.CaptureAsync(
-            Constants.Formats.Fid.ANSI,
-            Constants.CaptureProcessing.DP_IMG_PROC_DEFAULT,
-            reader.Capabilities.Resolutions[0]);
-        if (rc != Constants.ResultCode.DP_SUCCESS)
-            Log($"CaptureAsync arm: {rc} (benigno si ya estaba armado)");
-    }
-
-    private static void OnCaptured(CaptureResult capture)
+    private static void HandleSample(CaptureResult capture)
     {
         try
         {
-            if (capture.ResultCode != Constants.ResultCode.DP_SUCCESS || capture.Data == null)
+            var quality = capture.Quality.ToString();
+
+            // Timeout de la vuelta (sin dedo) y cancelaciones no son
+            // dedazos: seguir capturando en silencio — emitirlos inundaría
+            // stdout con un evento cada CaptureTimeoutMs.
+            if (quality.Contains("TIMED_OUT") || quality.Contains("CANCELED"))
+                return;
+
+            if (capture.Data == null)
             {
-                // Cancelaciones y fallos de captura no son dedazos: reportar
-                // calidad para telemetría y seguir esperando.
-                Emit(new Evt
-                {
-                    Event = "sample_rejected",
-                    Code = capture.ResultCode.ToString(),
-                    Quality = capture.Quality.ToString(),
-                });
+                // Hubo dedo pero la captura no sirvió (calidad) — feedback
+                // para el FE ("vuelve a apoyar") sin registrar nada.
+                Emit(new Evt { Event = "sample_rejected", Code = "no_data", Quality = quality });
                 return;
             }
 
@@ -229,7 +233,7 @@ internal static class Program
                 var extraction = FeatureExtraction.CreateFmdFromFid(capture.Data, Constants.Formats.Fmd.ANSI);
                 if (extraction.ResultCode != Constants.ResultCode.DP_SUCCESS)
                 {
-                    Emit(new Evt { Event = "sample_rejected", Code = extraction.ResultCode.ToString() });
+                    Emit(new Evt { Event = "sample_rejected", Code = extraction.ResultCode.ToString(), Quality = quality });
                     return;
                 }
                 fmd = extraction.Data;
@@ -239,22 +243,13 @@ internal static class Program
             {
                 Event = "sample",
                 Fmd = PackFmd(fmd),
-                Quality = capture.Quality.ToString(),
+                Quality = quality,
                 Score = capture.Score,
             });
         }
         catch (Exception ex)
         {
             Emit(new Evt { Event = "error", Code = "capture_handler", Detail = ex.Message });
-        }
-        finally
-        {
-            // Re-arme defensivo — ver decisión en el header.
-            var r = _reader;
-            if (r != null && !Shutdown.IsCancellationRequested)
-            {
-                try { Arm(r); } catch (Exception ex) { Log($"re-arm: {ex.Message}"); }
-            }
         }
     }
 
@@ -456,10 +451,9 @@ internal static class Program
 
     private static void Log(string msg) => Console.Error.WriteLine($"[tinta-bio] {msg}");
 
-    private static async Task Delay(int ms)
-    {
-        try { await Task.Delay(ms, Shutdown.Token); } catch (TaskCanceledException) { }
-    }
+    // Sleep cancelable por shutdown (el WaitHandle despierta al instante
+    // cuando Shutdown.Cancel() dispara — sin esperar el timeout completo).
+    private static void Sleep(int ms) => Shutdown.Token.WaitHandle.WaitOne(ms);
 
     // ── wire types ──────────────────────────────────────────────────────────
 

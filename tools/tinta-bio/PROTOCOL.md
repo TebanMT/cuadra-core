@@ -14,7 +14,7 @@ parsea — los cifra con GMK, los guarda, y los devuelve tal cual.
 {"event":"reader","state":"connected","name":"U.are.U 4500","serial":"..."}
 {"event":"reader","state":"disconnected","code":"no_device"}
 {"event":"sample","fmd":"<b64>","quality":"DP_QUALITY_GOOD","score":0}
-{"event":"sample_rejected","code":"DP_QUALITY_TIMED_OUT","quality":"..."}
+{"event":"sample_rejected","code":"no_data","quality":"DP_QUALITY_..."}
 {"event":"error","code":"capture_handler","detail":"..."}
 ```
 
@@ -22,6 +22,8 @@ parsea — los cifra con GMK, los guarda, y los devuelve tal cual.
   (check-in → identify; enroll en curso → acumular pre-enroll).
 - `sample_rejected` = hubo dedazo pero calidad/extracción falló. Sirve
   para feedback "vuelve a poner el dedo" sin registrar nada.
+- Los timeouts de vuelta del capture bloqueante (5s sin dedo) y las
+  cancelaciones NO se emiten — serían un evento de ruido cada 5s.
 
 ## Comandos (sidecar → helper) y sus respuestas
 
