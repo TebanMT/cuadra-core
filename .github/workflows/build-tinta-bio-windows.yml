@@ -77,19 +77,13 @@ jobs:
             -o ../../artifacts
           ls -la ../../artifacts
 
-      - name: Stage native SDK DLLs junto al exe
-        run: |
-          set -euo pipefail
-          # El single-file embebe lo administrado (DPUruNet), pero los
-          # P/Invoke resuelven dpfpdd/dpfj/etc. por búsqueda estándar de
-          # Windows. Shippearlas JUNTO al exe (probing incluye el app dir
-          # en single-file desde .NET 5) elimina la dependencia del PATH
-          # del sistema — sin esto, el exe truena con "DLL not found" en
-          # cualquier máquina donde el RTE no haya registrado las rutas.
-          # dpfpdd_4k.dll es el plugin de la serie 4000 (nuestro 4500).
-          # Redistribución permitida: EULA §1.1(c), como parte de la app.
-          cp tools/tinta-bio/vendor/Lib/x64/*.dll artifacts/
-          ls -la artifacts/
+      # NOTA deliberada: NO se copian DLLs nativas junto al exe. dpfpdd no
+      # es autosuficiente — su enumeración depende de la capa de soporte
+      # completa que instala el RTE (dpusbada, dpdevctl, dpd*/dpi*, etc.).
+      # Un subconjunto copiado le hace sombra al runtime instalado y da
+      # no_device silencioso (visto en campo). El runtime lo provee el RTE
+      # en cada PC; el helper trae un DllImportResolver que localiza la
+      # instalación si el PATH no la registra.
 
       - name: Smoke test (ping por stdin + shutdown limpio en EOF)
         run: |
@@ -123,11 +117,11 @@ jobs:
           } > artifacts/BUILD_INFO.txt
           cat artifacts/BUILD_INFO.txt
 
-      - name: Pack bundle (exe + DLLs nativas + provenance)
+      - name: Pack bundle (exe + provenance)
         run: |
           set -euo pipefail
           cd artifacts
-          7z a tinta-bio-win-x64.zip tinta-bio.exe ./*.dll BUILD_INFO.txt
+          7z a tinta-bio-win-x64.zip tinta-bio.exe BUILD_INFO.txt
           7z l tinta-bio-win-x64.zip
 
       - name: Upload artifact (workflow_dispatch)
