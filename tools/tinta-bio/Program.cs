@@ -145,7 +145,16 @@ internal static class Program
                     continue;
                 }
 
-                var rc = reader.Open(Constants.CapturePriority.DP_PRIORITY_COOPERATIVE);
+                // EXCLUSIVE, no COOPERATIVE: la doc del C API es explícita —
+                // en cooperative "client receives captured images IF IT HAS
+                // WINDOW WITH FOCUS". Un proceso de consola sin ventana jamás
+                // tiene foco → capturas mudas para siempre (mordió en
+                // hardware real). Exclusive = un solo dueño del lector, que
+                // es exactamente nuestra arquitectura (el sidecar es el único
+                // consumidor). Nota histórica: este flag es la razón de TODO
+                // el ruteo-por-foco que sufrimos con el Lite Client
+                // multi-ventana (PRs #8/#9 de cuadra-desktop).
+                var rc = reader.Open(Constants.CapturePriority.DP_PRIORITY_EXCLUSIVE);
                 if (rc != Constants.ResultCode.DP_SUCCESS)
                 {
                     Emit(new Evt { Event = "reader", State = "disconnected", Code = rc.ToString() });
