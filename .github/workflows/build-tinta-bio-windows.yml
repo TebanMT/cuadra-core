@@ -1,0 +1,120 @@
+# build-tinta-bio-windows.yml — compila tools/tinta-bio (motor biométrico
+# C#/.NET 8, Windows-only) y lo publica como release asset.
+#
+# Por qué el fuente vive en cuadra-core: el helper es la mitad nativa del
+# subsistema biométrico del sidecar (el protocolo PROTOCOL.md es contrato
+# entre ambos); cambiarlos en lock-step en el mismo repo evita drift.
+# cuadra-desktop lo consume igual que los NBIS: baja el asset del release
+# tag `tinta-bio-v*` con su script prepare-* y lo mete a bundle.resources.
+#
+# Los assemblies del SDK de HID (DigitalPersona Biometric SDK 3.6.1) NO
+# están en el repo (EULA: redistribuibles sólo dentro de la app final).
+# El workflow los baja del mirror privado R2 con hash pineado:
+#   - secret DP_SDK_LIBS_URL    → zip de la carpeta Lib/ del SDK instalado
+#                                 (Lib/DotNET + Lib/x64), subido a R2.
+#   - secret DP_SDK_LIBS_SHA256 → pin de integridad del zip.
+#
+# Triggers:
+#   - tag `tinta-bio-v*` → release con tinta-bio.exe + BUILD_INFO.txt.
+#   - workflow_dispatch  → build ad-hoc, sube artifact (sin release).
+
+name: Build tinta-bio (Windows)
+
+on:
+  push:
+    tags: ["tinta-bio-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Fetch DigitalPersona SDK libs (private R2 mirror)
+        env:
+          DP_SDK_LIBS_URL: ${{ secrets.DP_SDK_LIBS_URL }}
+          DP_SDK_LIBS_SHA256: ${{ secrets.DP_SDK_LIBS_SHA256 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DP_SDK_LIBS_URL}" ]; then
+            echo "::error::secret DP_SDK_LIBS_URL no configurado (zip de Lib/ del SDK en R2)"
+            exit 1
+          fi
+          curl -fsSL --retry 3 -o dp-sdk-libs.zip "${DP_SDK_LIBS_URL}"
+          echo "${DP_SDK_LIBS_SHA256}  dp-sdk-libs.zip" | sha256sum -c -
+          mkdir -p tools/tinta-bio/vendor
+          unzip -q dp-sdk-libs.zip -d tools/tinta-bio/vendor
+          # El zip debe contener Lib/DotNET y Lib/x64 (estructura del SDK
+          # instalado). Toleramos zip con o sin carpeta raíz "Lib".
+          if [ -d tools/tinta-bio/vendor/Lib ]; then
+            true
+          elif [ -d tools/tinta-bio/vendor/DotNET ]; then
+            mkdir -p tools/tinta-bio/vendor/Lib
+            mv tools/tinta-bio/vendor/DotNET tools/tinta-bio/vendor/x64 tools/tinta-bio/vendor/win32 tools/tinta-bio/vendor/Lib/ 2>/dev/null || true
+          else
+            echo "::error::el zip no trae Lib/DotNET — revisa DP_SDK_LIBS_URL"
+            exit 1
+          fi
+          ls tools/tinta-bio/vendor/Lib/DotNET/DPUruNet_DotNet8.dll
+
+      - name: Publish (win-x64, self-contained single file)
+        run: |
+          set -euo pipefail
+          cd tools/tinta-bio
+          dotnet publish -c Release -r win-x64 \
+            -p:DpSdkLibDir="$(pwd)/vendor/Lib" \
+            -o ../../artifacts
+          ls -la ../../artifacts
+
+      - name: Smoke test (arranca y sale limpio con stdin cerrado)
+        run: |
+          set -euo pipefail
+          # Sin lector físico en el runner: el helper debe arrancar,
+          # reportar no_device por stdout y salir con exit 0 al cerrar
+          # stdin. Valida el pipeline de arranque/shutdown y que las DLLs
+          # nativas resuelven (dpfpdd/dpfj junto al exe).
+          cp tools/tinta-bio/vendor/Lib/x64/*.dll artifacts/ || true
+          cd artifacts
+          OUT="$(echo "" | timeout 30 ./tinta-bio.exe || true)"
+          echo "$OUT"
+          echo "$OUT" | grep -q '"event":"reader"' || {
+            echo "::error::el helper no emitió evento reader"; exit 1; }
+
+      - name: Build provenance
+        run: |
+          {
+            echo "tinta-bio $(git describe --tags --always)"
+            echo "commit: ${GITHUB_SHA}"
+            echo "sdk: DigitalPersona Biometric SDK 3.6.1 (DPUruNet_DotNet8)"
+            echo "dotnet: $(dotnet --version)"
+            echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > artifacts/BUILD_INFO.txt
+          cat artifacts/BUILD_INFO.txt
+
+      - name: Upload artifact (workflow_dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tinta-bio-win-x64
+          path: |
+            artifacts/tinta-bio.exe
+            artifacts/BUILD_INFO.txt
+
+      - name: Release (tag tinta-bio-v*)
+        if: startsWith(github.ref, 'refs/tags/tinta-bio-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/tinta-bio.exe
+            artifacts/BUILD_INFO.txt

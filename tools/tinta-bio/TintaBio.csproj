@@ -1,0 +1,52 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    tinta-bio ⁠— motor biométrico de Tinta (Windows-only).
+
+    Proceso hijo del sidecar Go: captura del U.are.U 4500 vía DPUruNet
+    (DigitalPersona Biometric SDK 3.6.1) + extracción/matching FingerJet.
+    Protocolo NDJSON por stdin/stdout — ver PROTOCOL.md.
+
+    Los assemblies del SDK de HID NO se commitean (EULA: redistribuibles
+    sólo como parte de la app empaquetada). El build los espera en
+    $(DpSdkLibDir): en CI se bajan del mirror privado R2 (ver
+    .github/workflows/build-tinta-bio-windows.yml); en dev local, apunta
+    la propiedad al SDK instalado:
+
+      dotnet publish -c Release -r win-x64 ^
+        -p:DpSdkLibDir="C:\Program Files\DigitalPersona\U.are.U SDK\Windows\Lib"
+
+    Target net8.0-windows: DPUruNet_DotNet8 hace P/Invoke a dpfpdd/dpfj
+    (nativas x64, las instala el RTE en las PCs de los gyms). Single-file
+    self-contained: las PCs de gym no tienen .NET runtime.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>tinta-bio</AssemblyName>
+    <RootNamespace>TintaBio</RootNamespace>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PlatformTarget>x64</PlatformTarget>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <!-- Sin trimming: DPUruNet usa P/Invoke + reflection interna; recortar
+         es invitar fallos en runtime que sólo aparecen en la PC del gym. -->
+    <PublishTrimmed>false</PublishTrimmed>
+    <!-- Permite compilar (no ejecutar) el target windows desde macOS/Linux
+         para checks rápidos de sintaxis en dev. -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <DpSdkLibDir Condition="'$(DpSdkLibDir)' == ''">$(MSBuildThisFileDirectory)vendor\Lib</DpSdkLibDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="DPUruNet_DotNet8">
+      <HintPath>$(DpSdkLibDir)\DotNET\DPUruNet_DotNet8.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+</Project>
