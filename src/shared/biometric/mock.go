@@ -35,6 +35,10 @@ type MockEngine struct {
 	EnrollErr error
 	// IdentifyErr, when set, is returned by Identify.
 	IdentifyErr error
+	// IdentifyCalls counts Identify invocations — el SDK real truena con
+	// galería vacía (DP_INVALID_PARAMETER), así que el hub debe evitar la
+	// llamada y los tests lo verifican con este contador.
+	IdentifyCalls int
 
 	alive     bool
 	connected bool
@@ -70,6 +74,7 @@ func (m *MockEngine) SetGallery(_ context.Context, epoch string, candidates []Ga
 func (m *MockEngine) Identify(_ context.Context, probeFMD string, _, max int) ([]string, string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.IdentifyCalls++
 	if !m.alive {
 		return nil, "", ErrNotAvailable
 	}
