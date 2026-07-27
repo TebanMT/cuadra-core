@@ -315,10 +315,31 @@ internal static class Program
                     var divisor = cmd.FarDivisor ?? DefaultFarDivisor;
                     var max = cmd.Max ?? 1;
                     List<(string Ref, Fmd Fmd)> gallery;
-                    IdentifyResult result;
+                    string epoch;
                     lock (EngineLock)
                     {
                         gallery = _gallery;
+                        epoch = _galleryEpoch;
+                    }
+                    // Galería vacía = CERO matches, no error: dpfj_identify
+                    // con 0 candidatos devuelve DP_INVALID_PARAMETER y eso
+                    // rompía al sidecar (el hub cortocircuita el caso cuando
+                    // lo conoce, pero un helper recién reiniciado puede
+                    // recibir identify ANTES del resend de galería — el
+                    // epoch en la respuesta deja al sidecar detectar el
+                    // desfase y re-mandarla).
+                    if (gallery.Count == 0)
+                    {
+                        Emit(new Evt
+                        {
+                            Event = "result", Id = cmd.Id, Ok = true,
+                            Matches = Array.Empty<string>(), GalleryEpoch = epoch,
+                        });
+                        break;
+                    }
+                    IdentifyResult result;
+                    lock (EngineLock)
+                    {
                         result = Comparison.Identify(
                             probe, 0,
                             gallery.Select(g => g.Fmd),
