@@ -103,6 +103,67 @@ func (p *KeyringGMKProvider) GetGMK(_ context.Context, gymID uuid.UUID) ([]byte,
 	return out, nil
 }
 
+// Lookup devuelve la GMK local (cache → keyring) SIN generar una nueva en
+// el miss. Es la mitad de solo-lectura que el provider de escrow necesita:
+// "¿esta PC ya tiene llave?" sin el efecto secundario de crearla (crearla
+// sin consultar al cloud es exactamente el bug que el escrow arregla).
+func (p *KeyringGMKProvider) Lookup(gymID uuid.UUID) ([]byte, bool) {
+	if gymID == uuid.Nil {
+		return nil, false
+	}
+	p.mu.RLock()
+	if cached, ok := p.cache[gymID]; ok {
+		out := make([]byte, len(cached))
+		copy(out, cached)
+		p.mu.RUnlock()
+		return out, true
+	}
+	p.mu.RUnlock()
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if cached, ok := p.cache[gymID]; ok {
+		out := make([]byte, len(cached))
+		copy(out, cached)
+		return out, true
+	}
+	encoded, err := keyring.Get(p.service, gymID.String())
+	if err != nil {
+		return nil, false
+	}
+	raw, derr := base64.StdEncoding.DecodeString(encoded)
+	if derr != nil || len(raw) != GMKSize {
+		return nil, false
+	}
+	p.cache[gymID] = raw
+	out := make([]byte, GMKSize)
+	copy(out, raw)
+	return out, true
+}
+
+// Adopt persiste una GMK que vino de FUERA (el escrow del cloud) en keyring
+// + cache, sobreescribiendo cualquier entrada previa. El único caller
+// legítimo es el provider de escrow: el cloud es la autoridad de la llave
+// canónica del gym (misma postura que password_hash) y una divergencia
+// local pierde.
+func (p *KeyringGMKProvider) Adopt(gymID uuid.UUID, gmk []byte) error {
+	if gymID == uuid.Nil || len(gmk) != GMKSize {
+		return ErrInvalidGMK
+	}
+	if err := keyring.Set(p.service, gymID.String(), base64.StdEncoding.EncodeToString(gmk)); err != nil {
+		return fmt.Errorf("persist adopted gmk for gym %s: %w", gymID, err)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if old, ok := p.cache[gymID]; ok {
+		Zero(old)
+	}
+	stored := make([]byte, GMKSize)
+	copy(stored, gmk)
+	p.cache[gymID] = stored
+	return nil
+}
+
 // Forget drops the cached + keyring entry for a gym. Called on logout/unpair
 // so the next operator on the same physical PC can't passively reach the
 // previous tenant's templates. Errors talking to the keyring are logged-only

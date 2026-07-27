@@ -590,6 +590,17 @@ func main() {
 	syncStore := syncShared.NewPostgresStore()
 	syncConflicts := syncShared.NewConflictLogger()
 	syncHandler := syncShared.NewHandler(uow, syncStore, syncConflicts, tokens, sidecarStore, syncMetrics)
+	// SMK → escrow de GMKs biométricas (ADR-006 §2.2, POST /sync/gmk). Sin
+	// la env el endpoint responde 503 y los sidecars conservan su llave
+	// local (feature apagada, fail-closed). La SMK es un secreto de infra
+	// con respaldo obligatorio: perderla = perder todas las GMKs escrowed.
+	if smk, err := bcrypto.ParseSMK(os.Getenv("TINTA_SMK_BASE64")); err != nil {
+		log.Fatalf("TINTA_SMK_BASE64 inválida: %v", err)
+	} else if smk == nil {
+		log.Printf("[biometric] TINTA_SMK_BASE64 vacía — escrow de GMK deshabilitado (los sidecars operan con llave local)")
+	} else {
+		syncHandler.WithSMK(smk)
+	}
 	syncHandler.RegisterRoutes(r)
 	// Los webhooks de Stripe/MP mutan la suscripción del gym cloud-side; el
 	// touch re-manda la fila del gym en el pull incremental de los sidecars

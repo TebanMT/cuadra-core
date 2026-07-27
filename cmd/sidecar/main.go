@@ -213,12 +213,32 @@ func main() {
 	// first GetGMK and caches in-process. Override with SIDECAR_GMK_INMEMORY=1
 	// for ad-hoc tests on a box without an OS keyring (CI runners that
 	// don't keep a logged-in user, headless Linux dev VMs).
+	// Con escrow (ADR-006 §2.2/§2.6, jul-2026): el KeyringGMKProvider se
+	// envuelve en EscrowGMKProvider — la llave local se ADOPTA al vault del
+	// cloud en el primer contacto, y una PC sin llave (pareo nuevo /
+	// reinstalación con keyring perdido) la RECUPERA en lugar de generar
+	// una huérfana que volvía indescifrable toda huella sincronizada. La
+	// operación diaria sigue 100% offline (la llave del keyring manda); la
+	// red sólo participa en pareo/recuperación — el momento que ya requería
+	// internet. Credencial: el sk_live_* de sync_state (igual que el agent).
+	gmkCloudURL := envOrDefault("TINTA_CLOUD_URL", "https://api.entinta.app")
 	var gmkProvider bcrypto.GMKProvider
 	if os.Getenv("SIDECAR_GMK_INMEMORY") == "1" {
 		log.Printf("[biometric] SIDECAR_GMK_INMEMORY=1 — using in-memory GMK provider (galleries die at restart)")
 		gmkProvider = bcrypto.NewInMemoryGMKProvider()
 	} else {
-		gmkProvider = bcrypto.NewKeyringGMKProvider()
+		escrowClient := bcrypto.NewEscrowHTTPClient(gmkCloudURL, func(ctx context.Context) (string, error) {
+			tx, err := uow.Query(ctx)
+			if err != nil {
+				return "", err
+			}
+			st, err := syncShared.ReadState(ctx, tx)
+			if err != nil {
+				return "", err
+			}
+			return st.SidecarToken, nil
+		})
+		gmkProvider = bcrypto.NewEscrowGMKProvider(bcrypto.NewKeyringGMKProvider(), escrowClient)
 	}
 	bioEngine := biometric.NewEngine(biometric.EngineConfig{Logger: log.Default()})
 
