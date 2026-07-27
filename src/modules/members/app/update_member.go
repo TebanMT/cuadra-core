@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -52,24 +53,32 @@ func (uc *UpdateMember) Execute(ctx context.Context, in UpdateMemberInput) (*mem
 			return sharedDomain.NewBusinessError(memErrors.ErrCrossGym, "")
 		}
 		// Phone uniqueness — only relevant if it actually changed.
+		// in.Phone == nil → sin cambio; *in.Phone == "" → QUITAR el teléfono
+		// (explícito: el FE sólo manda "" cuando el operador marcó el check
+		// "sin teléfono" en la edición). El dedup sólo corre con valor.
 		if in.Phone != nil {
-			normalized, err := normalizeAndValidatePhone(*in.Phone)
-			if err != nil {
-				return sharedDomain.NewValidationError(err)
-			}
-			if normalized != m.Phone {
-				exists, err := uc.Members.ExistsByGymAndPhone(tx, in.GymID, normalized)
+			if strings.TrimSpace(*in.Phone) == "" {
+				empty := ""
+				in.Phone = &empty
+			} else {
+				normalized, err := normalizeAndValidatePhone(*in.Phone)
 				if err != nil {
-					return sharedDomain.NewUnexpectedError(err)
+					return sharedDomain.NewValidationError(err)
 				}
-				if exists {
-					return sharedDomain.NewBusinessError(memErrors.ErrPhoneAlreadyExists, "")
+				if normalized != m.Phone {
+					exists, err := uc.Members.ExistsByGymAndPhone(tx, in.GymID, normalized)
+					if err != nil {
+						return sharedDomain.NewUnexpectedError(err)
+					}
+					if exists {
+						return sharedDomain.NewBusinessError(memErrors.ErrPhoneAlreadyExists, "")
+					}
 				}
+				// Substitute the normalized version into the update so the domain
+				// also runs it through ValidatePhone (idempotent).
+				normCopy := normalized
+				in.Phone = &normCopy
 			}
-			// Substitute the normalized version into the update so the domain
-			// also runs it through ValidatePhone (idempotent).
-			normCopy := normalized
-			in.Phone = &normCopy
 		}
 		before := map[string]any{"full_name": m.FullName, "phone": m.Phone, "email": m.Email}
 		if err := m.ApplyProfileUpdate(memberDomain.ProfileUpdate{
