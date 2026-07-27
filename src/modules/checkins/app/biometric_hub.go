@@ -287,6 +287,21 @@ func (h *BiometricHub) RefreshGallery(ctx context.Context) error {
 // contesta con una galería distinta a la nuestra (carrera enroll-vs-identify
 // o helper recién reiniciado), re-manda la galería y reintenta UNA vez.
 func (h *BiometricHub) identify(ctx context.Context, fmd string) ([]string, error) {
+	// Galería vacía conocida (ya enviada al helper, cero enrolados): cero
+	// matches SIN llamar al motor. Identify del SDK con 0 candidatos no
+	// devuelve "sin matches" — devuelve DP_INVALID_PARAMETER. Vive AQUÍ y
+	// no en los llamadores porque los cubre a TODOS: el check-in (dedazo
+	// salía como checkin_error de lector) y el probe de colisión del
+	// enroll — el PRIMER enroll de un gym corre contra galería vacía por
+	// definición y moría en enroll_failed internal tras las 4 capturas
+	// (mordió en la validación real, 26-jul).
+	h.mu.Lock()
+	galleryLoaded := h.epoch != ""
+	galleryEmpty := len(h.refToMember) == 0
+	h.mu.Unlock()
+	if galleryLoaded && galleryEmpty {
+		return nil, nil
+	}
 	for attempt := 0; ; attempt++ {
 		refs, helperEpoch, err := h.Engine.Identify(ctx, fmd, h.FarDivisor, 1)
 		if err != nil {
@@ -406,21 +421,9 @@ func (h *BiometricHub) checkinSample(gymID uuid.UUID, fmd string) {
 
 	h.Events.Publish(BioEvent{Type: BioCheckinAttempt})
 
-	// Galería vacía conocida (ya se envió al helper y no hay enrolados):
-	// contestar no_match SIN llamar al motor. Identify del SDK con 0
-	// candidatos no devuelve "sin matches" — devuelve DP_INVALID_PARAMETER,
-	// y ese error salía al FE como checkin_error "lector no disponible" en
-	// vez del "nadie tiene huella registrada" honesto (mordió en la
-	// validación real, gym recién instalado sin enrolados).
-	h.mu.Lock()
-	galleryLoaded := h.epoch != ""
-	galleryEmpty := len(h.refToMember) == 0
-	h.mu.Unlock()
-	if galleryLoaded && galleryEmpty {
-		h.Events.Publish(BioEvent{Type: BioCheckinNoMatch, Message: chkErrors.ErrFingerprintNotEnrolled.Error()})
-		return
-	}
-
+	// El caso galería-vacía lo absorbe identify() (short-circuit sin llamar
+	// al motor); acá sólo cae al branch len(refs)==0, que ya distingue el
+	// mensaje "nadie tiene huella registrada" vs "no identifiqué la huella".
 	refs, err := h.identify(ctx, fmd)
 	if err != nil {
 		log.Printf("[biometric] identify falló: %v", err)

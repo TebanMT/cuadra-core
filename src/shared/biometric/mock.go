@@ -81,6 +81,14 @@ func (m *MockEngine) Identify(_ context.Context, probeFMD string, _, max int) ([
 	if m.IdentifyErr != nil {
 		return nil, m.GalleryEpoch, m.IdentifyErr
 	}
+	// Fidelidad al SDK real: dpfj_identify con 0 candidatos devuelve
+	// DP_INVALID_PARAMETER, NO "cero matches". El mock lo espeja para que
+	// cualquier caller que olvide el short-circuit de galería vacía FALLE
+	// en tests igual que en hardware (el probe de colisión del primer
+	// enroll se escapó justo por un mock demasiado amable).
+	if len(m.Gallery) == 0 {
+		return nil, m.GalleryEpoch, &CommandError{Code: "DP_INVALID_PARAMETER"}
+	}
 	if max <= 0 {
 		max = 1
 	}

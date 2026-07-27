@@ -501,13 +501,14 @@ func TestHub_GalleryEpochRace(t *testing.T) {
 	f := setupCheckinsFixture(t)
 	f.enrollViaSession(f.memberID, "fmd-juan")
 
-	// Desincronizar: el mock reporta OTRA galería (epoch distinto y vacía),
-	// como un helper que se reinició con cache viejo.
+	// Desincronizar: el mock conserva la galería pero con epoch VIEJO — la
+	// carrera enroll-vs-identify real (el hub re-mandó galería nueva y el
+	// helper contesta todavía con la anterior). No se vacía la galería: el
+	// mock fiel al SDK truena con 0 candidatos, y el caso "helper
+	// reiniciado con galería vacía" ya lo cubren el short-circuit de
+	// identify() + el resend de HandleHelperUp.
 	f.engine.GalleryEpoch = "epoch-viejo"
-	saved := f.engine.Gallery
-	f.engine.Gallery = nil
 	callsBefore := f.engine.SetGalleryCalls
-	_ = saved
 
 	sub, cancel := f.events.Subscribe()
 	defer cancel()
