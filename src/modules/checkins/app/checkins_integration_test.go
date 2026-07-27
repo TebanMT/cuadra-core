@@ -14,6 +14,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 
 	chkApp "github.com/cuadra/cuadra-core/src/modules/checkins/app"
+	chkErrors "github.com/cuadra/cuadra-core/src/modules/checkins/domain/errors"
 	chkRepoLite "github.com/cuadra/cuadra-core/src/modules/checkins/infraestructure/db/repositories"
 	gymRepoLite "github.com/cuadra/cuadra-core/src/modules/gyms/infraestructure/db/repositories"
 	memApp "github.com/cuadra/cuadra-core/src/modules/members/app"
@@ -314,6 +315,30 @@ func TestUC029_NoMatch_PublishesEventWithoutRow(t *testing.T) {
 	}
 }
 
+// TestUC029_EmptyGallery_NoMatchSinMotor: gym sin NADIE enrolado (galería
+// vacía ya enviada al helper) → un dedazo publica checkin_no_match con el
+// mensaje "nadie tiene huella registrada" SIN llamar Identify: el SDK real
+// con 0 candidatos devuelve DP_INVALID_PARAMETER, no "sin matches", y eso
+// salía al FE como checkin_error de lector (mordió en la validación real).
+func TestUC029_EmptyGallery_NoMatchSinMotor(t *testing.T) {
+	f := setupCheckinsFixture(t)
+
+	sub, cancel := f.events.Subscribe()
+	defer cancel()
+	identifyBefore := f.engine.IdentifyCalls
+	f.hub.HandleSample("fmd-de-un-desconocido", "DP_QUALITY_GOOD")
+	evt, ok := waitForEvent(sub, chkApp.BioCheckinNoMatch, time.Second)
+	if !ok {
+		t.Fatalf("checkin_no_match no llegó con galería vacía")
+	}
+	if evt.Message != chkErrors.ErrFingerprintNotEnrolled.Error() {
+		t.Errorf("mensaje equivocado: %q", evt.Message)
+	}
+	if f.engine.IdentifyCalls != identifyBefore {
+		t.Errorf("con galería vacía NO se debe llamar identify (el SDK real truena con 0 candidatos)")
+	}
+}
+
 // TestHub_SamplesDuringEnrollDoNotIdentify: con sesión abierta, un dedazo de
 // un socio YA enrolado se acumula para el enroll en lugar de hacer checkin.
 func TestHub_SamplesDuringEnrollDoNotIdentify(t *testing.T) {
@@ -523,17 +548,20 @@ func TestHub_HelperRestartMidEnroll(t *testing.T) {
 		t.Errorf("HandleHelperUp debe re-mandar la galería")
 	}
 
-	// La sesión sigue viva: dos dedazos más completan el enroll.
-	f.hub.HandleSample(otherFinger, "DP_QUALITY_GOOD")
-	f.hub.HandleSample(otherFinger, "DP_QUALITY_GOOD")
+	// La sesión sigue viva: los dedazos restantes completan el enroll.
+	for i := 1; i < f.hub.RequiredSamples; i++ {
+		f.hub.HandleSample(otherFinger, "DP_QUALITY_GOOD")
+	}
 	if _, ok := waitForEvent(sub, chkApp.BioEnrollCompleted, time.Second); !ok {
 		t.Fatalf("la sesión debió sobrevivir el restart del helper")
 	}
 }
 
 // TestHub_EnrollInvalidSet: el helper rechaza el set (DP_ENROLLMENT_INVALID_
-// SET) → enroll_failed enrollment_invalid, los samples se descartan y la
-// MISMA sesión acepta otros 3 dedazos.
+// SET) → enroll_failed enrollment_invalid y la sesión se CIERRA (todo
+// enroll_failed es terminal: el FE suelta su session_id al recibirlo; una
+// sesión que sobreviviera se tragaría los dedazos de check-in hasta el TTL).
+// El reintento abre sesión NUEVA y completa.
 func TestHub_EnrollInvalidSet(t *testing.T) {
 	f := setupCheckinsFixture(t)
 
@@ -552,18 +580,19 @@ func TestHub_EnrollInvalidSet(t *testing.T) {
 	if !ok || evt.Code != chkApp.EnrollFailInvalidSet {
 		t.Fatalf("esperaba enrollment_invalid, got %+v", evt)
 	}
-	if !f.hub.Enrolling() {
-		t.Fatalf("la sesión debe seguir viva tras set inválido")
+	if f.hub.Enrolling() {
+		t.Fatalf("la sesión debe CERRARSE tras set inválido (enroll_failed es terminal)")
 	}
 
-	// Segundo intento con el helper ya cooperando.
+	// El siguiente dedazo ya NO es de enroll: vuelve al modo check-in.
+	f.hub.HandleSample("fmd-borroso", "DP_QUALITY_GOOD")
+	if _, ok := waitForEvent(sub, chkApp.BioCheckinAttempt, time.Second); !ok {
+		t.Fatalf("tras el fallo los dedazos deben fluir al check-in, no a la sesión muerta")
+	}
+
+	// Reintento del operador = sesión nueva, con el helper ya cooperando.
 	f.engine.EnrollErr = nil
-	for i := 0; i < f.hub.RequiredSamples; i++ {
-		f.hub.HandleSample("fmd-juan", "DP_QUALITY_GOOD")
-	}
-	if _, ok := waitForEvent(sub, chkApp.BioEnrollCompleted, time.Second); !ok {
-		t.Fatalf("el reintento dentro de la misma sesión debió completar")
-	}
+	f.enrollViaSession(f.memberID, "fmd-juan")
 }
 
 // TestHub_ReaderStateEvents: hot-plug del lector fluye a los subscribers

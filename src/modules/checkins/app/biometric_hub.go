@@ -23,9 +23,16 @@ import (
 )
 
 // EnrollSamplesRequired is how many dedazos one enroll session accumulates
-// before asking the helper to combine them into the enrollment FMD — the
-// same 3-capture flow the FE always drove, ahora orquestado aquí.
-const EnrollSamplesRequired = 3
+// before asking the helper to combine them into the enrollment FMD.
+//
+// CUATRO, no tres: FingerJet (dpfj_create_enrollment_fmd, vía
+// Enrollment.CreateEnrollmentFmd) necesita 4 FMDs de pre-enroll para armar
+// el template — el sample oficial del SDK (UareUSampleCSharp/Enrollment.cs)
+// dispara el combine hasta `count >= 4`. Con 3 el SDK rechaza el set y CADA
+// enroll moría en enrollment_invalid tras el 3er dedazo (mordió en la
+// validación real del gym, 26-jul-2026). El 3 histórico venía del flujo
+// NBIS, que combinaba distinto.
+const EnrollSamplesRequired = 4
 
 // EnrollSessionTTL bounds an enroll session: si el socio no completa los
 // dedazos a tiempo, la sesión expira sola y el kiosko vuelve a identificar.
@@ -399,6 +406,21 @@ func (h *BiometricHub) checkinSample(gymID uuid.UUID, fmd string) {
 
 	h.Events.Publish(BioEvent{Type: BioCheckinAttempt})
 
+	// Galería vacía conocida (ya se envió al helper y no hay enrolados):
+	// contestar no_match SIN llamar al motor. Identify del SDK con 0
+	// candidatos no devuelve "sin matches" — devuelve DP_INVALID_PARAMETER,
+	// y ese error salía al FE como checkin_error "lector no disponible" en
+	// vez del "nadie tiene huella registrada" honesto (mordió en la
+	// validación real, gym recién instalado sin enrolados).
+	h.mu.Lock()
+	galleryLoaded := h.epoch != ""
+	galleryEmpty := len(h.refToMember) == 0
+	h.mu.Unlock()
+	if galleryLoaded && galleryEmpty {
+		h.Events.Publish(BioEvent{Type: BioCheckinNoMatch, Message: chkErrors.ErrFingerprintNotEnrolled.Error()})
+		return
+	}
+
 	refs, err := h.identify(ctx, fmd)
 	if err != nil {
 		log.Printf("[biometric] identify falló: %v", err)
@@ -577,23 +599,23 @@ func (h *BiometricHub) finalizeEnroll(sess *enrollSession) {
 
 	enrollFMD, err := h.Engine.EnrollCombine(ctx, sess.FMDs)
 	if err != nil {
-		// Set inválido (o helper caído a media combinación): se descartan
-		// los samples y la sesión sigue viva — el FE pide otros dedazos.
+		// Set inválido (o helper caído a media combinación): la sesión se
+		// CIERRA. Invariante: todo enroll_failed es terminal — el FE suelta
+		// su session_id al recibirlo (sessionRef=null) y el reintento abre
+		// sesión nueva. La versión anterior dejaba la sesión viva "para
+		// otros dedazos", pero nadie la escuchaba ya y la sesión zombie se
+		// tragaba los dedazos de CHECK-IN hasta que venciera el TTL (mordió
+		// en la validación real: check-in mudo tras un enroll fallido).
 		code := EnrollFailEngine
 		var cmdErr *biometric.CommandError
 		if errors.As(err, &cmdErr) {
 			code = EnrollFailInvalidSet
 		}
 		log.Printf("[biometric] enroll combine falló (session=%s): %v", sess.ID, err)
-		h.mu.Lock()
-		if h.session == sess {
-			sess.FMDs = nil
-			sess.finalizing = false
-		}
-		h.mu.Unlock()
+		h.closeEnrollSession(sess)
 		h.Events.Publish(BioEvent{
 			Type: BioEnrollFailed, Code: code,
-			Message: "no se pudo combinar las capturas; vuelve a poner el dedo",
+			Message: "no se pudo combinar las capturas; vuelve a intentarlo",
 			Enroll:  h.enrollState(sess),
 		})
 		return
