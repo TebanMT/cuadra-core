@@ -58,6 +58,8 @@ var moneyColumns = map[string]map[string]bool{
 var keepEmptyStringColumns = map[string]map[string]bool{
 	"users":                  {"email": true},
 	"notification_templates": {"body": true},
+	// members.phone: "" = socio sin teléfono (NOT NULL en ambos schemas).
+	"members": {"phone": true},
 }
 
 // isMoneyColumn reporta si (table, col) guarda PESOS en el wire pero CENTAVOS

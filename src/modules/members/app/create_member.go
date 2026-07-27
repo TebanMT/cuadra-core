@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -43,8 +44,8 @@ type CreateMemberPromotion struct {
 var ErrBillingNotWired = errors.New("create-member: billing dependencies missing for first-payment charge")
 
 // CreateMemberInput backs UC-012. The only required fields are GymID +
-// FullName + Phone + MembershipTypeID. Optional fields use pointers (nil ==
-// "not provided"). When `AllowDuplicatePhone` is false and the phone already
+// FullName + MembershipTypeID, más Phone salvo alta explícita sin teléfono
+// (NoPhone). Optional fields use pointers (nil == "not provided"). When `AllowDuplicatePhone` is false and the phone already
 // exists the use case returns a BusinessError; the front-end can re-call with
 // AllowDuplicatePhone=true to confirm (DA-12.3).
 type CreateMemberInput struct {
@@ -52,10 +53,18 @@ type CreateMemberInput struct {
 	ActorUserID uuid.UUID
 	FullName    string
 	Phone       string
-	Email       *string
-	Birthdate   *time.Time
-	PhotoURL    *string
-	Notes       *string
+	// NoPhone: alta EXPLÍCITA sin teléfono (el check "sin teléfono" del
+	// FE). Con el flag, Phone debe venir vacío (mandarlo poblado es un
+	// input contradictorio → ValidationError) y el socio se guarda con
+	// phone = "" — la convención del schema (columna NOT NULL, "" = sin
+	// dato, igual que users.email). Sin el flag, el teléfono sigue siendo
+	// obligatorio: un "" accidental de un caller viejo NO crea socios sin
+	// teléfono en silencio.
+	NoPhone   bool
+	Email     *string
+	Birthdate *time.Time
+	PhotoURL  *string
+	Notes     *string
 	// Gender opcional (DA-012.7). nil o "" = no se captura; valor válido se
 	// persiste tras pasar por memberDomain.ValidateGender. NO se infiere
 	// del nombre.
@@ -240,18 +249,30 @@ func (uc *CreateMember) Execute(ctx context.Context, in CreateMemberInput) (*Cre
 			return sharedDomain.NewBusinessError(memErrors.ErrMembershipTypeInactive, "")
 		}
 
-		// 2) Phone uniqueness — soft warning unless caller acknowledged.
-		phoneNorm, err := normalizeAndValidatePhone(in.Phone)
-		if err != nil {
-			return sharedDomain.NewValidationError(err)
-		}
-		if !in.AllowDuplicatePhone {
-			exists, err := uc.Members.ExistsByGymAndPhone(tx, in.GymID, phoneNorm)
-			if err != nil {
-				return sharedDomain.NewUnexpectedError(err)
+		// 2) Phone: obligatorio salvo alta explícita sin teléfono (NoPhone).
+		// El dedup sólo aplica cuando hay teléfono — dos socios sin teléfono
+		// deben poder coexistir.
+		phoneNorm := ""
+		if in.NoPhone {
+			if strings.TrimSpace(in.Phone) != "" {
+				// Contradicción: el caller marcó "sin teléfono" Y mandó uno.
+				// Mejor rebotar que adivinar cuál de los dos quiso.
+				return sharedDomain.NewValidationError(memErrors.ErrInvalidPhone)
 			}
-			if exists {
-				return sharedDomain.NewBusinessError(memErrors.ErrPhoneAlreadyExists, "")
+		} else {
+			var err error
+			phoneNorm, err = normalizeAndValidatePhone(in.Phone)
+			if err != nil {
+				return sharedDomain.NewValidationError(err)
+			}
+			if !in.AllowDuplicatePhone {
+				exists, err := uc.Members.ExistsByGymAndPhone(tx, in.GymID, phoneNorm)
+				if err != nil {
+					return sharedDomain.NewUnexpectedError(err)
+				}
+				if exists {
+					return sharedDomain.NewBusinessError(memErrors.ErrPhoneAlreadyExists, "")
+				}
 			}
 		}
 

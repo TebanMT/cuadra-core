@@ -123,8 +123,12 @@ type createMemberPromoReq struct {
 }
 
 type createMemberReq struct {
-	FullName  string  `json:"full_name" validate:"required,min=3,max=100"`
-	Phone     string  `json:"phone" validate:"required"`
+	FullName string `json:"full_name" validate:"required,min=3,max=100"`
+	// Phone es obligatorio SALVO alta explícita sin teléfono (no_phone) —
+	// el check "sin teléfono" del FE. La requiredness condicional vive en
+	// el use case (NoPhone), no en un tag validate.
+	Phone     string  `json:"phone"`
+	NoPhone   bool    `json:"no_phone,omitempty"`
 	Email     *string `json:"email,omitempty"`
 	Birthdate *string `json:"birthdate,omitempty"` // YYYY-MM-DD
 	PhotoURL  *string `json:"photo_url,omitempty"`
@@ -331,6 +335,7 @@ func (ctrl *MemberController) handleCreate(c *gin.Context) {
 		GymID: gymID, ActorUserID: userID,
 		FullName:            req.FullName,
 		Phone:               req.Phone,
+		NoPhone:             req.NoPhone,
 		Email:               req.Email,
 		Birthdate:           birthdate,
 		PhotoURL:            req.PhotoURL,

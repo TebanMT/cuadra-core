@@ -88,6 +88,9 @@ var timestamptzColumns = map[string]map[string]bool{
 // envía como `""` cuando es opcional en el dominio, debe vivir aquí.
 var notNullStringColumns = map[string]map[string]bool{
 	"users": {"email": true},
+	// phone: NOT NULL con "" = socio SIN teléfono (alta explícita con el
+	// check del FE). Nullificarlo rompería el INSERT en postgres (23502).
+	"members": {"phone": true},
 	// body: NOT NULL con "" como valor VÁLIDO y común — significa "usa el
 	// texto default de la librería" (Standard nunca edita el body, sólo el
 	// switch; enqueueTemplate siempre emite ""). Nullificarlo rompía la

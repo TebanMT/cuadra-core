@@ -263,6 +263,17 @@ func (m *Member) applyFullName(name string) error {
 }
 
 func (m *Member) applyPhone(phone string) error {
+	// "" (input CRUDO vacío) es válido: socio SIN teléfono. La explicitud
+	// vive en el borde (el FE exige el check "sin teléfono" y el use case
+	// el flag NoPhone en el alta); el dominio sólo garantiza que si HAY
+	// teléfono, sea canónico E.164. OJO: el check es sobre el input crudo
+	// y NO sobre el normalizado — Normalize("abc") también deja "" y esa
+	// basura debe seguir rebotando como ErrInvalidPhone, no colarse como
+	// "sin teléfono".
+	if strings.TrimSpace(phone) == "" {
+		m.Phone = ""
+		return nil
+	}
 	v := normalizePhone(phone)
 	if !ValidatePhone(v) {
 		return memErrors.ErrInvalidPhone
@@ -397,7 +408,9 @@ func (v *nameValidator) Validate(m *Member) error {
 type phoneValidator struct{ Next Validator }
 
 func (v *phoneValidator) Validate(m *Member) error {
-	if !ValidatePhone(m.Phone) {
+	// Sin teléfono ("") es un estado válido del socio; sólo se valida el
+	// formato cuando hay valor.
+	if m.Phone != "" && !ValidatePhone(m.Phone) {
 		return memErrors.ErrInvalidPhone
 	}
 	if v.Next != nil {

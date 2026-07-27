@@ -288,6 +288,127 @@ func TestUC012_CreateMember_DuplicatePhone(t *testing.T) {
 	}
 }
 
+// TestUC012_CreateMember_SinTelefono: el alta sin teléfono es EXPLÍCITA
+// (flag NoPhone = el check "sin teléfono" del FE). Sin el flag, un phone
+// vacío sigue rebotando (un caller viejo no crea socios sin teléfono en
+// silencio); con el flag + phone poblado es contradicción; dos socios sin
+// teléfono coexisten (el dedup sólo corre con valor).
+func TestUC012_CreateMember_SinTelefono(t *testing.T) {
+	f := setupMembersFixture(t)
+	typeID := f.createMembershipType(t, "Mensual")
+	uc := memApp.NewCreateMember(f.memberRepo, f.membershipR, f.mtRepo, f.uow, f.recorder)
+
+	base := memApp.CreateMemberInput{
+		GymID: f.gymID, ActorUserID: f.ownerID,
+		MembershipTypeID: typeID, StartDate: time.Now().UTC(),
+	}
+
+	// Sin flag y sin teléfono → error (requiredness intacta).
+	in := base
+	in.FullName = "Juan Sin Teléfono"
+	if _, err := uc.Execute(context.Background(), in); err == nil {
+		t.Errorf("phone vacío SIN NoPhone debe fallar")
+	}
+
+	// Flag + teléfono poblado → contradicción.
+	in = base
+	in.FullName = "Juan Contradictorio"
+	in.NoPhone = true
+	in.Phone = "+524421234567"
+	if _, err := uc.Execute(context.Background(), in); err == nil {
+		t.Errorf("NoPhone con teléfono poblado debe fallar")
+	}
+
+	// Alta explícita sin teléfono → OK, phone = "".
+	in = base
+	in.FullName = "Juan Sin Teléfono"
+	in.NoPhone = true
+	out, err := uc.Execute(context.Background(), in)
+	if err != nil {
+		t.Fatalf("alta sin teléfono: %v", err)
+	}
+	var phone string
+	if err := f.db.Get(&phone, "SELECT phone FROM members WHERE id = ?", out.MemberID.String()); err != nil {
+		t.Fatalf("query phone: %v", err)
+	}
+	if phone != "" {
+		t.Errorf("phone = %q, want \"\"", phone)
+	}
+
+	// Un segundo socio sin teléfono coexiste (el dedup no aplica a "").
+	in.FullName = "María Sin Teléfono"
+	if _, err := uc.Execute(context.Background(), in); err != nil {
+		t.Errorf("dos socios sin teléfono deben coexistir: %v", err)
+	}
+}
+
+// TestUC013_UpdateMember_QuitarYReponerTelefono: en edición, phone=""
+// explícito QUITA el teléfono; volver a ponerlo re-activa la validación y
+// el dedup contra otros socios.
+func TestUC013_UpdateMember_QuitarYReponerTelefono(t *testing.T) {
+	f := setupMembersFixture(t)
+	typeID := f.createMembershipType(t, "Mensual")
+	create := memApp.NewCreateMember(f.memberRepo, f.membershipR, f.mtRepo, f.uow, f.recorder)
+
+	made, err := create.Execute(context.Background(), memApp.CreateMemberInput{
+		GymID: f.gymID, ActorUserID: f.ownerID,
+		FullName: "Juan Pérez", Phone: "+524421234567",
+		MembershipTypeID: typeID, StartDate: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := create.Execute(context.Background(), memApp.CreateMemberInput{
+		GymID: f.gymID, ActorUserID: f.ownerID,
+		FullName: "María López", Phone: "+524429876543",
+		MembershipTypeID: typeID, StartDate: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("create 2nd: %v", err)
+	}
+
+	update := memApp.NewUpdateMember(f.memberRepo, f.uow, f.recorder)
+
+	// Quitar el teléfono ("" explícito, el check del FE en edición).
+	empty := ""
+	if _, err := update.Execute(context.Background(), memApp.UpdateMemberInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: made.MemberID,
+		Phone: &empty,
+	}); err != nil {
+		t.Fatalf("quitar teléfono: %v", err)
+	}
+	var phone string
+	if err := f.db.Get(&phone, "SELECT phone FROM members WHERE id = ?", made.MemberID.String()); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if phone != "" {
+		t.Errorf("phone tras quitar = %q, want \"\"", phone)
+	}
+
+	// Reponer un teléfono que YA es de otro socio → dedup rebota.
+	dup := "+524429876543"
+	if _, err := update.Execute(context.Background(), memApp.UpdateMemberInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: made.MemberID,
+		Phone: &dup,
+	}); err == nil {
+		t.Errorf("reponer un teléfono duplicado debe rebotar")
+	}
+
+	// Reponer uno libre → OK y normalizado.
+	fresh := "442 111 2233"
+	if _, err := update.Execute(context.Background(), memApp.UpdateMemberInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: made.MemberID,
+		Phone: &fresh,
+	}); err != nil {
+		t.Fatalf("reponer teléfono libre: %v", err)
+	}
+	if err := f.db.Get(&phone, "SELECT phone FROM members WHERE id = ?", made.MemberID.String()); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if phone != "+524421112233" {
+		t.Errorf("phone repuesto = %q, want +524421112233 (normalizado)", phone)
+	}
+}
+
 func TestUC012_CreateMember_InactiveTypeRejected(t *testing.T) {
 	f := setupMembersFixture(t)
 	typeID := f.createMembershipType(t, "Mensual")
