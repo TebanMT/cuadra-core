@@ -22,15 +22,23 @@ type UserSQLiteRepository struct{}
 func NewUserSQLiteRepository() *UserSQLiteRepository { return &UserSQLiteRepository{} }
 
 type sqliteUserRow struct {
-	ID                 string         `db:"id"`
-	GymID              string         `db:"gym_id"`
-	Version            int            `db:"version"`
-	CreatedAt          int64          `db:"created_at"`
-	UpdatedAt          int64          `db:"updated_at"`
-	DeletedAt          sql.NullInt64  `db:"deleted_at"`
-	SyncedAt           sql.NullInt64  `db:"synced_at"`
-	Email              string         `db:"email"`
-	PasswordHash       string         `db:"password_hash"`
+	ID        string        `db:"id"`
+	GymID     string        `db:"gym_id"`
+	Version   int           `db:"version"`
+	CreatedAt int64         `db:"created_at"`
+	UpdatedAt int64         `db:"updated_at"`
+	DeletedAt sql.NullInt64 `db:"deleted_at"`
+	SyncedAt  sql.NullInt64 `db:"synced_at"`
+	Email     string        `db:"email"`
+	// NullString y no string: password_hash es NULLABLE desde la migración
+	// 016 (operadores pin-first sin contraseña), y el pull del cloud puede
+	// escribir NULL (payload canónico con password_hash: null — p.ej. un
+	// operador pin-first round-tripeado, o el rastro de la corrupción de
+	// jun-2026 en el owner). Con string a secas, UNA fila NULL tumbaba el
+	// scan de TODO el SELECT *: el grid de /auth/operators moría con "Scan
+	// error on column index 8" y el login-pin del usuario afectado salía
+	// como "PIN incorrecto" opaco (GetByID falla antes de ver el PIN).
+	PasswordHash       sql.NullString `db:"password_hash"`
 	FullName           string         `db:"full_name"`
 	Phone              sql.NullString `db:"phone"`
 	Role               string         `db:"role"`
@@ -50,11 +58,15 @@ func userToRow(u *userDomain.User) sqliteUserRow {
 		CreatedAt:          u.CreatedAt.UnixMilli(),
 		UpdatedAt:          u.UpdatedAt.UnixMilli(),
 		Email:              u.Email,
-		PasswordHash:       u.PasswordHash,
 		FullName:           u.FullName,
 		Role:               u.Role,
 		Active:             boolToInt(u.Active),
 		MustChangePassword: boolToInt(u.MustChangePassword),
+	}
+	// "" en dominio = sin contraseña (pin-first) = NULL en DB — misma
+	// convención que la migración 016 y el cloud post-019.
+	if u.PasswordHash != "" {
+		r.PasswordHash = sql.NullString{String: u.PasswordHash, Valid: true}
 	}
 	if u.Phone != nil {
 		r.Phone = sql.NullString{String: *u.Phone, Valid: true}
@@ -85,7 +97,7 @@ func userFromRow(r *sqliteUserRow) *userDomain.User {
 		GymID:              gymID,
 		Version:            r.Version,
 		Email:              r.Email,
-		PasswordHash:       r.PasswordHash,
+		PasswordHash:       r.PasswordHash.String,
 		FullName:           r.FullName,
 		Role:               r.Role,
 		Active:             r.Active != 0,

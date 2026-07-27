@@ -21,6 +21,7 @@ import (
 	userDomain "github.com/cuadra/cuadra-core/src/modules/users/domain/user"
 	usersRepoLite "github.com/cuadra/cuadra-core/src/modules/users/infraestructure/db/repositories"
 	"github.com/cuadra/cuadra-core/src/shared/audit"
+	"github.com/cuadra/cuadra-core/src/shared/auth"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 	syncpkg "github.com/cuadra/cuadra-core/src/shared/sync"
 )
@@ -325,4 +326,76 @@ func fetchOwnerID(t *testing.T, db *sqlx.DB, gymID uuid.UUID) uuid.UUID {
 		t.Fatalf("parse uuid: %v", err)
 	}
 	return id
+}
+
+// TestOperatorsGrid_LoginPIN_ToleranPasswordHashNull: regresión del scan.
+// password_hash es NULLABLE desde la migración 016 y el pull del cloud puede
+// escribir NULL (payload canónico con password_hash: null). Con el row struct
+// en `string` a secas, UNA fila NULL tumbaba el SELECT * completo: el grid de
+// /auth/operators moría con "sql: Scan error on column index 8" y el
+// login-pin del usuario afectado (el OWNER en el gym piloto) devolvía
+// "PIN incorrecto" opaco sin siquiera evaluar el PIN.
+func TestOperatorsGrid_LoginPIN_ToleranPasswordHashNull(t *testing.T) {
+	db, uow, gym := setupOperatorsFixture(t)
+	userRepo := usersRepoLite.NewUserSQLiteRepository()
+	rec := audit.NewSQLiteRecorder()
+
+	seedOwner(t, uow, userRepo, gym.ID)
+	ownerID := fetchOwnerID(t, db, gym.ID)
+
+	// Owner con PIN asignado (flujo installer/welcome).
+	pinHash, err := auth.HashPIN("4321")
+	if err != nil {
+		t.Fatalf("hash pin: %v", err)
+	}
+	if err := uow.Command(context.Background(), func(tx sharedDomain.Transaction) error {
+		owner, gerr := userRepo.GetByID(tx, ownerID)
+		if gerr != nil {
+			return gerr
+		}
+		owner.AssignPIN(pinHash, time.Now().UTC())
+		_, uerr := userRepo.Update(tx, owner)
+		return uerr
+	}); err != nil {
+		t.Fatalf("assign pin: %v", err)
+	}
+
+	// Simular el pull que deja password_hash en NULL (la fila del owner en
+	// el gym piloto tras el round-trip de la era de la corrupción jun-2026).
+	if _, err := db.Exec("UPDATE users SET password_hash = NULL WHERE id = ?", ownerID.String()); err != nil {
+		t.Fatalf("null password_hash: %v", err)
+	}
+
+	// (a) El grid de login no debe morir por la fila NULL.
+	list := usersApp.NewListOperatorsForLogin(userRepo, uow)
+	ops, err := list.Execute(context.Background(), gym.ID)
+	if err != nil {
+		t.Fatalf("el grid de operadores debe tolerar password_hash NULL: %v", err)
+	}
+	found := false
+	for _, op := range ops {
+		if op.UserID == ownerID {
+			found = true
+			if !op.HasPIN {
+				t.Errorf("owner debe reportar has_pin=true")
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("owner ausente del grid: %+v", ops)
+	}
+
+	// (b) El login-pin del owner debe funcionar — antes fallaba en GetByID
+	// (scan) y salía como "PIN incorrecto" sin evaluar el PIN.
+	login := usersApp.NewLoginPIN(userRepo, gymRepoLite.NewGymSQLiteRepository(), uow,
+		auth.NewJWTService("test-secret"), rec)
+	out, err := login.Execute(context.Background(), usersApp.LoginPINInput{
+		UserID: ownerID, PIN: "4321",
+	})
+	if err != nil {
+		t.Fatalf("login-pin del owner con password_hash NULL: %v", err)
+	}
+	if out.Role != "owner" || out.AccessToken == "" {
+		t.Errorf("login-pin incompleto: %+v", out)
+	}
 }
