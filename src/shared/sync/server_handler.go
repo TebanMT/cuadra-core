@@ -27,6 +27,16 @@ type Handler struct {
 	Tokens       auth.TokenService
 	SidecarStore sidecartoken.Store
 	Metrics      *Metrics
+	// SMK (Server Master Key) habilita el escrow de GMKs (ADR-006 §2.2,
+	// POST /sync/gmk). Se setea con WithSMK desde cmd/server; vacía =
+	// endpoint responde 503 y los sidecars conservan su llave local.
+	SMK []byte
+}
+
+// WithSMK habilita el escrow de GMK. Encadenable tras NewHandler.
+func (h *Handler) WithSMK(smk []byte) *Handler {
+	h.SMK = smk
+	return h
 }
 
 func NewHandler(uow sharedDomain.UnitOfWork, store Store, conflicts ConflictLogger, tokens auth.TokenService, sidecarStore sidecartoken.Store, metrics *Metrics) *Handler {
@@ -51,6 +61,9 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/pull", h.Pull)
 	api.GET("/full", h.FullSync)
 	api.GET("/last-update", h.LastUpdate)
+	// Escrow de GMK (ADR-006) — misma frontera de confianza que push/pull;
+	// requiere WithSMK, sin ella responde 503 (ver server_gmk.go).
+	api.POST("/gmk", h.EnsureGMK)
 	r.GET("/_internal/metrics", h.MetricsHandler)
 }
 
