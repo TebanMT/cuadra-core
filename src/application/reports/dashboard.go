@@ -145,7 +145,7 @@ func (uc *Dashboard) Execute(ctx context.Context, in DashboardInput) (*Dashboard
 	now := time.Now().UTC()
 	// Día y mes del GYM, no de UTC — desde las 6 PM de CDMX el dashboard
 	// mostraba los KPIs del día siguiente.
-	today := localToday(tx, uc.Gyms, in.GymID, now)
+	today, tzName := localTodayAndTZ(tx, uc.Gyms, in.GymID, now)
 	monthStart := time.Date(today.Year(), today.Month(), 1, 0, 0, 0, 0, time.UTC)
 	prevMonthStart := monthStart.AddDate(0, -1, 0)
 	prevMonthEnd := monthStart.AddDate(0, 0, -1)
@@ -176,11 +176,11 @@ func (uc *Dashboard) Execute(ctx context.Context, in DashboardInput) (*Dashboard
 	// BC expenses. Mismo windowing que ingresos para que los KPIs sean
 	// comparables. Cada fuente se mantiene como sub-KPI por si después
 	// queremos exponer el desglose en UI.
-	inventoryCostMonth, err := uc.Reader.SumInventoryCostBetween(tx, in.GymID, monthStart, today)
+	inventoryCostMonth, err := uc.Reader.SumInventoryCostBetween(tx, in.GymID, tzName, monthStart, today)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}
-	inventoryCostPrev, err := uc.Reader.SumInventoryCostBetween(tx, in.GymID, prevMonthStart, prevMonthEnd)
+	inventoryCostPrev, err := uc.Reader.SumInventoryCostBetween(tx, in.GymID, tzName, prevMonthStart, prevMonthEnd)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}

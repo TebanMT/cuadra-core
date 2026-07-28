@@ -79,6 +79,44 @@ func TestRangeReport_PopulatesAllTotals(t *testing.T) {
 	}
 }
 
+// TestRangeReport_Today_UsaDiaLocalDelGym — el período "Hoy" se ancla al día
+// calendario del GYM, no al de UTC. 27-jul 20:00 CDMX == 28-jul 02:00 UTC:
+// con el anclaje UTC anterior la sección de reportes pedía el 28 y salía en
+// ceros aunque el día hubiera cerrado con cobros.
+func TestRangeReport_Today_UsaDiaLocalDelGym(t *testing.T) {
+	uc := reports.NewRangeReport(&fakeReader{}, fakeUoW{}).WithGyms(&fakeGymRepo{gym: sampleGym()})
+	uc.Now = func() time.Time { return time.Date(2026, 7, 28, 2, 0, 0, 0, time.UTC) }
+
+	out, err := uc.Execute(context.Background(), reports.RangeReportInput{
+		GymID:  uuid.New(),
+		Period: reports.PeriodToday,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if out.From != "2026-07-27" || out.To != "2026-07-27" {
+		t.Errorf("today window = %s..%s, want 2026-07-27..2026-07-27", out.From, out.To)
+	}
+}
+
+// TestRangeReport_Today_SinGymsCaeAUTC — fail-open: sin repo de gyms el
+// período sigue anclado al día UTC (comportamiento previo).
+func TestRangeReport_Today_SinGymsCaeAUTC(t *testing.T) {
+	uc := reports.NewRangeReport(&fakeReader{}, fakeUoW{})
+	uc.Now = func() time.Time { return time.Date(2026, 7, 28, 2, 0, 0, 0, time.UTC) }
+
+	out, err := uc.Execute(context.Background(), reports.RangeReportInput{
+		GymID:  uuid.New(),
+		Period: reports.PeriodToday,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if out.From != "2026-07-28" {
+		t.Errorf("today window sin gyms = %s, want 2026-07-28", out.From)
+	}
+}
+
 // TestRangeReport_PeriodWindow_Today returns a same-day from/to.
 func TestRangeReport_PeriodWindow_Today(t *testing.T) {
 	today := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)

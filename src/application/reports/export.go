@@ -17,6 +17,7 @@ import (
 
 	gymRepo "github.com/cuadra/cuadra-core/src/modules/gyms/domain/repository"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
+	"github.com/cuadra/cuadra-core/src/shared/tz"
 )
 
 // ReportType enumerates the exportable reports (DA-36.1).
@@ -92,7 +93,7 @@ func (uc *ExportReport) Execute(ctx context.Context, in ExportInput) (*ExportOut
 	if err != nil {
 		return nil, err
 	}
-	from, to := defaultRange(in.From, in.To)
+	from, to := defaultRange(gym.Timezone, in.From, in.To)
 
 	switch in.Type {
 	case ReportTypeMembers:
@@ -114,7 +115,7 @@ func (uc *ExportReport) Execute(ctx context.Context, in ExportInput) (*ExportOut
 			func() ([]byte, error) { return renderPaymentsXLSX(rows) })
 
 	case ReportTypeSales:
-		rows, err := uc.Reader.ListSalesForExport(tx, in.GymID, from, to)
+		rows, err := uc.Reader.ListSalesForExport(tx, in.GymID, gym.Timezone, from, to)
 		if err != nil {
 			return nil, sharedDomain.NewUnexpectedError(err)
 		}
@@ -203,11 +204,16 @@ func filename(reportType, ext string, from, to time.Time) string {
 	return fmt.Sprintf("%s_%s_%s.%s", safe, from.Format("20060102"), to.Format("20060102"), ext)
 }
 
-// defaultRange yields the current month when neither bound is provided. Both
-// bounds are inclusive and at day granularity (UTC).
-func defaultRange(from, to *time.Time) (time.Time, time.Time) {
-	now := time.Now().UTC()
-	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+// defaultRange yields the current month when neither bound is provided.
+// Ambos extremos inclusivos y con granularidad de día.
+//
+// El "hoy" y la frontera de mes salen del día calendario del GYM, no del de
+// UTC: el FE normalmente manda from/to explícitos, pero cuando no lo hace y
+// el dueño exportaba a las 8 PM de CDMX, el default caía en el día — y el
+// primer día de mes, en el MES — siguiente. Zona vacía = día UTC
+// (fail-open, ver tz.LocalToday).
+func defaultRange(tzName string, from, to *time.Time) (time.Time, time.Time) {
+	today := tz.LocalToday(tzName, nowUTC())
 	out := from
 	end := to
 	if out == nil {

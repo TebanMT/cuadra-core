@@ -116,13 +116,13 @@ func (r *fakeReader) ListMembersForExport(_ sharedDomain.Transaction, _ uuid.UUI
 func (r *fakeReader) ListPaymentsForExport(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time) ([]reports.PaymentExportRow, error) {
 	return r.exportPayments, nil
 }
-func (r *fakeReader) ListSalesForExport(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time) ([]reports.SaleExportRow, error) {
+func (r *fakeReader) ListSalesForExport(_ sharedDomain.Transaction, _ uuid.UUID, _ string, _, _ time.Time) ([]reports.SaleExportRow, error) {
 	return r.exportSales, nil
 }
-func (r *fakeReader) CountNewMembersBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time) (int, error) {
+func (r *fakeReader) CountNewMembersBetween(_ sharedDomain.Transaction, _ uuid.UUID, _ string, _, _ time.Time) (int, error) {
 	return r.newMembersCount, nil
 }
-func (r *fakeReader) CountCheckinsBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time) (int, error) {
+func (r *fakeReader) CountCheckinsBetween(_ sharedDomain.Transaction, _ uuid.UUID, _ string, _, _ time.Time) (int, error) {
 	return r.checkinsCount, nil
 }
 func (r *fakeReader) SumRefundsBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time) (float64, error) {
@@ -134,13 +134,13 @@ func (r *fakeReader) IncomeByMethodBetween(_ sharedDomain.Transaction, _ uuid.UU
 func (r *fakeReader) TopMembersBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time, _ int) ([]reports.TopMemberRow, error) {
 	return r.topMembers, nil
 }
-func (r *fakeReader) CheckinsDailySeries(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time) ([]reports.DailyCount, error) {
+func (r *fakeReader) CheckinsDailySeries(_ sharedDomain.Transaction, _ uuid.UUID, _ string, _, _ time.Time) ([]reports.DailyCount, error) {
 	return r.checkinsByDay, nil
 }
 func (r *fakeReader) ListRecentPayments(_ sharedDomain.Transaction, _ uuid.UUID, _ int) ([]reports.RecentPaymentRow, error) {
 	return r.recentPayments, nil
 }
-func (r *fakeReader) SumInventoryCostBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time) (float64, error) {
+func (r *fakeReader) SumInventoryCostBetween(_ sharedDomain.Transaction, _ uuid.UUID, _ string, _, _ time.Time) (float64, error) {
 	return r.inventoryCost, nil
 }
 func (r *fakeReader) RealizedProductProfitBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time) (reports.RealizedProductProfit, error) {
@@ -150,7 +150,7 @@ func (r *fakeReader) RealizedProductProfitBetween(_ sharedDomain.Transaction, _ 
 	}
 	return r.realizedPrev, nil
 }
-func (r *fakeReader) ListInventoryCostsBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time, _ int) ([]reports.InventoryCostRow, error) {
+func (r *fakeReader) ListInventoryCostsBetween(_ sharedDomain.Transaction, _ uuid.UUID, _ string, _, _ time.Time, _ int) ([]reports.InventoryCostRow, error) {
 	return r.inventoryCostRows, nil
 }
 func (r *fakeReader) SumExpensesBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time) (float64, error) {
@@ -159,7 +159,7 @@ func (r *fakeReader) SumExpensesBetween(_ sharedDomain.Transaction, _ uuid.UUID,
 func (r *fakeReader) ListExpensesBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time, _ int) ([]reports.ExpenseRow, error) {
 	return r.expenseRows, nil
 }
-func (r *fakeReader) ExpensesDailySeries(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time) ([]reports.DailyAmount, error) {
+func (r *fakeReader) ExpensesDailySeries(_ sharedDomain.Transaction, _ uuid.UUID, _ string, _, _ time.Time) ([]reports.DailyAmount, error) {
 	return r.expensesDaily, nil
 }
 func (r *fakeReader) ExpensesByCategoryBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time) (map[string]float64, error) {

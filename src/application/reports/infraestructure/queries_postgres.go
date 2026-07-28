@@ -17,6 +17,7 @@ import (
 
 	"github.com/cuadra/cuadra-core/src/application/reports"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
+	"github.com/cuadra/cuadra-core/src/shared/tz"
 )
 
 // PostgresReader implements reports.Reader against PG via GORM.
@@ -438,7 +439,7 @@ func (r *PostgresReader) ListPaymentsForExport(tx sharedDomain.Transaction, gymI
 	return out, nil
 }
 
-func (r *PostgresReader) ListSalesForExport(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) ([]reports.SaleExportRow, error) {
+func (r *PostgresReader) ListSalesForExport(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time) ([]reports.SaleExportRow, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	type row struct {
 		PaymentFolio string
@@ -449,6 +450,10 @@ func (r *PostgresReader) ListSalesForExport(tx sharedDomain.Transaction, gymID u
 		Total        float64
 		Method       string
 	}
+	// Ventas del día LOCAL del gym: created_at es un instante y las cotas
+	// eran medianoche UTC, así que las ventas de la tarde se exportaban en
+	// el día siguiente.
+	salesStart, salesEnd := tz.DayBounds(tzName, from, to)
 	var rows []row
 	if err := gormTx.Raw(`
 		SELECT p.folio AS payment_folio, s.created_at,
@@ -461,7 +466,7 @@ func (r *PostgresReader) ListSalesForExport(tx sharedDomain.Transaction, gymID u
 		WHERE s.gym_id = ? AND s.deleted_at IS NULL
 		  AND s.created_at >= ? AND s.created_at < ?
 		ORDER BY s.created_at DESC`,
-		gymID, from.UTC(), to.AddDate(0, 0, 1).UTC()).Scan(&rows).Error; err != nil {
+		gymID, salesStart, salesEnd).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 	out := make([]reports.SaleExportRow, len(rows))
@@ -475,29 +480,36 @@ func (r *PostgresReader) ListSalesForExport(tx sharedDomain.Transaction, gymID u
 // Range report extras (UC-036)
 // ---------------------------------------------------------------------------
 
-func (r *PostgresReader) CountNewMembersBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (int, error) {
+func (r *PostgresReader) CountNewMembersBetween(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time) (int, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	var n int64
-	// Calendar-day window: members whose registration falls in [from..to].
-	// created_at is TIMESTAMPTZ; treat it as a date for filtering so the
-	// bounds match the FE's date-only period selector.
+	// Calendar-day window: members whose registration falls in [from..to]
+	// según el día LOCAL del gym. created_at es TIMESTAMPTZ (un instante),
+	// así que traducimos los días a un rango de instantes en vez de
+	// truncar la columna: `created_at::date` daba el día UTC y además
+	// impedía usar índice.
+	start, end := tz.DayBounds(tzName, from, to)
 	err := gormTx.Raw(`
 		SELECT COUNT(*) FROM members
 		WHERE gym_id = ? AND deleted_at IS NULL
-		  AND created_at::date >= ? AND created_at::date <= ?`,
-		gymID, from.Format(dateFmt), to.Format(dateFmt)).Scan(&n).Error
+		  AND created_at >= ? AND created_at < ?`,
+		gymID, start, end).Scan(&n).Error
 	return int(n), err
 }
 
-func (r *PostgresReader) CountCheckinsBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (int, error) {
+func (r *PostgresReader) CountCheckinsBetween(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time) (int, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	var n int64
+	// Rango de instantes del día local del gym (ver tz.DayBounds). La
+	// columna va desnuda a propósito: así el planner puede usar
+	// idx_checkins_gym_date, que `checkin_at::date` inutilizaba.
+	start, end := tz.DayBounds(tzName, from, to)
 	err := gormTx.Raw(`
 		SELECT COUNT(*) FROM checkins
 		WHERE gym_id = ? AND deleted_at IS NULL
 		  AND result LIKE 'allowed%'
-		  AND checkin_at::date >= ? AND checkin_at::date <= ?`,
-		gymID, from.Format(dateFmt), to.Format(dateFmt)).Scan(&n).Error
+		  AND checkin_at >= ? AND checkin_at < ?`,
+		gymID, start, end).Scan(&n).Error
 	return int(n), err
 }
 
@@ -575,22 +587,28 @@ func (r *PostgresReader) TopMembersBetween(tx sharedDomain.Transaction, gymID uu
 	return out, nil
 }
 
-func (r *PostgresReader) CheckinsDailySeries(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) ([]reports.DailyCount, error) {
+func (r *PostgresReader) CheckinsDailySeries(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time) ([]reports.DailyCount, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	type row struct {
 		Day   time.Time
 		Count int
 	}
+	// Única query del grupo donde SÍ hay que convertir la columna: agrupar
+	// por día local exige clasificar CADA fila, no sólo acotar el rango.
+	// El WHERE sigue con la columna desnuda (usa índice) y el AT TIME ZONE
+	// sólo corre sobre las filas ya filtradas.
+	start, end := tz.DayBounds(tzName, from, to)
+	zone := tz.NameOrUTC(tzName)
 	var rows []row
 	if err := gormTx.Raw(`
-		SELECT checkin_at::date AS day, COUNT(*) AS count
+		SELECT (checkin_at AT TIME ZONE ?)::date AS day, COUNT(*) AS count
 		FROM checkins
 		WHERE gym_id = ? AND deleted_at IS NULL
 		  AND result LIKE 'allowed%'
-		  AND checkin_at::date >= ? AND checkin_at::date <= ?
-		GROUP BY checkin_at::date
-		ORDER BY checkin_at::date`,
-		gymID, from.Format(dateFmt), to.Format(dateFmt)).Scan(&rows).Error; err != nil {
+		  AND checkin_at >= ? AND checkin_at < ?
+		GROUP BY 1
+		ORDER BY 1`,
+		zone, gymID, start, end).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 	out := make([]reports.DailyCount, len(rows))
@@ -639,18 +657,20 @@ func (r *PostgresReader) ListRecentPayments(tx sharedDomain.Transaction, gymID u
 // stock_movements. cost (numeric(12,2)) es costo unitario; el total real
 // del egreso por fila es cost*delta. Filtramos NULL para no contar
 // restocks sin costo capturado.
-func (r *PostgresReader) SumInventoryCostBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (float64, error) {
+func (r *PostgresReader) SumInventoryCostBetween(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time) (float64, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	var total float64
-	// Comparamos contra created_at (timestamp con TZ) directamente —
-	// from/to llegan ya en UTC desde el use case.
+	// created_at es un instante; los días locales del gym se traducen a un
+	// rango de instantes (antes las cotas eran medianoche UTC, así que un
+	// restock de la tarde caía en el día siguiente).
+	start, end := tz.DayBounds(tzName, from, to)
 	err := gormTx.Raw(`
 		SELECT COALESCE(SUM(cost * delta), 0) FROM stock_movements
 		WHERE gym_id = ? AND deleted_at IS NULL
 		  AND movement_type = 'restock'
 		  AND cost IS NOT NULL
 		  AND created_at >= ? AND created_at < ?`,
-		gymID, from, to.AddDate(0, 0, 1)).Scan(&total).Error
+		gymID, start, end).Scan(&total).Error
 	return total, err
 }
 
@@ -706,7 +726,7 @@ func (r *PostgresReader) RealizedProductProfitBetween(tx sharedDomain.Transactio
 // ListInventoryCostsBetween — JOIN a products para incluir el nombre y
 // evitar el N+1 desde el FE. ORDER DESC porque la tabla del FE muestra
 // el último egreso arriba.
-func (r *PostgresReader) ListInventoryCostsBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time, limit int) ([]reports.InventoryCostRow, error) {
+func (r *PostgresReader) ListInventoryCostsBetween(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time, limit int) ([]reports.InventoryCostRow, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	if limit <= 0 {
 		limit = 200
@@ -720,6 +740,9 @@ func (r *PostgresReader) ListInventoryCostsBetween(tx sharedDomain.Transaction, 
 		Reason      *string
 		CreatedAt   time.Time
 	}
+	// Mismo criterio que SumInventoryCostBetween — la tabla y el total del
+	// KPI tienen que cubrir exactamente las mismas filas.
+	invStart, invEnd := tz.DayBounds(tzName, from, to)
 	var rows []row
 	if err := gormTx.Raw(`
 		SELECT sm.id AS movement_id, sm.product_id, p.name AS product_name,
@@ -731,7 +754,7 @@ func (r *PostgresReader) ListInventoryCostsBetween(tx sharedDomain.Transaction, 
 		  AND sm.cost IS NOT NULL
 		  AND sm.created_at >= ? AND sm.created_at < ?
 		ORDER BY sm.created_at DESC
-		LIMIT ?`, gymID, from, to.AddDate(0, 0, 1), limit).Scan(&rows).Error; err != nil {
+		LIMIT ?`, gymID, invStart, invEnd, limit).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 	out := make([]reports.InventoryCostRow, len(rows))
@@ -811,7 +834,7 @@ func (r *PostgresReader) ListExpensesBetween(tx sharedDomain.Transaction, gymID 
 // mantiene el filtro por fecha homogéneo entre las fuentes. Las
 // devoluciones van aquí para que la serie cuadre con Totals.Net (que
 // también las resta).
-func (r *PostgresReader) ExpensesDailySeries(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) ([]reports.DailyAmount, error) {
+func (r *PostgresReader) ExpensesDailySeries(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time) ([]reports.DailyAmount, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	type row struct {
 		Day   time.Time
@@ -833,16 +856,20 @@ func (r *PostgresReader) ExpensesDailySeries(tx sharedDomain.Transaction, gymID 
 		bucket[x.Day.Format(dateFmt)] += x.Total
 	}
 
+	// La mercancía es la única de las tres fuentes que va por instante; se
+	// agrupa por el día LOCAL para que caiga en la misma barra que el
+	// gasto o la devolución capturados ese mismo día en el gym.
+	invStart, invEnd := tz.DayBounds(tzName, from, to)
 	var invRows []row
 	if err := gormTx.Raw(`
-		SELECT created_at::date AS day, COALESCE(SUM(cost * delta), 0) AS total
+		SELECT (created_at AT TIME ZONE ?)::date AS day, COALESCE(SUM(cost * delta), 0) AS total
 		FROM stock_movements
 		WHERE gym_id = ? AND deleted_at IS NULL
 		  AND movement_type = 'restock'
 		  AND cost IS NOT NULL
 		  AND created_at >= ? AND created_at < ?
-		GROUP BY created_at::date`,
-		gymID, from, to.AddDate(0, 0, 1)).Scan(&invRows).Error; err != nil {
+		GROUP BY 1`,
+		tz.NameOrUTC(tzName), gymID, invStart, invEnd).Scan(&invRows).Error; err != nil {
 		return nil, err
 	}
 	for _, x := range invRows {

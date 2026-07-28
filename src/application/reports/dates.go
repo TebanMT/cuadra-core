@@ -26,15 +26,37 @@ func localToday(
 	gymID uuid.UUID,
 	now time.Time,
 ) time.Time {
+	today, _ := localTodayAndTZ(tx, gyms, gymID, now)
+	return today
+}
+
+// localTodayAndTZ es localToday más el nombre de la zona, resuelto en la
+// MISMA lectura del gym. Los reportes necesitan ambos: el día local para
+// acotar el período y la zona para que las columnas de TIMESTAMP
+// (checkin_at, created_at) se agrupen por el día del gym y no por el de
+// UTC — ver tz.DayBounds. Zona vacía = UTC, la misma semántica fail-open.
+func localTodayAndTZ(
+	tx sharedDomain.Transaction,
+	gyms gymRepo.GymRepository,
+	gymID uuid.UUID,
+	now time.Time,
+) (time.Time, string) {
 	if gyms == nil {
-		return truncateUTC(now)
+		return truncateUTC(now), ""
 	}
 	g, err := gyms.GetByID(tx, gymID)
 	if err != nil || g == nil {
-		return truncateUTC(now)
+		return truncateUTC(now), ""
 	}
-	return tz.LocalToday(g.Timezone, now)
+	return tz.LocalToday(g.Timezone, now), g.Timezone
 }
+
+// nowUTC es el reloj del paquete. Variable y no llamada directa para que
+// los tests puedan fijar la hora: las fronteras de día sólo se manifiestan
+// en una ventana concreta (en CDMX, de 6 PM a medianoche), así que un test
+// que dependa del reloj real pasa trivialmente el 75% del día y da una
+// falsa sensación de cobertura.
+var nowUTC = func() time.Time { return time.Now().UTC() }
 
 func truncateUTC(t time.Time) time.Time {
 	t = t.UTC()

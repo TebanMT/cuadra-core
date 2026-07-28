@@ -88,6 +88,7 @@ import (
 	"github.com/cuadra/cuadra-core/src/shared/runtime"
 	"github.com/cuadra/cuadra-core/src/shared/sidecartoken"
 	syncShared "github.com/cuadra/cuadra-core/src/shared/sync"
+	"github.com/cuadra/cuadra-core/src/shared/tz"
 	"os/signal"
 	"syscall"
 )
@@ -102,6 +103,7 @@ func main() {
 	_ = godotenv.Load()
 
 	logRuntimeMode()
+	tz.WarnIfUnavailable()
 	guardDevAgainstProd()
 
 	dsn := mustEnv("DATABASE_URL")
@@ -394,7 +396,7 @@ func main() {
 	// ── Reports application layer (Sesión 6) ─────────────────────────────
 	dashboard := reportsApp.NewDashboard(reportsReader, uow, 60*time.Second).WithGyms(gymRepo)
 	attentionRequired := reportsApp.NewAttentionRequired(reportsReader, uow).WithGyms(gymRepo)
-	rangeReport := reportsApp.NewRangeReport(reportsReader, uow)
+	rangeReport := reportsApp.NewRangeReport(reportsReader, uow).WithGyms(gymRepo)
 	exportReport := reportsApp.NewExportReport(reportsReader, gymRepo, uow, attentionRequired, rangeReport)
 	genderReport := reportsApp.NewGenderReport(reportsReader, uow).WithGyms(gymRepo)
 	markContacted := memApp.NewMarkContacted(memberRepo, contactAttemptRepo, uow, recorder)

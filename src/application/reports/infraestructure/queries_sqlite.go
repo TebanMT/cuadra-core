@@ -28,6 +28,7 @@ import (
 
 	"github.com/cuadra/cuadra-core/src/application/reports"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
+	"github.com/cuadra/cuadra-core/src/shared/tz"
 )
 
 // SQLiteReader implements reports.Reader against the local sidecar SQLite.
@@ -36,6 +37,24 @@ type SQLiteReader struct{}
 func NewSQLiteReader() *SQLiteReader { return &SQLiteReader{} }
 
 const sqliteDateFmt = "2006-01-02"
+
+// dayBoundsMs traduce un rango de días LOCALES del gym al rango de epoch-ms
+// [inicio, fin) que le corresponde. Las columnas de instante en SQLite
+// (created_at, checkin_at) son unix-ms absolutos, así que acotarlas con
+// medianoche UTC — como se hacía antes — metía en el día siguiente todo lo
+// ocurrido después de las 6 PM en CDMX.
+func dayBoundsMs(tzName string, from, to time.Time) (int64, int64) {
+	start, end := tz.DayBounds(tzName, from, to)
+	return start.UnixMilli(), end.UnixMilli()
+}
+
+// localDayExpr arma el truncado a día LOCAL sobre una columna unix-ms.
+// SQLite no trae base de zonas horarias, así que desplazamos el epoch por
+// el offset del gym antes de truncar; el offset se calcula en Go con la
+// tzdata embebida. Ver tz.OffsetSeconds para la salvedad de DST.
+func localDayExpr(column string) string {
+	return fmt.Sprintf("date((%s/1000) + ?, 'unixepoch')", column)
+}
 
 // ---------------------------------------------------------------------------
 // Dashboard KPIs
@@ -545,7 +564,7 @@ func (r *SQLiteReader) ListPaymentsForExport(tx sharedDomain.Transaction, gymID 
 	return out, nil
 }
 
-func (r *SQLiteReader) ListSalesForExport(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) ([]reports.SaleExportRow, error) {
+func (r *SQLiteReader) ListSalesForExport(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time) ([]reports.SaleExportRow, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	type row struct {
 		PaymentFolio string         `db:"payment_folio"`
@@ -560,8 +579,7 @@ func (r *SQLiteReader) ListSalesForExport(tx sharedDomain.Transaction, gymID uui
 	// `sales.created_at` is unix-ms in SQLite, so we compare against the
 	// `[from 00:00 UTC .. to+1 00:00 UTC)` half-open window — same shape as
 	// the Postgres implementation.
-	fromMs := time.Date(from.Year(), from.Month(), from.Day(), 0, 0, 0, 0, time.UTC).UnixMilli()
-	toMs := time.Date(to.Year(), to.Month(), to.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1).UnixMilli()
+	fromMs, toMs := dayBoundsMs(tzName, from, to)
 	if err := stx.Select(context.Background(), &rows, `
 		SELECT p.folio AS payment_folio, s.created_at,
 		       m.full_name AS member_name,
@@ -599,10 +617,9 @@ func (r *SQLiteReader) ListSalesForExport(tx sharedDomain.Transaction, gymID uui
 // Range report extras (UC-036)
 // ---------------------------------------------------------------------------
 
-func (r *SQLiteReader) CountNewMembersBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (int, error) {
+func (r *SQLiteReader) CountNewMembersBetween(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time) (int, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
-	fromMs := time.Date(from.Year(), from.Month(), from.Day(), 0, 0, 0, 0, time.UTC).UnixMilli()
-	toMs := time.Date(to.Year(), to.Month(), to.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1).UnixMilli()
+	fromMs, toMs := dayBoundsMs(tzName, from, to)
 	var n int
 	err := stx.Get(context.Background(), &n, `
 		SELECT COUNT(*) FROM members
@@ -612,10 +629,9 @@ func (r *SQLiteReader) CountNewMembersBetween(tx sharedDomain.Transaction, gymID
 	return n, err
 }
 
-func (r *SQLiteReader) CountCheckinsBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (int, error) {
+func (r *SQLiteReader) CountCheckinsBetween(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time) (int, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
-	fromMs := time.Date(from.Year(), from.Month(), from.Day(), 0, 0, 0, 0, time.UTC).UnixMilli()
-	toMs := time.Date(to.Year(), to.Month(), to.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1).UnixMilli()
+	fromMs, toMs := dayBoundsMs(tzName, from, to)
 	var n int
 	err := stx.Get(context.Background(), &n, `
 		SELECT COUNT(*) FROM checkins
@@ -703,24 +719,26 @@ func (r *SQLiteReader) TopMembersBetween(tx sharedDomain.Transaction, gymID uuid
 	return out, nil
 }
 
-func (r *SQLiteReader) CheckinsDailySeries(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) ([]reports.DailyCount, error) {
+func (r *SQLiteReader) CheckinsDailySeries(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time) ([]reports.DailyCount, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
-	fromMs := time.Date(from.Year(), from.Month(), from.Day(), 0, 0, 0, 0, time.UTC).UnixMilli()
-	toMs := time.Date(to.Year(), to.Month(), to.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1).UnixMilli()
+	fromMs, toMs := dayBoundsMs(tzName, from, to)
 	type row struct {
 		Day   string `db:"day"`
 		Count int    `db:"count"`
 	}
 	var rows []row
+	// Agrupar exige clasificar cada fila por su día local, no sólo acotar
+	// el rango — de ahí el desplazamiento por offset (ver localDayExpr).
+	offset := tz.OffsetSeconds(tzName, from)
 	if err := stx.Select(context.Background(), &rows, `
-		SELECT date(checkin_at/1000, 'unixepoch') AS day, COUNT(*) AS count
+		SELECT `+localDayExpr("checkin_at")+` AS day, COUNT(*) AS count
 		FROM checkins
 		WHERE gym_id = ? AND deleted_at IS NULL
 		  AND result LIKE 'allowed%'
 		  AND checkin_at >= ? AND checkin_at < ?
 		GROUP BY day
 		ORDER BY day`,
-		gymID.String(), fromMs, toMs); err != nil {
+		offset, gymID.String(), fromMs, toMs); err != nil {
 		return nil, err
 	}
 	out := make([]reports.DailyCount, 0, len(rows))
@@ -794,10 +812,9 @@ func (r *SQLiteReader) ListRecentPayments(tx sharedDomain.Transaction, gymID uui
 // guarda en cents (INTEGER) y delta es unidades — el total real es
 // cost*delta. Filtramos NULL para no contar restocks sin costo (el
 // operador puede no haberlo conocido al momento del registro).
-func (r *SQLiteReader) SumInventoryCostBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (float64, error) {
+func (r *SQLiteReader) SumInventoryCostBetween(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time) (float64, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
-	fromMs := time.Date(from.Year(), from.Month(), from.Day(), 0, 0, 0, 0, time.UTC).UnixMilli()
-	toMs := time.Date(to.Year(), to.Month(), to.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1).UnixMilli()
+	fromMs, toMs := dayBoundsMs(tzName, from, to)
 	var cents sql.NullInt64
 	err := stx.Get(context.Background(), &cents, `
 		SELECT COALESCE(SUM(cost * delta), 0) FROM stock_movements
@@ -860,13 +877,12 @@ func (r *SQLiteReader) RealizedProductProfitBetween(tx sharedDomain.Transaction,
 
 // ListInventoryCostsBetween — JOINea product_name. ORDER BY created_at
 // DESC para que el último egreso quede arriba en la tabla del FE.
-func (r *SQLiteReader) ListInventoryCostsBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time, limit int) ([]reports.InventoryCostRow, error) {
+func (r *SQLiteReader) ListInventoryCostsBetween(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time, limit int) ([]reports.InventoryCostRow, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	if limit <= 0 {
 		limit = 200
 	}
-	fromMs := time.Date(from.Year(), from.Month(), from.Day(), 0, 0, 0, 0, time.UTC).UnixMilli()
-	toMs := time.Date(to.Year(), to.Month(), to.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1).UnixMilli()
+	fromMs, toMs := dayBoundsMs(tzName, from, to)
 	type row struct {
 		MovementID  string         `db:"movement_id"`
 		ProductID   string         `db:"product_id"`
@@ -979,7 +995,7 @@ func (r *SQLiteReader) ListExpensesBetween(tx sharedDomain.Transaction, gymID uu
 // por día porque cada fuente vive en una tabla con un tipo de fecha
 // distinto y un UNION complicaría el binding. Las devoluciones van aquí
 // para que la serie cuadre con Totals.Net (que también las resta).
-func (r *SQLiteReader) ExpensesDailySeries(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) ([]reports.DailyAmount, error) {
+func (r *SQLiteReader) ExpensesDailySeries(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time) ([]reports.DailyAmount, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	bucket := map[string]int64{}
 
@@ -1001,15 +1017,18 @@ func (r *SQLiteReader) ExpensesDailySeries(tx sharedDomain.Transaction, gymID uu
 		bucket[x.Day] += x.Total
 	}
 
-	fromMs := time.Date(from.Year(), from.Month(), from.Day(), 0, 0, 0, 0, time.UTC).UnixMilli()
-	toMs := time.Date(to.Year(), to.Month(), to.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1).UnixMilli()
+	fromMs, toMs := dayBoundsMs(tzName, from, to)
 	type invRow struct {
 		Day   string `db:"day"`
 		Total int64  `db:"total"`
 	}
 	var invRows []invRow
+	// Única de las tres fuentes que va por instante: se agrupa por día
+	// local para que caiga en la misma barra que el gasto o la devolución
+	// del mismo día del gym.
+	invOffset := tz.OffsetSeconds(tzName, from)
 	if err := stx.Select(context.Background(), &invRows, `
-		SELECT date(created_at/1000, 'unixepoch') AS day,
+		SELECT `+localDayExpr("created_at")+` AS day,
 		       COALESCE(SUM(cost * delta), 0) AS total
 		FROM stock_movements
 		WHERE gym_id = ? AND deleted_at IS NULL
@@ -1017,7 +1036,7 @@ func (r *SQLiteReader) ExpensesDailySeries(tx sharedDomain.Transaction, gymID uu
 		  AND cost IS NOT NULL
 		  AND created_at >= ? AND created_at < ?
 		GROUP BY day`,
-		gymID.String(), fromMs, toMs); err != nil {
+		invOffset, gymID.String(), fromMs, toMs); err != nil {
 		return nil, err
 	}
 	for _, x := range invRows {

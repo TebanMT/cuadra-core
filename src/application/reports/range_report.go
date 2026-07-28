@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 
+	gymRepo "github.com/cuadra/cuadra-core/src/modules/gyms/domain/repository"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 )
 
@@ -118,19 +119,43 @@ type TopProductRow struct {
 type RangeReport struct {
 	Reader Reader
 	UoW    sharedDomain.UnitOfWork
+	// Gyms (opcional) → ancla el "hoy" del período al día LOCAL del gym
+	// (ver localToday). Nil = día UTC (tests viejos).
+	Gyms gymRepo.GymRepository
+	// Now (opcional) → reloj inyectable para tests. Nil = time.Now().UTC().
+	Now func() time.Time
+}
+
+// now resuelve el reloj del use case (inyectable en tests).
+func (uc *RangeReport) now() time.Time {
+	if uc.Now != nil {
+		return uc.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 func NewRangeReport(reader Reader, uow sharedDomain.UnitOfWork) *RangeReport {
 	return &RangeReport{Reader: reader, UoW: uow}
 }
 
+// WithGyms cablea el repo de gyms para anclar el período al día calendario
+// del gym en SU zona horaria.
+func (uc *RangeReport) WithGyms(g gymRepo.GymRepository) *RangeReport {
+	uc.Gyms = g
+	return uc
+}
+
 func (uc *RangeReport) Execute(ctx context.Context, in RangeReportInput) (*RangeReportOutput, error) {
-	from, to := ResolveWindow(in.Period, in.From, in.To, time.Now().UTC())
-	prevFrom, prevTo := previousWindow(in.Period, from, to)
 	tx, err := uc.UoW.Query(ctx)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}
+	// El "hoy" del período es el día del GYM, no el de UTC — desde las 6 PM
+	// de CDMX "Hoy" resolvía al día siguiente y salía en ceros aunque hubiera
+	// cobros. Mismo anclaje que el dashboard (localToday).
+	today, tzName := localTodayAndTZ(tx, uc.Gyms, in.GymID, uc.now())
+	from, to := ResolveWindow(in.Period, in.From, in.To, today)
+	prevFrom, prevTo := previousWindow(in.Period, from, to)
 
 	out := &RangeReportOutput{
 		Period:             in.Period,
@@ -154,8 +179,8 @@ func (uc *RangeReport) Execute(ctx context.Context, in RangeReportInput) (*Range
 	incomePrev, _ := uc.Reader.SumPaymentsBetween(tx, in.GymID, prevFrom, prevTo)
 	out.Totals.Income = newKPI(incomeNow, incomePrev)
 
-	inventoryNow, _ := uc.Reader.SumInventoryCostBetween(tx, in.GymID, from, to)
-	inventoryPrev, _ := uc.Reader.SumInventoryCostBetween(tx, in.GymID, prevFrom, prevTo)
+	inventoryNow, _ := uc.Reader.SumInventoryCostBetween(tx, in.GymID, tzName, from, to)
+	inventoryPrev, _ := uc.Reader.SumInventoryCostBetween(tx, in.GymID, tzName, prevFrom, prevTo)
 	out.Totals.InventoryCost = newKPI(inventoryNow, inventoryPrev)
 
 	expensesNow, _ := uc.Reader.SumExpensesBetween(tx, in.GymID, from, to)
@@ -166,12 +191,12 @@ func (uc *RangeReport) Execute(ctx context.Context, in RangeReportInput) (*Range
 	refundsPrev, _ := uc.Reader.SumRefundsBetween(tx, in.GymID, prevFrom, prevTo)
 	out.Totals.Refunds = newKPI(refundsNow, refundsPrev)
 
-	newMembersNow, _ := uc.Reader.CountNewMembersBetween(tx, in.GymID, from, to)
-	newMembersPrev, _ := uc.Reader.CountNewMembersBetween(tx, in.GymID, prevFrom, prevTo)
+	newMembersNow, _ := uc.Reader.CountNewMembersBetween(tx, in.GymID, tzName, from, to)
+	newMembersPrev, _ := uc.Reader.CountNewMembersBetween(tx, in.GymID, tzName, prevFrom, prevTo)
 	out.Totals.NewMembers = newKPI(float64(newMembersNow), float64(newMembersPrev))
 
-	checkinsNow, _ := uc.Reader.CountCheckinsBetween(tx, in.GymID, from, to)
-	checkinsPrev, _ := uc.Reader.CountCheckinsBetween(tx, in.GymID, prevFrom, prevTo)
+	checkinsNow, _ := uc.Reader.CountCheckinsBetween(tx, in.GymID, tzName, from, to)
+	checkinsPrev, _ := uc.Reader.CountCheckinsBetween(tx, in.GymID, tzName, prevFrom, prevTo)
 	out.Totals.Checkins = newKPI(float64(checkinsNow), float64(checkinsPrev))
 
 	// Net = income − inventory_cost − expenses_general − refunds. Computed on
@@ -186,10 +211,10 @@ func (uc *RangeReport) Execute(ctx context.Context, in RangeReportInput) (*Range
 	if series, err := uc.Reader.IncomeDailySeries(tx, in.GymID, from, to); err == nil && series != nil {
 		out.IncomeByDay = series
 	}
-	if rows, err := uc.Reader.ExpensesDailySeries(tx, in.GymID, from, to); err == nil && rows != nil {
+	if rows, err := uc.Reader.ExpensesDailySeries(tx, in.GymID, tzName, from, to); err == nil && rows != nil {
 		out.ExpensesByDay = rows
 	}
-	if rows, err := uc.Reader.CheckinsDailySeries(tx, in.GymID, from, to); err == nil && rows != nil {
+	if rows, err := uc.Reader.CheckinsDailySeries(tx, in.GymID, tzName, from, to); err == nil && rows != nil {
 		out.CheckinsByDay = rows
 	}
 
@@ -208,7 +233,7 @@ func (uc *RangeReport) Execute(ctx context.Context, in RangeReportInput) (*Range
 	}
 
 	// Tablas detalladas del período.
-	if rows, err := uc.Reader.ListInventoryCostsBetween(tx, in.GymID, from, to, 200); err == nil && rows != nil {
+	if rows, err := uc.Reader.ListInventoryCostsBetween(tx, in.GymID, tzName, from, to, 200); err == nil && rows != nil {
 		out.InventoryCosts = rows
 	}
 	if rows, err := uc.Reader.ListExpensesBetween(tx, in.GymID, from, to, 200); err == nil && rows != nil {

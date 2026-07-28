@@ -38,23 +38,36 @@ type Reader interface {
 	// Export feeders (UC-036)
 	ListMembersForExport(tx sharedDomain.Transaction, gymID uuid.UUID, today time.Time) ([]MemberExportRow, error)
 	ListPaymentsForExport(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) ([]PaymentExportRow, error)
-	ListSalesForExport(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) ([]SaleExportRow, error)
+	ListSalesForExport(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time) ([]SaleExportRow, error)
 
 	// Range report extras (UC-036 — totals + breakdowns over an arbitrary
 	// window; complement the dashboard KPIs).
-	CountNewMembersBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (int, error)
-	CountCheckinsBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (int, error)
+	//
+	// CONVENCIÓN tzName: los métodos que filtran una columna de TIMESTAMP
+	// (checkin_at, created_at) reciben la zona del gym además del rango de
+	// días. Sin ella, la base agrupa los instantes por día UTC y en CDMX
+	// todo lo posterior a las 6 PM — el horario pico del gym — se archiva
+	// en el día siguiente. Los que filtran columnas DATE (payment_date,
+	// expense_date) NO la necesitan: esas ya se escriben en el día local.
+	// Zona vacía = UTC (fail-open). Ver tz.DayBounds.
+	CountNewMembersBetween(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time) (int, error)
+	CountCheckinsBetween(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time) (int, error)
 	SumRefundsBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (float64, error)
 	IncomeByMethodBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (map[string]float64, error)
 	TopMembersBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time, limit int) ([]TopMemberRow, error)
-	CheckinsDailySeries(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) ([]DailyCount, error)
+	CheckinsDailySeries(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time) ([]DailyCount, error)
 
 	// ExpensesDailySeries totaliza por día la combinación de gastos
 	// generales (expenses) + compras de mercancía (stock_movements
 	// restock con costo). Alimenta el chart "Ingresos vs Egresos por
 	// día". Las dos fuentes se suman por fecha — la UI no necesita el
 	// desglose, sólo el total egresado del día.
-	ExpensesDailySeries(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) ([]DailyAmount, error)
+	// Lleva tzName porque combina fuentes de los DOS tipos: gastos
+	// (expense_date) y devoluciones (payment_date) ya vienen en día local,
+	// pero la mercancía va por stock_movements.created_at, que es un
+	// instante. Sin la zona, un restock de la tarde caía en una barra
+	// distinta que el gasto capturado el mismo día.
+	ExpensesDailySeries(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time) ([]DailyAmount, error)
 
 	// ExpensesByCategoryBetween devuelve el total de gastos generales
 	// agrupado por categoría del enum (renta, servicios, …). Sólo
@@ -82,7 +95,7 @@ type Reader interface {
 	// unitario; el total real desembolsado es cost * delta. Usado por:
 	//   - Dashboard (KPI inventory_cost_month, current + previous)
 	//   - RangeReport (totals.inventory_cost del período seleccionado)
-	SumInventoryCostBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (float64, error)
+	SumInventoryCostBetween(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time) (float64, error)
 
 	// RealizedProductProfitBetween — ganancia REALIZADA de productos en el
 	// rango: revenue (SUM precio_snapshot × qty) − COGS (SUM qty ×
@@ -112,7 +125,7 @@ type Reader interface {
 	// costo en un rango, ordenados por created_at DESC. JOINea
 	// product_name para que el FE no tenga que hacer N+1. Usado por la
 	// tabla "Compras de inventario" en la página de reportes.
-	ListInventoryCostsBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time, limit int) ([]InventoryCostRow, error)
+	ListInventoryCostsBetween(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time, limit int) ([]InventoryCostRow, error)
 
 	// SumExpensesBetween totaliza los gastos generales (BC expenses) en
 	// un rango. Filtra por expense_date — el campo del usuario, no el
