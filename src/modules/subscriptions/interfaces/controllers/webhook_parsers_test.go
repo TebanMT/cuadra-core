@@ -133,17 +133,56 @@ func TestParseMP_MissingExternalReferenceIgnored(t *testing.T) {
 
 // ── Stripe parser ────────────────────────────────────────────────────────
 
-func TestParseStripe_InvoicePaidIsRenewed(t *testing.T) {
+// stripeRenewalInvoice arma un payload de invoice con la forma REAL que manda
+// Stripe en renovaciones (API 2025-03-31 Basil en adelante, incl. dahlia):
+//   - object.metadata VACÍA (la invoice NO hereda la metadata de la
+//     subscription — bug jul-2026: asumir que sí la hereda hizo que toda
+//     renovación se descartara en silencio),
+//   - gym_id en parent.subscription_details.metadata,
+//   - fin de periodo en lines.data[0].period.end (no hay current_period_end),
+//   - línea con `pricing` sin nickname.
+func stripeRenewalInvoice(gymID uuid.UUID, periodEnd int64) map[string]any {
+	return map[string]any{
+		"id":             "in_renewal_001",
+		"object":         "invoice",
+		"metadata":       map[string]any{},
+		"billing_reason": "subscription_cycle",
+		"customer":       "cus_ABC123",
+		"amount_paid":    float64(79900), // $799.00 MXN en centavos
+		"currency":       "mxn",
+		"parent": map[string]any{
+			"type": "subscription_details",
+			"subscription_details": map[string]any{
+				"subscription": "sub_XYZ",
+				"metadata":     map[string]any{"gym_id": gymID.String()},
+			},
+		},
+		"lines": map[string]any{
+			"data": []any{
+				map[string]any{
+					"period": map[string]any{
+						"start": float64(periodEnd - 30*24*3600),
+						"end":   float64(periodEnd),
+					},
+					"pricing": map[string]any{
+						"price_details": map[string]any{"price": "price_123"},
+					},
+				},
+			},
+		},
+	}
+}
+
+func TestParseStripe_InvoicePaidRenewal_ModernAPI(t *testing.T) {
+	// Renovación mensual real: el gym_id viene en
+	// parent.subscription_details.metadata, NO en object.metadata.
 	gymID := uuid.New()
+	periodEnd := int64(1756080000) // 2025-08-25
 	body := mpEnvelopeJSON(t, map[string]any{
 		"id":      "evt_renew",
 		"type":    "invoice.paid",
-		"created": int64(1716206400), // 2024-05-20
-		"data": map[string]any{
-			"object": map[string]any{
-				"metadata": map[string]any{"gym_id": gymID.String()},
-			},
-		},
+		"created": int64(1753488000), // 2025-07-26
+		"data":    map[string]any{"object": stripeRenewalInvoice(gymID, periodEnd)},
 	})
 	in, err := parseStripeEvent(body)
 	if err != nil || in == nil {
@@ -151,6 +190,133 @@ func TestParseStripe_InvoicePaidIsRenewed(t *testing.T) {
 	}
 	if in.Type != subDomain.EventRenewed {
 		t.Errorf("type=%q, want renewed", in.Type)
+	}
+	if in.GymID != gymID {
+		t.Errorf("gym_id mismatch — no se leyó parent.subscription_details.metadata")
+	}
+	if in.PeriodEndsAt == nil || in.PeriodEndsAt.Unix() != periodEnd {
+		t.Errorf("period_ends_at=%v, want unix=%d (lines.data[0].period.end)", in.PeriodEndsAt, periodEnd)
+	}
+	if in.Plan != "" {
+		t.Errorf("plan=%q, want \"\" (sin nickname en la línea debe conservar el plan del gym, no caer a standard_monthly)", in.Plan)
+	}
+	if in.ExternalID != "in_renewal_001" {
+		t.Errorf("external_id=%q, want in_renewal_001 (invoice id, para dedupe paid/payment_succeeded)", in.ExternalID)
+	}
+	if in.Amount == nil || *in.Amount != 799.00 {
+		t.Errorf("amount=%v, want 799.00", in.Amount)
+	}
+	if in.StripeCustomerID != "cus_ABC123" {
+		t.Errorf("stripe_customer_id=%q, want cus_ABC123", in.StripeCustomerID)
+	}
+}
+
+func TestParseStripe_InvoicePaidRenewal_LegacyAPI(t *testing.T) {
+	// API pre-Basil (2023-08-16 .. 2025-02): la metadata de la subscription
+	// viaja en subscription_details.metadata (sin `parent`) y la línea trae
+	// plan.nickname — de ahí sí podemos extraer el plan.
+	gymID := uuid.New()
+	body := mpEnvelopeJSON(t, map[string]any{
+		"id":      "evt_renew_legacy",
+		"type":    "invoice.paid",
+		"created": int64(1753488000),
+		"data": map[string]any{
+			"object": map[string]any{
+				"id":             "in_legacy_001",
+				"metadata":       map[string]any{},
+				"billing_reason": "subscription_cycle",
+				"subscription_details": map[string]any{
+					"metadata": map[string]any{"gym_id": gymID.String()},
+				},
+				"lines": map[string]any{
+					"data": []any{
+						map[string]any{
+							"period": map[string]any{"end": float64(1756080000)},
+							"plan":   map[string]any{"nickname": "plus_monthly"},
+						},
+					},
+				},
+			},
+		},
+	})
+	in, err := parseStripeEvent(body)
+	if err != nil || in == nil {
+		t.Fatalf("parse err=%v in=%v", err, in)
+	}
+	if in.GymID != gymID {
+		t.Errorf("gym_id mismatch — no se leyó subscription_details.metadata (legacy)")
+	}
+	if in.Plan != "plus_monthly" {
+		t.Errorf("plan=%q, want plus_monthly (nickname de la línea legacy)", in.Plan)
+	}
+}
+
+func TestParseStripe_InvoiceFirstChargeIgnored(t *testing.T) {
+	// billing_reason=subscription_create es el cobro inicial del checkout —
+	// customer.subscription.created ya registra la activación; procesar
+	// también su invoice duplicaría la fila en la historia.
+	obj := stripeRenewalInvoice(uuid.New(), 1756080000)
+	obj["billing_reason"] = "subscription_create"
+	body := mpEnvelopeJSON(t, map[string]any{
+		"id":   "evt_first_invoice",
+		"type": "invoice.paid",
+		"data": map[string]any{"object": obj},
+	})
+	in, err := parseStripeEvent(body)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if in != nil {
+		t.Fatalf("expected nil (first charge handled by subscription.created), got %+v", in)
+	}
+}
+
+func TestParseStripe_InvoicePaymentSucceededSharesInvoiceExternalID(t *testing.T) {
+	// invoice.payment_succeeded e invoice.paid disparan por el MISMO cobro con
+	// event ids (evt_...) distintos. Ambos deben usar la invoice (in_...) como
+	// external id para que la idempotencia (provider, external_id) los colapse
+	// en una sola fila, llegue el que llegue primero.
+	gymID := uuid.New()
+	body := mpEnvelopeJSON(t, map[string]any{
+		"id":      "evt_pay_succeeded",
+		"type":    "invoice.payment_succeeded",
+		"created": int64(1753488000),
+		"data":    map[string]any{"object": stripeRenewalInvoice(gymID, 1756080000)},
+	})
+	in, err := parseStripeEvent(body)
+	if err != nil || in == nil {
+		t.Fatalf("parse err=%v in=%v", err, in)
+	}
+	if in.Type != subDomain.EventRenewed {
+		t.Errorf("type=%q, want renewed", in.Type)
+	}
+	if in.ExternalID != "in_renewal_001" {
+		t.Errorf("external_id=%q, want in_renewal_001 (mismo que invoice.paid)", in.ExternalID)
+	}
+}
+
+func TestParseStripe_InvoicePaymentFailedKeepsEventID(t *testing.T) {
+	// payment_failed conserva el evt_... : cada reintento de dunning fallido
+	// es un evento distinto, y el in_... queda libre para que un invoice.paid
+	// tardío (el dueño arregló la tarjeta) no choque contra el fallo previo.
+	gymID := uuid.New()
+	obj := stripeRenewalInvoice(gymID, 1756080000)
+	obj["amount_paid"] = float64(0)
+	body := mpEnvelopeJSON(t, map[string]any{
+		"id":      "evt_pay_failed_1",
+		"type":    "invoice.payment_failed",
+		"created": int64(1753488000),
+		"data":    map[string]any{"object": obj},
+	})
+	in, err := parseStripeEvent(body)
+	if err != nil || in == nil {
+		t.Fatalf("parse err=%v in=%v", err, in)
+	}
+	if in.Type != subDomain.EventPastDue {
+		t.Errorf("type=%q, want past_due", in.Type)
+	}
+	if in.ExternalID != "evt_pay_failed_1" {
+		t.Errorf("external_id=%q, want evt_pay_failed_1 (event id, no invoice id)", in.ExternalID)
 	}
 	if in.GymID != gymID {
 		t.Errorf("gym_id mismatch")

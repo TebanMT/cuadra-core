@@ -110,9 +110,12 @@ func (g *StripeGateway) StartCheckout(ctx context.Context, in subDomain.Checkout
 				Quantity: stripe.Int64(1),
 			},
 		},
-		// Subscription created by the session inherits this metadata, so the
-		// renewal webhooks (`invoice.paid`, `customer.subscription.deleted`)
-		// also carry gym_id without us having to reconcile by customer id.
+		// Subscription created by the session inherits this metadata, so
+		// `customer.subscription.*` webhooks carry gym_id in object.metadata.
+		// OJO: las invoices de renovación NO la exponen en invoice.metadata —
+		// Stripe la copia en parent.subscription_details.metadata (Basil+) /
+		// subscription_details.metadata (legacy); el parser la lee de ahí
+		// (extractStripeInvoiceGymID).
 		SubscriptionData: &stripe.CheckoutSessionCreateSubscriptionDataParams{
 			Metadata: map[string]string{"gym_id": gymRef},
 		},

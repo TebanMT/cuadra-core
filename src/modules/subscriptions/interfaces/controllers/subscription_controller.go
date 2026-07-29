@@ -378,10 +378,31 @@ func parseStripeEvent(body []byte) (*subApp.RecordEventInput, error) {
 	}
 	gymID, plan, periodEnd, amount, currency := extractStripeFields(env.Data)
 	customerID := extractStripeCustomer(env.Data)
+	if strings.HasPrefix(env.Type, "invoice.") {
+		// El objeto invoice NO hereda la metadata de la subscription en su
+		// propio `metadata` (llega vacía), y tampoco trae current_period_end
+		// ni `items` — extractStripeFields está escrito para la forma del
+		// subscription object. Suplimos con la forma real de la invoice.
+		// Bug jul-2026: sin esto TODA renovación mensual caía al drop de
+		// gym_id irresoluble → 200 OK a Stripe sin registrar nada.
+		if gymID == uuid.Nil {
+			gymID = extractStripeInvoiceGymID(env.Data)
+		}
+		if periodEnd == nil {
+			periodEnd = extractStripeInvoicePeriodEnd(env.Data)
+		}
+		// "" cuando la línea no trae nickname (API Basil+): RecordEvent cae
+		// al plan vigente del gym — correcto para una renovación, pagar no
+		// cambia de plan. El default "standard_monthly" de extractStripeFields
+		// aquí sería un downgrade silencioso para gyms Plus.
+		plan = extractStripeInvoicePlan(env.Data)
+	}
 	if gymID == uuid.Nil {
 		// We need to know which gym this concerns. Stripe's `client_reference_id`
 		// or `metadata.gym_id` carries it in our setup — if missing, drop the
-		// event (returning nil bypasses RecordEvent).
+		// event (returning nil bypasses RecordEvent). Este drop responde 200
+		// (Stripe no reintenta); el log es el único rastro que queda.
+		log.Printf("[subscriptions] stripe webhook dropped, unresolvable gym_id: type=%s id=%s", env.Type, env.ID)
 		return nil, nil
 	}
 	occurred := time.Unix(env.Created, 0).UTC()
@@ -389,13 +410,33 @@ func parseStripeEvent(body []byte) (*subApp.RecordEventInput, error) {
 		occurred = time.Now().UTC()
 	}
 	var typ subDomain.EventType
+	externalID := env.ID
 	rawPayload := map[string]any{"event": env.Type, "data": env.Data}
 	switch env.Type {
-	case "customer.subscription.created", "invoice.payment_succeeded":
+	case "customer.subscription.created":
 		typ = subDomain.EventActivated
-	case "invoice.paid":
+	case "invoice.paid", "invoice.payment_succeeded":
+		// Ambos eventos disparan por el MISMO cobro (payment_succeeded = el
+		// intento de pago funcionó, paid = la invoice quedó saldada). Para no
+		// duplicar filas en la historia:
+		//   - el primer cobro del checkout (billing_reason=subscription_create)
+		//     se ignora — customer.subscription.created ya registra la
+		//     activación con plan + period end;
+		//   - external id = la invoice (in_...), no el event (evt_...): la
+		//     idempotencia por (provider, external_id) colapsa paid +
+		//     payment_succeeded del mismo cobro en UNA sola fila.
+		if extractStripeInvoiceBillingReason(env.Data) == "subscription_create" {
+			return nil, nil
+		}
 		typ = subDomain.EventRenewed
+		if invID := extractStripeObjectID(env.Data); invID != "" {
+			externalID = invID
+		}
 	case "invoice.payment_failed":
+		// Conserva el evt_... como external id: cada reintento de dunning
+		// fallido es un evento distinto que sí queremos registrar, y el
+		// in_... queda libre para que el invoice.paid de un cobro tardío no
+		// choque contra el fallo previo en el índice de idempotencia.
 		typ = subDomain.EventPastDue
 	case "customer.subscription.deleted":
 		typ = subDomain.EventCancelled
@@ -482,7 +523,7 @@ func parseStripeEvent(body []byte) (*subApp.RecordEventInput, error) {
 		GymID:            gymID,
 		Provider:         subDomain.ProviderStripe,
 		Type:             typ,
-		ExternalID:       env.ID,
+		ExternalID:       externalID,
 		Plan:             plan,
 		Amount:           amount,
 		Currency:         currency,
@@ -668,6 +709,103 @@ func extractOXXOVoucherURL(data map[string]any) string {
 func oneYearFrom(t time.Time) *time.Time {
 	end := t.AddDate(1, 0, 0).UTC()
 	return &end
+}
+
+// ---------------------------------------------------------------------------
+// Invoice-shaped events (invoice.paid / invoice.payment_succeeded / _failed).
+// ---------------------------------------------------------------------------
+// La invoice tiene su propia forma, distinta del subscription object que
+// asume extractStripeFields; estos helpers leen los campos donde la invoice
+// realmente los trae.
+
+// digMap desciende por claves anidadas de mapas JSON genéricos. Devuelve nil
+// si cualquier eslabón falta o no es objeto (leer de un map nil es seguro).
+func digMap(m map[string]any, keys ...string) map[string]any {
+	cur := m
+	for _, k := range keys {
+		next, _ := cur[k].(map[string]any)
+		cur = next
+	}
+	return cur
+}
+
+// extractStripeInvoiceGymID resuelve el gym en eventos invoice.*. Stripe copia
+// la metadata de la subscription (donde StartCheckout siembra gym_id vía
+// SubscriptionData.Metadata) en:
+//   - parent.subscription_details.metadata — API 2025-03-31 (Basil) en
+//     adelante, incluida 2026-04-22.dahlia; o
+//   - subscription_details.metadata — API 2023-08-16 .. 2025-02 (legacy).
+//
+// Probamos ambas, espejo del patrón dual de current_period_end en
+// extractStripeFields.
+func extractStripeInvoiceGymID(data map[string]any) uuid.UUID {
+	obj := digMap(data, "object")
+	for _, md := range []map[string]any{
+		digMap(obj, "parent", "subscription_details", "metadata"),
+		digMap(obj, "subscription_details", "metadata"),
+	} {
+		if g, ok := md["gym_id"].(string); ok {
+			if id, err := uuid.Parse(g); err == nil {
+				return id
+			}
+		}
+	}
+	return uuid.Nil
+}
+
+// firstStripeInvoiceLine devuelve lines.data[0] del objeto invoice, o nil.
+// Tomar la primera línea basta para nuestro caso: cada subscription tiene un
+// único price (un plan por gym).
+func firstStripeInvoiceLine(data map[string]any) map[string]any {
+	ld, _ := digMap(data, "object", "lines")["data"].([]any)
+	if len(ld) == 0 {
+		return nil
+	}
+	first, _ := ld[0].(map[string]any)
+	return first
+}
+
+// extractStripeInvoicePeriodEnd lee el fin del periodo que este cobro cubre
+// desde lines.data[0].period.end (epoch seconds). La invoice no trae
+// current_period_end — ese campo vive en el subscription object.
+func extractStripeInvoicePeriodEnd(data map[string]any) *time.Time {
+	if v, ok := digMap(firstStripeInvoiceLine(data), "period")["end"].(float64); ok && v > 0 {
+		t := time.Unix(int64(v), 0).UTC()
+		return &t
+	}
+	return nil
+}
+
+// extractStripeInvoicePlan intenta el nickname del price en la primera línea
+// (line.plan.nickname o line.price.nickname, presentes en API legacy). En
+// Basil+ la línea trae `pricing` sin nickname → devolvemos "" y RecordEvent
+// conserva el plan actual del gym.
+func extractStripeInvoicePlan(data map[string]any) string {
+	line := firstStripeInvoiceLine(data)
+	for _, key := range []string{"plan", "price"} {
+		if nick, ok := digMap(line, key)["nickname"].(string); ok && nick != "" {
+			return nick
+		}
+	}
+	return ""
+}
+
+// extractStripeInvoiceBillingReason devuelve object.billing_reason
+// ("subscription_create" | "subscription_cycle" | "subscription_update" | …)
+// o "" si falta.
+func extractStripeInvoiceBillingReason(data map[string]any) string {
+	if v, ok := digMap(data, "object")["billing_reason"].(string); ok {
+		return v
+	}
+	return ""
+}
+
+// extractStripeObjectID devuelve object.id (p.ej. la invoice "in_...") o "".
+func extractStripeObjectID(data map[string]any) string {
+	if v, ok := digMap(data, "object")["id"].(string); ok {
+		return v
+	}
+	return ""
 }
 
 // extractStripeCustomer pulls the customer id out of whichever event shape
