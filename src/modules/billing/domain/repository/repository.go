@@ -23,6 +23,12 @@ type PaymentRepository interface {
 	GetByID(tx sharedDomain.Transaction, id uuid.UUID) (*paymentDomain.Payment, error)
 	ListByMember(tx sharedDomain.Transaction, q ListByMemberQuery) ([]*paymentDomain.Payment, int, error)
 	ListByGymBetweenDates(tx sharedDomain.Transaction, q ListByGymQuery) ([]*paymentDomain.Payment, int, error)
+	// AggregateByGymBetweenDates — totales de la MISMA ventana y filtros que
+	// ListByGymBetweenDates pero sobre TODAS las filas (Page/PageSize se
+	// ignoran). Existe porque sumar la página visible en el use case
+	// sub-reportaba el "Cobrado" del período en cuanto había más de una
+	// página, y el número cambiaba al paginar.
+	AggregateByGymBetweenDates(tx sharedDomain.Transaction, q ListByGymQuery) (ListByGymAggregates, error)
 	// HasRefundFor reports whether a UC-022 refund row already references the
 	// given parent payment. Used to enforce DA-22.1 single-refund.
 	HasRefundFor(tx sharedDomain.Transaction, parentPaymentID uuid.UUID) (bool, error)
@@ -51,14 +57,31 @@ type ListByMemberQuery struct {
 }
 
 // ListByGymQuery is a generic gym-scoped listing used by reports and the
-// future cash-close flow.
+// future cash-close flow. MethodFilter ("cash"/"transfer"/"card", vacío =
+// todos) filtra por método de pago — lo usa la pantalla de cobros para que
+// el filtro sea del lado del server y los totales cubran el mismo set que
+// la lista (filtrar en el FE sólo la página visible mentía).
 type ListByGymQuery struct {
 	GymID         uuid.UUID
 	From          time.Time
 	To            time.Time
 	ConceptFilter string
+	MethodFilter  string
 	Page          int
 	PageSize      int
+}
+
+// ListByGymAggregates — totales del set filtrado completo. NetTotal suma
+// amount tal cual (los refunds viven con monto negativo, así que restan
+// solos); los por-método son netos del método por la misma razón.
+// RefundTotal es la magnitud devuelta (positiva) para mostrarse como
+// "Devoluciones: $X" sin que el FE ande negando signos.
+type ListByGymAggregates struct {
+	NetTotal      float64
+	RefundTotal   float64
+	CashTotal     float64
+	TransferTotal float64
+	CardTotal     float64
 }
 
 // SaleRepository — UC-025 (RegisterSale) writes Sale + SaleItems atomically.

@@ -174,7 +174,7 @@ func (r *fakeReader) CountCriticalStock(_ sharedDomain.Transaction, _ uuid.UUID)
 func (r *fakeReader) GenderComposition(_ sharedDomain.Transaction, _ uuid.UUID, _ time.Time) (reports.GenderCompositionRow, error) {
 	return r.genderComposition, nil
 }
-func (r *fakeReader) AttendanceByGenderHour(_ sharedDomain.Transaction, _ uuid.UUID, _ int, _ time.Time) ([]reports.AttendanceByGenderHourRow, error) {
+func (r *fakeReader) AttendanceByGenderHour(_ sharedDomain.Transaction, _ uuid.UUID, _ string, _ int, _ time.Time) ([]reports.AttendanceByGenderHourRow, error) {
 	return r.genderByHour, nil
 }
 

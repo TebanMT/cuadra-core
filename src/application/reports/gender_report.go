@@ -66,7 +66,9 @@ func (uc *GenderReport) Execute(ctx context.Context, in GenderReportInput) (*Gen
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}
 	now := time.Now().UTC()
-	today := localToday(tx, uc.Gyms, in.GymID, now)
+	// Día y zona del gym: today acota la composición; tzName clasifica el
+	// heatmap por hora LOCAL (con hora UTC salía corrido 6 h en CDMX).
+	today, tzName := localTodayAndTZ(tx, uc.Gyms, in.GymID, now)
 	daysBack := in.DaysBack
 	if daysBack <= 0 {
 		daysBack = defaultGenderReportDaysBack
@@ -76,7 +78,7 @@ func (uc *GenderReport) Execute(ctx context.Context, in GenderReportInput) (*Gen
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}
-	byHour, err := uc.Reader.AttendanceByGenderHour(tx, in.GymID, daysBack, now)
+	byHour, err := uc.Reader.AttendanceByGenderHour(tx, in.GymID, tzName, daysBack, now)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}

@@ -209,14 +209,18 @@ type listMemberPaymentsResp struct {
 // header without the FE having to sum locally (would be wrong with
 // pagination cutting the page).
 type listGymPaymentsResp struct {
-	Items         []paymentResp `json:"items"`
-	Total         int           `json:"total"`
-	Page          int           `json:"page"`
-	PageSize      int           `json:"page_size"`
-	TotalPaid     float64       `json:"total_paid"`
-	CashTotal     float64       `json:"cash_total"`
-	TransferTotal float64       `json:"transfer_total"`
-	CardTotal     float64       `json:"card_total"`
+	Items    []paymentResp `json:"items"`
+	Total    int           `json:"total"`
+	Page     int           `json:"page"`
+	PageSize int           `json:"page_size"`
+	// total_paid es NETO del set filtrado completo (refunds restan);
+	// refund_total trae la magnitud devuelta por separado. Los por-método
+	// son netos del método.
+	TotalPaid     float64 `json:"total_paid"`
+	RefundTotal   float64 `json:"refund_total"`
+	CashTotal     float64 `json:"cash_total"`
+	TransferTotal float64 `json:"transfer_total"`
+	CardTotal     float64 `json:"card_total"`
 }
 
 // ---------------------------------------------------------------------------
@@ -244,7 +248,11 @@ func (ctrl *PaymentController) handleRegister(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, errBadID)
 		return
 	}
-	paymentDate := time.Now().UTC()
+	// Sin fecha en el request → zero time: el use case ancla el default al
+	// día LOCAL del gym (gymLocalPaymentDate). El pre-fill UTC anterior
+	// dejaba ese fallback muerto y fechaba refunds/ventas nocturnas en el
+	// día siguiente.
+	var paymentDate time.Time
 	if req.PaymentDate != "" {
 		t, err := time.Parse("2006-01-02", req.PaymentDate)
 		if err != nil {
@@ -334,7 +342,11 @@ func (ctrl *PaymentController) handleSettle(c *gin.Context) {
 	if !bindJSON(c, &req) {
 		return
 	}
-	paymentDate := time.Now().UTC()
+	// Sin fecha en el request → zero time: el use case ancla el default al
+	// día LOCAL del gym (gymLocalPaymentDate). El pre-fill UTC anterior
+	// dejaba ese fallback muerto y fechaba refunds/ventas nocturnas en el
+	// día siguiente.
+	var paymentDate time.Time
 	if req.PaymentDate != "" {
 		t, err := time.Parse("2006-01-02", req.PaymentDate)
 		if err != nil {
@@ -455,7 +467,6 @@ func (ctrl *PaymentController) handleListByGym(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
 	var from, to time.Time
-	now := time.Now().UTC()
 	if v := c.Query("from"); v != "" {
 		if t, err := time.Parse("2006-01-02", v); err == nil {
 			from = t
@@ -466,14 +477,13 @@ func (ctrl *PaymentController) handleListByGym(c *gin.Context) {
 			to = t
 		}
 	}
-	if from.IsZero() && to.IsZero() {
-		// Default: today only.
-		from = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
-		to = from
-	}
+	// Sin from/to → zero times: el use case resuelve "hoy" en el día LOCAL
+	// del gym. El default UTC de antes pedía el día de mañana desde las
+	// 6 PM de CDMX y la pantalla salía vacía.
 	out, err := ctrl.ListByGym.Execute(c.Request.Context(), billingApp.ListGymPaymentsInput{
 		GymID:         gymID,
 		ConceptFilter: c.Query("concept"),
+		MethodFilter:  c.Query("method"),
 		From:          from,
 		To:            to,
 		Page:          page,
@@ -496,6 +506,7 @@ func (ctrl *PaymentController) handleListByGym(c *gin.Context) {
 	utils.JsonResponse(c, http.StatusOK, listGymPaymentsResp{
 		Items: items, Total: out.Total, Page: out.Page, PageSize: out.PageSize,
 		TotalPaid:     out.TotalPaid,
+		RefundTotal:   out.RefundTotal,
 		CashTotal:     out.CashTotal,
 		TransferTotal: out.TransferTotal,
 		CardTotal:     out.CardTotal,
@@ -513,7 +524,11 @@ func (ctrl *PaymentController) handleRefund(c *gin.Context) {
 	if !bindJSON(c, &req) {
 		return
 	}
-	paymentDate := time.Now().UTC()
+	// Sin fecha en el request → zero time: el use case ancla el default al
+	// día LOCAL del gym (gymLocalPaymentDate). El pre-fill UTC anterior
+	// dejaba ese fallback muerto y fechaba refunds/ventas nocturnas en el
+	// día siguiente.
+	var paymentDate time.Time
 	if req.PaymentDate != "" {
 		t, err := time.Parse("2006-01-02", req.PaymentDate)
 		if err != nil {
@@ -726,7 +741,11 @@ func (ctrl *PaymentController) handleRegisterSale(c *gin.Context) {
 		}
 		memberID = &mid
 	}
-	paymentDate := time.Now().UTC()
+	// Sin fecha en el request → zero time: el use case ancla el default al
+	// día LOCAL del gym (gymLocalPaymentDate). El pre-fill UTC anterior
+	// dejaba ese fallback muerto y fechaba refunds/ventas nocturnas en el
+	// día siguiente.
+	var paymentDate time.Time
 	if req.PaymentDate != "" {
 		t, err := time.Parse("2006-01-02", req.PaymentDate)
 		if err != nil {

@@ -179,6 +179,45 @@ type recentPaymentWire struct {
 	Concept       string  `json:"concept"`
 }
 
+// dailyAmountWire / dailyCountWire — un punto de las series diarias. La fecha
+// va como string "YYYY-MM-DD" IGUAL que el resto de fechas de negocio del
+// wire: marshalear el time.Time crudo emitía "2026-07-31T00:00:00Z" y el FE,
+// al formatear ese instante en hora local (CDMX = UTC-6), pintaba cada punto
+// un día antes — la gráfica de ganancias salía "atrasada" un día.
+type dailyAmountWire struct {
+	Date  string  `json:"date"`
+	Total float64 `json:"total"`
+}
+
+type dailyCountWire struct {
+	Date  string  `json:"date"`
+	Count int     `json:"count"`
+}
+
+func dailyIncomeToWire(in []reportsApp.DailyIncome) []dailyAmountWire {
+	out := make([]dailyAmountWire, 0, len(in))
+	for _, r := range in {
+		out = append(out, dailyAmountWire{Date: r.Date.Format("2006-01-02"), Total: r.Total})
+	}
+	return out
+}
+
+func dailyAmountToWire(in []reportsApp.DailyAmount) []dailyAmountWire {
+	out := make([]dailyAmountWire, 0, len(in))
+	for _, r := range in {
+		out = append(out, dailyAmountWire{Date: r.Date.Format("2006-01-02"), Total: r.Total})
+	}
+	return out
+}
+
+func dailyCountToWire(in []reportsApp.DailyCount) []dailyCountWire {
+	out := make([]dailyCountWire, 0, len(in))
+	for _, r := range in {
+		out = append(out, dailyCountWire{Date: r.Date.Format("2006-01-02"), Count: r.Count})
+	}
+	return out
+}
+
 type cashTodayWire struct {
 	Total    float64            `json:"total"`
 	ByMethod map[string]float64 `json:"by_method"`
@@ -203,7 +242,7 @@ type dashboardWire struct {
 	ExpensesMonth    kpiTrendWire                `json:"expenses_month"`
 	ExpiringWeek     kpiTrendWire                `json:"expiring_week"`
 	Recoverable      kpiTrendWire                `json:"recoverable"`
-	Income30d        []reportsApp.DailyIncome    `json:"income_30d"`
+	Income30d        []dailyAmountWire           `json:"income_30d"`
 	AttentionSummary reportsApp.AttentionSummary `json:"attention_summary"`
 	RecentPayments   []recentPaymentWire         `json:"recent_payments"`
 	CashToday        cashTodayWire               `json:"cash_today"`
@@ -239,7 +278,7 @@ func toDashboardWire(d *reportsApp.DashboardOutput) dashboardWire {
 		// KpiTrend with no delta — FE renders just the value.
 		ExpiringWeek:     kpiTrendWire{Value: float64(d.ExpiringThisWeek)},
 		Recoverable:      kpiTrendWire{Value: float64(d.RecoverableExpired)},
-		Income30d:        nonNilDailyIncome(d.IncomeLast30Days),
+		Income30d:        dailyIncomeToWire(d.IncomeLast30Days),
 		AttentionSummary: d.AttentionSummary,
 		RecentPayments:   recentPaymentsToWire(d.RecentPayments),
 		CashToday: cashTodayWire{
@@ -258,13 +297,6 @@ func floatPtrIfMeaningful(k reportsApp.KPI) *float64 {
 	}
 	v := k.Delta
 	return &v
-}
-
-func nonNilDailyIncome(in []reportsApp.DailyIncome) []reportsApp.DailyIncome {
-	if in == nil {
-		return []reportsApp.DailyIncome{}
-	}
-	return in
 }
 
 func recentPaymentsToWire(in []reportsApp.RecentPaymentRow) []recentPaymentWire {
@@ -468,9 +500,9 @@ type rangeWire struct {
 	From                   string                         `json:"from"`
 	To                     string                         `json:"to"`
 	Totals                 rangeTotalsWire                `json:"totals"`
-	IncomeByDay            []reportsApp.DailyIncome       `json:"income_by_day"`
-	ExpensesByDay          []reportsApp.DailyAmount       `json:"expenses_by_day"`
-	CheckinsByDay          []reportsApp.DailyCount        `json:"checkins_by_day"`
+	IncomeByDay            []dailyAmountWire              `json:"income_by_day"`
+	ExpensesByDay          []dailyAmountWire              `json:"expenses_by_day"`
+	CheckinsByDay          []dailyCountWire               `json:"checkins_by_day"`
 	IncomeByMethod         map[string]float64             `json:"income_by_method"`
 	ExpensesByCategory     map[string]float64             `json:"expenses_by_category"`
 	TopMembers             []reportsApp.TopMemberRow      `json:"top_members"`
@@ -565,9 +597,9 @@ func toRangeWire(r *reportsApp.RangeReportOutput, dash *reportsApp.DashboardOutp
 			Checkins:        kpiToWire(r.Totals.Checkins),
 			Net:             kpiToWire(r.Totals.Net),
 		},
-		IncomeByDay:        nonNilDailyIncome(r.IncomeByDay),
-		ExpensesByDay:      nonNilDailyAmount(r.ExpensesByDay),
-		CheckinsByDay:      nonNilDailyCount(r.CheckinsByDay),
+		IncomeByDay:        dailyIncomeToWire(r.IncomeByDay),
+		ExpensesByDay:      dailyAmountToWire(r.ExpensesByDay),
+		CheckinsByDay:      dailyCountToWire(r.CheckinsByDay),
 		IncomeByMethod:     cashByMethod(r.IncomeByMethod),
 		ExpensesByCategory: nonNilCategoryMap(r.ExpensesByCategory),
 		TopMembers:         nonNilTopMembers(r.TopMembers),
@@ -596,13 +628,6 @@ func kpiToWire(k reportsApp.KPI) kpiTrendWire {
 	}
 }
 
-func nonNilDailyAmount(in []reportsApp.DailyAmount) []reportsApp.DailyAmount {
-	if in == nil {
-		return []reportsApp.DailyAmount{}
-	}
-	return in
-}
-
 func nonNilCategoryMap(in map[string]float64) map[string]float64 {
 	if in == nil {
 		return map[string]float64{}
@@ -613,13 +638,6 @@ func nonNilCategoryMap(in map[string]float64) map[string]float64 {
 func nonNilTopProducts(in []reportsApp.TopProductRow) []reportsApp.TopProductRow {
 	if in == nil {
 		return []reportsApp.TopProductRow{}
-	}
-	return in
-}
-
-func nonNilDailyCount(in []reportsApp.DailyCount) []reportsApp.DailyCount {
-	if in == nil {
-		return []reportsApp.DailyCount{}
 	}
 	return in
 }

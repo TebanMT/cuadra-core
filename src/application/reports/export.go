@@ -97,7 +97,9 @@ func (uc *ExportReport) Execute(ctx context.Context, in ExportInput) (*ExportOut
 
 	switch in.Type {
 	case ReportTypeMembers:
-		rows, err := uc.Reader.ListMembersForExport(tx, in.GymID, time.Now().UTC())
+		// Día LOCAL del gym para el estado/vigencia impreso — con el día
+		// UTC, un export nocturno marcaba vencido lo que vencía mañana.
+		rows, err := uc.Reader.ListMembersForExport(tx, in.GymID, tz.LocalToday(gym.Timezone, nowUTC()))
 		if err != nil {
 			return nil, sharedDomain.NewUnexpectedError(err)
 		}

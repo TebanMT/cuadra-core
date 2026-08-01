@@ -117,6 +117,9 @@ func (r *PaymentPostgresRepository) ListByGymBetweenDates(tx sharedDomain.Transa
 	if q.ConceptFilter != "" {
 		base = base.Where("concept = ?", q.ConceptFilter)
 	}
+	if q.MethodFilter != "" {
+		base = base.Where("payment_method = ?", q.MethodFilter)
+	}
 	var total int64
 	if err := base.Session(&gorm.Session{}).Count(&total).Error; err != nil {
 		return nil, 0, err
@@ -131,6 +134,46 @@ func (r *PaymentPostgresRepository) ListByGymBetweenDates(tx sharedDomain.Transa
 		out[i] = paymentFromModel(&rows[i])
 	}
 	return out, int(total), nil
+}
+
+func (r *PaymentPostgresRepository) AggregateByGymBetweenDates(tx sharedDomain.Transaction, q billingRepo.ListByGymQuery) (billingRepo.ListByGymAggregates, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	var row struct {
+		NetTotal      float64
+		RefundTotal   float64
+		CashTotal     float64
+		TransferTotal float64
+		CardTotal     float64
+	}
+	query := `
+		SELECT
+		  COALESCE(SUM(amount), 0) AS net_total,
+		  COALESCE(SUM(ABS(amount)) FILTER (WHERE concept = 'refund'), 0) AS refund_total,
+		  COALESCE(SUM(amount) FILTER (WHERE payment_method = 'cash'), 0) AS cash_total,
+		  COALESCE(SUM(amount) FILTER (WHERE payment_method = 'transfer'), 0) AS transfer_total,
+		  COALESCE(SUM(amount) FILTER (WHERE payment_method = 'card'), 0) AS card_total
+		FROM payments
+		WHERE gym_id = ? AND deleted_at IS NULL
+		  AND payment_date >= ? AND payment_date <= ?`
+	args := []any{q.GymID, q.From.Format("2006-01-02"), q.To.Format("2006-01-02")}
+	if q.ConceptFilter != "" {
+		query += ` AND concept = ?`
+		args = append(args, q.ConceptFilter)
+	}
+	if q.MethodFilter != "" {
+		query += ` AND payment_method = ?`
+		args = append(args, q.MethodFilter)
+	}
+	if err := gormTx.Raw(query, args...).Scan(&row).Error; err != nil {
+		return billingRepo.ListByGymAggregates{}, err
+	}
+	return billingRepo.ListByGymAggregates{
+		NetTotal:      row.NetTotal,
+		RefundTotal:   row.RefundTotal,
+		CashTotal:     row.CashTotal,
+		TransferTotal: row.TransferTotal,
+		CardTotal:     row.CardTotal,
+	}, nil
 }
 
 func (r *PaymentPostgresRepository) HasRefundFor(tx sharedDomain.Transaction, parentPaymentID uuid.UUID) (bool, error) {

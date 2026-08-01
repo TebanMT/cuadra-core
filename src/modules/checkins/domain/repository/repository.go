@@ -23,18 +23,21 @@ type CheckinRepository interface {
 	// attempts" persistence if needed.
 	ListByMember(tx sharedDomain.Transaction, memberID uuid.UUID, since time.Time, limit int) ([]*checkinDomain.Checkin, error)
 	// CountTodayByGym is the count tile that lives at the top of the
-	// reception screen. `today` is interpreted at day granularity in UTC.
-	CountTodayByGym(tx sharedDomain.Transaction, gymID uuid.UUID, today time.Time) (int, error)
+	// reception screen. `today` is the gym's LOCAL calendar day and tzName
+	// its zone — checkin_at es un instante, así que el día se traduce a un
+	// rango de instantes vía tz.DayBounds (zona vacía = UTC, fail-open).
+	CountTodayByGym(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, today time.Time) (int, error)
 	// ListRecentByGym returns the latest N checkins for the gym joined with
 	// member and operator names so the FE doesn't have to round-trip per
 	// row. The active membership's expiry is included for the "vence en X
 	// días" badge — same query the kiosk shows after a successful pass.
 	ListRecentByGym(tx sharedDomain.Transaction, gymID uuid.UUID, limit int) ([]RecentCheckinRow, error)
 	// ListByGymBetween returns checkins in the day-grain window [from,to]
-	// (both inclusive). Used by the reports page drill-down ("ver entradas
-	// del día X"). Joins member name + expiry the same way ListRecentByGym
-	// does so the FE renders one shape.
-	ListByGymBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time, limit int) ([]RecentCheckinRow, error)
+	// (both inclusive), interpreted in the gym's timezone (tzName) — the
+	// chart bar it drills into is bucketed by LOCAL day, so the list must
+	// window the same way or the counts never match. Joins member name +
+	// expiry the same way ListRecentByGym does so the FE renders one shape.
+	ListByGymBetween(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time, limit int) ([]RecentCheckinRow, error)
 	// ListByMemberDetailed returns the latest N checkins de un socio
 	// concreto con el operator_name resuelto. Lo consume la pestaña
 	// "Asistencia" del detalle de socio para evitar N+1 en el FE.

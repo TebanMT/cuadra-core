@@ -115,11 +115,10 @@ func renderPaymentsPDF(gym *gymDomain.Gym, rows []PaymentExportRow, from, to tim
 		pdf.CellFormat(widths[5], 5, fmt.Sprintf("$%.2f", r.Amount), "1", 0, "R", false, 0, "")
 		pdf.CellFormat(widths[6], 5, fmt.Sprintf("$%.2f", r.BalancePending), "1", 0, "R", false, 0, "")
 		pdf.Ln(-1)
-		if r.Concept != "refund" {
-			total += r.Amount
-		} else {
-			total -= r.Amount
-		}
+		// Los refunds ya vienen con amount NEGATIVO (DA-22.1), así que el
+		// neto es la suma directa. El `-=` anterior los negaba de vuelta y
+		// el "Total neto" SUMABA cada devolución en lugar de restarla.
+		total += r.Amount
 	}
 	pdf.Ln(3)
 	pdf.SetFont("Helvetica", "B", 10)

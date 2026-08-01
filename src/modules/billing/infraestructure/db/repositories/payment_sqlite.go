@@ -170,6 +170,10 @@ func (r *PaymentSQLiteRepository) ListByGymBetweenDates(tx sharedDomain.Transact
 		where = append(where, "concept = ?")
 		args = append(args, q.ConceptFilter)
 	}
+	if q.MethodFilter != "" {
+		where = append(where, "payment_method = ?")
+		args = append(args, q.MethodFilter)
+	}
 	whereClause := strings.Join(where, " AND ")
 	var total int
 	if err := stx.Get(context.Background(), &total,
@@ -188,6 +192,45 @@ func (r *PaymentSQLiteRepository) ListByGymBetweenDates(tx sharedDomain.Transact
 		out[i] = paymentFromRow(&rows[i])
 	}
 	return out, total, nil
+}
+
+func (r *PaymentSQLiteRepository) AggregateByGymBetweenDates(tx sharedDomain.Transaction, q billingRepo.ListByGymQuery) (billingRepo.ListByGymAggregates, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	where := []string{"gym_id = ?", "deleted_at IS NULL", "payment_date >= ?", "payment_date <= ?"}
+	args := []any{q.GymID.String(), q.From.UTC().Format(dateLayout), q.To.UTC().Format(dateLayout)}
+	if q.ConceptFilter != "" {
+		where = append(where, "concept = ?")
+		args = append(args, q.ConceptFilter)
+	}
+	if q.MethodFilter != "" {
+		where = append(where, "payment_method = ?")
+		args = append(args, q.MethodFilter)
+	}
+	var row struct {
+		NetTotal      int64 `db:"net_total"`
+		RefundTotal   int64 `db:"refund_total"`
+		CashTotal     int64 `db:"cash_total"`
+		TransferTotal int64 `db:"transfer_total"`
+		CardTotal     int64 `db:"card_total"`
+	}
+	// amount está en cents (INTEGER); /100 al edge como el resto del repo.
+	if err := stx.Get(context.Background(), &row, `
+		SELECT
+		  COALESCE(SUM(amount), 0) AS net_total,
+		  COALESCE(SUM(CASE WHEN concept = 'refund' THEN ABS(amount) ELSE 0 END), 0) AS refund_total,
+		  COALESCE(SUM(CASE WHEN payment_method = 'cash' THEN amount ELSE 0 END), 0) AS cash_total,
+		  COALESCE(SUM(CASE WHEN payment_method = 'transfer' THEN amount ELSE 0 END), 0) AS transfer_total,
+		  COALESCE(SUM(CASE WHEN payment_method = 'card' THEN amount ELSE 0 END), 0) AS card_total
+		FROM payments WHERE `+strings.Join(where, " AND "), args...); err != nil {
+		return billingRepo.ListByGymAggregates{}, err
+	}
+	return billingRepo.ListByGymAggregates{
+		NetTotal:      float64(row.NetTotal) / 100,
+		RefundTotal:   float64(row.RefundTotal) / 100,
+		CashTotal:     float64(row.CashTotal) / 100,
+		TransferTotal: float64(row.TransferTotal) / 100,
+		CardTotal:     float64(row.CardTotal) / 100,
+	}, nil
 }
 
 func (r *PaymentSQLiteRepository) HasRefundFor(tx sharedDomain.Transaction, parentPaymentID uuid.UUID) (bool, error) {

@@ -10,6 +10,7 @@ import (
 	folioSvc "github.com/cuadra/cuadra-core/src/modules/billing/domain/folio"
 	paymentDomain "github.com/cuadra/cuadra-core/src/modules/billing/domain/payment"
 	billingRepo "github.com/cuadra/cuadra-core/src/modules/billing/domain/repository"
+	gymRepo "github.com/cuadra/cuadra-core/src/modules/gyms/domain/repository"
 	"github.com/cuadra/cuadra-core/src/shared/audit"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 )
@@ -37,6 +38,16 @@ type SettlePendingBalance struct {
 	Folios   *folioSvc.Generator
 	UoW      sharedDomain.UnitOfWork
 	Audit    audit.Recorder
+	// Gyms (opcional) → default de PaymentDate en el día LOCAL del gym
+	// (ver gymLocalPaymentDate). Nil = día UTC (tests viejos).
+	Gyms gymRepo.GymRepository
+}
+
+// WithGyms cablea el repo de gyms para anclar el default de PaymentDate
+// al día calendario del gym en SU zona horaria.
+func (uc *SettlePendingBalance) WithGyms(g gymRepo.GymRepository) *SettlePendingBalance {
+	uc.Gyms = g
+	return uc
 }
 
 func NewSettlePendingBalance(payments billingRepo.PaymentRepository, folios *folioSvc.Generator,
@@ -46,11 +57,13 @@ func NewSettlePendingBalance(payments billingRepo.PaymentRepository, folios *fol
 
 func (uc *SettlePendingBalance) Execute(ctx context.Context, in SettlePendingBalanceInput) (*SettlePendingBalanceOutput, error) {
 	now := time.Now().UTC()
-	if in.PaymentDate.IsZero() {
-		in.PaymentDate = now
-	}
 	var out SettlePendingBalanceOutput
 	err := uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
+		// Default de fecha: día LOCAL del gym — un abono nocturno pertenece
+		// a la caja del día en curso (mismo criterio que el cobro).
+		if in.PaymentDate.IsZero() {
+			in.PaymentDate = gymLocalPaymentDate(tx, uc.Gyms, in.GymID, now)
+		}
 		parent, err := uc.Payments.GetByID(tx, in.ParentPaymentID)
 		if err != nil {
 			return err

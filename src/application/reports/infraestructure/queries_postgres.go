@@ -1029,15 +1029,16 @@ func (r *PostgresReader) GenderComposition(tx sharedDomain.Transaction, gymID uu
 // "Exitoso" = result LIKE 'allowed_%' (allowed_active / expiring_soon /
 // override). Filtramos denied_* para que el reporte refleje uso real del gym,
 // no intentos fallidos. La ventana corre [now - daysBack, now] sobre
-// checkin_at (que es TIMESTAMPTZ — la conversión a hora local del gym
-// queda para una mejora futura; hoy usamos UTC para simplificar).
-func (r *PostgresReader) AttendanceByGenderHour(tx sharedDomain.Transaction, gymID uuid.UUID, daysBack int, now time.Time) ([]reports.AttendanceByGenderHourRow, error) {
+// checkin_at y la hora se clasifica en la zona LOCAL del gym — con la hora
+// UTC el heatmap salía corrido 6 horas en CDMX.
+func (r *PostgresReader) AttendanceByGenderHour(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, daysBack int, now time.Time) ([]reports.AttendanceByGenderHourRow, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	cutoff := now.Add(-time.Duration(daysBack) * 24 * time.Hour)
+	zone := tz.NameOrUTC(tzName)
 	var rows []hourBucketRow
 	err := gormTx.Raw(`
 		SELECT
-		    EXTRACT(HOUR FROM c.checkin_at)::int                                     AS hour,
+		    EXTRACT(HOUR FROM (c.checkin_at AT TIME ZONE ?))::int                    AS hour,
 		    COUNT(*) FILTER (WHERE m.gender = 'hombre')                              AS hombre,
 		    COUNT(*) FILTER (WHERE m.gender = 'mujer')                               AS mujer,
 		    COUNT(*) FILTER (WHERE m.gender IS NULL OR m.gender = 'no_especificado') AS no_especificado
@@ -1047,8 +1048,8 @@ func (r *PostgresReader) AttendanceByGenderHour(tx sharedDomain.Transaction, gym
 		  AND c.deleted_at IS NULL
 		  AND c.result LIKE 'allowed_%'
 		  AND c.checkin_at >= ? AND c.checkin_at <= ?
-		GROUP BY EXTRACT(HOUR FROM c.checkin_at)`,
-		gymID, cutoff, now).Scan(&rows).Error
+		GROUP BY 1`,
+		zone, gymID, cutoff, now).Scan(&rows).Error
 	if err != nil {
 		return nil, err
 	}

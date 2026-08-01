@@ -70,7 +70,7 @@ func renderPeriodSummaryPDF(gym *gymDomain.Gym, r *RangeReportOutput, from, to t
 		pdf.CellFormat(kpiWidths[3], 5, asciiSafe(fmtKPIDelta(k)), "1", 0, "R", false, 0, "")
 		pdf.Ln(-1)
 	}
-	writeKPI("Utilidad (Ingresos - egresos)", r.Totals.Net, true)
+	writeKPI("Utilidad (Ingresos - egresos - devoluciones)", r.Totals.Net, true)
 	writeKPI("Ingresos", r.Totals.Income, true)
 	writeKPI("Egresos por mercancía", r.Totals.InventoryCost, true)
 	writeKPI("Otros gastos", r.Totals.ExpensesGeneral, true)
@@ -209,7 +209,7 @@ func renderPeriodSummaryXLSX(r *RangeReportOutput, from, to time.Time) ([]byte, 
 	// KPI table — col1 indicador, col2 actual, col3 anterior, col4 delta.
 	header("Indicadores", bold)
 	colsHeader([]string{"Indicador", "Actual", "Anterior", "Cambio"})
-	row([]any{"Utilidad (Ingresos - egresos)", r.Totals.Net.Current, r.Totals.Net.Previous, fmtKPIDelta(r.Totals.Net)})
+	row([]any{"Utilidad (Ingresos - egresos - devoluciones)", r.Totals.Net.Current, r.Totals.Net.Previous, fmtKPIDelta(r.Totals.Net)})
 	row([]any{"Ingresos", r.Totals.Income.Current, r.Totals.Income.Previous, fmtKPIDelta(r.Totals.Income)})
 	row([]any{"Egresos por mercancía", r.Totals.InventoryCost.Current, r.Totals.InventoryCost.Previous, fmtKPIDelta(r.Totals.InventoryCost)})
 	row([]any{"Otros gastos", r.Totals.ExpensesGeneral.Current, r.Totals.ExpensesGeneral.Previous, fmtKPIDelta(r.Totals.ExpensesGeneral)})

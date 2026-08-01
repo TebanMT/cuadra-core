@@ -265,9 +265,9 @@ func main() {
 	deactivatePromo := promoApp.NewDeactivatePromotion(promotionRepo, uow, recorder)
 	reactivatePromo := promoApp.NewReactivatePromotion(promotionRepo, uow, recorder)
 	listPromos := promoApp.NewListPromotions(promotionRepo, uow).WithGyms(gymRepo)
-	getPromoByCode := promoApp.NewGetPromotionByCode(promotionRepo, appliedPromoRepo, uow)
+	getPromoByCode := promoApp.NewGetPromotionByCode(promotionRepo, appliedPromoRepo, uow).WithGyms(gymRepo)
 	applyPromo := promoApp.NewApplyPromotion(promotionRepo, appliedPromoRepo)
-	listAppliedByMonth := promoApp.NewListAppliedByMonth(appliedPromoRepo, uow)
+	listAppliedByMonth := promoApp.NewListAppliedByMonth(appliedPromoRepo, uow).WithGyms(gymRepo)
 	// Engancha el flujo de primer pago a promociones: el alta de socio
 	// con ChargeFirstPayment puede aplicar una promo en la misma tx.
 	createMember.WithPromotions(applyPromo, memberSvc)
@@ -359,14 +359,14 @@ func main() {
 		WithPromotions(applyPromo).
 		WithWelcomeNotifier(enqueueWelcomePin).
 		WithGyms(gymRepo)
-	settlePayment := billingApp.NewSettlePendingBalance(paymentRepo, folios, uow, recorder)
+	settlePayment := billingApp.NewSettlePendingBalance(paymentRepo, folios, uow, recorder).WithGyms(gymRepo)
 	receiptPayment := billingApp.NewGenerateReceipt(paymentRepo, gymRepo, memberRepo, uow)
 	// El dispatcher genera el PDF del comprobante (reusa GenerateReceipt),
 	// lo sube a R2 y mete la URL en el template de recibo ({receipt_url}).
 	dispatchNoti.Receipt = receiptPDFRenderer{gen: receiptPayment}
 	sendReceipt := billingApp.NewSendReceipt(paymentRepo, uow).WithPublisher(billingSubscriber).WithResender(billingSubscriber)
 	listMemberPayments := billingApp.NewListMemberPayments(paymentRepo, memberRepo, uow)
-	listGymPayments := billingApp.NewListGymPayments(paymentRepo, memberRepo, uow)
+	listGymPayments := billingApp.NewListGymPayments(paymentRepo, memberRepo, uow).WithGyms(gymRepo)
 	refundPayment := billingApp.NewRefundPayment(paymentRepo, folios, memberSvc, uow, recorder).
 		WithGyms(gymRepo)
 
@@ -458,7 +458,7 @@ func main() {
 	expenseController := expCtrl.NewExpenseController(createExpense, updateExpense, deleteExpense, listExpenses, tokens)
 	expenseController.PlanGate = plusGate
 	// Cloud has no biometric reader — fingerprint flows live on the sidecar.
-	checkinCtrl := chkCtrl.NewCheckinController(checkinManual, checkinNumber, checkinOverride, checkinRepo, uow, nil, tokens)
+	checkinCtrl := chkCtrl.NewCheckinController(checkinManual, checkinNumber, checkinOverride, checkinRepo, uow, nil, tokens).WithGyms(gymRepo)
 	reportsController := reportsCtrl.NewReportsController(dashboard, attentionRequired, rangeReport, exportReport, markContacted, markLost, tokens).
 		WithGenderReport(genderReport)
 	reportsController.PlanGate = plusGate

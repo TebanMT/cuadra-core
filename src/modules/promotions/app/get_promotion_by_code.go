@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
+	gymRepo "github.com/cuadra/cuadra-core/src/modules/gyms/domain/repository"
 	promoErrors "github.com/cuadra/cuadra-core/src/modules/promotions/domain/errors"
 	promoDomain "github.com/cuadra/cuadra-core/src/modules/promotions/domain/promotion"
 	promoRepo "github.com/cuadra/cuadra-core/src/modules/promotions/domain/repository"
@@ -27,10 +28,20 @@ type GetPromotionByCode struct {
 	Promotions promoRepo.PromotionRepository
 	Applied    promoRepo.AppliedPromotionRepository
 	UoW        sharedDomain.UnitOfWork
+	// Gyms (opcional) → la vigencia se evalúa sobre el día LOCAL del gym
+	// (ver localPromoDay). Nil = día UTC (tests viejos).
+	Gyms gymRepo.GymRepository
 }
 
 func NewGetPromotionByCode(p promoRepo.PromotionRepository, ap promoRepo.AppliedPromotionRepository, uow sharedDomain.UnitOfWork) *GetPromotionByCode {
 	return &GetPromotionByCode{Promotions: p, Applied: ap, UoW: uow}
+}
+
+// WithGyms cablea el repo de gyms para evaluar la vigencia sobre el día
+// calendario del gym en SU zona horaria.
+func (uc *GetPromotionByCode) WithGyms(g gymRepo.GymRepository) *GetPromotionByCode {
+	uc.Gyms = g
+	return uc
 }
 
 func (uc *GetPromotionByCode) Execute(ctx context.Context, in GetPromotionByCodeInput) (*promoDomain.Promotion, error) {
@@ -47,7 +58,10 @@ func (uc *GetPromotionByCode) Execute(ctx context.Context, in GetPromotionByCode
 		return nil, err
 	}
 	if in.Today != nil {
-		if err := p.IsCurrentlyValid(*in.Today); err != nil {
+		// Día LOCAL del gym — con el instante UTC a pelo, una promo vigente
+		// su último día se juzgaba vencida desde las 6 PM en caja (CDMX).
+		day := localPromoDay(tx, uc.Gyms, in.GymID, *in.Today)
+		if err := p.IsCurrentlyValid(day); err != nil {
 			return nil, sharedDomain.NewBusinessError(err, "")
 		}
 		if p.MaxUsesTotal != nil {

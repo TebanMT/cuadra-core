@@ -1199,13 +1199,14 @@ func (r *SQLiteReader) GenderComposition(tx sharedDomain.Transaction, gymID uuid
 }
 
 // AttendanceByGenderHour — checkin_at en SQLite es INTEGER unix milliseconds.
-// Convertimos a HH via strftime('%H', checkin_at/1000, 'unixepoch'). El
-// resultado es UTC (igual que en postgres) — la TZ-local del gym queda para
-// una mejora futura. result LIKE 'allowed_%' filtra denied_*.
-func (r *SQLiteReader) AttendanceByGenderHour(tx sharedDomain.Transaction, gymID uuid.UUID, daysBack int, now time.Time) ([]reports.AttendanceByGenderHourRow, error) {
+// La hora se clasifica en la zona LOCAL del gym desplazando el epoch por el
+// offset (misma técnica que localDayExpr) — con la hora UTC el heatmap salía
+// corrido 6 horas en CDMX. result LIKE 'allowed_%' filtra denied_*.
+func (r *SQLiteReader) AttendanceByGenderHour(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, daysBack int, now time.Time) ([]reports.AttendanceByGenderHourRow, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	cutoffMs := now.Add(-time.Duration(daysBack) * 24 * time.Hour).UnixMilli()
 	nowMs := now.UnixMilli()
+	offset := tz.OffsetSeconds(tzName, now)
 	type sqliteRow struct {
 		HourStr        string `db:"hour"`
 		Hombre         int    `db:"hombre"`
@@ -1215,7 +1216,7 @@ func (r *SQLiteReader) AttendanceByGenderHour(tx sharedDomain.Transaction, gymID
 	var rows []sqliteRow
 	err := stx.Select(context.Background(), &rows, `
 		SELECT
-		    strftime('%H', c.checkin_at/1000, 'unixepoch')                                       AS hour,
+		    strftime('%H', (c.checkin_at/1000) + ?, 'unixepoch')                                 AS hour,
 		    SUM(CASE WHEN m.gender = 'hombre' THEN 1 ELSE 0 END)                                 AS hombre,
 		    SUM(CASE WHEN m.gender = 'mujer' THEN 1 ELSE 0 END)                                  AS mujer,
 		    SUM(CASE WHEN m.gender IS NULL OR m.gender = 'no_especificado' THEN 1 ELSE 0 END)    AS no_especificado
@@ -1225,8 +1226,8 @@ func (r *SQLiteReader) AttendanceByGenderHour(tx sharedDomain.Transaction, gymID
 		  AND c.deleted_at IS NULL
 		  AND c.result LIKE 'allowed_%'
 		  AND c.checkin_at >= ? AND c.checkin_at <= ?
-		GROUP BY strftime('%H', c.checkin_at/1000, 'unixepoch')`,
-		gymID.String(), cutoffMs, nowMs)
+		GROUP BY 1`,
+		offset, gymID.String(), cutoffMs, nowMs)
 	if err != nil {
 		return nil, err
 	}

@@ -15,6 +15,7 @@ import (
 	chkErrors "github.com/cuadra/cuadra-core/src/modules/checkins/domain/errors"
 	chkRepo "github.com/cuadra/cuadra-core/src/modules/checkins/domain/repository"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
+	"github.com/cuadra/cuadra-core/src/shared/tz"
 )
 
 const sqliteCheckinDateFmt = "2006-01-02"
@@ -109,10 +110,12 @@ func (r *CheckinSQLiteRepository) ListByMember(tx sharedDomain.Transaction, memb
 	return out, nil
 }
 
-func (r *CheckinSQLiteRepository) CountTodayByGym(tx sharedDomain.Transaction, gymID uuid.UUID, today time.Time) (int, error) {
+func (r *CheckinSQLiteRepository) CountTodayByGym(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, today time.Time) (int, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
-	start := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, time.UTC).UnixMilli()
-	end := start + int64(24*time.Hour/time.Millisecond)
+	// Día LOCAL del gym → rango de instantes epoch-ms. Con medianoche UTC,
+	// el contador se reiniciaba a las 6 PM de CDMX.
+	startT, endT := tz.DayBounds(tzName, today, today)
+	start, end := startT.UnixMilli(), endT.UnixMilli()
 	var n int
 	err := stx.Get(context.Background(), &n, `
 		SELECT COUNT(1) FROM checkins
@@ -196,15 +199,17 @@ func (r *CheckinSQLiteRepository) ListRecentByGym(tx sharedDomain.Transaction, g
 	return out, nil
 }
 
-// ListByGymBetween — drill-down: check-ins en rango [from,to] al día.
+// ListByGymBetween — drill-down: check-ins en rango [from,to] al día LOCAL
+// del gym (la barra del chart se cuenta por día local; con medianoche UTC
+// la lista iba corrida 6 horas y nunca cuadraba con la barra).
 // Misma shape de salida que ListRecentByGym.
-func (r *CheckinSQLiteRepository) ListByGymBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time, limit int) ([]chkRepo.RecentCheckinRow, error) {
+func (r *CheckinSQLiteRepository) ListByGymBetween(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time, limit int) ([]chkRepo.RecentCheckinRow, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	if limit <= 0 || limit > 500 {
 		limit = 200
 	}
-	fromMs := time.Date(from.Year(), from.Month(), from.Day(), 0, 0, 0, 0, time.UTC).UnixMilli()
-	toMs := time.Date(to.Year(), to.Month(), to.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1).UnixMilli()
+	fromT, toT := tz.DayBounds(tzName, from, to)
+	fromMs, toMs := fromT.UnixMilli(), toT.UnixMilli()
 	type row struct {
 		ID             string         `db:"id"`
 		MemberID       sql.NullString `db:"member_id"`

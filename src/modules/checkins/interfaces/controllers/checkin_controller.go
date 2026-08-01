@@ -11,10 +11,12 @@ import (
 
 	chkApp "github.com/cuadra/cuadra-core/src/modules/checkins/app"
 	chkRepo "github.com/cuadra/cuadra-core/src/modules/checkins/domain/repository"
+	gymRepo "github.com/cuadra/cuadra-core/src/modules/gyms/domain/repository"
 	"github.com/cuadra/cuadra-core/src/shared/accesswebhook"
 	"github.com/cuadra/cuadra-core/src/shared/auth"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 	"github.com/cuadra/cuadra-core/src/shared/middleware"
+	"github.com/cuadra/cuadra-core/src/shared/tz"
 	"github.com/cuadra/cuadra-core/src/shared/utils"
 )
 
@@ -34,6 +36,9 @@ type CheckinController struct {
 	// Webhook is invoked fire-and-forget after a successful "allowed"
 	// checkin. nil → defaults to a no-op dispatcher.
 	Webhook accesswebhook.Dispatcher
+	// Gyms (opcional) → resuelve la zona del gym para que "hoy" y el
+	// drill-down por día usen el día LOCAL, no el UTC. Nil = UTC (fail-open).
+	Gyms gymRepo.GymRepository
 }
 
 func NewCheckinController(
@@ -63,6 +68,26 @@ func (c *CheckinController) WithWebhook(d accesswebhook.Dispatcher) *CheckinCont
 		c.Webhook = d
 	}
 	return c
+}
+
+// WithGyms cablea el repo de gyms para anclar "hoy" y las ventanas por día
+// a la zona horaria del gym.
+func (c *CheckinController) WithGyms(g gymRepo.GymRepository) *CheckinController {
+	c.Gyms = g
+	return c
+}
+
+// gymTZAndToday resuelve la zona del gym y su día calendario local dentro
+// de la misma tx del handler. Fail-open a UTC (mismo criterio que
+// reports.localTodayAndTZ).
+func (c *CheckinController) gymTZAndToday(tx sharedDomain.Transaction, gymID uuid.UUID) (string, time.Time) {
+	now := time.Now().UTC()
+	if c.Gyms != nil {
+		if g, err := c.Gyms.GetByID(tx, gymID); err == nil && g != nil {
+			return g.Timezone, tz.LocalToday(g.Timezone, now)
+		}
+	}
+	return "", time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 }
 
 // dispatchAccessWebhook is invoked from each handler after a successful
@@ -295,7 +320,10 @@ func (c *CheckinController) handleListRecent(ctx *gin.Context) {
 	}
 	var rows []chkRepo.RecentCheckinRow
 	if !fromT.IsZero() && !toT.IsZero() {
-		rows, err = c.Repo.ListByGymBetween(tx, gymID, fromT, toT, limit)
+		// La ventana del drill-down se interpreta en el día LOCAL del gym
+		// — igual que la barra del chart de la que viene el click.
+		tzName, _ := c.gymTZAndToday(tx, gymID)
+		rows, err = c.Repo.ListByGymBetween(tx, gymID, tzName, fromT, toT, limit)
 	} else {
 		rows, err = c.Repo.ListRecentByGym(tx, gymID, limit)
 	}
@@ -329,7 +357,8 @@ func (c *CheckinController) handleCountToday(ctx *gin.Context) {
 		utils.ErrorResponse(ctx, http.StatusInternalServerError, err)
 		return
 	}
-	n, err := c.Repo.CountTodayByGym(tx, gymID, time.Now().UTC())
+	tzName, today := c.gymTZAndToday(tx, gymID)
+	n, err := c.Repo.CountTodayByGym(tx, gymID, tzName, today)
 	if err != nil {
 		utils.ErrorResponse(ctx, http.StatusInternalServerError, err)
 		return

@@ -32,6 +32,9 @@ func (stubPaymentRepo) ListByMember(_ sharedDomain.Transaction, _ billingRepo.Li
 func (stubPaymentRepo) ListByGymBetweenDates(_ sharedDomain.Transaction, _ billingRepo.ListByGymQuery) ([]*paymentDomain.Payment, int, error) {
 	return nil, 0, nil
 }
+func (stubPaymentRepo) AggregateByGymBetweenDates(_ sharedDomain.Transaction, _ billingRepo.ListByGymQuery) (billingRepo.ListByGymAggregates, error) {
+	return billingRepo.ListByGymAggregates{}, nil
+}
 func (stubPaymentRepo) HasRefundFor(_ sharedDomain.Transaction, _ uuid.UUID) (bool, error) {
 	return false, nil
 }

@@ -150,8 +150,10 @@ type Reader interface {
 	// género del socio. NULL → no_especificado. Cada hora del día aparece
 	// exactamente una vez en la salida (24 filas) aunque no haya tráfico
 	// (zeros explícitos), para que el FE renderee la grilla completa sin
-	// reconciliar gaps.
-	AttendanceByGenderHour(tx sharedDomain.Transaction, gymID uuid.UUID, daysBack int, now time.Time) ([]AttendanceByGenderHourRow, error)
+	// reconciliar gaps. La hora es la LOCAL del gym (tzName) — con la hora
+	// UTC el heatmap salía corrido 6 horas en CDMX (el pico de las 7 PM
+	// aparecía en la 1 AM). Zona vacía = UTC (fail-open).
+	AttendanceByGenderHour(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, daysBack int, now time.Time) ([]AttendanceByGenderHourRow, error)
 }
 
 // GenderCompositionRow es el agregado total + 3 buckets para el donut. El

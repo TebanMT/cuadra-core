@@ -303,9 +303,9 @@ func main() {
 	deactivatePromo := promoApp.NewDeactivatePromotion(promotionRepo, uow, recorder)
 	reactivatePromo := promoApp.NewReactivatePromotion(promotionRepo, uow, recorder)
 	listPromos := promoApp.NewListPromotions(promotionRepo, uow).WithGyms(gymRepo)
-	getPromoByCode := promoApp.NewGetPromotionByCode(promotionRepo, appliedPromoRepo, uow)
+	getPromoByCode := promoApp.NewGetPromotionByCode(promotionRepo, appliedPromoRepo, uow).WithGyms(gymRepo)
 	applyPromo := promoApp.NewApplyPromotion(promotionRepo, appliedPromoRepo)
-	listAppliedByMonth := promoApp.NewListAppliedByMonth(appliedPromoRepo, uow)
+	listAppliedByMonth := promoApp.NewListAppliedByMonth(appliedPromoRepo, uow).WithGyms(gymRepo)
 	createMember.WithPromotions(applyPromo, memberSvc)
 
 	// ── Biometric + Checkins (Sesión 5 / paso 3 tinta-bio) ────────────────
@@ -392,11 +392,11 @@ func main() {
 		WithPromotions(applyPromo).
 		WithWelcomeNotifier(enqueueWelcomePin).
 		WithGyms(gymRepo)
-	settlePayment := billingApp.NewSettlePendingBalance(paymentRepo, folios, uow, recorder)
+	settlePayment := billingApp.NewSettlePendingBalance(paymentRepo, folios, uow, recorder).WithGyms(gymRepo)
 	receiptPayment := billingApp.NewGenerateReceipt(paymentRepo, gymRepo, memberRepo, uow)
 	sendReceipt := billingApp.NewSendReceipt(paymentRepo, uow).WithPublisher(billingSubscriber).WithResender(billingSubscriber)
 	listMemberPayments := billingApp.NewListMemberPayments(paymentRepo, memberRepo, uow)
-	listGymPayments := billingApp.NewListGymPayments(paymentRepo, memberRepo, uow)
+	listGymPayments := billingApp.NewListGymPayments(paymentRepo, memberRepo, uow).WithGyms(gymRepo)
 	refundPayment := billingApp.NewRefundPayment(paymentRepo, folios, memberSvc, uow, recorder).
 		WithGyms(gymRepo)
 
@@ -515,7 +515,8 @@ func main() {
 	expenseController.PlanGate = plusGate
 	fingerprintAvailable := bioHub.Available
 	checkinCtrl := chkCtrl.NewCheckinController(checkinManual, checkinNumber, checkinOverride, checkinRepo, uow, fingerprintAvailable, tokens).
-		WithWebhook(accessWebhook)
+		WithWebhook(accessWebhook).
+		WithGyms(gymRepo)
 	// Superficie biométrica nueva (paso 3 tinta-bio): SSE de eventos +
 	// sesión de enroll + status. Los endpoints multipart de imagen y el
 	// loop de captura del kiosko murieron — la captura vive en el helper.

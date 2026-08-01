@@ -14,6 +14,7 @@ import (
 	chkRepo "github.com/cuadra/cuadra-core/src/modules/checkins/domain/repository"
 	"github.com/cuadra/cuadra-core/src/modules/checkins/infraestructure/db/models"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
+	"github.com/cuadra/cuadra-core/src/shared/tz"
 )
 
 type CheckinPostgresRepository struct{}
@@ -65,10 +66,11 @@ func (r *CheckinPostgresRepository) ListByMember(tx sharedDomain.Transaction, me
 	return out, nil
 }
 
-func (r *CheckinPostgresRepository) CountTodayByGym(tx sharedDomain.Transaction, gymID uuid.UUID, today time.Time) (int, error) {
+func (r *CheckinPostgresRepository) CountTodayByGym(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, today time.Time) (int, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
-	start := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, time.UTC)
-	end := start.AddDate(0, 0, 1)
+	// Día LOCAL del gym → rango de instantes. Con medianoche UTC, el
+	// contador se reiniciaba a las 6 PM de CDMX.
+	start, end := tz.DayBounds(tzName, today, today)
 	var n int64
 	err := gormTx.Model(&models.CheckinModel{}).
 		Where("gym_id = ? AND deleted_at IS NULL AND result LIKE 'allowed%' AND checkin_at >= ? AND checkin_at < ?",
@@ -120,13 +122,17 @@ func (r *CheckinPostgresRepository) ListRecentByGym(tx sharedDomain.Transaction,
 	return out, nil
 }
 
-// ListByGymBetween — drill-down: check-ins en el rango [from,to] al día.
+// ListByGymBetween — drill-down: check-ins en el rango [from,to] al día
+// LOCAL del gym (la barra del chart se cuenta por día local; con
+// `checkin_at::date` la lista iba por día UTC y nunca cuadraba con la
+// barra — además el cast inutilizaba el índice).
 // Misma forma de salida que ListRecentByGym para que el FE renderee igual.
-func (r *CheckinPostgresRepository) ListByGymBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time, limit int) ([]chkRepo.RecentCheckinRow, error) {
+func (r *CheckinPostgresRepository) ListByGymBetween(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time, limit int) ([]chkRepo.RecentCheckinRow, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	if limit <= 0 || limit > 500 {
 		limit = 200
 	}
+	start, end := tz.DayBounds(tzName, from, to)
 	type row struct {
 		ID             uuid.UUID
 		MemberID       *uuid.UUID
@@ -154,10 +160,10 @@ func (r *CheckinPostgresRepository) ListByGymBetween(tx sharedDomain.Transaction
 		LEFT JOIN members m ON m.id = c.member_id AND m.deleted_at IS NULL
 		LEFT JOIN users u ON u.id = c.operator_id AND u.deleted_at IS NULL
 		WHERE c.gym_id = ? AND c.deleted_at IS NULL
-		  AND c.checkin_at::date >= ? AND c.checkin_at::date <= ?
+		  AND c.checkin_at >= ? AND c.checkin_at < ?
 		ORDER BY c.checkin_at DESC
 		LIMIT ?`,
-		gymID, from.Format("2006-01-02"), to.Format("2006-01-02"), limit).Scan(&rows).Error; err != nil {
+		gymID, start, end, limit).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 	out := make([]chkRepo.RecentCheckinRow, len(rows))

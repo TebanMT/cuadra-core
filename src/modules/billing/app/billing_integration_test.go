@@ -685,3 +685,86 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+// ---------------------------------------------------------------------------
+// ListGymPayments — agregados de ventana completa, netos de devoluciones
+// ---------------------------------------------------------------------------
+
+// Los totales del listado de cobros deben calcularse sobre TODA la ventana
+// filtrada (no la página visible) y en NETO (los refunds, con monto
+// negativo, restan). El bug original: TotalPaid se sumaba iterando la página
+// (50 filas) y las devoluciones se saltaban con `continue`, así que el
+// "Cobrado / neto del periodo" ni era neto ni era del período.
+func TestListGymPayments_AggregatesFullWindowNetOfRefunds(t *testing.T) {
+	f := setup(t)
+	// WithGyms en TODOS los use cases: sin él, los cobros caen en el día
+	// UTC y el refund en el día local — cruzando las 6 PM de CDMX quedaban
+	// en días distintos y la ventana "hoy" sólo veía al refund (exactamente
+	// la clase de bug que este PR arregla).
+	register := f.registerPayment().WithGyms(f.gymRepo)
+	// Dos cobros de membresía (cash) + refund del segundo.
+	if _, err := register.Execute(context.Background(), billingApp.RegisterMembershipPaymentInput{
+		GymID: f.gymID, ActorUserID: f.ownerID,
+		MemberID: f.memberID, MembershipTypeID: f.planID, Method: "cash",
+	}); err != nil {
+		t.Fatalf("payment 1: %v", err)
+	}
+	second, err := register.Execute(context.Background(), billingApp.RegisterMembershipPaymentInput{
+		GymID: f.gymID, ActorUserID: f.ownerID,
+		MemberID: f.memberID, MembershipTypeID: f.planID, Method: "cash",
+	})
+	if err != nil {
+		t.Fatalf("payment 2: %v", err)
+	}
+	refund := billingApp.NewRefundPayment(f.paymentRepo, f.folios, f.memberSvc, f.uow, f.recorder).WithGyms(f.gymRepo)
+	if _, err := refund.Execute(context.Background(), billingApp.RefundPaymentInput{
+		GymID: f.gymID, ActorUserID: f.ownerID,
+		ParentPaymentID: second.PaymentID, Reason: "Cliente cambió de opinión",
+		Method: "cash",
+	}); err != nil {
+		t.Fatalf("refund: %v", err)
+	}
+
+	list := billingApp.NewListGymPayments(f.paymentRepo, f.memberRepo, f.uow).WithGyms(f.gymRepo)
+	// page_size=1 fuerza paginación: los agregados NO deben encogerse a la
+	// página. From/To vacíos ejercitan el default "hoy local del gym".
+	out, err := list.Execute(context.Background(), billingApp.ListGymPaymentsInput{
+		GymID: f.gymID, Page: 1, PageSize: 1,
+	})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(out.Items) != 1 {
+		t.Errorf("page should hold 1 item, got %d", len(out.Items))
+	}
+	if out.Total != 3 {
+		t.Errorf("window should hold 3 rows (2 cobros + 1 refund), got %d", out.Total)
+	}
+	// Esperados desde la BD (cents): el neto es SUM(amount) — los refunds
+	// son negativos y restan solos — y RefundTotal la magnitud devuelta.
+	var netCents, refundCents int64
+	if err := f.db.Get(&netCents, "SELECT COALESCE(SUM(amount),0) FROM payments WHERE gym_id=?", f.gymID.String()); err != nil {
+		t.Fatalf("sum: %v", err)
+	}
+	if err := f.db.Get(&refundCents, "SELECT COALESCE(SUM(ABS(amount)),0) FROM payments WHERE gym_id=? AND concept='refund'", f.gymID.String()); err != nil {
+		t.Fatalf("sum refunds: %v", err)
+	}
+	if refundCents == 0 {
+		t.Fatalf("fixture should have produced a refund row")
+	}
+	wantNet := float64(netCents) / 100
+	wantRefund := float64(refundCents) / 100
+	if out.TotalPaid != wantNet {
+		t.Errorf("TotalPaid (neto ventana completa) = %v, want %v", out.TotalPaid, wantNet)
+	}
+	if out.RefundTotal != wantRefund {
+		t.Errorf("RefundTotal = %v, want %v", out.RefundTotal, wantRefund)
+	}
+	// Todo fue cash → el neto por método es el neto global.
+	if out.CashTotal != wantNet {
+		t.Errorf("CashTotal (neto del método) = %v, want %v", out.CashTotal, wantNet)
+	}
+	if out.TransferTotal != 0 || out.CardTotal != 0 {
+		t.Errorf("other methods should be 0: transfer=%v card=%v", out.TransferTotal, out.CardTotal)
+	}
+}
