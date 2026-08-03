@@ -33,6 +33,7 @@ type sqliteStockMovementRow struct {
 	Delta        int            `db:"delta"`
 	Reason       sql.NullString `db:"reason"`
 	Cost         sql.NullInt64  `db:"cost"`
+	IsPurchase   int            `db:"is_purchase"`
 	SaleItemID   sql.NullString `db:"sale_item_id"`
 	OperatorID   string         `db:"operator_id"`
 }
@@ -43,10 +44,10 @@ func (r *StockMovementSQLiteRepository) Create(tx sharedDomain.Transaction, m *s
 	const stmt = `
 		INSERT INTO stock_movements (
 		    id, gym_id, version, created_at, updated_at, deleted_at,
-		    product_id, movement_type, delta, reason, cost, sale_item_id, operator_id
+		    product_id, movement_type, delta, reason, cost, is_purchase, sale_item_id, operator_id
 		) VALUES (
 		    :id, :gym_id, :version, :created_at, :updated_at, :deleted_at,
-		    :product_id, :movement_type, :delta, :reason, :cost, :sale_item_id, :operator_id
+		    :product_id, :movement_type, :delta, :reason, :cost, :is_purchase, :sale_item_id, :operator_id
 		)`
 	if _, err := stx.NamedExec(context.Background(), stmt, row); err != nil {
 		return nil, err
@@ -87,6 +88,9 @@ func stockMovementToRow(m *stockMovementDomain.StockMovement) sqliteStockMovemen
 		Delta:        m.Delta,
 		OperatorID:   m.OperatorID.String(),
 	}
+	if m.IsPurchase {
+		row.IsPurchase = 1
+	}
 	if m.DeletedAt != nil {
 		row.DeletedAt = sql.NullInt64{Int64: m.DeletedAt.UnixMilli(), Valid: true}
 	}
@@ -114,6 +118,7 @@ func stockMovementFromRow(r *sqliteStockMovementRow) *stockMovementDomain.StockM
 		ProductID:    prodID,
 		MovementType: r.MovementType,
 		Delta:        r.Delta,
+		IsPurchase:   r.IsPurchase != 0,
 		OperatorID:   opID,
 		CreatedAt:    time.UnixMilli(r.CreatedAt).UTC(),
 		UpdatedAt:    time.UnixMilli(r.UpdatedAt).UTC(),
@@ -159,6 +164,7 @@ func enqueueStockMovement(stx *sharedDomain.SqlxTransaction, m *stockMovementDom
 		"delta":         m.Delta,
 		"reason":        strPtrOrNil(m.Reason),
 		"cost":          cost,
+		"is_purchase":   m.IsPurchase,
 		"sale_item_id":  uuidPtrOrNil(m.SaleItemID),
 		"operator_id":   m.OperatorID.String(),
 	})

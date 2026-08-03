@@ -77,6 +77,9 @@ type createProductReq struct {
 	ImageURL      *string  `json:"image_url,omitempty"`
 	InitialCost   *float64 `json:"initial_cost,omitempty"`
 	InitialReason *string  `json:"initial_reason,omitempty"`
+	// initial_is_purchase=false → captura de inventario preexistente (no es
+	// egreso). Ausente/true = compra (compat con FEs viejos).
+	InitialIsPurchase *bool `json:"initial_is_purchase,omitempty"`
 }
 
 type updateProductReq struct {
@@ -91,7 +94,10 @@ type adjustStockReq struct {
 	MovementType string   `json:"movement_type" validate:"required,oneof=restock shrinkage count_correction"`
 	Quantity     int      `json:"quantity" validate:"required,min=0"`
 	Cost         *float64 `json:"cost,omitempty"`
-	Reason       *string  `json:"reason,omitempty"`
+	// is_purchase=false (sólo restock) → inventario que ya existía, no es
+	// egreso. Ausente/true = compra.
+	IsPurchase *bool   `json:"is_purchase,omitempty"`
+	Reason     *string `json:"reason,omitempty"`
 }
 
 type productResp struct {
@@ -174,8 +180,9 @@ func (ctrl *ProductController) handleCreate(c *gin.Context) {
 		StockMinimum:  req.StockMinimum,
 		Category:      req.Category,
 		ImageURL:      req.ImageURL,
-		InitialCost:   req.InitialCost,
-		InitialReason: req.InitialReason,
+		InitialCost:       req.InitialCost,
+		InitialReason:     req.InitialReason,
+		InitialIsPurchase: req.InitialIsPurchase,
 	})
 	if err != nil {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
@@ -322,6 +329,7 @@ func (ctrl *ProductController) handleAdjust(c *gin.Context) {
 		MovementType: req.MovementType,
 		Quantity:     req.Quantity,
 		Cost:         req.Cost,
+		IsPurchase:   req.IsPurchase,
 		Reason:       req.Reason,
 	})
 	if err != nil {

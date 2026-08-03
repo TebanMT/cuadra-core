@@ -55,6 +55,7 @@ func stockMovementToModel(m *stockMovementDomain.StockMovement) models.StockMove
 		Delta:        m.Delta,
 		Reason:       m.Reason,
 		Cost:         m.Cost,
+		IsPurchase:   m.IsPurchase,
 		SaleItemID:   m.SaleItemID,
 		OperatorID:   m.OperatorID,
 	}
@@ -70,6 +71,7 @@ func stockMovementFromModel(m *models.StockMovementModel) *stockMovementDomain.S
 		Delta:        m.Delta,
 		Reason:       m.Reason,
 		Cost:         m.Cost,
+		IsPurchase:   m.IsPurchase,
 		SaleItemID:   m.SaleItemID,
 		OperatorID:   m.OperatorID,
 		CreatedAt:    m.CreatedAt,

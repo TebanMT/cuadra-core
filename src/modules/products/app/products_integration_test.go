@@ -58,6 +58,7 @@ func setupProducts(t *testing.T) *productsFixture {
 		"../../../../db_migrations/sqlite/005_users_pin.sql",
 		"../../../../db_migrations/sqlite/008_gym_charge_settings.sql",
 		"../../../../db_migrations/sqlite/018_gyms_stripe_customer.sql",
+		"../../../../db_migrations/sqlite/030_stock_movements_is_purchase.sql",
 	} {
 		schema, err := os.ReadFile(m)
 		if err != nil {
@@ -425,4 +426,62 @@ func indexOf(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+// ---------------------------------------------------------------------------
+// is_purchase — captura de catálogo vs compra real
+// ---------------------------------------------------------------------------
+
+// El alta con initial_is_purchase=false (inventario que ya existía) debe
+// persistir is_purchase=0 — así queda FUERA de los egresos por mercancía —
+// pero su costo SIGUE alimentando el promedio ponderado del margen. Un
+// restock normal (sin el campo) queda como compra (is_purchase=1). Bug
+// original: la carga de catálogo del gym contaba como compra y el mes
+// arrancaba con utilidad negativa.
+func TestIsPurchase_CatalogCaptureVsRealRestock(t *testing.T) {
+	f := setupProducts(t)
+	notPurchase := false
+	cost := 6.50
+	out, err := f.createProductUC().Execute(context.Background(), prodApp.CreateProductInput{
+		GymID: f.gymID, ActorUserID: f.ownerID,
+		Name: "Agua Ciel 600ml", Price: 20, InitialStock: 10, StockMinimum: 2,
+		InitialCost: &cost, InitialIsPurchase: &notPurchase,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	var isPurchase int
+	if err := f.db.Get(&isPurchase,
+		"SELECT is_purchase FROM stock_movements WHERE product_id=? AND movement_type='restock'",
+		out.ProductID.String()); err != nil {
+		t.Fatalf("get is_purchase: %v", err)
+	}
+	if isPurchase != 0 {
+		t.Errorf("captura de catálogo: is_purchase = %d, want 0", isPurchase)
+	}
+
+	// El costo promedio del margen NO filtra por is_purchase — la captura
+	// es la base del COGS del producto.
+	costs := f.unitCosts(t)
+	if got := costs[out.ProductID.String()]; got != 6.50 {
+		t.Errorf("avg unit cost = %v, want 6.50 (la captura debe contar al margen)", got)
+	}
+
+	// Restock posterior SIN el campo → compra (default true, semántica previa).
+	restockCost := 7.00
+	if _, err := f.adjustStockUC().Execute(context.Background(), prodApp.AdjustStockInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, ProductID: out.ProductID,
+		MovementType: "restock", Quantity: 5, Cost: &restockCost,
+	}); err != nil {
+		t.Fatalf("restock: %v", err)
+	}
+	var purchases int
+	if err := f.db.Get(&purchases,
+		"SELECT COUNT(*) FROM stock_movements WHERE product_id=? AND is_purchase=1",
+		out.ProductID.String()); err != nil {
+		t.Fatalf("count purchases: %v", err)
+	}
+	if purchases != 1 {
+		t.Errorf("compras reales = %d, want 1 (sólo el restock)", purchases)
+	}
 }

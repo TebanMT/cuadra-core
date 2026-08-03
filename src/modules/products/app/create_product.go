@@ -28,6 +28,11 @@ type CreateProductInput struct {
 	ImageURL      *string
 	InitialCost   *float64 // optional — DA-24.3
 	InitialReason *string  // free-text, e.g. "Stock inicial"
+	// InitialIsPurchase — false = el stock inicial es inventario que YA
+	// existía (captura de catálogo, no salió dinero): conserva el costo
+	// para el margen pero NO cuenta como egreso del período. nil/true =
+	// compra (semántica previa, callers viejos sin el campo).
+	InitialIsPurchase *bool
 }
 
 type CreateProductOutput struct {
@@ -78,6 +83,9 @@ func (uc *CreateProduct) Execute(ctx context.Context, in CreateProductInput) (*C
 				stockMovementDomain.TypeRestock, in.InitialStock, reason, in.InitialCost, nil, now)
 			if err != nil {
 				return sharedDomain.NewValidationError(err)
+			}
+			if in.InitialIsPurchase != nil && !*in.InitialIsPurchase {
+				mv.MarkAsCapture()
 			}
 			if _, err := uc.StockMovements.Create(tx, mv); err != nil {
 				return sharedDomain.NewUnexpectedError(err)

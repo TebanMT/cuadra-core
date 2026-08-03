@@ -816,11 +816,14 @@ func (r *SQLiteReader) SumInventoryCostBetween(tx sharedDomain.Transaction, gymI
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	fromMs, toMs := dayBoundsMs(tzName, from, to)
 	var cents sql.NullInt64
+	// is_purchase filtra las capturas de inventario preexistente (alta de
+	// catálogo): llevan costo para el margen pero NO son dinero que salió.
 	err := stx.Get(context.Background(), &cents, `
 		SELECT COALESCE(SUM(cost * delta), 0) FROM stock_movements
 		WHERE gym_id = ? AND deleted_at IS NULL
 		  AND movement_type = 'restock'
 		  AND cost IS NOT NULL
+		  AND is_purchase = 1
 		  AND created_at >= ? AND created_at < ?`,
 		gymID.String(), fromMs, toMs)
 	return float64(cents.Int64) / 100, err
@@ -901,6 +904,7 @@ func (r *SQLiteReader) ListInventoryCostsBetween(tx sharedDomain.Transaction, gy
 		WHERE sm.gym_id = ? AND sm.deleted_at IS NULL
 		  AND sm.movement_type = 'restock'
 		  AND sm.cost IS NOT NULL
+		  AND sm.is_purchase = 1
 		  AND sm.created_at >= ? AND sm.created_at < ?
 		ORDER BY sm.created_at DESC
 		LIMIT ?`, gymID.String(), fromMs, toMs, limit); err != nil {
@@ -1034,6 +1038,7 @@ func (r *SQLiteReader) ExpensesDailySeries(tx sharedDomain.Transaction, gymID uu
 		WHERE gym_id = ? AND deleted_at IS NULL
 		  AND movement_type = 'restock'
 		  AND cost IS NOT NULL
+		  AND is_purchase = 1
 		  AND created_at >= ? AND created_at < ?
 		GROUP BY day`,
 		invOffset, gymID.String(), fromMs, toMs); err != nil {

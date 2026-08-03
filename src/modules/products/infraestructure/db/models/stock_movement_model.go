@@ -21,6 +21,7 @@ type StockMovementModel struct {
 	Delta        int        `gorm:"not null;column:delta"`
 	Reason       *string    `gorm:"column:reason"`
 	Cost         *float64   `gorm:"type:numeric(12,2);column:cost"`
+	IsPurchase   bool       `gorm:"not null;default:true;column:is_purchase"`
 	SaleItemID   *uuid.UUID `gorm:"type:uuid;column:sale_item_id"`
 	OperatorID   uuid.UUID  `gorm:"type:uuid;not null;column:operator_id"`
 }

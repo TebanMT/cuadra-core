@@ -191,7 +191,7 @@ var SyncedTables = []EntityTable{
 		Columns: []string{
 			"id", "gym_id", "version", "created_at", "updated_at", "deleted_at",
 			"product_id", "movement_type", "delta", "reason", "cost",
-			"sale_item_id", "operator_id",
+			"is_purchase", "sale_item_id", "operator_id",
 		},
 	},
 	{

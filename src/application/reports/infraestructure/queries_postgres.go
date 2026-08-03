@@ -664,11 +664,14 @@ func (r *PostgresReader) SumInventoryCostBetween(tx sharedDomain.Transaction, gy
 	// rango de instantes (antes las cotas eran medianoche UTC, así que un
 	// restock de la tarde caía en el día siguiente).
 	start, end := tz.DayBounds(tzName, from, to)
+	// is_purchase filtra las capturas de inventario preexistente (alta de
+	// catálogo): llevan costo para el margen pero NO son dinero que salió.
 	err := gormTx.Raw(`
 		SELECT COALESCE(SUM(cost * delta), 0) FROM stock_movements
 		WHERE gym_id = ? AND deleted_at IS NULL
 		  AND movement_type = 'restock'
 		  AND cost IS NOT NULL
+		  AND is_purchase = TRUE
 		  AND created_at >= ? AND created_at < ?`,
 		gymID, start, end).Scan(&total).Error
 	return total, err
@@ -752,6 +755,7 @@ func (r *PostgresReader) ListInventoryCostsBetween(tx sharedDomain.Transaction, 
 		WHERE sm.gym_id = ? AND sm.deleted_at IS NULL
 		  AND sm.movement_type = 'restock'
 		  AND sm.cost IS NOT NULL
+		  AND sm.is_purchase = TRUE
 		  AND sm.created_at >= ? AND sm.created_at < ?
 		ORDER BY sm.created_at DESC
 		LIMIT ?`, gymID, invStart, invEnd, limit).Scan(&rows).Error; err != nil {
@@ -867,6 +871,7 @@ func (r *PostgresReader) ExpensesDailySeries(tx sharedDomain.Transaction, gymID 
 		WHERE gym_id = ? AND deleted_at IS NULL
 		  AND movement_type = 'restock'
 		  AND cost IS NOT NULL
+		  AND is_purchase = TRUE
 		  AND created_at >= ? AND created_at < ?
 		GROUP BY 1`,
 		tz.NameOrUTC(tzName), gymID, invStart, invEnd).Scan(&invRows).Error; err != nil {

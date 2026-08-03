@@ -27,7 +27,11 @@ type AdjustStockInput struct {
 	MovementType string
 	Quantity     int      // restock/shrinkage = delta size; count_correction = absolute
 	Cost         *float64 // optional, only meaningful for restock
-	Reason       *string
+	// IsPurchase — sólo significativo para restock: false = inventario que
+	// ya existía físicamente (no salió dinero, no es egreso del período).
+	// nil/true = compra (default).
+	IsPurchase *bool
+	Reason     *string
 }
 
 type AdjustStockOutput struct {
@@ -97,6 +101,10 @@ func (uc *AdjustStock) Execute(ctx context.Context, in AdjustStockInput) (*Adjus
 			in.MovementType, delta, in.Reason, cost, nil, now)
 		if err != nil {
 			return sharedDomain.NewValidationError(err)
+		}
+		if in.MovementType == stockMovementDomain.TypeRestock &&
+			in.IsPurchase != nil && !*in.IsPurchase {
+			mv.MarkAsCapture()
 		}
 		if _, err := uc.StockMovements.Create(tx, mv); err != nil {
 			return sharedDomain.NewUnexpectedError(err)
