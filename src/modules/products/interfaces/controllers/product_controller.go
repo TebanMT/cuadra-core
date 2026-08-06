@@ -172,14 +172,14 @@ func (ctrl *ProductController) handleCreate(c *gin.Context) {
 		return
 	}
 	out, err := ctrl.Create.Execute(c.Request.Context(), prodApp.CreateProductInput{
-		GymID:         gymID,
-		ActorUserID:   userID,
-		Name:          req.Name,
-		Price:         req.Price,
-		InitialStock:  req.InitialStock,
-		StockMinimum:  req.StockMinimum,
-		Category:      req.Category,
-		ImageURL:      req.ImageURL,
+		GymID:             gymID,
+		ActorUserID:       userID,
+		Name:              req.Name,
+		Price:             req.Price,
+		InitialStock:      req.InitialStock,
+		StockMinimum:      req.StockMinimum,
+		Category:          req.Category,
+		ImageURL:          req.ImageURL,
 		InitialCost:       req.InitialCost,
 		InitialReason:     req.InitialReason,
 		InitialIsPurchase: req.InitialIsPurchase,

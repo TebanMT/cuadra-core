@@ -190,8 +190,8 @@ type dailyAmountWire struct {
 }
 
 type dailyCountWire struct {
-	Date  string  `json:"date"`
-	Count int     `json:"count"`
+	Date  string `json:"date"`
+	Count int    `json:"count"`
 }
 
 func dailyIncomeToWire(in []reportsApp.DailyIncome) []dailyAmountWire {
