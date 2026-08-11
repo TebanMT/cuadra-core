@@ -64,10 +64,10 @@ import (
 	subCtrl "github.com/cuadra/cuadra-core/src/modules/subscriptions/interfaces/controllers"
 
 	"errors"
-	releasesApp "github.com/cuadra/cuadra-core/src/application/releases"
 	analyticsApp "github.com/cuadra/cuadra-core/src/application/analytics"
 	analyticsInfra "github.com/cuadra/cuadra-core/src/application/analytics/infraestructure"
 	analyticsCtrl "github.com/cuadra/cuadra-core/src/application/analytics/interfaces"
+	releasesApp "github.com/cuadra/cuadra-core/src/application/releases"
 	releasesInfra "github.com/cuadra/cuadra-core/src/application/releases/infraestructure"
 	releasesCtrl "github.com/cuadra/cuadra-core/src/application/releases/interfaces"
 	reportsApp "github.com/cuadra/cuadra-core/src/application/reports"

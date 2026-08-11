@@ -24,9 +24,9 @@ var (
 	// ErrOwnerOnlyLogin — el binario cloud restringe /auth/login al dueño
 	// (el dashboard es superficie del dueño). El sidecar nunca lo emite:
 	// recepción sí loguea operadores.
-	ErrOwnerOnlyLogin = errors.New("el dashboard es del dueño. En el gym, entra con la app de recepción")
-	ErrInvalidResetToken  = errors.New("este link ya no es válido")
-	ErrResetTokenExpired  = errors.New("este link expiró. Solicita uno nuevo")
+	ErrOwnerOnlyLogin    = errors.New("el dashboard es del dueño. En el gym, entra con la app de recepción")
+	ErrInvalidResetToken = errors.New("este link ya no es válido")
+	ErrResetTokenExpired = errors.New("este link expiró. Solicita uno nuevo")
 	// UC-013 — verificación de correo.
 	ErrInvalidVerifyToken    = errors.New("este link de verificación ya no es válido")
 	ErrVerifyTokenExpired    = errors.New("este link de verificación expiró. Solicita uno nuevo")

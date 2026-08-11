@@ -49,8 +49,8 @@ type RangeReportOutput struct {
 	Totals RangeTotals `json:"totals"`
 	// ProductSales — KPI "Ventas de productos": $ con trend + unidades del
 	// período actual (la sub-línea "· N uds" es informativa, sin delta).
-	ProductSales ProductSalesKPI `json:"product_sales"`
-	IncomeByDay  []DailyIncome   `json:"income_by_day"`
+	ProductSales       ProductSalesKPI    `json:"product_sales"`
+	IncomeByDay        []DailyIncome      `json:"income_by_day"`
 	ExpensesByDay      []DailyAmount      `json:"expenses_by_day"`
 	CheckinsByDay      []DailyCount       `json:"checkins_by_day"`
 	IncomeByMethod     map[string]float64 `json:"income_by_method"`

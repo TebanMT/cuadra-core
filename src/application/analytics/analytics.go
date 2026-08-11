@@ -317,13 +317,13 @@ type FrequencyWire struct {
 }
 
 type AtRiskWire struct {
-	MemberID       string   `json:"member_id"`
-	FullName       string   `json:"full_name"`
-	Phone          string   `json:"phone"`
-	DaysToExpiry   *int     `json:"days_to_expiry"`
-	BalancePending float64  `json:"balance_pending"`
-	Checkins14d    int      `json:"checkins_14d"`
-	AvgPer14d      float64  `json:"avg_14d"`
+	MemberID       string  `json:"member_id"`
+	FullName       string  `json:"full_name"`
+	Phone          string  `json:"phone"`
+	DaysToExpiry   *int    `json:"days_to_expiry"`
+	BalancePending float64 `json:"balance_pending"`
+	Checkins14d    int     `json:"checkins_14d"`
+	AvgPer14d      float64 `json:"avg_14d"`
 	// Paid90d — el valor del socio como multiplicador del riesgo (el
 	// leaderboard eliminado de Standard renace aquí).
 	Paid90d float64  `json:"paid_90d"`
@@ -395,9 +395,9 @@ type PromotionsROIOutput struct {
 	GeneratedAt time.Time `json:"generated_at"`
 	// FullPricePct — retención de quienes pagaron membresía SIN promo hace
 	// 60–180 días (la vara contra la que se compara cada promo).
-	FullPriceBase     int      `json:"full_price_base"`
-	FullPriceRetained int      `json:"full_price_retained"`
-	FullPricePct      *float64 `json:"full_price_pct"`
+	FullPriceBase     int                `json:"full_price_base"`
+	FullPriceRetained int                `json:"full_price_retained"`
+	FullPricePct      *float64           `json:"full_price_pct"`
 	Rows              []PromotionROIWire `json:"rows"`
 }
 
