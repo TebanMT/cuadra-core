@@ -678,6 +678,67 @@ func (r *SQLiteReader) IncomeByMethodBetween(tx sharedDomain.Transaction, gymID 
 	return out, nil
 }
 
+// IncomeByMembershipTypeBetween — espejo del postgres: atribución por la
+// membresía con start_date más reciente <= payment_date (TEXT YYYY-MM-DD,
+// comparación lexicográfica). Cents → pesos al edge.
+func (r *SQLiteReader) IncomeByMembershipTypeBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (map[string]float64, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	type row struct {
+		TypeName string `db:"type_name"`
+		Total    int64  `db:"total"`
+	}
+	var rows []row
+	if err := stx.Select(context.Background(), &rows, `
+		SELECT COALESCE((
+		         SELECT ms.type_name_snapshot FROM memberships ms
+		         WHERE ms.member_id = p.member_id AND ms.deleted_at IS NULL
+		           AND ms.start_date <= p.payment_date
+		         ORDER BY ms.start_date DESC LIMIT 1
+		       ), 'Sin tipo') AS type_name,
+		       COALESCE(SUM(p.amount), 0) AS total
+		FROM payments p
+		WHERE p.gym_id = ? AND p.deleted_at IS NULL
+		  AND p.concept = 'membership'
+		  AND p.payment_date >= ? AND p.payment_date <= ?
+		GROUP BY 1`,
+		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt)); err != nil {
+		return nil, err
+	}
+	out := make(map[string]float64, len(rows))
+	for _, x := range rows {
+		out[x.TypeName] = float64(x.Total) / 100
+	}
+	return out, nil
+}
+
+// ActiveMembersByType — mismo predicado que CountActiveMembers, agrupado.
+func (r *SQLiteReader) ActiveMembersByType(tx sharedDomain.Transaction, gymID uuid.UUID, today time.Time) (map[string]int, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	type row struct {
+		TypeName string `db:"type_name"`
+		N        int    `db:"n"`
+	}
+	var rows []row
+	if err := stx.Select(context.Background(), &rows, `
+		SELECT ms.type_name_snapshot AS type_name, COUNT(*) AS n
+		FROM members m
+		JOIN memberships ms ON ms.member_id = m.id
+		    AND ms.status = 'active' AND ms.deleted_at IS NULL
+		WHERE m.gym_id = ?
+		  AND m.status = 'active'
+		  AND m.deleted_at IS NULL
+		  AND ms.expiry_date >= ?
+		GROUP BY 1`,
+		gymID.String(), today.Format(sqliteDateFmt)); err != nil {
+		return nil, err
+	}
+	out := make(map[string]int, len(rows))
+	for _, x := range rows {
+		out[x.TypeName] = x.N
+	}
+	return out, nil
+}
+
 func (r *SQLiteReader) TopMembersBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time, limit int) ([]reports.TopMemberRow, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	if limit <= 0 {
@@ -1147,6 +1208,37 @@ func (r *SQLiteReader) TopProductsBetween(tx sharedDomain.Transaction, gymID uui
 		})
 	}
 	return out, nil
+}
+
+// SumProductSalesBetween — espejo del PG: $ por payments concept='product'
+// (INTEGER cents → /100 al salir), unidades por sale_items de esos pagos.
+func (r *SQLiteReader) SumProductSalesBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (reports.ProductSalesTotals, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	var cents sql.NullInt64
+	if err := stx.Get(context.Background(), &cents, `
+		SELECT COALESCE(SUM(amount), 0) FROM payments
+		WHERE gym_id = ? AND deleted_at IS NULL
+		  AND concept = 'product'
+		  AND payment_date >= ? AND payment_date <= ?`,
+		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt)); err != nil {
+		return reports.ProductSalesTotals{}, err
+	}
+	var units sql.NullInt64
+	if err := stx.Get(context.Background(), &units, `
+		SELECT COALESCE(SUM(si.quantity), 0)
+		FROM sale_items si
+		JOIN sales s ON s.id = si.sale_id AND s.deleted_at IS NULL
+		JOIN payments p ON p.id = s.payment_id AND p.deleted_at IS NULL
+		WHERE si.gym_id = ? AND si.deleted_at IS NULL
+		  AND p.concept = 'product'
+		  AND p.payment_date >= ? AND p.payment_date <= ?`,
+		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt)); err != nil {
+		return reports.ProductSalesTotals{}, err
+	}
+	return reports.ProductSalesTotals{
+		Amount: float64(cents.Int64) / 100,
+		Units:  int(units.Int64),
+	}, nil
 }
 
 // CountCriticalStock — snapshot del catálogo. SQLite usa active=1 boolean

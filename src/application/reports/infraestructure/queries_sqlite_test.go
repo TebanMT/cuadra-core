@@ -195,3 +195,81 @@ func TestListPendingBalances_SumaTodasLasDeudasDelSocio(t *testing.T) {
 		t.Errorf("Ana balance = %v, want 150.00", rows[1].BalancePending)
 	}
 }
+
+// seedProductSale inserta la tríada payment(concept='product') + sale +
+// sale_items con la que register_sale materializa una venta. amountCents es
+// el total del pago; quantities es una entrada por línea de venta. deleted
+// soft-borra las tres piezas (una venta cancelada de origen).
+func (f *readerFixture) seedProductSale(t *testing.T, amountCents int64, paymentDate string, quantities []int, deleted bool) {
+	t.Helper()
+	now := time.Now().UTC().UnixMilli()
+	var deletedAt any
+	if deleted {
+		deletedAt = now
+	}
+	payID := uuid.New()
+	if _, err := f.db.Exec(`
+		INSERT INTO payments
+		   (id, gym_id, version, created_at, updated_at, deleted_at, folio, member_id,
+		    amount, payment_method, concept, balance_pending, payment_date, operator_id)
+		 VALUES (?, ?, 1, ?, ?, ?, ?, NULL, ?, 'cash', 'product', 0, ?, ?)`,
+		payID, f.gymID, now, now, deletedAt, "P-"+payID.String()[:8], amountCents, paymentDate, f.operatorID); err != nil {
+		t.Fatalf("seed product payment: %v", err)
+	}
+	saleID := uuid.New()
+	if _, err := f.db.Exec(`
+		INSERT INTO sales (id, gym_id, version, created_at, updated_at, deleted_at, payment_id, subtotal, discount, total)
+		VALUES (?, ?, 1, ?, ?, ?, ?, ?, 0, ?)`,
+		saleID, f.gymID, now, now, deletedAt, payID, amountCents, amountCents); err != nil {
+		t.Fatalf("seed sale: %v", err)
+	}
+	prodID := uuid.New()
+	if _, err := f.db.Exec(`
+		INSERT INTO products (id, gym_id, version, created_at, updated_at, name, price, stock)
+		VALUES (?, ?, 1, ?, ?, ?, 1000, 100)`,
+		prodID, f.gymID, now, now, "Prod "+prodID.String()[:8]); err != nil {
+		t.Fatalf("seed product: %v", err)
+	}
+	for _, q := range quantities {
+		itemID := uuid.New()
+		if _, err := f.db.Exec(`
+			INSERT INTO sale_items (id, gym_id, version, created_at, updated_at, deleted_at, sale_id, product_id, product_name_snapshot, unit_price_snapshot, quantity, line_total)
+			VALUES (?, ?, 1, ?, ?, ?, ?, ?, 'Prod', 1000, ?, ?)`,
+			itemID, f.gymID, now, now, deletedAt, saleID, prodID, q, int64(q)*1000); err != nil {
+			t.Fatalf("seed sale_item: %v", err)
+		}
+	}
+}
+
+// TestSumProductSalesBetween_DineroYUnidades — el $ sale de payments
+// concept='product' (mismo criterio cash-based por payment_date que
+// SumPaymentsBetween, para que el KPI cuadre contra Ingresos) y las
+// unidades de sale_items. Membership, refund, soft-deleted y fuera de
+// ventana no cuentan.
+func TestSumProductSalesBetween_DineroYUnidades(t *testing.T) {
+	f := setupReaderDB(t)
+
+	f.seedProductSale(t, 10000, "2026-07-10", []int{3, 2}, false) // $100.00, 5 uds
+	f.seedProductSale(t, 5025, "2026-07-20", []int{1}, false)     // $50.25, 1 ud
+	f.seedProductSale(t, 9900, "2026-06-01", []int{7}, false)     // fuera de ventana
+	f.seedProductSale(t, 7700, "2026-07-15", []int{4}, true)      // soft-deleted
+	ana := f.seedMember(t, "Ana")
+	f.seedPayment(t, &ana, "membership", 0, "2026-07-12", false) // otro concepto
+	f.seedPayment(t, &ana, "refund", 0, "2026-07-13", false)     // vive en devoluciones
+
+	tx, err := f.uow.Query(context.Background())
+	if err != nil {
+		t.Fatalf("query tx: %v", err)
+	}
+	got, err := reportsInfra.NewSQLiteReader().SumProductSalesBetween(tx, f.gymID,
+		time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, 7, 31, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("SumProductSalesBetween: %v", err)
+	}
+	if got.Amount != 150.25 {
+		t.Errorf("amount = %v, want 150.25", got.Amount)
+	}
+	if got.Units != 6 {
+		t.Errorf("units = %d, want 6", got.Units)
+	}
+}

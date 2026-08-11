@@ -20,6 +20,7 @@ import (
 	usersApp "github.com/cuadra/cuadra-core/src/modules/users/app"
 	userErrors "github.com/cuadra/cuadra-core/src/modules/users/domain/errors"
 	usersRepo "github.com/cuadra/cuadra-core/src/modules/users/domain/repository"
+	userDomain "github.com/cuadra/cuadra-core/src/modules/users/domain/user"
 	"github.com/cuadra/cuadra-core/src/shared/auth"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 	"github.com/cuadra/cuadra-core/src/shared/installerbootstrap"
@@ -50,6 +51,12 @@ type AuthController struct {
 	RequestTransfer   *usersApp.RequestTransferOwnership
 	ConfirmTransfer   *usersApp.ConfirmTransferOwnership
 	Tokens            auth.TokenService
+	// OwnerOnlyLogin restringe POST /auth/login a cuentas owner. Lo activa
+	// SOLO cmd/server (el dashboard cloud es superficie del dueño, plan
+	// Reports-improve transversal §1); el sidecar lo deja en false porque
+	// recepción sí loguea operadores. Vive como flag y no como check en el
+	// use case porque Login es compartido entre binarios.
+	OwnerOnlyLogin bool
 	// Read deps used by me_controller.go for GET /auth/me, GET /gyms/me, and
 	// GET /gyms/me/setup-status. They're optional in the sense that nil-safe
 	// guards in the handlers turn them into 500s — main.go is expected to
@@ -573,6 +580,16 @@ func (ctrl *AuthController) handleLogin(c *gin.Context) {
 		utils.ErrorResponse(c, loginErrorStatus(err), err)
 		return
 	}
+	// OwnerOnlyLogin gatea la SUPERFICIE del dashboard, no la credencial:
+	// el sidecar proxyea su login online hacia aquí (auth_controller_sidecar
+	// .forward) y recepción SÍ loguea operadores — esos requests traen
+	// X-Cuadra-Client-ID y quedan exentos. El header es spoofeable a
+	// propósito: lo único que "gana" un operador es su propio token de
+	// operador, que RequireOwner y el wire role-aware ya acotan.
+	if ctrl.OwnerOnlyLogin && out.Role != userDomain.RoleOwner && readClientID(c) == uuid.Nil {
+		utils.ErrorResponse(c, http.StatusForbidden, userErrors.ErrOwnerOnlyLogin)
+		return
+	}
 	utils.JsonResponse(c, http.StatusOK, loginResp{
 		UserID:             out.UserID,
 		GymID:              out.GymID,
@@ -604,7 +621,7 @@ func loginErrorStatus(err error) int {
 	switch {
 	case errors.Is(err, userErrors.ErrInvalidCredentials):
 		return http.StatusUnauthorized
-	case errors.Is(err, userErrors.ErrAccountInactive):
+	case errors.Is(err, userErrors.ErrAccountInactive), errors.Is(err, userErrors.ErrOwnerOnlyLogin):
 		return http.StatusForbidden
 	default:
 		return utils.DomainErrorToHttpCode(err)

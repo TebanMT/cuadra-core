@@ -54,6 +54,22 @@ type Reader interface {
 	CountCheckinsBetween(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time) (int, error)
 	SumRefundsBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (float64, error)
 	IncomeByMethodBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (map[string]float64, error)
+
+	// IncomeByMembershipTypeBetween — cobros de membresía (concept =
+	// 'membership', cash-based por payment_date, mismo criterio que el KPI
+	// de ingresos) agrupados por el tipo de la membresía que el pago
+	// renovó. Los pagos no llevan tipo: se atribuye vía la membresía del
+	// socio con start_date más reciente <= payment_date (el pago crea la
+	// membresía el mismo día, así que empatan; renovaciones anticipadas de
+	// OTRO tipo pueden atribuirse al tipo anterior — aproximación
+	// documentada). Abonos y ventas NO entran. Breakdown Standard.
+	IncomeByMembershipTypeBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (map[string]float64, error)
+
+	// ActiveMembersByType — snapshot de socios ACTIVOS agrupados por el
+	// tipo de su membresía vigente (mismo predicado que CountActiveMembers,
+	// para que la suma de los buckets cuadre con ese KPI). No depende del
+	// período. Breakdown Standard.
+	ActiveMembersByType(tx sharedDomain.Transaction, gymID uuid.UUID, today time.Time) (map[string]int, error)
 	TopMembersBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time, limit int) ([]TopMemberRow, error)
 	CheckinsDailySeries(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time) ([]DailyCount, error)
 
@@ -79,6 +95,15 @@ type Reader interface {
 	// sale_items en pagos del período. Filtra por payment_date para
 	// alinear con el resto de las queries por ventana.
 	TopProductsBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time, limit int) ([]TopProductRow, error)
+
+	// SumProductSalesBetween — $ y unidades de la venta de productos del
+	// período: $ = SUM(amount) de payments con concept='product' (cash-based
+	// por payment_date, mismo criterio que SumPaymentsBetween, para que
+	// membresías-por-tipo + productos + abonos ≈ Ingresos); unidades =
+	// SUM(quantity) de los sale_items de esos mismos pagos. payment_date es
+	// DATE → sin tzName. Los refunds de venta NO restan aquí — viven en el
+	// KPI de devoluciones, igual que en el resto de los breakdowns.
+	SumProductSalesBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (ProductSalesTotals, error)
 
 	// CountCriticalStock — snapshot del catálogo: cuántos productos
 	// activos están a 0 (out) y cuántos por debajo del mínimo pero >0
@@ -213,6 +238,14 @@ type RealizedProductProfit struct {
 	COGS          float64
 	ItemsTotal    int
 	ItemsWithCost int
+}
+
+// ProductSalesTotals — $ y unidades de productos vendidos en un rango. Van
+// juntos porque el KPI los pinta juntos ("$3,420 · 87 uds"): Amount sale de
+// payments (concept='product'); Units de sale_items vía sales.
+type ProductSalesTotals struct {
+	Amount float64
+	Units  int
 }
 
 // DailyIncome — one bar of the dashboard chart (UC-033).

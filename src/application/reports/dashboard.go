@@ -60,6 +60,9 @@ type DashboardOutput struct {
 	RecoverableExpired   int                `json:"recoverable_expired"`
 	TodayCash            map[string]float64 `json:"today_cash_by_method"`
 	TodayCashTotal       float64            `json:"today_cash_total"`
+	// CheckinsToday — entradas de HOY en el día local del gym. Pieza del
+	// home operacional del operador (plan Reports-improve transversal §2).
+	CheckinsToday int `json:"checkins_today"`
 
 	IncomeLast30Days []DailyIncome `json:"income_last_30_days"`
 
@@ -225,6 +228,10 @@ func (uc *Dashboard) Execute(ctx context.Context, in DashboardInput) (*Dashboard
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}
+	checkinsToday, err := uc.Reader.CountCheckinsBetween(tx, in.GymID, tzName, today, today)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
 	todayCash, err := uc.Reader.TodayCashByMethod(tx, in.GymID, today)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
@@ -291,6 +298,7 @@ func (uc *Dashboard) Execute(ctx context.Context, in DashboardInput) (*Dashboard
 		),
 		ExpiringThisWeek:   expiringWeek,
 		RecoverableExpired: recoverable,
+		CheckinsToday:      checkinsToday,
 		TodayCash:          todayCash,
 		TodayCashTotal:     totalToday,
 		IncomeLast30Days:   series,

@@ -35,11 +35,6 @@ import (
 	chkRepoLite "github.com/cuadra/cuadra-core/src/modules/checkins/infraestructure/db/repositories"
 	chkCtrl "github.com/cuadra/cuadra-core/src/modules/checkins/interfaces/controllers"
 
-	challengesApp "github.com/cuadra/cuadra-core/src/modules/challenges/app"
-	challengesInfra "github.com/cuadra/cuadra-core/src/modules/challenges/infraestructure"
-	challengesRepoLite "github.com/cuadra/cuadra-core/src/modules/challenges/infraestructure/db/repositories"
-	challengesCtrl "github.com/cuadra/cuadra-core/src/modules/challenges/interfaces/controllers"
-
 	billingApp "github.com/cuadra/cuadra-core/src/modules/billing/app"
 	folioSvc "github.com/cuadra/cuadra-core/src/modules/billing/domain/folio"
 	billingRepoLite "github.com/cuadra/cuadra-core/src/modules/billing/infraestructure/db/repositories"
@@ -438,34 +433,6 @@ func main() {
 	markContacted := memApp.NewMarkContacted(memberRepo, contactAttemptRepo, uow, recorder)
 	markLost := memApp.NewMarkLost(memberRepo, uow, recorder)
 
-	// ── Challenges (retos) — Sesión 2 ─────────────────────────────────────
-	// Full vertical slice running locally on the gym laptop. AttendanceCounter
-	// reads from the same SQLite checkins table; the sync agent flushes new
-	// rows cloud-side without changing the in-gym UX.
-	challengeRepo := challengesRepoLite.NewChallengeSQLiteRepository()
-	categoryRepo := challengesRepoLite.NewCategorySQLiteRepository()
-	participantRepo := challengesRepoLite.NewParticipantSQLiteRepository()
-	measurementRepo := challengesRepoLite.NewMeasurementSQLiteRepository()
-	attendanceCounter := challengesInfra.NewCheckinsAttendanceAdapter()
-	createChallenge := challengesApp.NewCreateChallenge(challengeRepo, uow, recorder)
-	listChallenges := challengesApp.NewListChallenges(challengeRepo, uow)
-	detailChallenge := challengesApp.NewGetChallengeDetail(challengeRepo, categoryRepo, participantRepo, measurementRepo, uow)
-	updateChallengeConfig := challengesApp.NewUpdateChallengeConfig(challengeRepo, measurementRepo, uow, recorder)
-	transitionChallenge := challengesApp.NewTransitionChallengeStatus(challengeRepo, categoryRepo, uow, recorder)
-	addCategory := challengesApp.NewAddCategory(challengeRepo, categoryRepo, uow, recorder)
-	updateCategoryUC := challengesApp.NewUpdateCategory(categoryRepo, uow, recorder)
-	deleteCategory := challengesApp.NewDeleteCategory(categoryRepo, uow, recorder)
-	listCategories := challengesApp.NewListCategories(challengeRepo, categoryRepo, uow)
-	addParticipant := challengesApp.NewAddParticipant(challengeRepo, categoryRepo, participantRepo, uow, recorder)
-	updateParticipant := challengesApp.NewUpdateParticipant(participantRepo, uow, recorder)
-	removeParticipant := challengesApp.NewRemoveParticipant(participantRepo, uow, recorder)
-	listParticipants := challengesApp.NewListParticipants(challengeRepo, participantRepo, uow)
-	captureMeasurement := challengesApp.NewCaptureMeasurement(challengeRepo, participantRepo, measurementRepo, uow, recorder)
-	listMeasurementsUC := challengesApp.NewListMeasurements(challengeRepo, participantRepo, measurementRepo, uow)
-	rankingUC := challengesApp.NewGetChallengeRanking(challengeRepo, participantRepo, measurementRepo, attendanceCounter, uow)
-	attendanceReport := challengesApp.NewGetAttendanceReport(challengeRepo, participantRepo, attendanceCounter, uow)
-	checkDQ := challengesApp.NewCheckDisqualifications(challengeRepo, participantRepo, attendanceCounter, uow, recorder)
-
 	authCtrl := usersCtrl.NewAuthController(usersCtrl.AuthController{
 		Signup:            signup,
 		Login:             login,
@@ -543,29 +510,6 @@ func main() {
 	reportsController := reportsCtrl.NewReportsController(dashboard, attentionRequired, rangeReport, exportReport, markContacted, markLost, tokens).
 		WithGenderReport(genderReport)
 	reportsController.PlanGate = plusGate
-	challengeCtrl := challengesCtrl.NewChallengeController(challengesCtrl.ChallengeController{
-		CreateChallenge:        createChallenge,
-		ListChallenges:         listChallenges,
-		GetChallengeDetail:     detailChallenge,
-		UpdateChallengeConfig:  updateChallengeConfig,
-		TransitionStatus:       transitionChallenge,
-		AddCategory:            addCategory,
-		UpdateCategory:         updateCategoryUC,
-		DeleteCategory:         deleteCategory,
-		ListCategories:         listCategories,
-		AddParticipant:         addParticipant,
-		UpdateParticipant:      updateParticipant,
-		RemoveParticipant:      removeParticipant,
-		ListParticipants:       listParticipants,
-		CaptureMeasurement:     captureMeasurement,
-		ListMeasurements:       listMeasurementsUC,
-		GetChallengeRanking:    rankingUC,
-		GetAttendanceReport:    attendanceReport,
-		CheckDisqualifications: checkDQ,
-		Tokens:                 tokens,
-		PlanGate:               plusGate,
-	})
-
 	if os.Getenv("ENVIRONMENT") == "production" {
 		gin.SetMode(gin.ReleaseMode)
 	}
@@ -654,7 +598,6 @@ func main() {
 	})
 	whatsappProxy.RegisterRoutes(r)
 	reportsController.RegisterRoutes(r)
-	challengeCtrl.RegisterRoutes(r)
 	subscriptionCtrl.RegisterReadOnlyRoutes(r)
 	auditCtrl.RegisterRoutes(r)
 

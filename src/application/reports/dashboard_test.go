@@ -55,6 +55,9 @@ type fakeReader struct {
 	topProducts        []reports.TopProductRow
 	criticalStock      reports.CriticalStockCounts
 
+	productSalesNow, productSalesPrev reports.ProductSalesTotals
+	productSalesCalls                 int
+
 	genderComposition reports.GenderCompositionRow
 	genderByHour      []reports.AttendanceByGenderHourRow
 
@@ -131,6 +134,12 @@ func (r *fakeReader) SumRefundsBetween(_ sharedDomain.Transaction, _ uuid.UUID, 
 func (r *fakeReader) IncomeByMethodBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time) (map[string]float64, error) {
 	return r.incomeByMethod, nil
 }
+func (r *fakeReader) IncomeByMembershipTypeBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time) (map[string]float64, error) {
+	return map[string]float64{}, nil
+}
+func (r *fakeReader) ActiveMembersByType(_ sharedDomain.Transaction, _ uuid.UUID, _ time.Time) (map[string]int, error) {
+	return map[string]int{}, nil
+}
 func (r *fakeReader) TopMembersBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time, _ int) ([]reports.TopMemberRow, error) {
 	return r.topMembers, nil
 }
@@ -167,6 +176,13 @@ func (r *fakeReader) ExpensesByCategoryBetween(_ sharedDomain.Transaction, _ uui
 }
 func (r *fakeReader) TopProductsBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time, _ int) ([]reports.TopProductRow, error) {
 	return r.topProducts, nil
+}
+func (r *fakeReader) SumProductSalesBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time) (reports.ProductSalesTotals, error) {
+	r.productSalesCalls++
+	if r.productSalesCalls == 1 {
+		return r.productSalesNow, nil
+	}
+	return r.productSalesPrev, nil
 }
 func (r *fakeReader) CountCriticalStock(_ sharedDomain.Transaction, _ uuid.UUID) (reports.CriticalStockCounts, error) {
 	return r.criticalStock, nil

@@ -33,8 +33,10 @@ func TestRangeReport_PopulatesAllTotals(t *testing.T) {
 		checkinsByDay: []reports.DailyCount{
 			{Date: time.Now().UTC(), Count: 2},
 		},
-		generalExpenses: 200,
-		inventoryCost:   100,
+		generalExpenses:  200,
+		inventoryCost:    100,
+		productSalesNow:  reports.ProductSalesTotals{Amount: 320, Units: 12},
+		productSalesPrev: reports.ProductSalesTotals{Amount: 100, Units: 4},
 	}
 
 	uc := reports.NewRangeReport(reader, fakeUoW{})
@@ -57,6 +59,14 @@ func TestRangeReport_PopulatesAllTotals(t *testing.T) {
 	}
 	if out.Totals.Refunds.Current != 250 {
 		t.Errorf("totals.refunds.current = %.2f, want 250", out.Totals.Refunds.Current)
+	}
+	// product_sales: $ como KPI con ventana previa, unidades del período
+	// actual como sub-línea sin delta.
+	if out.ProductSales.Amount.Current != 320 {
+		t.Errorf("product_sales.amount.current = %.2f, want 320", out.ProductSales.Amount.Current)
+	}
+	if out.ProductSales.Units != 12 {
+		t.Errorf("product_sales.units = %d, want 12", out.ProductSales.Units)
 	}
 	// Net = income − inventory − expenses − refunds
 	//     = 1500 − 100 − 200 − 250 = 950. El income es bruto (excluye

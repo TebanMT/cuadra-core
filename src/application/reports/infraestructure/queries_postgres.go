@@ -552,6 +552,69 @@ func (r *PostgresReader) IncomeByMethodBetween(tx sharedDomain.Transaction, gymI
 	return out, nil
 }
 
+// IncomeByMembershipTypeBetween — atribución por subquery correlacionada:
+// la membresía del socio con start_date más reciente <= payment_date es la
+// que ese pago renovó (se crean el mismo día). 'Sin tipo' es el residuo
+// defensivo (pago de membresía sin fila de membresía — no debería pasar).
+func (r *PostgresReader) IncomeByMembershipTypeBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (map[string]float64, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	type row struct {
+		TypeName string
+		Total    float64
+	}
+	var rows []row
+	if err := gormTx.Raw(`
+		SELECT COALESCE((
+		         SELECT ms.type_name_snapshot FROM memberships ms
+		         WHERE ms.member_id = p.member_id AND ms.deleted_at IS NULL
+		           AND ms.start_date <= p.payment_date
+		         ORDER BY ms.start_date DESC LIMIT 1
+		       ), 'Sin tipo') AS type_name,
+		       COALESCE(SUM(p.amount), 0) AS total
+		FROM payments p
+		WHERE p.gym_id = ? AND p.deleted_at IS NULL
+		  AND p.concept = 'membership'
+		  AND p.payment_date >= ? AND p.payment_date <= ?
+		GROUP BY 1`,
+		gymID, from.Format(dateFmt), to.Format(dateFmt)).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[string]float64, len(rows))
+	for _, x := range rows {
+		out[x.TypeName] = x.Total
+	}
+	return out, nil
+}
+
+// ActiveMembersByType — mismo predicado que CountActiveMembers, agrupado,
+// para que SUM(buckets) == ese KPI siempre.
+func (r *PostgresReader) ActiveMembersByType(tx sharedDomain.Transaction, gymID uuid.UUID, today time.Time) (map[string]int, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	type row struct {
+		TypeName string
+		N        int
+	}
+	var rows []row
+	if err := gormTx.Raw(`
+		SELECT ms.type_name_snapshot AS type_name, COUNT(*) AS n
+		FROM members m
+		JOIN memberships ms ON ms.member_id = m.id
+		    AND ms.status = 'active' AND ms.deleted_at IS NULL
+		WHERE m.gym_id = ?
+		  AND m.status = 'active'
+		  AND m.deleted_at IS NULL
+		  AND ms.expiry_date >= ?
+		GROUP BY 1`,
+		gymID, today.Format(dateFmt)).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[string]int, len(rows))
+	for _, x := range rows {
+		out[x.TypeName] = x.N
+	}
+	return out, nil
+}
+
 func (r *PostgresReader) TopMembersBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time, limit int) ([]reports.TopMemberRow, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	if limit <= 0 {
@@ -972,6 +1035,36 @@ func (r *PostgresReader) TopProductsBetween(tx sharedDomain.Transaction, gymID u
 			Quantity:    x.Quantity,
 			Revenue:     x.Revenue,
 		}
+	}
+	return out, nil
+}
+
+// SumProductSalesBetween — $ y unidades de productos del período. El $ va
+// directo por payments concept='product' (cash-based por payment_date, mismo
+// criterio que SumPaymentsBetween — así el KPI cuadra contra Ingresos); las
+// unidades por sale_items de esos mismos pagos. Refunds no restan aquí:
+// viven en el KPI de devoluciones.
+func (r *PostgresReader) SumProductSalesBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (reports.ProductSalesTotals, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	var out reports.ProductSalesTotals
+	if err := gormTx.Raw(`
+		SELECT COALESCE(SUM(amount), 0) FROM payments
+		WHERE gym_id = ? AND deleted_at IS NULL
+		  AND concept = 'product'
+		  AND payment_date >= ? AND payment_date <= ?`,
+		gymID, from.Format(dateFmt), to.Format(dateFmt)).Scan(&out.Amount).Error; err != nil {
+		return reports.ProductSalesTotals{}, err
+	}
+	if err := gormTx.Raw(`
+		SELECT COALESCE(SUM(si.quantity), 0)
+		FROM sale_items si
+		JOIN sales s ON s.id = si.sale_id AND s.deleted_at IS NULL
+		JOIN payments p ON p.id = s.payment_id AND p.deleted_at IS NULL
+		WHERE si.gym_id = ? AND si.deleted_at IS NULL
+		  AND p.concept = 'product'
+		  AND p.payment_date >= ? AND p.payment_date <= ?`,
+		gymID, from.Format(dateFmt), to.Format(dateFmt)).Scan(&out.Units).Error; err != nil {
+		return reports.ProductSalesTotals{}, err
 	}
 	return out, nil
 }

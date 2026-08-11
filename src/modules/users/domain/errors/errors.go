@@ -21,6 +21,10 @@ var (
 	ErrNameLooksLikeEmail = errors.New("ese se ve como un correo. Escribe tu nombre")
 	ErrInvalidCredentials = errors.New("correo o contraseña incorrectos")
 	ErrAccountInactive    = errors.New("tu cuenta está desactivada. Contacta al dueño del gimnasio")
+	// ErrOwnerOnlyLogin — el binario cloud restringe /auth/login al dueño
+	// (el dashboard es superficie del dueño). El sidecar nunca lo emite:
+	// recepción sí loguea operadores.
+	ErrOwnerOnlyLogin = errors.New("el dashboard es del dueño. En el gym, entra con la app de recepción")
 	ErrInvalidResetToken  = errors.New("este link ya no es válido")
 	ErrResetTokenExpired  = errors.New("este link expiró. Solicita uno nuevo")
 	// UC-013 — verificación de correo.

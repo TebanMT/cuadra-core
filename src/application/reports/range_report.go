@@ -43,17 +43,25 @@ type RangeReportInput struct {
 
 // RangeReportOutput matches the FE ReportsRangeData shape.
 type RangeReportOutput struct {
-	Period             string             `json:"period"`
-	From               string             `json:"from"`
-	To                 string             `json:"to"`
-	Totals             RangeTotals        `json:"totals"`
-	IncomeByDay        []DailyIncome      `json:"income_by_day"`
+	Period string      `json:"period"`
+	From   string      `json:"from"`
+	To     string      `json:"to"`
+	Totals RangeTotals `json:"totals"`
+	// ProductSales — KPI "Ventas de productos": $ con trend + unidades del
+	// período actual (la sub-línea "· N uds" es informativa, sin delta).
+	ProductSales ProductSalesKPI `json:"product_sales"`
+	IncomeByDay  []DailyIncome   `json:"income_by_day"`
 	ExpensesByDay      []DailyAmount      `json:"expenses_by_day"`
 	CheckinsByDay      []DailyCount       `json:"checkins_by_day"`
 	IncomeByMethod     map[string]float64 `json:"income_by_method"`
 	ExpensesByCategory map[string]float64 `json:"expenses_by_category"`
-	TopMembers         []TopMemberRow     `json:"top_members"`
-	TopProducts        []TopProductRow    `json:"top_products"`
+	// IncomeByMembershipType / MembersByType — breakdowns Standard por tipo
+	// de membresía: cobros de membresía del período y snapshot de socios
+	// activos (la suma de MembersByType cuadra con el KPI de activos).
+	IncomeByMembershipType map[string]float64 `json:"income_by_membership_type"`
+	MembersByType          map[string]int     `json:"members_by_membership_type"`
+	TopMembers             []TopMemberRow     `json:"top_members"`
+	TopProducts            []TopProductRow    `json:"top_products"`
 	// InventoryCosts — movimientos restock con costo del período.
 	InventoryCosts []InventoryCostRow `json:"inventory_costs"`
 	// Expenses — gastos generales (BC expenses) del período.
@@ -76,6 +84,13 @@ type RangeTotals struct {
 	NewMembers      KPI `json:"new_members"`
 	Checkins        KPI `json:"checkins"`
 	Net             KPI `json:"net"`
+}
+
+// ProductSalesKPI — bloque del KPI "Ventas de productos": monto con
+// comparación vs ventana previa + unidades vendidas del período actual.
+type ProductSalesKPI struct {
+	Amount KPI `json:"amount"`
+	Units  int `json:"units"`
 }
 
 // CriticalStockCounts — productos sin stock o por debajo del mínimo. Es un
@@ -158,18 +173,20 @@ func (uc *RangeReport) Execute(ctx context.Context, in RangeReportInput) (*Range
 	prevFrom, prevTo := previousWindow(in.Period, from, to)
 
 	out := &RangeReportOutput{
-		Period:             in.Period,
-		From:               from.Format("2006-01-02"),
-		To:                 to.Format("2006-01-02"),
-		IncomeByDay:        []DailyIncome{},
-		ExpensesByDay:      []DailyAmount{},
-		CheckinsByDay:      []DailyCount{},
-		IncomeByMethod:     map[string]float64{},
-		ExpensesByCategory: map[string]float64{},
-		TopMembers:         []TopMemberRow{},
-		TopProducts:        []TopProductRow{},
-		InventoryCosts:     []InventoryCostRow{},
-		Expenses:           []ExpenseRow{},
+		Period:                 in.Period,
+		From:                   from.Format("2006-01-02"),
+		To:                     to.Format("2006-01-02"),
+		IncomeByDay:            []DailyIncome{},
+		ExpensesByDay:          []DailyAmount{},
+		CheckinsByDay:          []DailyCount{},
+		IncomeByMethod:         map[string]float64{},
+		ExpensesByCategory:     map[string]float64{},
+		IncomeByMembershipType: map[string]float64{},
+		MembersByType:          map[string]int{},
+		TopMembers:             []TopMemberRow{},
+		TopProducts:            []TopProductRow{},
+		InventoryCosts:         []InventoryCostRow{},
+		Expenses:               []ExpenseRow{},
 	}
 
 	// KPI scalar reads — current + previous window. Errors degrade silently
@@ -199,6 +216,13 @@ func (uc *RangeReport) Execute(ctx context.Context, in RangeReportInput) (*Range
 	checkinsPrev, _ := uc.Reader.CountCheckinsBetween(tx, in.GymID, tzName, prevFrom, prevTo)
 	out.Totals.Checkins = newKPI(float64(checkinsNow), float64(checkinsPrev))
 
+	productNow, _ := uc.Reader.SumProductSalesBetween(tx, in.GymID, from, to)
+	productPrev, _ := uc.Reader.SumProductSalesBetween(tx, in.GymID, prevFrom, prevTo)
+	out.ProductSales = ProductSalesKPI{
+		Amount: newKPI(productNow.Amount, productPrev.Amount),
+		Units:  productNow.Units,
+	}
+
 	// Net = income − inventory_cost − expenses_general − refunds. Computed on
 	// both windows so the FE can show a meaningful trend chip. Income es bruto
 	// (excluye refunds) y SumRefundsBetween devuelve el valor ABSOLUTO — se
@@ -224,6 +248,12 @@ func (uc *RangeReport) Execute(ctx context.Context, in RangeReportInput) (*Range
 	}
 	if m, err := uc.Reader.ExpensesByCategoryBetween(tx, in.GymID, from, to); err == nil && m != nil {
 		out.ExpensesByCategory = m
+	}
+	if m, err := uc.Reader.IncomeByMembershipTypeBetween(tx, in.GymID, from, to); err == nil && m != nil {
+		out.IncomeByMembershipType = m
+	}
+	if m, err := uc.Reader.ActiveMembersByType(tx, in.GymID, today); err == nil && m != nil {
+		out.MembersByType = m
 	}
 	if rows, err := uc.Reader.TopMembersBetween(tx, in.GymID, from, to, topMembersLimit); err == nil && rows != nil {
 		out.TopMembers = rows

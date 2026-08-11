@@ -275,27 +275,36 @@ func (ctrl *ProductController) handleList(c *gin.Context) {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
 		return
 	}
+	// El costo frente al operador también es sensible (plan Reports-improve
+	// transversal §2): costo unitario y agregados de margen sólo viajan al
+	// dueño. Stock, precios de venta y low_stock son operación — van para
+	// ambos roles.
+	role, _ := middleware.GetRole(c)
+	includeCosts := role == "owner"
 	items := make([]productResp, 0, len(out.Items))
 	for _, p := range out.Items {
 		item := toProductResp(p)
-		if cost, ok := out.UnitCosts[p.ID]; ok {
+		if cost, ok := out.UnitCosts[p.ID]; ok && includeCosts {
 			c := cost
 			item.AvgUnitCost = &c
 		}
 		items = append(items, item)
 	}
+	totals := listProductTotals{
+		TotalValue:    out.Aggregates.TotalValue,
+		LowCount:      out.Aggregates.LowCount,
+		OutCount:      out.Aggregates.OutCount,
+		ProductsTotal: out.Aggregates.ProductsTotal,
+	}
+	if includeCosts {
+		totals.PotentialProfit = out.Aggregates.PotentialProfit
+		totals.CostValue = out.Aggregates.CostValue
+		totals.MarginPct = marginPct(out.Aggregates)
+		totals.ProductsWithCost = out.Aggregates.ProductsWithCost
+	}
 	utils.JsonResponse(c, http.StatusOK, listProductsResp{
 		Items: items, Total: out.Total, Page: out.Page, PageSize: out.PageSize,
-		Totals: listProductTotals{
-			TotalValue:       out.Aggregates.TotalValue,
-			LowCount:         out.Aggregates.LowCount,
-			OutCount:         out.Aggregates.OutCount,
-			PotentialProfit:  out.Aggregates.PotentialProfit,
-			CostValue:        out.Aggregates.CostValue,
-			MarginPct:        marginPct(out.Aggregates),
-			ProductsTotal:    out.Aggregates.ProductsTotal,
-			ProductsWithCost: out.Aggregates.ProductsWithCost,
-		},
+		Totals: totals,
 	})
 }
 

@@ -46,11 +46,6 @@ import (
 	usersRepoPg "github.com/cuadra/cuadra-core/src/modules/users/infraestructure/db/repositories"
 	usersCtrl "github.com/cuadra/cuadra-core/src/modules/users/interfaces/controllers"
 
-	challengesApp "github.com/cuadra/cuadra-core/src/modules/challenges/app"
-	challengesInfra "github.com/cuadra/cuadra-core/src/modules/challenges/infraestructure"
-	challengesRepoPG "github.com/cuadra/cuadra-core/src/modules/challenges/infraestructure/db/repositories"
-	challengesCtrl "github.com/cuadra/cuadra-core/src/modules/challenges/interfaces/controllers"
-
 	promoApp "github.com/cuadra/cuadra-core/src/modules/promotions/app"
 	promoRepoPg "github.com/cuadra/cuadra-core/src/modules/promotions/infraestructure/db/repositories"
 	promoCtrl "github.com/cuadra/cuadra-core/src/modules/promotions/interfaces/controllers"
@@ -70,6 +65,9 @@ import (
 
 	"errors"
 	releasesApp "github.com/cuadra/cuadra-core/src/application/releases"
+	analyticsApp "github.com/cuadra/cuadra-core/src/application/analytics"
+	analyticsInfra "github.com/cuadra/cuadra-core/src/application/analytics/infraestructure"
+	analyticsCtrl "github.com/cuadra/cuadra-core/src/application/analytics/interfaces"
 	releasesInfra "github.com/cuadra/cuadra-core/src/application/releases/infraestructure"
 	releasesCtrl "github.com/cuadra/cuadra-core/src/application/releases/interfaces"
 	reportsApp "github.com/cuadra/cuadra-core/src/application/reports"
@@ -431,6 +429,10 @@ func main() {
 		AssignSelfPIN:      assignSelfPIN,
 		ClearSelfPIN:       clearSelfPIN,
 		Tokens:             tokens,
+		// El dashboard cloud es del dueño: operadores no se loguean aquí
+		// (plan Reports-improve, transversal §1). El sidecar NO activa este
+		// flag — recepción vive del login de operadores.
+		OwnerOnlyLogin:     true,
 		Gyms:               gymRepo,
 		Users:              userRepo,
 		MembershipTypes:    mtRepo,
@@ -461,61 +463,18 @@ func main() {
 	reportsController := reportsCtrl.NewReportsController(dashboard, attentionRequired, rangeReport, exportReport, markContacted, markLost, tokens).
 		WithGenderReport(genderReport)
 	reportsController.PlanGate = plusGate
+	// Analytics Plus (plan Reports-improve fase 3) — SOLO cloud: la pestaña
+	// Análisis vive en el dashboard, el sidecar no registra estas rutas y
+	// no existe reader SQLite.
+	analyticsOverview := analyticsApp.NewOverview(analyticsInfra.NewPostgresReader(), uow).WithGyms(gymRepo)
+	analyticsController := analyticsCtrl.NewAnalyticsController(analyticsOverview, tokens)
+	analyticsController.PlanGate = plusGate
 	notificationsCtrl := notiCtrl.NewController(connectWhatsApp, disconnectWhatsApp, whatsappStatus, listTemplates, updateTemplate, broadcast, listNotifications, retryNotification, listOwnerAlerts, updateOwnerAlert, whatsappProvider, tokens)
 	notificationsCtrl.PlanGate = plusGate
 	// El ceremony de UC-037 acepta sk_live_* además de JWT owner: el desktop
 	// conecta WhatsApp a través del WhatsAppSidecarProxy del sidecar, cuyos
 	// JWTs de operador están firmados con el secret local y no validan aquí.
 	notificationsCtrl.SidecarTokens = sidecarStore
-
-	// ── Challenges (retos) ────────────────────────────────────────────────
-	// Full vertical slice: list/detail/config, categories, participants,
-	// measurement capture (with supersession), ranking, attendance + DQ.
-	challengeRepo := challengesRepoPG.NewChallengePostgresRepository()
-	categoryRepo := challengesRepoPG.NewCategoryPostgresRepository()
-	participantRepo := challengesRepoPG.NewParticipantPostgresRepository()
-	measurementRepo := challengesRepoPG.NewMeasurementPostgresRepository()
-	attendanceCounter := challengesInfra.NewCheckinsAttendanceAdapter()
-	createChallenge := challengesApp.NewCreateChallenge(challengeRepo, uow, recorder)
-	listChallenges := challengesApp.NewListChallenges(challengeRepo, uow)
-	detailChallenge := challengesApp.NewGetChallengeDetail(challengeRepo, categoryRepo, participantRepo, measurementRepo, uow)
-	updateChallengeConfig := challengesApp.NewUpdateChallengeConfig(challengeRepo, measurementRepo, uow, recorder)
-	transitionChallenge := challengesApp.NewTransitionChallengeStatus(challengeRepo, categoryRepo, uow, recorder)
-	addCategory := challengesApp.NewAddCategory(challengeRepo, categoryRepo, uow, recorder)
-	updateCategory := challengesApp.NewUpdateCategory(categoryRepo, uow, recorder)
-	deleteCategory := challengesApp.NewDeleteCategory(categoryRepo, uow, recorder)
-	listCategories := challengesApp.NewListCategories(challengeRepo, categoryRepo, uow)
-	addParticipant := challengesApp.NewAddParticipant(challengeRepo, categoryRepo, participantRepo, uow, recorder)
-	updateParticipant := challengesApp.NewUpdateParticipant(participantRepo, uow, recorder)
-	removeParticipant := challengesApp.NewRemoveParticipant(participantRepo, uow, recorder)
-	listParticipants := challengesApp.NewListParticipants(challengeRepo, participantRepo, uow)
-	captureMeasurement := challengesApp.NewCaptureMeasurement(challengeRepo, participantRepo, measurementRepo, uow, recorder)
-	listMeasurements := challengesApp.NewListMeasurements(challengeRepo, participantRepo, measurementRepo, uow)
-	ranking := challengesApp.NewGetChallengeRanking(challengeRepo, participantRepo, measurementRepo, attendanceCounter, uow)
-	attendanceReport := challengesApp.NewGetAttendanceReport(challengeRepo, participantRepo, attendanceCounter, uow)
-	checkDQ := challengesApp.NewCheckDisqualifications(challengeRepo, participantRepo, attendanceCounter, uow, recorder)
-	challengeCtrl := challengesCtrl.NewChallengeController(challengesCtrl.ChallengeController{
-		CreateChallenge:        createChallenge,
-		ListChallenges:         listChallenges,
-		GetChallengeDetail:     detailChallenge,
-		UpdateChallengeConfig:  updateChallengeConfig,
-		TransitionStatus:       transitionChallenge,
-		AddCategory:            addCategory,
-		UpdateCategory:         updateCategory,
-		DeleteCategory:         deleteCategory,
-		ListCategories:         listCategories,
-		AddParticipant:         addParticipant,
-		UpdateParticipant:      updateParticipant,
-		RemoveParticipant:      removeParticipant,
-		ListParticipants:       listParticipants,
-		CaptureMeasurement:     captureMeasurement,
-		ListMeasurements:       listMeasurements,
-		GetChallengeRanking:    ranking,
-		GetAttendanceReport:    attendanceReport,
-		CheckDisqualifications: checkDQ,
-		Tokens:                 tokens,
-		PlanGate:               plusGate,
-	})
 
 	// ── Subscriptions (Fase 1: cobranza al dueño) ─────────────────────────
 	subEventRepo := subDB.NewEventPostgresRepository()
@@ -573,10 +532,10 @@ func main() {
 	expenseController.RegisterRoutes(r)
 	checkinCtrl.RegisterRoutes(r)
 	reportsController.RegisterRoutes(r)
+	analyticsController.RegisterRoutes(r)
 	notificationsCtrl.RegisterRoutes(r)
 	notiWebhookCtrl.RegisterRoutes(r)
 	subscriptionsCtrl.RegisterRoutes(r)
-	challengeCtrl.RegisterRoutes(r)
 
 	// Bitácora cloud (item 9) — owner-only, lee de Postgres. El sidecar
 	// monta su propio controller con SQLiteReader para ver el log local.
