@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
+	gymRepo "github.com/cuadra/cuadra-core/src/modules/gyms/domain/repository"
 	"github.com/cuadra/cuadra-core/src/modules/members/domain/access"
 	memberDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/member"
 	membershipDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/membership"
@@ -42,6 +43,7 @@ type ListMembersOutput struct {
 }
 
 type ListMembers struct {
+	Gyms    gymRepo.GymRepository
 	Members memRepo.MemberRepository
 	UoW     sharedDomain.UnitOfWork
 }
@@ -50,12 +52,25 @@ func NewListMembers(members memRepo.MemberRepository, uow sharedDomain.UnitOfWor
 	return &ListMembers{Members: members, UoW: uow}
 }
 
+func (uc *ListMembers) WithGyms(gyms gymRepo.GymRepository) *ListMembers { uc.Gyms = gyms; return uc }
+
 func (uc *ListMembers) Execute(ctx context.Context, in ListMembersInput) (*ListMembersOutput, error) {
 	tx, err := uc.UoW.Query(ctx)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}
 	now := time.Now().UTC()
+	if uc.Gyms != nil {
+		gym, err := uc.Gyms.GetByID(tx, in.GymID)
+		if err != nil {
+			return nil, sharedDomain.NewUnexpectedError(err)
+		}
+		if gym != nil {
+			if zone, err := time.LoadLocation(gym.Timezone); err == nil {
+				now = now.In(zone)
+			}
+		}
+	}
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 	page := in.Page
 	if page < 1 {

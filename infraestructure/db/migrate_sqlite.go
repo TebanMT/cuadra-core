@@ -41,12 +41,24 @@ func ApplySQLiteMigrations(db *sqlx.DB, fsys fs.FS, dir string) error {
 	if err != nil {
 		applied = map[int]struct{}{}
 	}
+	if err := repairSQLiteSchemaDrift(db, applied); err != nil {
+		return err
+	}
 
 	for _, f := range files {
 		v, ok := sqliteVersionFromFilename(path.Base(f))
 		if ok {
 			if _, done := applied[v]; done {
 				continue
+			}
+			if v == 43 {
+				reconciled, err := reconcileSQLitePaymentCashDestination(db)
+				if err != nil {
+					return fmt.Errorf("reconcile %q: %w", f, err)
+				}
+				if reconciled {
+					continue
+				}
 			}
 		}
 		raw, err := fs.ReadFile(fsys, f)
@@ -57,7 +69,16 @@ func ApplySQLiteMigrations(db *sqlx.DB, fsys fs.FS, dir string) error {
 			return fmt.Errorf("apply %q: %w", f, err)
 		}
 	}
-	return nil
+
+	// Run once more because the first pass may have applied the migrations
+	// whose final shape is being reconciled. Existing drifted installations
+	// are repaired by the first call; old but internally consistent databases
+	// are upgraded by SQL first and verified here afterwards.
+	finalApplied, err := loadAppliedSQLiteMigrations(db)
+	if err != nil {
+		return fmt.Errorf("reload applied sqlite migrations: %w", err)
+	}
+	return repairSQLiteSchemaDrift(db, finalApplied)
 }
 
 func loadAppliedSQLiteMigrations(db *sqlx.DB) (map[int]struct{}, error) {

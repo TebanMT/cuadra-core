@@ -4,6 +4,7 @@ package domain
 
 import (
 	"context"
+	"database/sql"
 
 	"gorm.io/gorm"
 )
@@ -45,6 +46,28 @@ func (u *gormUnitOfWork) Rollback(tx Transaction) error {
 
 func (u *gormUnitOfWork) Query(ctx context.Context) (Transaction, error) {
 	return &GormTransaction{Tx: u.db.WithContext(ctx)}, nil
+}
+
+func (u *gormUnitOfWork) ReadSnapshot(ctx context.Context, fn func(tx Transaction) error) error {
+	tx := u.db.WithContext(ctx).Begin(&sql.TxOptions{
+		Isolation: sql.LevelRepeatableRead,
+		ReadOnly:  true,
+	})
+	if tx.Error != nil {
+		return tx.Error
+	}
+	handle := &GormTransaction{Tx: tx}
+	defer func() {
+		if r := recover(); r != nil {
+			_ = tx.Rollback().Error
+			panic(r)
+		}
+	}()
+	if err := fn(handle); err != nil {
+		_ = tx.Rollback().Error
+		return err
+	}
+	return tx.Commit().Error
 }
 
 func (u *gormUnitOfWork) Command(ctx context.Context, fn func(tx Transaction) error) error {

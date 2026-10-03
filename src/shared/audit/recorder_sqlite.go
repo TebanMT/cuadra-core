@@ -63,7 +63,7 @@ func (sqliteRecorder) Record(ctx context.Context, tx sharedDomain.Transaction, e
 	if entry.Changes != nil && stx.Queue != nil {
 		// Audit rows are sync'd cliente→cloud (ADR-002 §3.16). Encode the row
 		// as the snapshot payload so the sync batch is self-contained.
-		payload, _ := json.Marshal(map[string]any{
+		payload, err := json.Marshal(map[string]any{
 			"id":            id,
 			"gym_id":        entry.GymID.String(),
 			"entity_type":   entry.EntityType,
@@ -74,7 +74,12 @@ func (sqliteRecorder) Record(ctx context.Context, tx sharedDomain.Transaction, e
 			"created_at":    nowMs,
 			"updated_at":    nowMs,
 		})
-		_ = stx.EnqueueSync(ctx, "audit_log", id, "upsert", payload, 1)
+		if err != nil {
+			return err
+		}
+		if err := stx.EnqueueSync(ctx, "audit_log", id, "upsert", payload, 1); err != nil {
+			return err
+		}
 	}
 	return nil
 }

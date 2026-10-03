@@ -11,6 +11,7 @@ import (
 // ProductModel mirrors `products` (ADR-002 §3.11). The domain entity stays
 // free of GORM tags; the mapper in repositories/ bridges them.
 type ProductModel struct {
+	StockBase    *int       `gorm:"column:stock_base"`
 	ID           uuid.UUID  `gorm:"type:uuid;primaryKey;column:id"`
 	GymID        uuid.UUID  `gorm:"type:uuid;not null;column:gym_id"`
 	Version      int        `gorm:"not null;default:1;column:version"`

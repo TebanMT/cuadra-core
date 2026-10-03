@@ -32,6 +32,7 @@ import (
 	memCtrl "github.com/cuadra/cuadra-core/src/modules/members/interfaces/controllers"
 
 	chkApp "github.com/cuadra/cuadra-core/src/modules/checkins/app"
+	arduinoAccess "github.com/cuadra/cuadra-core/src/modules/checkins/infraestructure/accessdevice/arduino"
 	chkRepoLite "github.com/cuadra/cuadra-core/src/modules/checkins/infraestructure/db/repositories"
 	chkCtrl "github.com/cuadra/cuadra-core/src/modules/checkins/interfaces/controllers"
 
@@ -168,11 +169,21 @@ func main() {
 	paymentRepo := billingRepoLite.NewPaymentSQLiteRepository()
 	saleRepo := billingRepoLite.NewSaleSQLiteRepository()
 	saleItemRepo := billingRepoLite.NewSaleItemSQLiteRepository()
+	refundRepo := billingRepoLite.NewRefundSQLiteRepository()
+	saleCorrectionRepo := billingRepoLite.NewSaleCorrectionSQLiteRepository()
+	paymentCorrectionRepo := billingRepoLite.NewPaymentCorrectionSQLiteRepository()
 	cashCloseReader := billingRepoLite.NewCashCloseSQLiteReader()
 	cashCloseEventRepo := billingRepoLite.NewCashCloseEventSQLiteRepository()
+	cashDrawerRepo := billingRepoLite.NewCashDrawerSQLiteRepository()
 	productRepo := prodRepoLite.NewProductSQLiteRepository()
 	stockMovementRepo := prodRepoLite.NewStockMovementSQLiteRepository()
+	inventoryPurchaseRepo := prodRepoLite.NewInventoryPurchaseSQLiteRepository()
+	inventoryReceiptRepo := prodRepoLite.NewInventoryPurchaseReceiptSQLiteRepository()
 	expenseRepo := expRepoLite.NewExpenseSQLiteRepository()
+	cashMovementRepo := expRepoLite.NewCashMovementSQLiteRepository()
+	recurringTemplateRepo := expRepoLite.NewRecurringTemplateSQLiteRepository()
+	expenseOccurrenceRepo := expRepoLite.NewOccurrenceSQLiteRepository()
+	cashDayLock := expRepoLite.NewCashDayLockSQLite()
 	fingerprintRepo := memRepoLite.NewFingerprintSQLiteRepository()
 	checkinRepo := chkRepoLite.NewCheckinSQLiteRepository()
 	contactAttemptRepo := memRepoLite.NewContactAttemptSQLiteRepository()
@@ -275,7 +286,7 @@ func main() {
 	folios := folioSvc.NewGenerator(paymentRepo)
 	createMember := memApp.NewCreateMemberWithBilling(memberRepo, membershipRepo, mtRepo, paymentRepo, folios, uow, recorder)
 	updateMember := memApp.NewUpdateMember(memberRepo, uow, recorder)
-	listMembers := memApp.NewListMembers(memberRepo, uow)
+	listMembers := memApp.NewListMembers(memberRepo, uow).WithGyms(gymRepo)
 	memberDetail := memApp.NewGetMemberDetail(memberRepo, fingerprintRepo, uow)
 	toggleMember := memApp.NewToggleMemberStatus(memberRepo, uow, recorder)
 	lockExpiry := memApp.NewLockMembershipExpiry(membershipRepo, adjustmentRepo, uow, recorder)
@@ -321,6 +332,17 @@ func main() {
 	// gyms.kiosk_settings; dispatcher reads them per-call. Lo comparten el
 	// hub (checkin por dedazo) y los endpoints manual/número.
 	accessWebhook := accesswebhook.NewHTTPDispatcher(uow, gymRepo)
+	// Primer actuador físico de Tinta: Arduino Nano por USB serial. Es lazy:
+	// no abre el puerto hasta consultar status o ejecutar el pulso de prueba,
+	// así un gym sin hardware conectado opera normalmente. Un único puerto
+	// USB candidato se autodetecta; múltiples requieren env explícito.
+	accessActuator := arduinoAccess.NewSerialActuator(arduinoAccess.Config{
+		PortName: envOrDefault("TINTA_ACCESS_ARDUINO_PORT", ""),
+		BaudRate: envInt("TINTA_ACCESS_ARDUINO_BAUD", 115200),
+	})
+	defer accessActuator.Close()
+	testAccessActuator := chkApp.NewTestAccessActuator(accessActuator, uow, recorder)
+	getAccessActuatorStatus := chkApp.NewGetAccessActuatorStatus(accessActuator)
 	bioHub := chkApp.NewBiometricHub(bioEngine, checkinFingerprint, registerFingerprint,
 		memberRepo, fingerprintRepo, gmkProvider, uow, bioEvents).
 		WithWebhook(accessWebhook)
@@ -390,33 +412,85 @@ func main() {
 	settlePayment := billingApp.NewSettlePendingBalance(paymentRepo, folios, uow, recorder).WithGyms(gymRepo)
 	receiptPayment := billingApp.NewGenerateReceipt(paymentRepo, gymRepo, memberRepo, uow)
 	sendReceipt := billingApp.NewSendReceipt(paymentRepo, uow).WithPublisher(billingSubscriber).WithResender(billingSubscriber)
-	listMemberPayments := billingApp.NewListMemberPayments(paymentRepo, memberRepo, uow)
-	listGymPayments := billingApp.NewListGymPayments(paymentRepo, memberRepo, uow).WithGyms(gymRepo)
+	listMemberPayments := billingApp.NewListMemberPayments(paymentRepo, memberRepo, uow).WithSales(saleItemRepo)
+	listGymPayments := billingApp.NewListGymPayments(paymentRepo, memberRepo, uow).WithGyms(gymRepo).WithSales(saleItemRepo)
 	refundPayment := billingApp.NewRefundPayment(paymentRepo, folios, memberSvc, uow, recorder).
-		WithGyms(gymRepo)
+		WithGyms(gymRepo).
+		WithRefunds(refundRepo)
+	registerOtherIncome := billingApp.NewRegisterOtherIncome(paymentRepo, folios, uow, recorder).WithGyms(gymRepo)
 
 	// ── Products + Billing pt.2 (Sesión 4) ────────────────────────────────
 	productSvc := prodApp.NewProductService(productRepo, stockMovementRepo)
+	refundPayment.WithSaleDetails(saleRepo, saleItemRepo, productSvc)
 	createProduct := prodApp.NewCreateProduct(productRepo, stockMovementRepo, uow, recorder)
 	updateProduct := prodApp.NewUpdateProduct(productRepo, uow, recorder)
 	deactivateProduct := prodApp.NewDeactivateProduct(productRepo, uow, recorder)
 	reactivateProduct := prodApp.NewReactivateProduct(productRepo, uow, recorder)
 	listProducts := prodApp.NewListProducts(productRepo, uow)
-	adjustStock := prodApp.NewAdjustStock(productRepo, stockMovementRepo, uow, recorder)
+	inventoryPurchaseCash := expApp.NewInventoryPurchaseCashService(cashMovementRepo).WithAudit(recorder)
+	adjustStock := prodApp.NewAdjustStock(productRepo, stockMovementRepo, uow, recorder).
+		WithPurchases(inventoryPurchaseRepo, inventoryPurchaseCash).
+		WithGyms(gymRepo)
+	listInventoryPurchases := prodApp.NewListInventoryPurchases(inventoryPurchaseRepo, productRepo, inventoryPurchaseCash, uow).WithReceipts(inventoryReceiptRepo).WithGyms(gymRepo)
+	payInventoryPurchase := prodApp.NewPayInventoryPurchase(inventoryPurchaseRepo, productRepo, inventoryPurchaseCash, uow, recorder).WithGyms(gymRepo).WithReceipts(inventoryReceiptRepo)
+	reopenInventoryPurchase := prodApp.NewReopenInventoryPurchase(inventoryPurchaseRepo, productRepo, inventoryPurchaseCash, uow, recorder).WithReceipts(inventoryReceiptRepo)
+	correctInventoryPurchase := prodApp.NewCorrectInventoryPurchase(inventoryPurchaseRepo, productRepo, stockMovementRepo, uow, recorder).WithCash(inventoryPurchaseCash)
 	// Expenses (gastos generales) — CRUD + listado. Mismo wiring que cloud.
-	createExpense := expApp.NewCreateExpense(expenseRepo, uow, recorder)
-	updateExpense := expApp.NewUpdateExpense(expenseRepo, uow, recorder)
-	deleteExpense := expApp.NewDeleteExpense(expenseRepo, uow, recorder)
+	expensePolicy := expApp.OperationalPolicy{DayLock: cashDayLock, Gyms: gymRepo}
+	createExpense := expApp.NewCreateExpense(expenseRepo, uow, recorder).WithOperational(cashMovementRepo, expensePolicy)
+	updateExpense := expApp.NewUpdateExpense(expenseRepo, uow, recorder).WithOccurrences(expenseOccurrenceRepo).WithOperational(cashMovementRepo, expensePolicy)
+	deleteExpense := expApp.NewDeleteExpense(expenseRepo, uow, recorder).WithOperational(cashMovementRepo, expensePolicy).WithOccurrences(expenseOccurrenceRepo)
 	listExpenses := expApp.NewListExpenses(expenseRepo, uow)
+	getExpense := expApp.NewGetExpense(expenseRepo, uow)
+	createCashMovement := expApp.NewCreateCashMovement(cashMovementRepo, uow, recorder, expensePolicy).WithExpenses(expenseRepo)
+	updateCashMovement := expApp.NewUpdateCashMovement(cashMovementRepo, uow, recorder, expensePolicy)
+	deleteCashMovement := expApp.NewDeleteCashMovement(cashMovementRepo, uow, recorder, expensePolicy)
+	listCashMovements := expApp.NewListCashMovementsByDate(cashMovementRepo, uow)
+	classifyCashMovement := expApp.NewClassifyCashMovement(cashMovementRepo, expenseRepo, uow, recorder, expensePolicy)
+	unclassifyCashMovement := expApp.NewUnclassifyCashMovement(cashMovementRepo, uow, recorder).WithExpenses(expenseRepo).WithOccurrences(expenseOccurrenceRepo)
+	createExpenseTemplate := expApp.NewCreateRecurringExpenseTemplate(recurringTemplateRepo, uow, recorder)
+	updateExpenseTemplate := expApp.NewUpdateRecurringExpenseTemplate(recurringTemplateRepo, expenseOccurrenceRepo, uow, recorder, expensePolicy)
+	setExpenseTemplateActive := expApp.NewDeactivateRecurringExpenseTemplate(recurringTemplateRepo, uow, recorder).WithOperationalPolicy(expensePolicy)
+	listExpenseTemplates := expApp.NewListRecurringExpenseTemplates(recurringTemplateRepo, uow)
+	materializeExpenseOccurrences := expApp.NewMaterializeExpenseOccurrences(recurringTemplateRepo, expenseOccurrenceRepo, uow, recorder)
+	listExpenseOccurrences := expApp.NewListExpenseOccurrences(expenseOccurrenceRepo, uow).WithDetails(recurringTemplateRepo, expenseRepo)
+	payExpenseOccurrence := expApp.NewMarkExpenseOccurrencePaid(expenseOccurrenceRepo, expenseRepo, cashMovementRepo, uow, recorder, expensePolicy)
+	skipExpenseOccurrence := expApp.NewSkipExpenseOccurrence(expenseOccurrenceRepo, uow, recorder)
+	reopenExpenseOccurrence := expApp.NewReopenExpenseOccurrence(expenseOccurrenceRepo, expenseRepo, cashMovementRepo, uow, recorder)
 	registerSale := billingApp.NewRegisterSale(paymentRepo, saleRepo, saleItemRepo, folios, productSvc, memberRepo, uow, recorder, billingSubscriber).
 		WithPromotions(applyPromo).
 		WithGyms(gymRepo)
 	refundSale := billingApp.NewRefundSale(saleRepo, refundPayment, uow)
 	cashClose := reportsApp.NewCashClose(cashCloseReader, cashCloseEventRepo, uow, recorder).
 		WithExpenses(expenseRepo).
+		WithCashMovements(cashMovementRepo).
+		WithCashDrawers(cashDrawerRepo).
 		WithUsers(userRepo).
 		WithSubscriber(notiApp.NewCashCloseAlertSubscriber(enqueueOwnerAlert)).
 		WithGyms(gymRepo)
+	updateExpense.WithCashSessionMarker(cashClose)
+	deleteExpense.WithCashSessionMarker(cashClose)
+	updateCashMovement.WithCashSessionMarker(cashClose)
+	deleteCashMovement.WithCashSessionMarker(cashClose)
+	reopenExpenseOccurrence.WithCashSessionMarker(cashClose)
+	correctSale := billingApp.NewCorrectSale(saleRepo, saleItemRepo, paymentRepo, saleCorrectionRepo,
+		refundRepo, productSvc, folios, cashClose, uow, recorder).WithGyms(gymRepo)
+	correctPayment := billingApp.NewCorrectPayment(paymentRepo, paymentCorrectionRepo, cashClose, uow, recorder).WithGyms(gymRepo)
+	cashDrawers := billingApp.NewCashDrawers(cashDrawerRepo, uow, recorder)
+	registerPayment.WithCashDrawers(cashDrawers)
+	settlePayment.WithCashDrawers(cashDrawers)
+	registerSale.WithCashDrawers(cashDrawers)
+	registerOtherIncome.WithCashDrawers(cashDrawers)
+	refundPayment.WithCashDrawers(cashDrawers)
+	correctSale.WithCashDrawers(cashDrawers)
+	correctPayment.WithCashDrawers(cashDrawers)
+	createExpense.WithCashDrawerValidator(cashDrawers)
+	updateExpense.WithCashDrawerValidator(cashDrawers)
+	createCashMovement.WithCashDrawerValidator(cashDrawers)
+	updateCashMovement.WithCashDrawerValidator(cashDrawers)
+	payExpenseOccurrence.WithCashDrawerValidator(cashDrawers)
+	inventoryPurchaseCash.WithCashDrawerValidator(cashDrawers)
+	inventoryPurchaseCash.WithCashSessionMarker(cashClose)
 
 	// ── Reports application layer (Sesión 6) — same use cases as the cloud,
 	// but reading from the local SQLite. TTL corto (5s, vs 60s del cloud):
@@ -428,10 +502,10 @@ func main() {
 	dashboard := reportsApp.NewDashboard(reportsReader, uow, 5*time.Second).WithGyms(gymRepo)
 	attentionRequired := reportsApp.NewAttentionRequired(reportsReader, uow).WithGyms(gymRepo)
 	rangeReport := reportsApp.NewRangeReport(reportsReader, uow).WithGyms(gymRepo)
-	exportReport := reportsApp.NewExportReport(reportsReader, gymRepo, uow, attentionRequired, rangeReport)
+	exportReport := reportsApp.NewExportReport(reportsReader, gymRepo, uow, attentionRequired, rangeReport).WithCashClose(cashClose)
 	genderReport := reportsApp.NewGenderReport(reportsReader, uow).WithGyms(gymRepo)
 	markContacted := memApp.NewMarkContacted(memberRepo, contactAttemptRepo, uow, recorder)
-	markLost := memApp.NewMarkLost(memberRepo, uow, recorder)
+	markLost := memApp.NewMarkLost(memberRepo, uow, recorder).WithGyms(gymRepo)
 
 	authCtrl := usersCtrl.NewAuthController(usersCtrl.AuthController{
 		Signup:            signup,
@@ -475,14 +549,23 @@ func main() {
 	// galería al helper (que la cachea completa para el 1:N).
 	fingerprintCtrl := memCtrl.NewFingerprintController(registerFingerprint, deleteFingerprint, tokens).
 		WithOnChange(bioHub.NotifyFingerprintsChanged)
-	paymentCtrl := billingCtrl.NewPaymentController(registerPayment, settlePayment, receiptPayment, sendReceipt, listMemberPayments, listGymPayments, refundPayment, registerSale, refundSale, cashClose, tokens)
-	productCtrl := prodCtrl.NewProductController(createProduct, updateProduct, deactivateProduct, reactivateProduct, listProducts, adjustStock, tokens)
-	expenseController := expCtrl.NewExpenseController(createExpense, updateExpense, deleteExpense, listExpenses, tokens)
+	paymentCtrl := billingCtrl.NewPaymentController(registerPayment, settlePayment, receiptPayment, sendReceipt, listMemberPayments, listGymPayments, refundPayment, registerSale, refundSale, cashClose, tokens).WithOtherIncome(registerOtherIncome).WithSaleCorrections(correctSale).WithPaymentCorrections(correctPayment)
+	cashDrawerCtrl := billingCtrl.NewCashDrawerController(cashDrawers, tokens)
+	productCtrl := prodCtrl.NewProductController(createProduct, updateProduct, deactivateProduct, reactivateProduct, listProducts, adjustStock, tokens).
+		WithInventoryPurchases(listInventoryPurchases, payInventoryPurchase, reopenInventoryPurchase).
+		WithInventoryPurchaseCorrections(correctInventoryPurchase).
+		WithPurchaseRegistration(prodApp.NewRegisterInventoryPurchase(inventoryPurchaseRepo, inventoryReceiptRepo, productRepo, gymRepo, adjustStock.PurchaseCash, uow, recorder, "desktop")).
+		WithLegacyPurchaseCosts(prodApp.NewListMissingPurchaseCosts(inventoryPurchaseRepo, gymRepo, uow), prodApp.NewCompleteLegacyPurchaseCost(inventoryPurchaseRepo, inventoryPurchaseRepo, uow, recorder)).
+		WithRemotePurchases(nil, prodApp.NewReceiveInventoryPurchase(inventoryPurchaseRepo, inventoryReceiptRepo, uow, recorder))
+	expenseController := expCtrl.NewExpenseController(createExpense, updateExpense, deleteExpense, listExpenses, tokens).
+		WithPlusOperations(getExpense, createCashMovement, updateCashMovement, deleteCashMovement, listCashMovements, classifyCashMovement, createExpenseTemplate, updateExpenseTemplate, setExpenseTemplateActive, listExpenseTemplates, materializeExpenseOccurrences, listExpenseOccurrences, payExpenseOccurrence, skipExpenseOccurrence).
+		WithCorrectionOperations(unclassifyCashMovement, reopenExpenseOccurrence)
 	expenseController.PlanGate = plusGate
 	fingerprintAvailable := bioHub.Available
 	checkinCtrl := chkCtrl.NewCheckinController(checkinManual, checkinNumber, checkinOverride, checkinRepo, uow, fingerprintAvailable, tokens).
 		WithWebhook(accessWebhook).
 		WithGyms(gymRepo)
+	accessDeviceCtrl := chkCtrl.NewAccessDeviceController(testAccessActuator, getAccessActuatorStatus, tokens)
 	// Superficie biométrica nueva (paso 3 tinta-bio): SSE de eventos +
 	// sesión de enroll + status. Los endpoints multipart de imagen y el
 	// loop de captura del kiosko murieron — la captura vive en el helper.
@@ -508,7 +591,8 @@ func main() {
 	auditCtrl := audithttp.NewController(audit.NewSQLiteReader(), userRepo, uow, tokens)
 	auditCtrl.PlanGate = plusGate
 	reportsController := reportsCtrl.NewReportsController(dashboard, attentionRequired, rangeReport, exportReport, markContacted, markLost, tokens).
-		WithGenderReport(genderReport)
+		WithGenderReport(genderReport).
+		WithPaidExpenses(reportsApp.NewPaidExpenses(reportsReader, uow, gymRepo))
 	reportsController.PlanGate = plusGate
 	if os.Getenv("ENVIRONMENT") == "production" {
 		gin.SetMode(gin.ReleaseMode)
@@ -569,8 +653,9 @@ func main() {
 	// (cached_login row) so el check-in por dedazo funciona right after
 	// sidecar restart, before any operator re-logs in. El helper aún no
 	// está arriba aquí — HandleHelperUp re-manda la galería al arrancar.
-	if gymID := loginGymIDFromCache(uow); gymID != uuid.Nil {
-		bioHub.SetActiveGym(gymID)
+	pairedGymID := loginGymIDFromCache(uow)
+	if pairedGymID != uuid.Nil {
+		bioHub.SetActiveGym(pairedGymID)
 	}
 	authProxy.RegisterRoutes(r)
 	authCtrl.RegisterMeRoute(r)
@@ -583,9 +668,11 @@ func main() {
 	memberCtrl.RegisterRoutes(r)
 	fingerprintCtrl.RegisterRoutes(r)
 	paymentCtrl.RegisterRoutes(r)
+	cashDrawerCtrl.RegisterRoutes(r)
 	productCtrl.RegisterRoutes(r)
 	expenseController.RegisterRoutes(r)
 	checkinCtrl.RegisterRoutes(r)
+	accessDeviceCtrl.RegisterRoutes(r)
 	biometricCtrl.RegisterRoutes(r)
 	notificationsCtrl.RegisterRoutes(r)
 	// Ceremony de WhatsApp (UC-037) → proxy al cloud con el sk_live_* del
@@ -612,6 +699,17 @@ func main() {
 		Logger:     log.New(os.Stderr, "[sync] ", log.LstdFlags),
 		UploadsDir: uploadsDir,
 	}, db, uow)
+	// Bind the persisted pull/full-sync checkpoint to the paired tenant
+	// BEFORE the agent boots. Older builds stored one global cursor; when
+	// this SQLite was re-paired to another gym, that cursor skipped the new
+	// gym's cloud history and allowed conflicting local catalog rows. The
+	// first run after a real gym switch now starts with /sync/full while
+	// preserving both gyms' local data and pending queues.
+	if pairedGymID != uuid.Nil {
+		if err := agent.SetActiveGym(context.Background(), pairedGymID); err != nil {
+			log.Printf("sync: bind checkpoint to gym %s: %v", pairedGymID, err)
+		}
+	}
 	// Wire the proxy's hooks so a fresh login (or a re-login after the
 	// previous credential was revoked) takes effect immediately:
 	//   - OnSidecarTokenChanged: hot-swap the agent's in-memory token so
@@ -621,6 +719,19 @@ func main() {
 	//     for the 30s tick. Order matters — swap first, then trigger.
 	authProxy.OnSidecarTokenChanged = agent.SetToken
 	authProxy.AgentReload = agent.TriggerNow
+	// Replace the temporary biometric-only hook with the process-wide gym
+	// switch. SetActiveGym is synchronous and the auth proxy invokes it
+	// before handing the new sidecar token to the agent, so a request can
+	// never combine a new credential with the previous gym's cursor/queue.
+	authProxy.OnActiveGymChanged = func(gymID uuid.UUID) {
+		bioHub.SetActiveGym(gymID)
+		if gymID == uuid.Nil {
+			return
+		}
+		if err := agent.SetActiveGym(context.Background(), gymID); err != nil {
+			log.Printf("sync: switch active gym to %s: %v", gymID, err)
+		}
+	}
 	// Member create/update con foto: empuja al agent inmediatamente
 	// para que el upload a R2 ocurra en segundos en lugar de esperar
 	// el siguiente tick (hasta 30s).

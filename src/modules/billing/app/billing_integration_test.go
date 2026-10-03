@@ -7,6 +7,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -347,8 +348,8 @@ func TestFolioGenerator_NumericMaxNotLexicographic(t *testing.T) {
 		if _, err := f.db.Exec(
 			`INSERT INTO payments
 			   (id, gym_id, version, created_at, updated_at, folio, member_id,
-			    amount, payment_method, concept, balance_pending, payment_date, operator_id)
-			 VALUES (?, ?, 1, 1, 1, ?, ?, 10000, 'cash', 'membership', 0, '2026-01-01', ?)`,
+			    amount, recognized_amount, payment_method, concept, balance_pending, payment_date, operator_id)
+			 VALUES (?, ?, 1, 1, 1, ?, ?, 10000, 10000, 'cash', 'membership', 0, '2026-01-01', ?)`,
 			uuid.New().String(), f.gymID.String(), folio, f.memberID.String(), f.ownerID.String(),
 		); err != nil {
 			t.Fatalf("insert %s: %v", folio, err)
@@ -584,7 +585,7 @@ func TestUC021_ListMemberPayments_FiltersAndPaginates(t *testing.T) {
 // UC-022 — RefundPayment
 // ---------------------------------------------------------------------------
 
-func TestUC022_RefundCreatesNegativeRowAppendOnly(t *testing.T) {
+func TestUC022_RefundCreatesNegativeLedgerRowAppendOnly(t *testing.T) {
 	f := setup(t)
 	register := f.registerPayment()
 	out, _ := register.Execute(context.Background(), billingApp.RegisterMembershipPaymentInput{
@@ -595,13 +596,13 @@ func TestUC022_RefundCreatesNegativeRowAppendOnly(t *testing.T) {
 	res, err := uc.Execute(context.Background(), billingApp.RefundPaymentInput{
 		GymID: f.gymID, ActorUserID: f.ownerID,
 		ParentPaymentID: out.PaymentID, Reason: "Cliente cambió de opinión",
-		Method: "cash",
+		Method: "cash", Amount: out.Paid,
 	})
 	if err != nil {
 		t.Fatalf("refund: %v", err)
 	}
-	if res.Amount >= 0 {
-		t.Errorf("refund amount should be negative: %v", res.Amount)
+	if res.Amount != out.Paid {
+		t.Errorf("refund response amount = %v, want positive magnitude %v", res.Amount, out.Paid)
 	}
 	// Original payment row UNCHANGED in amount (append-only).
 	var origAmount int64
@@ -614,13 +615,13 @@ func TestUC022_RefundCreatesNegativeRowAppendOnly(t *testing.T) {
 	// Second refund attempt fails.
 	if _, err := uc.Execute(context.Background(), billingApp.RefundPaymentInput{
 		GymID: f.gymID, ActorUserID: f.ownerID,
-		ParentPaymentID: out.PaymentID, Reason: "doble", Method: "cash",
+		ParentPaymentID: out.PaymentID, Reason: "doble", Method: "cash", Amount: out.Paid,
 	}); err == nil {
 		t.Errorf("double refund should be rejected")
 	}
 }
 
-func TestUC022_RefundWithRevertCancelsRenewal(t *testing.T) {
+func TestUC022_RefundWithRevertFailsClosedUntilAllMembershipEffectsAreTraceable(t *testing.T) {
 	f := setup(t)
 	register := f.registerPayment()
 	// First payment (initial Membership was created at member creation).
@@ -636,30 +637,34 @@ func TestUC022_RefundWithRevertCancelsRenewal(t *testing.T) {
 	}
 
 	uc := billingApp.NewRefundPayment(f.paymentRepo, f.folios, f.memberSvc, f.uow, f.recorder)
-	res, err := uc.Execute(context.Background(), billingApp.RefundPaymentInput{
+	_, err := uc.Execute(context.Background(), billingApp.RefundPaymentInput{
 		GymID: f.gymID, ActorUserID: f.ownerID,
 		ParentPaymentID: first.PaymentID, Reason: "Error en cobro",
-		Method: "cash", RevertMembership: true,
+		Method: "cash", Amount: first.Paid, RevertMembership: true,
 	})
-	if err != nil {
-		t.Fatalf("refund w/ revert: %v", err)
+	if err == nil {
+		t.Fatal("automatic membership reversal must fail closed")
 	}
-	if !res.Reverted {
-		t.Errorf("expected reverted=true")
-	}
-	// After revert: previous membership should be active again, current cancelled.
+	// The rejected compound command is atomic: no membership or money changes.
 	if err := f.db.Get(&nActive, "SELECT COUNT(*) FROM memberships WHERE member_id=? AND status='active'", f.memberID.String()); err != nil {
 		t.Fatalf("count: %v", err)
 	}
 	if nActive != 1 {
-		t.Errorf("expected 1 active after revert (predecessor restored), got %d", nActive)
+		t.Errorf("expected active membership unchanged, got %d", nActive)
 	}
 	var nCancelled int
 	if err := f.db.Get(&nCancelled, "SELECT COUNT(*) FROM memberships WHERE member_id=? AND status='cancelled'", f.memberID.String()); err != nil {
 		t.Fatalf("count cancelled: %v", err)
 	}
-	if nCancelled != 1 {
-		t.Errorf("expected 1 cancelled (the renewal), got %d", nCancelled)
+	if nCancelled != 0 {
+		t.Errorf("rejected reversal cancelled %d memberships", nCancelled)
+	}
+	var nRefunds int
+	if err := f.db.Get(&nRefunds, "SELECT COUNT(*) FROM payments WHERE concept='refund' AND parent_payment_id=?", first.PaymentID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if nRefunds != 0 {
+		t.Fatalf("rejected reversal created %d refund payments", nRefunds)
 	}
 }
 
@@ -676,6 +681,275 @@ func TestUC022_RefundReasonRequired(t *testing.T) {
 		ParentPaymentID: out.PaymentID, Reason: "  ", Method: "cash",
 	}); err == nil {
 		t.Errorf("blank reason should fail")
+	}
+}
+
+func TestRefundMembership_RevertDoesNotPartiallyCancelMoneyOrDebt(t *testing.T) {
+	f := setup(t)
+	payment, err := f.registerPayment().Execute(context.Background(), billingApp.RegisterMembershipPaymentInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: f.memberID,
+		MembershipTypeID: f.planID, Method: "cash", PaidNow: 40,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	refund := billingApp.NewRefundPayment(f.paymentRepo, f.folios, f.memberSvc, f.uow, f.recorder).
+		WithRefunds(billingRepoLite.NewRefundSQLiteRepository())
+	_, err = refund.Execute(context.Background(), billingApp.RefundPaymentInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, ParentPaymentID: payment.PaymentID,
+		Reason: "Se capturó la renovación equivocada", Method: "cash", Amount: 40,
+		RevertMembership: true, IdempotencyKey: "membership-partial-revert",
+	})
+	if err == nil {
+		t.Fatal("unsafe compound reversal must be rejected")
+	}
+	var balance int64
+	if err := f.db.Get(&balance, `SELECT balance_pending FROM payments WHERE id=?`, payment.PaymentID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if balance != int64(payment.BalancePending*100) {
+		t.Fatalf("rejected reversal changed debt to %d cents", balance)
+	}
+	var aggregates int
+	if err := f.db.Get(&aggregates, `SELECT COUNT(*) FROM refunds WHERE root_payment_id=?`, payment.PaymentID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if aggregates != 0 {
+		t.Fatalf("rejected reversal left %d refund aggregates", aggregates)
+	}
+}
+
+func TestRefundPreview_DistinguishesSelectedCollectionFromAggregateObligation(t *testing.T) {
+	f := setup(t)
+	root, err := f.registerPayment().Execute(context.Background(), billingApp.RegisterMembershipPaymentInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: f.memberID,
+		MembershipTypeID: f.planID, Method: "cash", PaidNow: 40,
+		IdempotencyKey: "preview-root",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settlement, err := billingApp.NewSettlePendingBalance(f.paymentRepo, f.folios, f.uow, f.recorder).Execute(
+		context.Background(), billingApp.SettlePendingBalanceInput{
+			GymID: f.gymID, ActorUserID: f.ownerID, ParentPaymentID: root.PaymentID,
+			Amount: 100, Method: "cash", IdempotencyKey: "preview-settlement",
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	uc := billingApp.NewRefundPayment(f.paymentRepo, f.folios, f.memberSvc, f.uow, f.recorder).
+		WithRefunds(billingRepoLite.NewRefundSQLiteRepository())
+
+	rootPreview, err := uc.Preview(context.Background(), f.gymID, root.PaymentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rootPreview.SelectedPaymentID != root.PaymentID || rootPreview.RootPaymentID != root.PaymentID ||
+		rootPreview.SelectedRefundable != 40 || rootPreview.AggregateCollected != 140 ||
+		rootPreview.AggregateRefunded != 0 || rootPreview.AggregateRefundable != 140 ||
+		rootPreview.BalancePending != 460 || rootPreview.RevertMembershipTotal != 600 {
+		t.Fatalf("root preview=%+v", rootPreview)
+	}
+	if rootPreview.MembershipRevertAllowed || rootPreview.MembershipRevertReason == "" {
+		t.Fatalf("membership reversal must be explicitly blocked: %+v", rootPreview)
+	}
+
+	settlementPreview, err := uc.Preview(context.Background(), f.gymID, settlement.SettlementID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settlementPreview.SelectedPaymentID != settlement.SettlementID ||
+		settlementPreview.RootPaymentID != root.PaymentID || settlementPreview.SelectedRefundable != 100 ||
+		settlementPreview.AggregateCollected != 140 || settlementPreview.AggregateRefundable != 140 ||
+		settlementPreview.BalancePending != 460 {
+		t.Fatalf("settlement preview=%+v", settlementPreview)
+	}
+}
+
+func TestRefundMembership_HistoricalPaymentCannotCancelLaterRenewal(t *testing.T) {
+	f := setup(t)
+	first, err := f.registerPayment().Execute(context.Background(), billingApp.RegisterMembershipPaymentInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: f.memberID,
+		MembershipTypeID: f.planID, Method: "cash",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := f.registerPayment().Execute(context.Background(), billingApp.RegisterMembershipPaymentInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: f.memberID,
+		MembershipTypeID: f.planID, Method: "cash",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var activeBefore string
+	if err := f.db.Get(&activeBefore, `SELECT id FROM memberships WHERE member_id=? AND status='active'`, f.memberID.String()); err != nil {
+		t.Fatal(err)
+	}
+	var secondMembership string
+	if err := f.db.Get(&secondMembership, `SELECT membership_id FROM payments WHERE id=?`, second.PaymentID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if activeBefore != secondMembership {
+		t.Fatalf("fixture active=%s second payment membership=%s", activeBefore, secondMembership)
+	}
+	refund := billingApp.NewRefundPayment(f.paymentRepo, f.folios, f.memberSvc, f.uow, f.recorder).
+		WithRefunds(billingRepoLite.NewRefundSQLiteRepository())
+	if _, err := refund.Execute(context.Background(), billingApp.RefundPaymentInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, ParentPaymentID: first.PaymentID,
+		Reason: "Intento sobre pago histórico", Method: "cash", Amount: first.Paid,
+		RevertMembership: true, IdempotencyKey: "historical-membership-revert",
+	}); err == nil {
+		t.Fatal("historical refund must not cancel the current renewal")
+	}
+	var activeAfter string
+	_ = f.db.Get(&activeAfter, `SELECT id FROM memberships WHERE member_id=? AND status='active'`, f.memberID.String())
+	if activeAfter != activeBefore {
+		t.Fatalf("later renewal changed: before=%s after=%s", activeBefore, activeAfter)
+	}
+	var refunds int
+	_ = f.db.Get(&refunds, `SELECT COUNT(*) FROM refunds WHERE root_payment_id=?`, first.PaymentID.String())
+	if refunds != 0 {
+		t.Fatalf("failed historical revert left %d refund rows", refunds)
+	}
+}
+
+func TestRefundSettlement_ReopensExactRootDebtAndIsIdempotent(t *testing.T) {
+	f := setup(t)
+	root, err := f.registerPayment().Execute(context.Background(), billingApp.RegisterMembershipPaymentInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: f.memberID,
+		MembershipTypeID: f.planID, Method: "cash", PaidNow: 300,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settlement, err := billingApp.NewSettlePendingBalance(f.paymentRepo, f.folios, f.uow, f.recorder).
+		Execute(context.Background(), billingApp.SettlePendingBalanceInput{
+			GymID: f.gymID, ActorUserID: f.ownerID, ParentPaymentID: root.PaymentID,
+			Amount: 150, Method: "transfer",
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	refund := billingApp.NewRefundPayment(f.paymentRepo, f.folios, f.memberSvc, f.uow, f.recorder).
+		WithRefunds(billingRepoLite.NewRefundSQLiteRepository())
+	in := billingApp.RefundPaymentInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, ParentPaymentID: settlement.SettlementID,
+		Reason: "Abono duplicado", Method: "transfer", Amount: 150,
+		IdempotencyKey: "refund-settlement-150",
+	}
+	first, err := refund.Execute(context.Background(), in)
+	if err != nil {
+		t.Fatalf("refund settlement: %v", err)
+	}
+	second, err := refund.Execute(context.Background(), in)
+	if err != nil {
+		t.Fatalf("idempotent retry: %v", err)
+	}
+	if first.RefundID != second.RefundID || first.Amount != 150 {
+		t.Fatalf("retry mismatch first=%+v second=%+v", first, second)
+	}
+	if first.RefundPaymentID == nil || second.RefundPaymentID == nil ||
+		*first.RefundPaymentID != *second.RefundPaymentID || first.RefundFolio != second.RefundFolio ||
+		first.BalanceCancelled != second.BalanceCancelled || first.Reverted != second.Reverted {
+		t.Fatalf("retry did not replay exact response first=%+v second=%+v", first, second)
+	}
+	changedDrawer := uuid.New()
+	variants := []billingApp.RefundPaymentInput{
+		in,
+		in,
+		in,
+		in,
+		in,
+	}
+	variants[0].Reason = "Una razón distinta"
+	variants[1].Amount = 149
+	variants[2].PaymentDate = time.Date(2026, 8, 25, 0, 0, 0, 0, time.UTC)
+	variants[3].CashDrawerID = &changedDrawer
+	variants[4].RevertMembership = true
+	for i, changed := range variants {
+		if _, err := refund.Execute(context.Background(), changed); err == nil {
+			t.Errorf("semantic variant %d reused committed idempotency key", i)
+		}
+	}
+	var idempotency struct {
+		Fingerprint string `db:"idempotency_fingerprint"`
+		Result      string `db:"idempotency_result"`
+	}
+	if err := f.db.Get(&idempotency, `SELECT idempotency_fingerprint,idempotency_result FROM refunds WHERE id=?`, first.RefundID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if idempotency.Fingerprint == "" || idempotency.Result == "" {
+		t.Fatalf("refund did not persist exact replay metadata: %+v", idempotency)
+	}
+	var balance int64
+	_ = f.db.Get(&balance, `SELECT balance_pending FROM payments WHERE id=?`, root.PaymentID.String())
+	if balance != 30000 {
+		t.Fatalf("root debt=%d cents, want 30000", balance)
+	}
+	var links struct {
+		PaymentParent string `db:"payment_parent"`
+		AggregateRoot string `db:"aggregate_root"`
+	}
+	if err := f.db.Get(&links, `
+		SELECT rp.parent_payment_id AS payment_parent,r.root_payment_id AS aggregate_root
+		FROM refunds r JOIN payments rp ON rp.id=r.refund_payment_id
+		WHERE r.id=?`, first.RefundID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if links.PaymentParent != settlement.SettlementID.String() || links.AggregateRoot != root.PaymentID.String() {
+		t.Fatalf("refund links=%+v", links)
+	}
+}
+
+func TestRefundSettlement_ConcurrentAttemptsCannotOverRefund(t *testing.T) {
+	f := setup(t)
+	root, err := f.registerPayment().Execute(context.Background(), billingApp.RegisterMembershipPaymentInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: f.memberID,
+		MembershipTypeID: f.planID, Method: "cash", PaidNow: 300,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settlement, err := billingApp.NewSettlePendingBalance(f.paymentRepo, f.folios, f.uow, f.recorder).
+		Execute(context.Background(), billingApp.SettlePendingBalanceInput{
+			GymID: f.gymID, ActorUserID: f.ownerID, ParentPaymentID: root.PaymentID,
+			Amount: 150, Method: "transfer",
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	refund := billingApp.NewRefundPayment(f.paymentRepo, f.folios, f.memberSvc, f.uow, f.recorder).
+		WithRefunds(billingRepoLite.NewRefundSQLiteRepository())
+	errCh := make(chan error, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, err := refund.Execute(context.Background(), billingApp.RefundPaymentInput{
+				GymID: f.gymID, ActorUserID: f.ownerID, ParentPaymentID: settlement.SettlementID,
+				Reason: "Concurrencia", Method: "transfer", Amount: 100,
+				IdempotencyKey: "refund-settlement-concurrent-" + string(rune('a'+i)),
+			})
+			errCh <- err
+		}(i)
+	}
+	wg.Wait()
+	close(errCh)
+	succeeded := 0
+	for err := range errCh {
+		if err == nil {
+			succeeded++
+		}
+	}
+	if succeeded != 1 {
+		t.Fatalf("concurrent successes=%d, want exactly 1", succeeded)
+	}
+	var balance int64
+	_ = f.db.Get(&balance, `SELECT balance_pending FROM payments WHERE id=?`, root.PaymentID.String())
+	if balance != 25000 {
+		t.Fatalf("root debt=%d cents, want 25000 after one refund", balance)
 	}
 }
 
@@ -720,7 +994,7 @@ func TestListGymPayments_AggregatesFullWindowNetOfRefunds(t *testing.T) {
 	if _, err := refund.Execute(context.Background(), billingApp.RefundPaymentInput{
 		GymID: f.gymID, ActorUserID: f.ownerID,
 		ParentPaymentID: second.PaymentID, Reason: "Cliente cambió de opinión",
-		Method: "cash",
+		Method: "cash", Amount: second.Paid,
 	}); err != nil {
 		t.Fatalf("refund: %v", err)
 	}

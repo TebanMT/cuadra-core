@@ -44,15 +44,16 @@ type Store interface {
 // it into (entity_type_index, server_updated_at, entity_id) so it survives
 // new entries with the same updated_at (entity_id breaks ties).
 type FullCursor struct {
-	TypeIndex int       `json:"t"`
-	After     time.Time `json:"a"`
-	EntityID  string    `json:"e"`
+	EntityType string    `json:"k,omitempty"` // tie breaker for incremental cursors
+	TypeIndex  int       `json:"t"`
+	After      time.Time `json:"a"`
+	EntityID   string    `json:"e"`
 }
 
 // EncodeCursor — serializes a FullCursor to a URL-safe base64-ish opaque
 // string so clients treat it as opaque (ADR-001 §3.5).
 func EncodeCursor(c FullCursor) string {
-	if c.TypeIndex == 0 && c.After.IsZero() && c.EntityID == "" {
+	if c.TypeIndex == 0 && c.After.IsZero() && c.EntityID == "" && c.EntityType == "" {
 		return ""
 	}
 	b, _ := json.Marshal(c)
@@ -213,6 +214,27 @@ func (s *PostgresStore) UpsertOne(
 		}
 	}
 
+	if item.EntityType == "inventory_purchase_receipts" {
+		return s.upsertReceipt(ctx, tx, gymID, entityID, item)
+	}
+	if item.EntityType == "inventory_purchases" {
+		var remote bool
+		if err := g.WithContext(ctx).Raw(`SELECT EXISTS(SELECT 1 FROM inventory_purchases WHERE gym_id=? AND id=? AND origin='cloud')`, gymID, entityID).Scan(&remote).Error; err != nil {
+			return UpsertResult{}, err
+		}
+		if remote || pl["origin"] == "cloud" || ((pl["stock_movement_id"] == nil || pl["stock_movement_id"] == uuid.Nil.String()) && pl["origin"] != "desktop") {
+			return UpsertResult{}, newFinancialConflict("las compras registradas en la web se administran desde la cuenta del dueño")
+		}
+	}
+	if item.EntityType == "stock_movements" {
+		var derived bool
+		if err := g.Raw(`SELECT EXISTS(SELECT 1 FROM stock_movements WHERE gym_id=? AND id=? AND idempotency_key LIKE 'purchase-receipt:%')`, gymID, entityID).Scan(&derived).Error; err != nil {
+			return UpsertResult{}, err
+		}
+		if derived {
+			return UpsertResult{}, newFinancialConflict("la entrada de esta compra se conserva en su recepción")
+		}
+	}
 	// Lock the row (or absence) for the duration of this transaction.
 	row, exists, err := s.lockRow(ctx, g, gymID, item.EntityType, entityID)
 	if err != nil {
@@ -379,8 +401,10 @@ func (s *PostgresStore) updateRow(
 	return g.WithContext(ctx).Exec(q, version, string(payload), now, deletedAt, gymID, entityType, entityID).Error
 }
 
-// gymCanonicalAugmentExpr — para sync_entities.entity_type='gyms',
-// inyecta cuatro grupos de columnas desde el row vivo de `gyms`:
+// canonicalAugmentExpr injects live cloud-canonical fields over historical
+// sync_entities payloads.
+//
+// Para entity_type='gyms', inyecta cuatro grupos desde el row vivo:
 //
 //  1. Billing (cloud-owned): subscription_plan, subscription_status,
 //     stripe_customer_id, trial_ends_at, subscription_ends_at. El sidecar
@@ -422,10 +446,20 @@ func (s *PostgresStore) updateRow(
 // wire del sidecar. NULLs sobreviven: jsonb_build_object emite JSON null
 // donde corresponda (ej. gym recién creado sin trial_ends_at).
 //
-// Para filas non-gym (members, payments, ...) o cuando el JOIN no
-// encuentra el gym (defensa: gym fue hard-deleted o existe sólo en
-// sync_entities), el CASE devuelve el payload original sin tocar.
-const gymCanonicalAugmentExpr = `
+// Para membership_types re-emite el row vivo completo. Builds anteriores
+// guardaron esos tres montos en CENTAVOS dentro del journal aunque el wire
+// canónico es PESOS; el sidecar multiplicaba de nuevo ×100 al materializar.
+// Superponer los NUMERIC vivos repara journals históricos sin un backfill
+// destructivo y mantiene full/pull consistentes con Postgres.
+//
+// Stock_movements recibe el mismo tratamiento. Un importador histórico
+// dejó `cost` en centavos dentro del journal aunque el row canónico de
+// Postgres estaba en pesos; al materializarlo, SQLite multiplicaba otra vez
+// por 100. El resultado era un COGS ×100 en desktop y distinto al dashboard.
+//
+// Para las demás filas, o cuando el JOIN canónico no encuentra el row, el
+// CASE devuelve el payload original sin tocar.
+const canonicalAugmentExpr = `
 	CASE
 	    WHEN se.entity_type = 'gyms' AND g.id IS NOT NULL THEN
 	        se.payload || jsonb_build_object(
@@ -447,6 +481,38 @@ const gymCanonicalAugmentExpr = `
 	            'whatsapp_business_token_enc',
 	                translate(encode(g.whatsapp_business_token_enc, 'base64'), E'\n', '')
 	        )
+	    WHEN se.entity_type = 'membership_types' AND mt.id IS NOT NULL THEN
+	        se.payload || jsonb_build_object(
+	            'id',                    mt.id,
+	            'gym_id',                mt.gym_id,
+	            'version',               se.version,
+	            'name',                  mt.name,
+	            'price',                 mt.price,
+	            'duration_days',         mt.duration_days,
+	            'duration_months',       mt.duration_months,
+	            'enrollment_fee',        mt.enrollment_fee,
+	            'maintenance_fee',       mt.maintenance_fee,
+	            'maintenance_frequency', mt.maintenance_frequency,
+	            'active',                mt.active,
+	            'created_at', (EXTRACT(EPOCH FROM mt.created_at) * 1000)::bigint,
+	            'updated_at', (EXTRACT(EPOCH FROM mt.updated_at) * 1000)::bigint
+	        )
+	    WHEN se.entity_type = 'stock_movements' AND sm.id IS NOT NULL THEN
+	        se.payload || jsonb_build_object(
+	            'id',            sm.id,
+	            'gym_id',        sm.gym_id,
+	            'version',       se.version,
+	            'product_id',    sm.product_id,
+	            'movement_type', sm.movement_type,
+	            'delta',         sm.delta,
+	            'reason',        sm.reason,
+	            'cost',          sm.cost,
+	            'is_purchase',   sm.is_purchase,
+	            'sale_item_id',  sm.sale_item_id,
+	            'operator_id',   sm.operator_id,
+	            'created_at', (EXTRACT(EPOCH FROM sm.created_at) * 1000)::bigint,
+	            'updated_at', (EXTRACT(EPOCH FROM sm.updated_at) * 1000)::bigint
+	        )
 	    ELSE se.payload
 	END`
 
@@ -461,20 +527,30 @@ func (s *PostgresStore) ListSince(
 	since time.Time,
 	limit int,
 ) ([]PullChange, bool, error) {
+	return s.ListSinceCursor(ctx, tx, gymID, FullCursor{After: since, EntityID: "ffffffff-ffff-ffff-ffff-ffffffffffff", EntityType: "~"}, limit)
+}
+
+func (s *PostgresStore) ListSinceCursor(ctx context.Context, tx sharedDomain.Transaction, gymID uuid.UUID, cursor FullCursor, limit int) ([]PullChange, bool, error) {
 	g := gormTx(tx)
 	if limit <= 0 || limit > 1000 {
 		limit = 500
 	}
 	q := `
 		SELECT se.entity_type, se.entity_id, se.version,
-		       ` + gymCanonicalAugmentExpr + ` AS payload,
+		       ` + canonicalAugmentExpr + ` AS payload,
 		       se.server_updated_at, se.deleted_at
 		  FROM sync_entities se
 		  LEFT JOIN gyms g ON se.entity_type = 'gyms' AND se.entity_id = g.id
-		 WHERE se.gym_id = ? AND se.server_updated_at > ?
-		 ORDER BY se.server_updated_at ASC, se.entity_id ASC
+		  LEFT JOIN membership_types mt ON se.entity_type = 'membership_types' AND se.entity_id = mt.id
+		  LEFT JOIN stock_movements sm ON se.entity_type = 'stock_movements' AND se.entity_id = sm.id
+		 WHERE se.gym_id = ? AND (se.server_updated_at > ? OR (se.server_updated_at = ? AND (se.entity_id > ? OR (se.entity_id = ? AND se.entity_type > ?))))
+         ORDER BY se.server_updated_at ASC, se.entity_id ASC,se.entity_type ASC
 		 LIMIT ?`
-	rows, err := g.WithContext(ctx).Raw(q, gymID, since, limit+1).Rows()
+	id := cursor.EntityID
+	if id == "" {
+		id = uuid.Nil.String()
+	}
+	rows, err := g.WithContext(ctx).Raw(q, gymID, cursor.After, cursor.After, id, id, cursor.EntityType, limit+1).Rows()
 	if err != nil {
 		return nil, false, err
 	}
@@ -539,10 +615,12 @@ func (s *PostgresStore) ListForFullSync(
 		// kiosk_settings son todos NOT NULL en SQLite).
 		q := `
 			SELECT se.entity_type, se.entity_id, se.version,
-			       ` + gymCanonicalAugmentExpr + ` AS payload,
+			       ` + canonicalAugmentExpr + ` AS payload,
 			       se.server_updated_at, se.deleted_at
 			  FROM sync_entities se
 			  LEFT JOIN gyms g ON se.entity_type = 'gyms' AND se.entity_id = g.id
+			  LEFT JOIN membership_types mt ON se.entity_type = 'membership_types' AND se.entity_id = mt.id
+			  LEFT JOIN stock_movements sm ON se.entity_type = 'stock_movements' AND se.entity_id = sm.id
 			 WHERE se.gym_id = ?
 			   AND se.entity_type = ?
 			   AND (

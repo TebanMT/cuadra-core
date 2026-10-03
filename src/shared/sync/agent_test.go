@@ -230,6 +230,15 @@ func setupSidecarDB(t *testing.T) (*sqlx.DB, sharedDomain.UnitOfWork, uuid.UUID)
 	if err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
+	// Production binds the sync checkpoint from cached_login before the
+	// agent boots. Seed the same invariant so RunOnce never operates with
+	// an ambiguous/global tenant cursor.
+	if err := uow.Command(context.Background(), func(tx sharedDomain.Transaction) error {
+		_, err := syncpkg.BindCheckpointToGym(context.Background(), tx, gymID)
+		return err
+	}); err != nil {
+		t.Fatalf("bind sync gym: %v", err)
+	}
 	t.Setenv("SEED_USER_ID", userID.String())
 	return db, uow, gymID
 }

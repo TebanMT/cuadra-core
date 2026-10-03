@@ -22,6 +22,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/google/uuid"
@@ -37,6 +38,51 @@ type SQLiteReader struct{}
 func NewSQLiteReader() *SQLiteReader { return &SQLiteReader{} }
 
 const sqliteDateFmt = "2006-01-02"
+
+// FinancialReadMetadata mirrors PostgreSQL's financial watermark and adds
+// the offline fact the cloud cannot know: whether this gym still has local
+// financial mutations waiting in sync_queue.
+func (r *SQLiteReader) FinancialReadMetadata(tx sharedDomain.Transaction, gymID uuid.UUID) (reports.FinancialReadMetadata, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	var watermark sql.NullInt64
+	err := stx.Get(context.Background(), &watermark, `
+		SELECT MAX(updated_at) FROM (
+		  SELECT updated_at FROM payments WHERE gym_id=?
+		  UNION ALL SELECT updated_at FROM sales WHERE gym_id=?
+		  UNION ALL SELECT updated_at FROM sale_items WHERE gym_id=?
+		  UNION ALL SELECT updated_at FROM refunds WHERE gym_id=?
+		  UNION ALL SELECT updated_at FROM expenses WHERE gym_id=?
+		  UNION ALL SELECT updated_at FROM inventory_purchases WHERE gym_id=?
+		  UNION ALL SELECT updated_at FROM stock_movements WHERE gym_id=?
+		  UNION ALL SELECT updated_at FROM cash_close_events WHERE gym_id=?
+		  UNION ALL SELECT updated_at FROM cash_movements WHERE gym_id=?
+		  UNION ALL SELECT updated_at FROM cash_transfers WHERE gym_id=?
+		  UNION ALL SELECT updated_at FROM sale_corrections WHERE gym_id=?
+		  UNION ALL SELECT updated_at FROM payment_corrections WHERE gym_id=?
+		) financial_events`, gymID.String(), gymID.String(), gymID.String(), gymID.String(), gymID.String(), gymID.String(),
+		gymID.String(), gymID.String(), gymID.String(), gymID.String(), gymID.String(), gymID.String())
+	if err != nil {
+		return reports.FinancialReadMetadata{}, err
+	}
+	var pendingInt int
+	err = stx.Get(context.Background(), &pendingInt, `SELECT EXISTS(
+		SELECT 1 FROM sync_queue
+		WHERE synced_at IS NULL
+		  AND entity_type IN ('payments','sales','sale_items','refunds','expenses','inventory_purchases',
+		    'stock_movements','cash_close_events','cash_movements','cash_transfers','sale_corrections','payment_corrections')
+		  AND json_extract(payload,'$.gym_id')=?
+	)`, gymID.String())
+	if err != nil {
+		return reports.FinancialReadMetadata{}, err
+	}
+	pending := pendingInt != 0
+	out := reports.FinancialReadMetadata{SyncPending: &pending}
+	if watermark.Valid {
+		v := time.UnixMilli(watermark.Int64).UTC()
+		out.DataWatermark = &v
+	}
+	return out, nil
+}
 
 // dayBoundsMs traduce un rango de días LOCALES del gym al rango de epoch-ms
 // [inicio, fin) que le corresponde. Las columnas de instante en SQLite
@@ -65,13 +111,16 @@ func (r *SQLiteReader) CountActiveMembers(tx sharedDomain.Transaction, gymID uui
 	var n int
 	err := stx.Get(context.Background(), &n, `
 		SELECT COUNT(*) FROM members m
-		JOIN memberships ms ON ms.member_id = m.id
-		    AND ms.status = 'active' AND ms.deleted_at IS NULL
 		WHERE m.gym_id = ?
 		  AND m.status = 'active'
 		  AND m.deleted_at IS NULL
-		  AND ms.expiry_date >= ?`,
-		gymID.String(), today.Format(sqliteDateFmt))
+		  AND EXISTS (
+		      SELECT 1 FROM memberships ms
+		      WHERE ms.member_id = m.id AND ms.deleted_at IS NULL
+		        AND ms.status IN ('active', 'replaced')
+		        AND ms.start_date <= ? AND ms.expiry_date >= ?
+		  )`,
+		gymID.String(), today.Format(sqliteDateFmt), today.Format(sqliteDateFmt))
 	return n, err
 }
 
@@ -79,12 +128,255 @@ func (r *SQLiteReader) SumPaymentsBetween(tx sharedDomain.Transaction, gymID uui
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	var cents sql.NullInt64
 	err := stx.Get(context.Background(), &cents, `
-		SELECT COALESCE(SUM(amount), 0) FROM payments
+		SELECT COALESCE(SUM(recognized_amount), 0) FROM payments
 		WHERE gym_id = ? AND deleted_at IS NULL
 		  AND concept <> 'refund'
 		  AND payment_date >= ? AND payment_date <= ?`,
 		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt))
 	return float64(cents.Int64) / 100, err
+}
+
+func (r *SQLiteReader) SumOtherIncomeBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (float64, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	var cents sql.NullInt64
+	err := stx.Get(context.Background(), &cents, `
+		SELECT COALESCE(SUM(recognized_amount), 0) FROM payments
+		WHERE gym_id = ? AND deleted_at IS NULL
+		  AND concept = 'other'
+		  AND payment_date >= ? AND payment_date <= ?`,
+		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt))
+	return float64(cents.Int64) / 100, err
+}
+
+func (r *SQLiteReader) SumCashClosedBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (float64, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	var cents sql.NullInt64
+	err := stx.Get(context.Background(), &cents, `
+		SELECT
+		  COALESCE((SELECT SUM(p.amount) FROM payments p
+		    WHERE p.gym_id = ? AND p.deleted_at IS NULL AND p.payment_method = 'cash' AND p.amount<>0 AND p.cash_destination<>'gym_fund'
+		      AND p.payment_date >= ? AND p.payment_date <= ?), 0)
+		  + COALESCE((SELECT SUM(CASE WHEN m.movement_type = 'cash_in' THEN m.amount ELSE -m.amount END)
+		    FROM cash_movements m
+		    WHERE m.gym_id = ? AND m.deleted_at IS NULL
+		      AND m.movement_on >= ? AND m.movement_on <= ?), 0)`,
+		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt),
+		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt))
+	return float64(cents.Int64) / 100, err
+}
+
+func (r *SQLiteReader) SumCashCountedBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (reports.CashCountSummary, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	var row struct {
+		Counted                         int64          `db:"counted"`
+		CountedCloses                   int            `db:"counted_closes"`
+		TotalCloses                     int            `db:"total_closes"`
+		Withdrawn                       int64          `db:"withdrawn"`
+		HistoricalActivityDays          int            `db:"historical_activity_days"`
+		HistoricalSessions              int            `db:"historical_sessions"`
+		ActiveDays                      int            `db:"active_days"`
+		MissingActiveDays               int            `db:"missing_active_days"`
+		UncoveredActivityDays           int            `db:"uncovered_activity_days"`
+		OpenSessions                    int            `db:"open_sessions"`
+		ClosedUnverifiedSessions        int            `db:"closed_unverified_sessions"`
+		ReconciledSessions              int            `db:"reconciled_sessions"`
+		StaleSessions                   int            `db:"stale_sessions"`
+		WithdrawnSessions               int            `db:"withdrawn_sessions"`
+		UnknownOpeningSessions          int            `db:"unknown_opening_sessions"`
+		AdjustedAfterWithdrawalSessions int            `db:"adjusted_after_withdrawal_sessions"`
+		LegacyCashSourceUnverifiedCount int            `db:"legacy_cash_source_unverified_count"`
+		TotalSessions                   int            `db:"total_sessions"`
+		LatestSessionID                 sql.NullString `db:"latest_session_id"`
+		LatestExpected                  sql.NullInt64  `db:"latest_expected"`
+		LatestCounted                   sql.NullInt64  `db:"latest_counted"`
+		LatestDifference                sql.NullInt64  `db:"latest_difference"`
+		LatestCountedAt                 sql.NullInt64  `db:"latest_counted_at"`
+		LatestStatus                    sql.NullString `db:"latest_status"`
+		LatestNeedsRecount              int            `db:"latest_needs_recount"`
+	}
+	err := stx.Get(context.Background(), &row, `
+		WITH physical(day,drawer_id,recorded_at,touched_at,amount) AS (
+		  SELECT payment_date,COALESCE(cash_drawer_id,gym_id),created_at,created_at,amount
+		  FROM payments
+		  WHERE gym_id=? AND payment_method='cash' AND amount<>0 AND cash_destination<>'gym_fund' AND deleted_at IS NULL
+		    AND payment_date BETWEEN ? AND ?
+		  UNION ALL
+		  SELECT movement_on,COALESCE(cash_drawer_id,gym_id),created_at,created_at,
+		         CASE WHEN movement_type='cash_in' THEN amount ELSE -amount END
+		  FROM cash_movements
+		  WHERE gym_id=? AND deleted_at IS NULL AND movement_on BETWEEN ? AND ?
+		), active_dates(day) AS (
+		  SELECT DISTINCT day FROM physical
+		), gym_sessions AS (
+		  SELECT * FROM cash_close_events WHERE gym_id = ?
+		), tracking AS (
+		  -- Real openings confirm opening cash; migrated snapshots do not.
+		  -- Use shared business dates, never a device's migration timestamp.
+		  -- Tombstones retain the start so deletion cannot reset coverage.
+		  SELECT MIN(COALESCE(operational_date,close_date)) AS started_on
+		  FROM gym_sessions WHERE opening_cash_known=1
+		), period_sessions AS (
+		  SELECT * FROM gym_sessions WHERE deleted_at IS NULL
+		    AND COALESCE(operational_date,close_date) >= ?
+		    AND COALESCE(operational_date,close_date) <= ?
+		), scoped_base AS (
+		  SELECT * FROM period_sessions
+		  WHERE COALESCE(operational_date,close_date)>=(SELECT started_on FROM tracking)
+		), tracked_physical AS (
+		  SELECT * FROM physical WHERE day>=(SELECT started_on FROM tracking)
+		), current_activity AS (
+		  SELECT s.id,COALESCE(SUM(p.amount),0) AS amount
+		  FROM scoped_base s
+		  LEFT JOIN physical p
+		    ON p.day=COALESCE(s.operational_date,s.close_date)
+		   AND p.drawer_id=COALESCE(s.drawer_id,s.gym_id)
+		   AND p.recorded_at>=COALESCE(s.opened_at,s.created_at)
+		   AND (s.withdrawn_at IS NULL OR p.recorded_at<=s.withdrawn_at)
+		  GROUP BY s.id
+		), uncovered_dates(day) AS (
+		  SELECT DISTINCT p.day FROM tracked_physical p
+		  WHERE (SELECT COUNT(*) FROM scoped_base s
+		         WHERE COALESCE(s.operational_date,s.close_date)=p.day
+		           AND COALESCE(s.drawer_id,s.gym_id)=p.drawer_id
+		           AND p.recorded_at>=COALESCE(s.opened_at,s.created_at)
+		           AND (COALESCE(s.status,'closed_unverified')<>'withdrawn' OR s.withdrawn_at IS NOT NULL)
+		           AND (s.withdrawn_at IS NULL OR p.recorded_at<=s.withdrawn_at)) <> 1
+		     OR EXISTS (SELECT 1 FROM scoped_base s
+		         WHERE COALESCE(s.operational_date,s.close_date)=p.day
+		           AND COALESCE(s.drawer_id,s.gym_id)=p.drawer_id
+		           AND p.recorded_at>=COALESCE(s.opened_at,s.created_at)
+		           AND s.closed_at IS NOT NULL AND p.touched_at>s.closed_at
+		           AND (COALESCE(s.status,'closed_unverified')<>'withdrawn'
+		             OR (s.withdrawn_at IS NOT NULL AND p.touched_at<=s.withdrawn_at)))
+		  UNION
+		  SELECT COALESCE(s.operational_date,s.close_date)
+		  FROM scoped_base s JOIN current_activity ca ON ca.id=s.id
+		  WHERE COALESCE(s.status,'closed_unverified')<>'open'
+		    AND ca.amount<>COALESCE(s.activity_cash,0)
+		), scoped AS (
+		  SELECT s.*,
+		    CASE WHEN s.withdrawn_at IS NOT NULL
+		                   AND ca.amount<>COALESCE(s.activity_cash,0)
+		         THEN 1 ELSE 0 END AS dynamic_post_withdrawal_adjustment,
+		    CASE WHEN s.status='stale' THEN 1
+		      WHEN COALESCE(s.status,'closed_unverified') IN ('open','withdrawn') THEN 0
+		      WHEN ca.amount<>COALESCE(s.activity_cash,0) THEN 1
+		      WHEN s.closed_at IS NOT NULL AND EXISTS (
+		        SELECT 1 FROM physical p
+		        WHERE p.day=COALESCE(s.operational_date,s.close_date)
+		          AND p.drawer_id=COALESCE(s.drawer_id,s.gym_id)
+		          AND p.recorded_at>=COALESCE(s.opened_at,s.created_at)
+		          AND p.recorded_at>s.closed_at
+		          AND (s.withdrawn_at IS NULL OR p.recorded_at<=s.withdrawn_at)
+		      ) THEN 1 ELSE 0 END AS needs_recount
+		  FROM scoped_base s JOIN current_activity ca ON ca.id=s.id
+		), effective AS (
+		  SELECT s.*,
+		    CASE WHEN needs_recount=1 THEN 'stale'
+		         ELSE COALESCE(status,'closed_unverified') END AS effective_status
+		  FROM scoped s
+		), latest AS (
+		  SELECT * FROM effective
+		  WHERE effective_status <> 'open'
+		  ORDER BY COALESCE(operational_date,close_date) DESC,
+		           COALESCE(reconciled_at,closed_at,updated_at,created_at) DESC,
+		           COALESCE(sequence,1) DESC, id DESC
+		  LIMIT 1
+		)
+		SELECT COALESCE((SELECT SUM(counted_cash) FROM effective
+		                 WHERE effective_status IN ('reconciled','withdrawn')),0) AS counted,
+		       (SELECT COUNT(counted_cash) FROM effective
+		        WHERE effective_status IN ('reconciled','withdrawn')) AS counted_closes,
+		       (SELECT COUNT(*) FROM effective WHERE effective_status <> 'open') AS total_closes,
+		       COALESCE((SELECT SUM(withdrawn_cash) FROM effective),0) AS withdrawn,
+		       (SELECT COUNT(*) FROM active_dates) AS active_days,
+		       (SELECT COUNT(*) FROM active_dates a WHERE NOT EXISTS (
+		         SELECT 1 FROM tracking t WHERE a.day>=t.started_on)) AS historical_activity_days,
+		       (SELECT COUNT(*) FROM period_sessions s WHERE NOT EXISTS (
+		         SELECT 1 FROM tracking t WHERE COALESCE(s.operational_date,s.close_date)>=t.started_on)) AS historical_sessions,
+		       (SELECT COUNT(*) FROM active_dates a
+		        WHERE a.day>=(SELECT started_on FROM tracking) AND NOT EXISTS (
+		          SELECT 1 FROM scoped_base s WHERE COALESCE(s.operational_date,s.close_date)=a.day
+		        )) AS missing_active_days,
+		       (SELECT COUNT(*) FROM uncovered_dates) AS uncovered_activity_days,
+		       (SELECT COUNT(*) FROM effective WHERE effective_status='open') AS open_sessions,
+		       (SELECT COUNT(*) FROM effective WHERE effective_status='closed_unverified') AS closed_unverified_sessions,
+		       (SELECT COUNT(*) FROM effective WHERE effective_status='reconciled') AS reconciled_sessions,
+		       (SELECT COUNT(*) FROM effective WHERE effective_status='stale') AS stale_sessions,
+		       (SELECT COUNT(*) FROM effective WHERE effective_status='withdrawn') AS withdrawn_sessions,
+		       (SELECT COUNT(*) FROM effective WHERE COALESCE(opening_cash_known,0)=0) AS unknown_opening_sessions,
+		       (SELECT COUNT(*) FROM effective
+		         WHERE COALESCE(adjusted_after_withdrawal,0)=1
+		            OR dynamic_post_withdrawal_adjustment=1) AS adjusted_after_withdrawal_sessions,
+		       (SELECT COUNT(*) FROM expenses e
+		         WHERE e.gym_id=? AND e.deleted_at IS NULL
+		           AND e.paid_from IN ('cash_register','cash_drawer')
+		           AND e.cash_movement_id IS NULL
+		           AND e.expense_date BETWEEN ? AND ?) AS legacy_cash_source_unverified_count,
+		       (SELECT COUNT(*) FROM effective) AS total_sessions,
+		       l.id AS latest_session_id,
+		       l.calculated_cash AS latest_expected,
+		       l.counted_cash AS latest_counted,
+		       CASE WHEN l.counted_cash IS NOT NULL
+		                  AND l.effective_status IN ('reconciled','withdrawn')
+		                  AND COALESCE(l.adjusted_after_withdrawal,0)=0
+		                  AND l.dynamic_post_withdrawal_adjustment=0
+		            THEN l.counted_cash-l.calculated_cash END AS latest_difference,
+		       CASE WHEN l.counted_cash IS NOT NULL
+		            THEN COALESCE(l.reconciled_at,l.closed_at,l.updated_at) END AS latest_counted_at,
+		       l.effective_status AS latest_status,
+		       CASE WHEN COALESCE(l.needs_recount,0)=1
+		                   OR COALESCE(l.dynamic_post_withdrawal_adjustment,0)=1
+		                   OR COALESCE(l.adjusted_after_withdrawal,0)=1
+		            THEN 1 ELSE 0 END AS latest_needs_recount
+		FROM (SELECT 1) anchor LEFT JOIN latest l ON 1=1`,
+		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt),
+		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt),
+		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt),
+		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt))
+	out := reports.CashCountSummary{
+		Counted:                float64(row.Counted) / 100,
+		CountedCloses:          row.CountedCloses,
+		TotalCloses:            row.TotalCloses,
+		Withdrawn:              float64(row.Withdrawn) / 100,
+		HistoricalActivityDays: row.HistoricalActivityDays, HistoricalSessions: row.HistoricalSessions,
+		ActiveDays: row.ActiveDays, MissingActiveDays: row.MissingActiveDays,
+		UncoveredActivityDays: row.UncoveredActivityDays, OpenSessions: row.OpenSessions,
+		ClosedUnverifiedSessions: row.ClosedUnverifiedSessions,
+		ReconciledSessions:       row.ReconciledSessions, StaleSessions: row.StaleSessions,
+		WithdrawnSessions: row.WithdrawnSessions, UnknownOpeningSessions: row.UnknownOpeningSessions,
+		AdjustedAfterWithdrawalSessions: row.AdjustedAfterWithdrawalSessions,
+		LegacyCashSourceUnverifiedCount: row.LegacyCashSourceUnverifiedCount,
+		TotalSessions:                   row.TotalSessions,
+	}
+	if row.LatestSessionID.Valid {
+		id, parseErr := uuid.Parse(row.LatestSessionID.String)
+		if parseErr != nil {
+			return reports.CashCountSummary{}, parseErr
+		}
+		out.LatestSessionID = &id
+	}
+	if row.LatestExpected.Valid {
+		v := float64(row.LatestExpected.Int64) / 100
+		out.LatestExpected = &v
+	}
+	if row.LatestCounted.Valid {
+		v := float64(row.LatestCounted.Int64) / 100
+		out.LatestCounted = &v
+	}
+	if row.LatestDifference.Valid {
+		v := float64(row.LatestDifference.Int64) / 100
+		out.LatestDifference = &v
+	}
+	if row.LatestCountedAt.Valid {
+		v := time.UnixMilli(row.LatestCountedAt.Int64).UTC()
+		out.LatestCountedAt = &v
+	}
+	if row.LatestStatus.Valid {
+		out.LatestStatus = row.LatestStatus.String
+	}
+	out.LatestNeedsRecount = row.LatestNeedsRecount != 0
+	return out, err
 }
 
 func (r *SQLiteReader) CountExpiringBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (int, error) {
@@ -96,8 +388,9 @@ func (r *SQLiteReader) CountExpiringBetween(tx sharedDomain.Transaction, gymID u
 		WHERE ms.gym_id = ? AND ms.deleted_at IS NULL
 		  AND ms.status = 'active'
 		  AND m.status = 'active'
+		  AND ms.start_date <= ?
 		  AND ms.expiry_date >= ? AND ms.expiry_date <= ?`,
-		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt))
+		gymID.String(), from.Format(sqliteDateFmt), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt))
 	return n, err
 }
 
@@ -106,12 +399,21 @@ func (r *SQLiteReader) CountExpiredRecoverable(tx sharedDomain.Transaction, gymI
 	cutoff := today.AddDate(0, 0, -withinDays)
 	var n int
 	err := stx.Get(context.Background(), &n, `
-		SELECT COUNT(DISTINCT m.id) FROM members m
-		JOIN memberships ms ON ms.member_id = m.id AND ms.deleted_at IS NULL
+		SELECT COUNT(*) FROM members m
 		WHERE m.gym_id = ? AND m.deleted_at IS NULL
 		  AND m.status <> 'lost'
-		  AND ms.expiry_date < ? AND ms.expiry_date >= ?`,
-		gymID.String(), today.Format(sqliteDateFmt), cutoff.Format(sqliteDateFmt))
+		  AND EXISTS (
+		      SELECT 1 FROM memberships expired
+		      WHERE expired.member_id = m.id AND expired.deleted_at IS NULL
+		        AND expired.expiry_date < ? AND expired.expiry_date >= ?
+		  )
+		  AND NOT EXISTS (
+		      SELECT 1 FROM memberships covered
+		      WHERE covered.member_id = m.id AND covered.deleted_at IS NULL
+		        AND covered.status IN ('active', 'replaced')
+		        AND covered.start_date <= ? AND covered.expiry_date >= ?
+		  )`, gymID.String(), today.Format(sqliteDateFmt), cutoff.Format(sqliteDateFmt),
+		today.Format(sqliteDateFmt), today.Format(sqliteDateFmt))
 	return n, err
 }
 
@@ -147,7 +449,7 @@ func (r *SQLiteReader) IncomeDailySeries(tx sharedDomain.Transaction, gymID uuid
 	}
 	var rows []row
 	if err := stx.Select(context.Background(), &rows, `
-		SELECT payment_date AS day, COALESCE(SUM(amount), 0) AS total
+		SELECT payment_date AS day, COALESCE(SUM(recognized_amount), 0) AS total
 		FROM payments
 		WHERE gym_id = ? AND deleted_at IS NULL
 		  AND concept <> 'refund'
@@ -191,9 +493,10 @@ func (r *SQLiteReader) ListExpiringSoon(tx sharedDomain.Transaction, gymID uuid.
 		WHERE m.gym_id = ? AND m.deleted_at IS NULL
 		  AND m.status = 'active'
 		  AND ms.status = 'active'
+		  AND ms.start_date <= ?
 		  AND ms.expiry_date >= ? AND ms.expiry_date <= ?
 		ORDER BY ms.expiry_date ASC`,
-		gymID.String(), today.Format(sqliteDateFmt), endDate.Format(sqliteDateFmt)); err != nil {
+		gymID.String(), today.Format(sqliteDateFmt), today.Format(sqliteDateFmt), endDate.Format(sqliteDateFmt)); err != nil {
 		return nil, err
 	}
 	out := make([]reports.MemberExpiringRow, 0, len(rows))
@@ -237,13 +540,25 @@ func (r *SQLiteReader) ListExpiredRecoverable(tx sharedDomain.Transaction, gymID
 		       (SELECT COUNT(1) FROM contact_attempts ca
 		        WHERE ca.member_id = m.id AND ca.deleted_at IS NULL) AS contact_attempts_count
 		FROM members m
-		JOIN memberships ms ON ms.member_id = m.id AND ms.deleted_at IS NULL
+		JOIN memberships ms ON ms.id = (
+		    SELECT expired.id FROM memberships expired
+		    WHERE expired.member_id = m.id AND expired.deleted_at IS NULL
+		      AND expired.expiry_date < ? AND expired.expiry_date >= ?
+		    ORDER BY expired.expiry_date DESC, expired.created_at DESC
+		    LIMIT 1
+		)
 		WHERE m.gym_id = ? AND m.deleted_at IS NULL
 		  AND m.status <> 'lost'
-		  AND ms.expiry_date < ? AND ms.expiry_date >= ?
 		  AND (m.last_contact_attempt_at IS NULL OR m.last_contact_attempt_at < ?)
+		  AND NOT EXISTS (
+		      SELECT 1 FROM memberships covered
+		      WHERE covered.member_id = m.id AND covered.deleted_at IS NULL
+		        AND covered.status IN ('active', 'replaced')
+		        AND covered.start_date <= ? AND covered.expiry_date >= ?
+		  )
 		ORDER BY ms.expiry_date DESC`,
-		gymID.String(), today.Format(sqliteDateFmt), cutoff.Format(sqliteDateFmt), staleAfter); err != nil {
+		today.Format(sqliteDateFmt), cutoff.Format(sqliteDateFmt), gymID.String(), staleAfter,
+		today.Format(sqliteDateFmt), today.Format(sqliteDateFmt)); err != nil {
 		return nil, err
 	}
 	out := make([]reports.MemberExpiredRow, 0, len(rows))
@@ -289,6 +604,12 @@ func (r *SQLiteReader) ListInactiveInvoluntary(tx sharedDomain.Transaction, gymI
 		FROM members m
 		WHERE m.gym_id = ? AND m.deleted_at IS NULL
 		  AND m.status = 'active'
+		  AND EXISTS (
+		      SELECT 1 FROM memberships covered
+		      WHERE covered.member_id = m.id AND covered.deleted_at IS NULL
+		        AND covered.status IN ('active', 'replaced')
+		        AND covered.start_date <= ? AND covered.expiry_date >= ?
+		  )
 		  AND ((SELECT MAX(c.checkin_at) FROM checkins c
 		        WHERE c.member_id = m.id AND c.deleted_at IS NULL
 		          AND c.result LIKE 'allowed%') IS NULL
@@ -296,7 +617,7 @@ func (r *SQLiteReader) ListInactiveInvoluntary(tx sharedDomain.Transaction, gymI
 		        WHERE c.member_id = m.id AND c.deleted_at IS NULL
 		          AND c.result LIKE 'allowed%') < ?)
 		ORDER BY last_checkin_at NULLS FIRST`,
-		gymID.String(), cutoffMs); err != nil {
+		gymID.String(), today.Format(sqliteDateFmt), today.Format(sqliteDateFmt), cutoffMs); err != nil {
 		return nil, err
 	}
 	out := make([]reports.MemberInactiveRow, 0, len(rows))
@@ -646,10 +967,10 @@ func (r *SQLiteReader) SumRefundsBetween(tx sharedDomain.Transaction, gymID uuid
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	var cents sql.NullInt64
 	err := stx.Get(context.Background(), &cents, `
-		SELECT COALESCE(SUM(ABS(amount)), 0) FROM payments
+		SELECT COALESCE(SUM(amount), 0) FROM refunds
 		WHERE gym_id = ? AND deleted_at IS NULL
-		  AND concept = 'refund'
-		  AND payment_date >= ? AND payment_date <= ?`,
+		  AND kind = 'revenue_refund'
+		  AND refunded_on >= ? AND refunded_on <= ?`,
 		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt))
 	return float64(cents.Int64) / 100, err
 }
@@ -662,7 +983,7 @@ func (r *SQLiteReader) IncomeByMethodBetween(tx sharedDomain.Transaction, gymID 
 	}
 	var rows []row
 	if err := stx.Select(context.Background(), &rows, `
-		SELECT payment_method AS method, COALESCE(SUM(amount), 0) AS total
+		SELECT payment_method AS method, COALESCE(SUM(recognized_amount), 0) AS total
 		FROM payments
 		WHERE gym_id = ? AND deleted_at IS NULL
 		  AND concept <> 'refund'
@@ -678,9 +999,9 @@ func (r *SQLiteReader) IncomeByMethodBetween(tx sharedDomain.Transaction, gymID 
 	return out, nil
 }
 
-// IncomeByMembershipTypeBetween — espejo del postgres: atribución por la
-// membresía con start_date más reciente <= payment_date (TEXT YYYY-MM-DD,
-// comparación lexicográfica). Cents → pesos al edge.
+// IncomeByMembershipTypeBetween — espejo del postgres: cobro inicial y sus
+// abonos se atribuyen primero por membership_id exacto; la inferencia por
+// socio y fecha queda como fallback legacy. Cents → pesos al edge.
 func (r *SQLiteReader) IncomeByMembershipTypeBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (map[string]float64, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	type row struct {
@@ -689,16 +1010,23 @@ func (r *SQLiteReader) IncomeByMembershipTypeBetween(tx sharedDomain.Transaction
 	}
 	var rows []row
 	if err := stx.Select(context.Background(), &rows, `
-		SELECT COALESCE((
-		         SELECT ms.type_name_snapshot FROM memberships ms
-		         WHERE ms.member_id = p.member_id AND ms.deleted_at IS NULL
-		           AND ms.start_date <= p.payment_date
-		         ORDER BY ms.start_date DESC LIMIT 1
-		       ), 'Sin tipo') AS type_name,
-		       COALESCE(SUM(p.amount), 0) AS total
+		SELECT COALESCE(
+		         (SELECT exact_ms.type_name_snapshot FROM memberships exact_ms
+		          WHERE exact_ms.gym_id = p.gym_id
+		            AND exact_ms.id = COALESCE(p.membership_id, parent.membership_id)),
+		         (SELECT legacy_ms.type_name_snapshot FROM memberships legacy_ms
+		          WHERE legacy_ms.member_id = COALESCE(p.member_id, parent.member_id)
+		            AND legacy_ms.deleted_at IS NULL
+		            AND legacy_ms.start_date <= COALESCE(parent.payment_date, p.payment_date)
+		          ORDER BY legacy_ms.start_date DESC LIMIT 1),
+		         'Sin tipo') AS type_name,
+		       COALESCE(SUM(p.recognized_amount), 0) AS total
 		FROM payments p
+		LEFT JOIN payments parent ON parent.id = p.parent_payment_id
+		  AND parent.gym_id = p.gym_id AND parent.deleted_at IS NULL
 		WHERE p.gym_id = ? AND p.deleted_at IS NULL
-		  AND p.concept = 'membership'
+		  AND (p.concept = 'membership'
+		    OR (p.concept = 'balance_settlement' AND parent.concept = 'membership'))
 		  AND p.payment_date >= ? AND p.payment_date <= ?
 		GROUP BY 1`,
 		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt)); err != nil {
@@ -722,14 +1050,22 @@ func (r *SQLiteReader) ActiveMembersByType(tx sharedDomain.Transaction, gymID uu
 	if err := stx.Select(context.Background(), &rows, `
 		SELECT ms.type_name_snapshot AS type_name, COUNT(*) AS n
 		FROM members m
-		JOIN memberships ms ON ms.member_id = m.id
-		    AND ms.status = 'active' AND ms.deleted_at IS NULL
+		JOIN memberships ms ON ms.id = (
+		    SELECT covered.id
+		    FROM memberships covered
+		    WHERE covered.member_id = m.id AND covered.deleted_at IS NULL
+		      AND covered.status IN ('active', 'replaced')
+		      AND covered.start_date <= ? AND covered.expiry_date >= ?
+		    ORDER BY covered.expiry_date DESC,
+		             CASE WHEN covered.status = 'active' THEN 0 ELSE 1 END,
+		             covered.created_at DESC
+		    LIMIT 1
+		)
 		WHERE m.gym_id = ?
 		  AND m.status = 'active'
 		  AND m.deleted_at IS NULL
-		  AND ms.expiry_date >= ?
 		GROUP BY 1`,
-		gymID.String(), today.Format(sqliteDateFmt)); err != nil {
+		today.Format(sqliteDateFmt), today.Format(sqliteDateFmt), gymID.String()); err != nil {
 		return nil, err
 	}
 	out := make(map[string]int, len(rows))
@@ -753,12 +1089,12 @@ func (r *SQLiteReader) TopMembersBetween(tx sharedDomain.Transaction, gymID uuid
 	var rows []row
 	if err := stx.Select(context.Background(), &rows, `
 		SELECT p.member_id, m.full_name,
-		       COALESCE(SUM(p.amount), 0) AS total_paid,
+		       COALESCE(SUM(p.recognized_amount), 0) AS total_paid,
 		       COUNT(*) AS payments_count
 		FROM payments p
 		JOIN members m ON m.id = p.member_id AND m.deleted_at IS NULL
 		WHERE p.gym_id = ? AND p.deleted_at IS NULL
-		  AND p.concept <> 'refund'
+		  AND p.concept <> 'refund' AND p.amount > 0
 		  AND p.member_id IS NOT NULL
 		  AND p.payment_date >= ? AND p.payment_date <= ?
 		GROUP BY p.member_id, m.full_name
@@ -826,13 +1162,21 @@ func (r *SQLiteReader) ListRecentPayments(tx sharedDomain.Transaction, gymID uui
 		Method      string         `db:"method"`
 		Concept     string         `db:"concept"`
 		PaymentDate string         `db:"payment_date"`
+		SaleSummary sql.NullString `db:"sale_summary"`
 	}
 	var rows []row
 	if err := stx.Select(context.Background(), &rows, `
 		SELECT p.id, p.member_id,
 		       m.full_name AS member_name,
 		       p.amount, p.payment_method AS method, p.concept,
-		       p.payment_date
+		       p.payment_date,
+		       (SELECT group_concat(
+		          si.product_name_snapshot ||
+		            CASE WHEN si.quantity > 1 THEN ' ×' || si.quantity ELSE '' END,
+		          ' · ')
+		        FROM sales s
+		        JOIN sale_items si ON si.sale_id = s.id AND si.deleted_at IS NULL
+		        WHERE s.payment_id = p.id AND s.deleted_at IS NULL) AS sale_summary
 		FROM payments p
 		LEFT JOIN members m ON m.id = p.member_id AND m.deleted_at IS NULL
 		WHERE p.gym_id = ? AND p.deleted_at IS NULL
@@ -863,90 +1207,326 @@ func (r *SQLiteReader) ListRecentPayments(tx sharedDomain.Transaction, gymID uui
 			v := x.MemberName.String
 			entry.MemberName = &v
 		}
+		if x.SaleSummary.Valid {
+			v := x.SaleSummary.String
+			entry.SaleSummary = &v
+		}
 		out = append(out, entry)
 	}
 	return out, nil
 }
 
-// SumInventoryCostBetween — totaliza desembolsos por mercancía en el
-// rango (movimientos 'restock' con costo capturado). En SQLite cost se
-// guarda en cents (INTEGER) y delta es unidades — el total real es
-// cost*delta. Filtramos NULL para no contar restocks sin costo (el
-// operador puede no haberlo conocido al momento del registro).
+// SumInventoryCostBetween suma compras explícitas efectivamente pagadas y,
+// durante la compatibilidad histórica, restocks marcados como compra cuyo
+// monto todavía puede reconstruirse exactamente (cantidad × costo unitario).
+// Un restock sin costo sigue fuera del total y se declara en integridad.
 func (r *SQLiteReader) SumInventoryCostBetween(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time) (float64, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	fromMs, toMs := dayBoundsMs(tzName, from, to)
 	var cents sql.NullInt64
-	// is_purchase filtra las capturas de inventario preexistente (alta de
-	// catálogo): llevan costo para el margen pero NO son dinero que salió.
 	err := stx.Get(context.Background(), &cents, `
-		SELECT COALESCE(SUM(cost * delta), 0) FROM stock_movements
-		WHERE gym_id = ? AND deleted_at IS NULL
-		  AND movement_type = 'restock'
-		  AND cost IS NOT NULL
-		  AND is_purchase = 1
-		  AND created_at >= ? AND created_at < ?`,
+		SELECT COALESCE(SUM(amount),0) FROM (
+		  SELECT total_amount AS amount
+		  FROM inventory_purchases
+		  WHERE gym_id=? AND deleted_at IS NULL AND status='paid'
+		    AND paid_on>=? AND paid_on<=?
+		  UNION ALL
+		  SELECT COALESCE(NULLIF(ip.total_amount,0),sm.delta*sm.cost) AS amount
+		  FROM stock_movements sm
+		  LEFT JOIN inventory_purchases ip
+		    ON ip.stock_movement_id=sm.id AND ip.deleted_at IS NULL
+		  WHERE sm.gym_id=? AND sm.deleted_at IS NULL
+		    AND sm.movement_type='restock' AND sm.is_purchase=1
+		    AND sm.created_at>=? AND sm.created_at<? AND sm.delta>0
+		    AND (ip.id IS NULL OR ip.status='legacy_incomplete')
+		    AND COALESCE(NULLIF(ip.total_amount,0),sm.delta*sm.cost,0)>0
+		) purchases`,
+		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt),
 		gymID.String(), fromMs, toMs)
 	return float64(cents.Int64) / 100, err
 }
 
-// RealizedProductProfitBetween — espejo SQLite de la versión Postgres.
-// unit_price_snapshot y cost están en centavos; el costo unitario promedio
-// ponderado usa (2*SUM(cost*delta)+den)/(2*den) (half-up entero) = paridad
-// con ROUND(SUM(cost*delta)/SUM(delta),2) de Postgres. Todo se calcula en
-// centavos y se divide /100 al edge. Filtra
-// por payment_date (TEXT YYYY-MM-DD, comparación lexicográfica) y excluye
-// ventas reembolsadas.
-func (r *SQLiteReader) RealizedProductProfitBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (reports.RealizedProductProfit, error) {
+func (r *SQLiteReader) CanonicalFinancialBetween(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time) (reports.CanonicalFinancialSnapshot, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
+	fromMs, toMs := dayBoundsMs(tzName, from, to)
 	var row struct {
-		RevenueCents  sql.NullInt64 `db:"revenue"`
-		CogsCents     sql.NullInt64 `db:"cogs"`
-		ItemsTotal    int           `db:"items_total"`
-		ItemsWithCost int           `db:"items_with_cost"`
+		MembershipIncome                 int64 `db:"membership_income"`
+		ProductIncome                    int64 `db:"product_income"`
+		OtherIncome                      int64 `db:"other_income"`
+		UnclassifiedIncome               int64 `db:"unclassified_income"`
+		OperatingExpenses                int64 `db:"operating_expenses"`
+		InventoryPurchases               int64 `db:"inventory_purchases"`
+		Refunds                          int64 `db:"refunds"`
+		UnclassifiedIncomeCount          int   `db:"unclassified_income_count"`
+		UnclassifiedCashOutCount         int   `db:"unclassified_cash_out_count"`
+		InvalidCashInClassificationCount int   `db:"invalid_cash_in_classification_count"`
+		LegacyCashSourceUnverifiedCount  int   `db:"legacy_cash_source_unverified_count"`
+		LegacyPurchaseCount              int   `db:"legacy_purchase_count"`
+		LegacyRefundCount                int   `db:"legacy_refund_count"`
 	}
 	err := stx.Get(context.Background(), &row, `
+		WITH classified AS (
+			  SELECT p.recognized_amount AS amount,
+		         CASE WHEN p.concept='balance_settlement' THEN parent.concept ELSE p.concept END AS bucket
+		  FROM payments p
+		  LEFT JOIN payments parent ON parent.id=p.parent_payment_id
+		  WHERE p.gym_id=? AND p.deleted_at IS NULL AND p.concept<>'refund'
+		    AND p.payment_date>=? AND p.payment_date<=?
+		)
 		SELECT
-		  COALESCE(SUM(si.unit_price_snapshot * si.quantity), 0) AS revenue,
-		  COALESCE(SUM(CASE WHEN c.avg_unit_cost IS NOT NULL THEN si.quantity * c.avg_unit_cost ELSE 0 END), 0) AS cogs,
-		  COUNT(*) AS items_total,
-		  COALESCE(SUM(CASE WHEN c.avg_unit_cost IS NOT NULL THEN 1 ELSE 0 END), 0) AS items_with_cost
-		FROM sale_items si
-		JOIN sales s ON s.id = si.sale_id AND s.deleted_at IS NULL
-		JOIN payments p ON p.id = s.payment_id AND p.deleted_at IS NULL
-		LEFT JOIN (
-		  SELECT product_id, (2*SUM(cost * delta) + SUM(delta)) / (2*SUM(delta)) AS avg_unit_cost
-		  FROM stock_movements
-		  WHERE gym_id = ? AND movement_type = 'restock' AND cost IS NOT NULL AND deleted_at IS NULL
-		  GROUP BY product_id
-		  HAVING SUM(delta) > 0
-		) c ON c.product_id = si.product_id
-		WHERE si.gym_id = ? AND si.deleted_at IS NULL
-		  AND p.payment_date >= ? AND p.payment_date <= ?
-		  AND NOT EXISTS (
-		    SELECT 1 FROM payments rfd
-		    WHERE rfd.parent_payment_id = p.id AND rfd.concept = 'refund' AND rfd.deleted_at IS NULL
-		  )`,
-		gymID.String(), gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt))
+		  COALESCE(SUM(CASE WHEN bucket='membership' THEN amount ELSE 0 END),0) AS membership_income,
+		  COALESCE(SUM(CASE WHEN bucket='product' THEN amount ELSE 0 END),0) AS product_income,
+		  COALESCE(SUM(CASE WHEN bucket='other' THEN amount ELSE 0 END),0) AS other_income,
+		  COALESCE(SUM(CASE WHEN bucket IS NULL OR bucket NOT IN ('membership','product','other') THEN amount ELSE 0 END),0) AS unclassified_income,
+		  (SELECT COALESCE(SUM(e.amount),0) FROM expenses e
+		    WHERE e.gym_id=? AND e.deleted_at IS NULL AND e.expense_date>=? AND e.expense_date<=?) AS operating_expenses,
+		  (SELECT COALESCE(SUM(amount),0) FROM (
+		    SELECT ip.total_amount AS amount FROM inventory_purchases ip
+		    WHERE ip.gym_id=? AND ip.deleted_at IS NULL AND ip.status='paid'
+		      AND ip.paid_on>=? AND ip.paid_on<=?
+		    UNION ALL
+		    SELECT COALESCE(NULLIF(ip.total_amount,0),sm.delta*sm.cost) AS amount
+		    FROM stock_movements sm
+		    LEFT JOIN inventory_purchases ip
+		      ON ip.stock_movement_id=sm.id AND ip.deleted_at IS NULL
+		    WHERE sm.gym_id=? AND sm.deleted_at IS NULL AND sm.movement_type='restock'
+		      AND sm.is_purchase=1 AND sm.created_at>=? AND sm.created_at<? AND sm.delta>0
+		      AND (ip.id IS NULL OR ip.status='legacy_incomplete')
+		      AND COALESCE(NULLIF(ip.total_amount,0),sm.delta*sm.cost,0)>0
+		  )) AS inventory_purchases,
+			  (SELECT COALESCE(SUM(r.amount),0) FROM refunds r
+			    WHERE r.gym_id=? AND r.deleted_at IS NULL AND r.kind='revenue_refund'
+			      AND r.refunded_on>=? AND r.refunded_on<=?) AS refunds,
+		  COALESCE(SUM(CASE WHEN bucket IS NULL OR bucket NOT IN ('membership','product','other') THEN 1 ELSE 0 END),0) AS unclassified_income_count,
+		  (SELECT COUNT(*) FROM cash_movements cm
+		    WHERE cm.gym_id=? AND cm.deleted_at IS NULL AND cm.movement_type='cash_out'
+		      AND cm.classification_status='unclassified' AND cm.movement_on>=? AND cm.movement_on<=?) AS unclassified_cash_out_count,
+		  (SELECT COUNT(*) FROM cash_movements cm
+		    WHERE cm.gym_id=? AND cm.deleted_at IS NULL AND cm.movement_type='cash_in'
+		      AND (cm.classification_status<>'non_operating' OR cm.expense_id IS NOT NULL)
+		      AND cm.movement_on>=? AND cm.movement_on<=?) AS invalid_cash_in_classification_count,
+		  (SELECT COUNT(*) FROM expenses e
+		    WHERE e.gym_id=? AND e.deleted_at IS NULL
+		      AND e.paid_from IN ('cash_register','cash_drawer')
+		      AND e.cash_movement_id IS NULL
+		      AND e.expense_date>=? AND e.expense_date<=?) AS legacy_cash_source_unverified_count,
+		  (SELECT COUNT(*) FROM stock_movements sm
+		    LEFT JOIN inventory_purchases ip ON ip.stock_movement_id=sm.id AND ip.deleted_at IS NULL
+		    WHERE sm.gym_id=? AND sm.deleted_at IS NULL AND sm.movement_type='restock'
+		      AND sm.is_purchase=1 AND sm.created_at>=? AND sm.created_at<?
+		      AND (ip.id IS NULL OR ip.status='legacy_incomplete')
+		      AND COALESCE(NULLIF(ip.total_amount,0),
+		        CASE WHEN sm.delta>0 AND sm.cost>0 THEN sm.delta*sm.cost END,0)<=0) AS legacy_purchase_count,
+		  (SELECT COUNT(*) FROM payments rp
+		    LEFT JOIN refunds rr ON rr.refund_payment_id=rp.id AND rr.deleted_at IS NULL
+		    WHERE rp.gym_id=? AND rp.deleted_at IS NULL AND rp.concept='refund'
+		      AND rp.payment_date>=? AND rp.payment_date<=?
+		      AND (rr.id IS NULL OR rr.legacy_incomplete=1)) AS legacy_refund_count
+		FROM classified`,
+		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt),
+		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt),
+		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt),
+		gymID.String(), fromMs, toMs,
+		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt),
+		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt),
+		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt),
+		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt),
+		gymID.String(), fromMs, toMs,
+		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt))
+	if err != nil {
+		return reports.CanonicalFinancialSnapshot{}, err
+	}
+	return reports.CanonicalFinancialSnapshot{
+		MembershipIncome:                 float64(row.MembershipIncome) / 100,
+		ProductIncome:                    float64(row.ProductIncome) / 100,
+		OtherIncome:                      float64(row.OtherIncome) / 100,
+		UnclassifiedIncome:               float64(row.UnclassifiedIncome) / 100,
+		OperatingExpenses:                float64(row.OperatingExpenses) / 100,
+		InventoryPurchases:               float64(row.InventoryPurchases) / 100,
+		Refunds:                          float64(row.Refunds) / 100,
+		UnclassifiedIncomeCount:          row.UnclassifiedIncomeCount,
+		UnclassifiedCashOutCount:         row.UnclassifiedCashOutCount,
+		InvalidCashInClassificationCount: row.InvalidCashInClassificationCount,
+		LegacyCashSourceUnverifiedCount:  row.LegacyCashSourceUnverifiedCount,
+		LegacyPurchaseCount:              row.LegacyPurchaseCount,
+		LegacyRefundCount:                row.LegacyRefundCount,
+	}, nil
+}
+
+func (r *SQLiteReader) ProductProfitabilityBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) ([]reports.ProductProfitabilityRow, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	type row struct {
+		ProductID    string  `db:"product_id"`
+		ProductName  string  `db:"product_name"`
+		Quantity     int     `db:"quantity"`
+		RevenueCents float64 `db:"revenue"`
+		CogsCents    float64 `db:"cogs"`
+		MissingCosts int     `db:"missing_costs"`
+	}
+	var rows []row
+	if err := stx.Select(context.Background(), &rows, `
+		WITH payment_sources AS (
+		  SELECT p.id AS payment_id, s.id AS sale_id, s.payment_id AS root_payment_id,
+		         p.payment_date, p.created_at, p.recognized_amount,
+		         s.subtotal, s.total,
+		         SUM(p.recognized_amount) OVER (
+		           PARTITION BY s.id
+		           ORDER BY p.payment_date, p.created_at, p.id
+		           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+		         ) AS collected_after
+		  FROM sales s
+		  JOIN payments p ON p.id=s.payment_id OR p.parent_payment_id=s.payment_id
+		  WHERE s.gym_id=? AND s.deleted_at IS NULL AND p.deleted_at IS NULL
+		    AND ((p.id=s.payment_id AND p.concept='product')
+		      OR (p.parent_payment_id=s.payment_id AND p.concept='balance_settlement'))
+		),
+		payment_lines AS (
+		  SELECT ps.*, si.id AS line_id, si.product_id,
+		         si.product_name_snapshot AS product_name, si.quantity, si.line_total,
+		         CASE WHEN si.unit_cost_snapshot IS NOT NULL
+		           THEN si.quantity*si.unit_cost_snapshot ELSE 0 END AS line_cost,
+		         si.unit_cost_snapshot IS NULL AS missing_cost,
+		         SUM(si.line_total) OVER (
+		           PARTITION BY ps.payment_id ORDER BY si.id
+		           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+		         ) AS revenue_cumulative,
+		         SUM(CASE WHEN si.unit_cost_snapshot IS NOT NULL
+		           THEN si.quantity*si.unit_cost_snapshot ELSE 0 END) OVER (
+		           PARTITION BY ps.payment_id ORDER BY si.id
+		           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+		         ) AS cost_cumulative,
+		         SUM(CASE WHEN si.unit_cost_snapshot IS NOT NULL
+		           THEN si.quantity*si.unit_cost_snapshot ELSE 0 END) OVER (
+		           PARTITION BY ps.payment_id
+		         ) AS cost_total
+		  FROM payment_sources ps
+		  JOIN sale_items si ON si.sale_id=ps.sale_id AND si.deleted_at IS NULL
+		),
+		payment_amounts AS (
+		  SELECT *,
+		         ROUND(CAST(collected_after AS REAL)*cost_total/NULLIF(total,0),0)
+		           - ROUND(CAST(collected_after-recognized_amount AS REAL)*cost_total/NULLIF(total,0),0) AS event_cogs
+		  FROM payment_lines
+		),
+		payment_events AS (
+		  SELECT product_id, product_name,
+		         CASE WHEN payment_id=root_payment_id THEN quantity ELSE 0 END AS quantity,
+		         ROUND(CAST(recognized_amount AS REAL)*revenue_cumulative/NULLIF(subtotal,0),0)
+		           - ROUND(CAST(recognized_amount AS REAL)*(revenue_cumulative-line_total)/NULLIF(subtotal,0),0) AS revenue,
+		         CASE WHEN cost_total>0 THEN
+		           ROUND(CAST(event_cogs AS REAL)*cost_cumulative/cost_total,0)
+		             - ROUND(CAST(event_cogs AS REAL)*(cost_cumulative-line_cost)/cost_total,0)
+		           ELSE 0 END AS cogs,
+		         CASE WHEN missing_cost AND recognized_amount<>0 THEN 1 ELSE 0 END AS missing_cost
+		  FROM payment_amounts
+		  WHERE payment_date>=? AND payment_date<=?
+		),
+		refund_lines AS (
+		  SELECT r.id AS refund_id, r.amount AS refund_amount,
+		         r.amount+r.balance_cancelled AS economic_amount,
+		         ri.id AS refund_item_id, ri.amount AS item_amount, ri.quantity,
+		         ri.disposition, si.product_id, si.product_name_snapshot AS product_name,
+		         CASE WHEN ri.disposition='returned_to_stock' AND si.unit_cost_snapshot IS NOT NULL
+		           THEN ri.quantity*si.unit_cost_snapshot ELSE 0 END AS returned_cost,
+		         CASE WHEN ri.disposition='returned_to_stock' AND si.unit_cost_snapshot IS NULL THEN 1 ELSE 0 END AS missing_cost,
+		         SUM(ri.amount) OVER (
+		           PARTITION BY r.id ORDER BY ri.id
+		           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+		         ) AS revenue_cumulative,
+		         SUM(CASE WHEN ri.disposition='returned_to_stock' AND si.unit_cost_snapshot IS NOT NULL
+		           THEN ri.quantity*si.unit_cost_snapshot ELSE 0 END) OVER (
+		           PARTITION BY r.id ORDER BY ri.id
+		           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+		         ) AS cost_cumulative,
+		         SUM(CASE WHEN ri.disposition='returned_to_stock' AND si.unit_cost_snapshot IS NOT NULL
+		           THEN ri.quantity*si.unit_cost_snapshot ELSE 0 END) OVER (
+		           PARTITION BY r.id
+		         ) AS cost_total
+		  FROM refund_items ri
+		  JOIN refunds r ON r.id=ri.refund_id AND r.deleted_at IS NULL
+		  JOIN sale_items si ON si.id=ri.sale_item_id AND si.deleted_at IS NULL
+		  WHERE ri.gym_id=? AND ri.deleted_at IS NULL AND r.kind='revenue_refund'
+		    AND r.refunded_on>=? AND r.refunded_on<=?
+		),
+		refund_amounts AS (
+		  SELECT *, ROUND(CAST(refund_amount AS REAL)*cost_total/NULLIF(economic_amount,0),0) AS event_cogs
+		  FROM refund_lines
+		),
+		refund_events AS (
+		  SELECT product_id, product_name, -quantity AS quantity,
+		         -(ROUND(CAST(refund_amount AS REAL)*revenue_cumulative/NULLIF(economic_amount,0),0)
+		           - ROUND(CAST(refund_amount AS REAL)*(revenue_cumulative-item_amount)/NULLIF(economic_amount,0),0)) AS revenue,
+		         CASE WHEN cost_total>0 THEN
+		           -(ROUND(CAST(event_cogs AS REAL)*cost_cumulative/cost_total,0)
+		             - ROUND(CAST(event_cogs AS REAL)*(cost_cumulative-returned_cost)/cost_total,0))
+		           ELSE 0 END AS cogs,
+		         missing_cost
+		  FROM refund_amounts
+		),
+		events AS (
+		  SELECT * FROM payment_events
+		  UNION ALL
+		  SELECT * FROM refund_events
+		)
+		SELECT product_id, MAX(product_name) AS product_name,
+		       SUM(quantity) AS quantity, ROUND(SUM(revenue),0) AS revenue,
+		       ROUND(SUM(cogs),0) AS cogs,
+		       SUM(missing_cost) AS missing_costs
+		FROM events
+		GROUP BY product_id
+		ORDER BY SUM(revenue) DESC, MAX(product_name), product_id`,
+		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt),
+		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt)); err != nil {
+		return nil, err
+	}
+	out := make([]reports.ProductProfitabilityRow, len(rows))
+	for i, x := range rows {
+		id, _ := uuid.Parse(x.ProductID)
+		revenue := math.Round(x.RevenueCents) / 100
+		cogs := math.Round(x.CogsCents) / 100
+		profit := math.Round((revenue-cogs)*100) / 100
+		out[i] = reports.ProductProfitabilityRow{
+			ProductID: id, ProductName: x.ProductName, Quantity: x.Quantity,
+			Revenue: revenue, COGS: cogs, GrossProfit: profit,
+			CostComplete: x.MissingCosts == 0,
+		}
+		if revenue != 0 && x.MissingCosts == 0 {
+			pct := math.Round(profit/revenue*10000) / 100
+			out[i].MarginPct = &pct
+		}
+	}
+	return out, nil
+}
+
+// RealizedProductProfitBetween — espejo SQLite de la base de caja de PG:
+// cobros y abonos reconocen COGS proporcional con asignación acumulada de
+// centavos; refunds negativos revierten costo sólo al regresar al stock.
+func (r *SQLiteReader) RealizedProductProfitBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (reports.RealizedProductProfit, error) {
+	rows, err := r.ProductProfitabilityBetween(tx, gymID, from, to)
 	if err != nil {
 		return reports.RealizedProductProfit{}, err
 	}
-	return reports.RealizedProductProfit{
-		Revenue:       float64(row.RevenueCents.Int64) / 100,
-		COGS:          float64(row.CogsCents.Int64) / 100,
-		ItemsTotal:    row.ItemsTotal,
-		ItemsWithCost: row.ItemsWithCost,
-	}, nil
+	var out reports.RealizedProductProfit
+	for _, row := range rows {
+		out.Revenue += row.Revenue
+		out.COGS += row.COGS
+		out.ItemsTotal++
+		if row.CostComplete {
+			out.ItemsWithCost++
+		}
+	}
+	out.Revenue = math.Round(out.Revenue*100) / 100
+	out.COGS = math.Round(out.COGS*100) / 100
+	return out, nil
 }
 
 // ListInventoryCostsBetween — JOINea product_name. ORDER BY created_at
 // DESC para que el último egreso quede arriba en la tabla del FE.
 func (r *SQLiteReader) ListInventoryCostsBetween(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time, limit int) ([]reports.InventoryCostRow, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
-	if limit <= 0 {
+	if limit == 0 {
 		limit = 200
 	}
-	fromMs, toMs := dayBoundsMs(tzName, from, to)
 	type row struct {
 		MovementID  string         `db:"movement_id"`
 		ProductID   string         `db:"product_id"`
@@ -954,21 +1534,42 @@ func (r *SQLiteReader) ListInventoryCostsBetween(tx sharedDomain.Transaction, gy
 		Delta       int            `db:"delta"`
 		CostCents   int64          `db:"cost"`
 		Reason      sql.NullString `db:"reason"`
-		CreatedAt   int64          `db:"created_at"`
+		PaidOn      string         `db:"paid_on"`
 	}
 	var rows []row
-	if err := stx.Select(context.Background(), &rows, `
-		SELECT sm.id AS movement_id, sm.product_id, p.name AS product_name,
-		       sm.delta, sm.cost, sm.reason, sm.created_at
-		FROM stock_movements sm
-		JOIN products p ON p.id = sm.product_id
-		WHERE sm.gym_id = ? AND sm.deleted_at IS NULL
-		  AND sm.movement_type = 'restock'
-		  AND sm.cost IS NOT NULL
-		  AND sm.is_purchase = 1
-		  AND sm.created_at >= ? AND sm.created_at < ?
-		ORDER BY sm.created_at DESC
-		LIMIT ?`, gymID.String(), fromMs, toMs, limit); err != nil {
+	fromMs, toMs := dayBoundsMs(tzName, from, to)
+	offset := tz.OffsetSeconds(tzName, from)
+	query := `
+		SELECT movement_id,product_id,product_name,delta,cost,reason,paid_on
+		FROM (
+		  SELECT COALESCE(ip.stock_movement_id,ip.id) AS movement_id,ip.product_id,p.name AS product_name,
+		         ip.quantity AS delta,ip.unit_cost AS cost,sm.reason,ip.paid_on,ip.created_at AS sort_at
+		  FROM inventory_purchases ip
+		  JOIN products p ON p.id=ip.product_id
+		  LEFT JOIN stock_movements sm ON sm.id=ip.stock_movement_id
+		  WHERE ip.gym_id=? AND ip.deleted_at IS NULL AND ip.status='paid'
+		    AND ip.paid_on>=? AND ip.paid_on<=?
+		  UNION ALL
+		  SELECT sm.id,sm.product_id,p.name,sm.delta,
+		         COALESCE(NULLIF(ip.unit_cost,0),sm.cost),sm.reason,
+		         ` + localDayExpr("sm.created_at") + ` AS paid_on,sm.created_at AS sort_at
+		  FROM stock_movements sm
+		  JOIN products p ON p.id=sm.product_id
+		  LEFT JOIN inventory_purchases ip
+		    ON ip.stock_movement_id=sm.id AND ip.deleted_at IS NULL
+		  WHERE sm.gym_id=? AND sm.deleted_at IS NULL AND sm.movement_type='restock'
+		    AND sm.is_purchase=1 AND sm.created_at>=? AND sm.created_at<? AND sm.delta>0
+		    AND (ip.id IS NULL OR ip.status='legacy_incomplete')
+		    AND COALESCE(NULLIF(ip.total_amount,0),sm.delta*sm.cost,0)>0
+		) purchase_rows
+		ORDER BY paid_on DESC,sort_at DESC`
+	args := []any{gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt),
+		offset, gymID.String(), fromMs, toMs}
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	if err := stx.Select(context.Background(), &rows, query, args...); err != nil {
 		return nil, err
 	}
 	out := make([]reports.InventoryCostRow, 0, len(rows))
@@ -976,6 +1577,7 @@ func (r *SQLiteReader) ListInventoryCostsBetween(tx sharedDomain.Transaction, gy
 		mid, _ := uuid.Parse(x.MovementID)
 		pid, _ := uuid.Parse(x.ProductID)
 		costUnit := float64(x.CostCents) / 100
+		paidOn, _ := time.Parse(sqliteDateFmt, x.PaidOn)
 		entry := reports.InventoryCostRow{
 			MovementID:  mid,
 			ProductID:   pid,
@@ -983,7 +1585,7 @@ func (r *SQLiteReader) ListInventoryCostsBetween(tx sharedDomain.Transaction, gy
 			Delta:       x.Delta,
 			CostUnit:    costUnit,
 			CostTotal:   costUnit * float64(x.Delta),
-			OccurredAt:  time.UnixMilli(x.CreatedAt).UTC(),
+			OccurredAt:  paidOn,
 		}
 		if x.Reason.Valid {
 			s := x.Reason.String
@@ -1013,7 +1615,7 @@ func (r *SQLiteReader) SumExpensesBetween(tx sharedDomain.Transaction, gymID uui
 // al edge.
 func (r *SQLiteReader) ListExpensesBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time, limit int) ([]reports.ExpenseRow, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
-	if limit <= 0 {
+	if limit == 0 {
 		limit = 200
 	}
 	type row struct {
@@ -1025,13 +1627,18 @@ func (r *SQLiteReader) ListExpensesBetween(tx sharedDomain.Transaction, gymID uu
 		PaymentMethod string         `db:"payment_method"`
 	}
 	var rows []row
-	if err := stx.Select(context.Background(), &rows, `
+	query := `
 		SELECT id, expense_date, amount, category, description, payment_method
 		FROM expenses
 		WHERE gym_id = ? AND deleted_at IS NULL
 		  AND expense_date >= ? AND expense_date <= ?
-		ORDER BY expense_date DESC, created_at DESC
-		LIMIT ?`, gymID.String(), from.Format("2006-01-02"), to.Format("2006-01-02"), limit); err != nil {
+		ORDER BY expense_date DESC, created_at DESC`
+	args := []any{gymID.String(), from.Format("2006-01-02"), to.Format("2006-01-02")}
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	if err := stx.Select(context.Background(), &rows, query, args...); err != nil {
 		return nil, err
 	}
 	out := make([]reports.ExpenseRow, 0, len(rows))
@@ -1054,12 +1661,10 @@ func (r *SQLiteReader) ListExpensesBetween(tx sharedDomain.Transaction, gymID uu
 	return out, nil
 }
 
-// ExpensesDailySeries — egresos por día = expenses (expense_date) +
-// stock_movements restock con costo (created_at) + devoluciones
-// (payments concept='refund', payment_date, en absoluto). Suma en memoria
-// por día porque cada fuente vive en una tabla con un tipo de fecha
-// distinto y un UNION complicaría el binding. Las devoluciones van aquí
-// para que la serie cuadre con Totals.Net (que también las resta).
+// ExpensesDailySeries — egresos por día = gastos pagados (expense_date) +
+// compras explícitas pagadas (paid_on) + devoluciones de ingreso
+// (refunded_on). Suma en memoria para mantener la misma ecuación que el
+// resultado canónico.
 func (r *SQLiteReader) ExpensesDailySeries(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time) ([]reports.DailyAmount, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	bucket := map[string]int64{}
@@ -1082,31 +1687,47 @@ func (r *SQLiteReader) ExpensesDailySeries(tx sharedDomain.Transaction, gymID uu
 		bucket[x.Day] += x.Total
 	}
 
-	fromMs, toMs := dayBoundsMs(tzName, from, to)
 	type invRow struct {
 		Day   string `db:"day"`
 		Total int64  `db:"total"`
 	}
 	var invRows []invRow
-	// Única de las tres fuentes que va por instante: se agrupa por día
-	// local para que caiga en la misma barra que el gasto o la devolución
-	// del mismo día del gym.
-	invOffset := tz.OffsetSeconds(tzName, from)
 	if err := stx.Select(context.Background(), &invRows, `
-		SELECT `+localDayExpr("created_at")+` AS day,
-		       COALESCE(SUM(cost * delta), 0) AS total
-		FROM stock_movements
-		WHERE gym_id = ? AND deleted_at IS NULL
-		  AND movement_type = 'restock'
-		  AND cost IS NOT NULL
-		  AND is_purchase = 1
-		  AND created_at >= ? AND created_at < ?
-		GROUP BY day`,
-		invOffset, gymID.String(), fromMs, toMs); err != nil {
+		SELECT paid_on AS day, COALESCE(SUM(total_amount), 0) AS total
+		FROM inventory_purchases
+		WHERE gym_id = ? AND deleted_at IS NULL AND status='paid'
+		  AND paid_on >= ? AND paid_on <= ?
+		GROUP BY paid_on`,
+		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt)); err != nil {
 		return nil, err
 	}
 	for _, x := range invRows {
 		bucket[x.Day] += x.Total
+	}
+	// Before the explicit Purchase aggregate existed, is_purchase=true was
+	// the affirmative record that money left the gym. If cost survived, its
+	// amount is exact; created_at is the best available economic date.
+	fromMs, toMs := dayBoundsMs(tzName, from, to)
+	type legacyInvRow struct {
+		CreatedAt int64 `db:"created_at"`
+		Total     int64 `db:"total"`
+	}
+	var legacyInvRows []legacyInvRow
+	if err := stx.Select(context.Background(), &legacyInvRows, `
+		SELECT sm.created_at,COALESCE(NULLIF(ip.total_amount,0),sm.delta*sm.cost) AS total
+		FROM stock_movements sm
+		LEFT JOIN inventory_purchases ip
+		  ON ip.stock_movement_id=sm.id AND ip.deleted_at IS NULL
+		WHERE sm.gym_id=? AND sm.deleted_at IS NULL AND sm.movement_type='restock'
+		  AND sm.is_purchase=1 AND sm.created_at>=? AND sm.created_at<? AND sm.delta>0
+		  AND (ip.id IS NULL OR ip.status='legacy_incomplete')
+		  AND COALESCE(NULLIF(ip.total_amount,0),sm.delta*sm.cost,0)>0`,
+		gymID.String(), fromMs, toMs); err != nil {
+		return nil, err
+	}
+	loc := tz.LocationOrUTC(tzName)
+	for _, x := range legacyInvRows {
+		bucket[time.UnixMilli(x.CreatedAt).In(loc).Format(sqliteDateFmt)] += x.Total
 	}
 
 	type refRow struct {
@@ -1115,12 +1736,12 @@ func (r *SQLiteReader) ExpensesDailySeries(tx sharedDomain.Transaction, gymID uu
 	}
 	var refRows []refRow
 	if err := stx.Select(context.Background(), &refRows, `
-		SELECT payment_date AS day, COALESCE(SUM(ABS(amount)), 0) AS total
-		FROM payments
+		SELECT refunded_on AS day, COALESCE(SUM(amount), 0) AS total
+		FROM refunds
 		WHERE gym_id = ? AND deleted_at IS NULL
-		  AND concept = 'refund'
-		  AND payment_date >= ? AND payment_date <= ?
-		GROUP BY payment_date`,
+		  AND kind = 'revenue_refund'
+		  AND refunded_on >= ? AND refunded_on <= ?
+		GROUP BY refunded_on`,
 		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt)); err != nil {
 		return nil, err
 	}
@@ -1165,36 +1786,57 @@ func (r *SQLiteReader) ExpensesByCategoryBetween(tx sharedDomain.Transaction, gy
 	return out, nil
 }
 
-// TopProductsBetween — ranking por revenue (= SUM(line_total) en cents).
-// JOIN con payments para filtrar por payment_date — alinea la ventana con
-// el resto del use case.
+// TopProductsBetween is the gross commercial ranking. Revenue and quantity
+// use the same basis as the "Ventas de productos" KPI; refunds live in their
+// own KPI. Net revenue/profit belongs to the Plus profitability analysis.
 func (r *SQLiteReader) TopProductsBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time, limit int) ([]reports.TopProductRow, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	if limit <= 0 {
 		limit = 5
 	}
 	type row struct {
-		ProductID   string `db:"product_id"`
-		ProductName string `db:"product_name"`
-		Quantity    int    `db:"quantity"`
-		Revenue     int64  `db:"revenue"`
+		ProductID   string  `db:"product_id"`
+		ProductName string  `db:"product_name"`
+		Quantity    int     `db:"quantity"`
+		Revenue     float64 `db:"revenue"`
 	}
 	var rows []row
 	if err := stx.Select(context.Background(), &rows, `
-		SELECT si.product_id,
-		       MIN(si.product_name_snapshot) AS product_name,
-		       COALESCE(SUM(si.quantity), 0) AS quantity,
-		       COALESCE(SUM(si.line_total), 0) AS revenue
-		FROM sale_items si
-		JOIN sales s ON s.id = si.sale_id AND s.deleted_at IS NULL
-		JOIN payments p ON p.id = s.payment_id AND p.deleted_at IS NULL
-		WHERE si.gym_id = ? AND si.deleted_at IS NULL
-		  AND p.concept <> 'refund'
-		  AND p.payment_date >= ? AND p.payment_date <= ?
-		GROUP BY si.product_id
+		WITH units_sold AS (
+		  SELECT si.product_id, SUM(si.quantity) AS quantity
+		  FROM sale_items si
+		  JOIN sales s ON s.id = si.sale_id AND s.deleted_at IS NULL
+		  JOIN payments p ON p.id = s.payment_id AND p.deleted_at IS NULL AND p.concept = 'product'
+		  WHERE si.gym_id = ? AND si.deleted_at IS NULL
+		    AND p.payment_date >= ? AND p.payment_date <= ?
+		  GROUP BY product_id
+		), revenue_events AS (
+		  SELECT si.product_id,
+		         CAST(p.recognized_amount AS REAL) * si.line_total / NULLIF(s.subtotal, 0) AS amount
+		  FROM sale_items si
+		  JOIN sales s ON s.id = si.sale_id AND s.deleted_at IS NULL
+		  JOIN payments p ON p.id = s.payment_id OR p.parent_payment_id = s.payment_id
+		  WHERE si.gym_id = ? AND si.deleted_at IS NULL AND p.deleted_at IS NULL
+		    AND p.payment_date >= ? AND p.payment_date <= ?
+		    AND ((p.id = s.payment_id AND p.concept = 'product')
+		      OR (p.parent_payment_id = s.payment_id AND p.concept = 'balance_settlement'))
+		), cash_revenue AS (
+		  SELECT product_id, SUM(amount) AS revenue FROM revenue_events
+		  GROUP BY product_id
+		)
+		SELECT pr.id AS product_id, pr.name AS product_name,
+		       COALESCE(u.quantity, 0) AS quantity,
+		       COALESCE(c.revenue, 0) AS revenue
+		FROM products pr
+		LEFT JOIN units_sold u ON u.product_id = pr.id
+		LEFT JOIN cash_revenue c ON c.product_id = pr.id
+		WHERE pr.gym_id = ? AND pr.deleted_at IS NULL
+		  AND (u.product_id IS NOT NULL OR c.product_id IS NOT NULL)
 		ORDER BY revenue DESC
 		LIMIT ?`,
-		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt), limit); err != nil {
+		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt),
+		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt),
+		gymID.String(), limit); err != nil {
 		return nil, err
 	}
 	out := make([]reports.TopProductRow, 0, len(rows))
@@ -1204,21 +1846,23 @@ func (r *SQLiteReader) TopProductsBetween(tx sharedDomain.Transaction, gymID uui
 			ProductID:   pid,
 			ProductName: x.ProductName,
 			Quantity:    x.Quantity,
-			Revenue:     float64(x.Revenue) / 100,
+			Revenue:     x.Revenue / 100,
 		})
 	}
 	return out, nil
 }
 
-// SumProductSalesBetween — espejo del PG: $ por payments concept='product'
-// (INTEGER cents → /100 al salir), unidades por sale_items de esos pagos.
+// SumProductSalesBetween — espejo del PG: $ por cobro inicial + abonos de
+// producto (INTEGER cents → /100), unidades por ventas originadas.
 func (r *SQLiteReader) SumProductSalesBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (reports.ProductSalesTotals, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	var cents sql.NullInt64
 	if err := stx.Get(context.Background(), &cents, `
-		SELECT COALESCE(SUM(amount), 0) FROM payments
+		SELECT COALESCE(SUM(recognized_amount), 0) FROM payments
 		WHERE gym_id = ? AND deleted_at IS NULL
-		  AND concept = 'product'
+		  AND (concept = 'product' OR (concept = 'balance_settlement' AND EXISTS (
+		    SELECT 1 FROM sales s WHERE s.payment_id = payments.parent_payment_id AND s.deleted_at IS NULL
+		  )))
 		  AND payment_date >= ? AND payment_date <= ?`,
 		gymID.String(), from.Format(sqliteDateFmt), to.Format(sqliteDateFmt)); err != nil {
 		return reports.ProductSalesTotals{}, err
@@ -1251,8 +1895,8 @@ func (r *SQLiteReader) CountCriticalStock(tx sharedDomain.Transaction, gymID uui
 	}
 	err := stx.Get(context.Background(), &out, `
 		SELECT
-		    SUM(CASE WHEN stock <= 0 THEN 1 ELSE 0 END) AS out_count,
-		    SUM(CASE WHEN stock > 0 AND stock <= stock_minimum THEN 1 ELSE 0 END) AS low_count
+		    COALESCE(SUM(CASE WHEN stock <= 0 THEN 1 ELSE 0 END), 0) AS out_count,
+		    COALESCE(SUM(CASE WHEN stock > 0 AND stock <= stock_minimum THEN 1 ELSE 0 END), 0) AS low_count
 		FROM products
 		WHERE gym_id = ? AND deleted_at IS NULL AND active = 1`,
 		gymID.String())
@@ -1277,18 +1921,21 @@ func (r *SQLiteReader) GenderComposition(tx sharedDomain.Transaction, gymID uuid
 	}
 	err := stx.Get(context.Background(), &row, `
 		SELECT
-		    SUM(CASE WHEN m.gender = 'hombre' THEN 1 ELSE 0 END)                                AS hombre,
-		    SUM(CASE WHEN m.gender = 'mujer' THEN 1 ELSE 0 END)                                 AS mujer,
-		    SUM(CASE WHEN m.gender IS NULL OR m.gender = 'no_especificado' THEN 1 ELSE 0 END)   AS no_especificado,
+		    COALESCE(SUM(CASE WHEN m.gender = 'hombre' THEN 1 ELSE 0 END), 0)                                AS hombre,
+		    COALESCE(SUM(CASE WHEN m.gender = 'mujer' THEN 1 ELSE 0 END), 0)                                 AS mujer,
+		    COALESCE(SUM(CASE WHEN m.gender IS NULL OR m.gender = 'no_especificado' THEN 1 ELSE 0 END), 0)   AS no_especificado,
 		    COUNT(*)                                                                            AS total
 		FROM members m
-		JOIN memberships ms ON ms.member_id = m.id
-		    AND ms.status = 'active' AND ms.deleted_at IS NULL
 		WHERE m.gym_id = ?
 		  AND m.status = 'active'
 		  AND m.deleted_at IS NULL
-		  AND ms.expiry_date >= ?`,
-		gymID.String(), today.Format(sqliteDateFmt))
+		  AND EXISTS (
+		      SELECT 1 FROM memberships ms
+		      WHERE ms.member_id = m.id AND ms.deleted_at IS NULL
+		        AND ms.status IN ('active', 'replaced')
+		        AND ms.start_date <= ? AND ms.expiry_date >= ?
+		  )`,
+		gymID.String(), today.Format(sqliteDateFmt), today.Format(sqliteDateFmt))
 	return reports.GenderCompositionRow{
 		Hombre: row.Hombre, Mujer: row.Mujer,
 		NoEspecificado: row.NoEspecificado, Total: row.Total,

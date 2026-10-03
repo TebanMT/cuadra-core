@@ -1,8 +1,5 @@
-// UC-034 — Atención inmediata.
-//
-// One read endpoint that surfaces every actionable thing a operator should
-// look at right now. The owner UI groups them into sections; we return them
-// already split so the controller stays dumb.
+// Shared contextual queries for members and products. The legacy endpoint
+// remains available to installed clients; there is no separate attention inbox.
 package reports
 
 import (
@@ -87,10 +84,6 @@ func (uc *AttentionRequired) Execute(ctx context.Context, in AttentionRequiredIn
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}
-	bdays, err := uc.Reader.ListBirthdaysOn(tx, in.GymID, today)
-	if err != nil {
-		return nil, sharedDomain.NewUnexpectedError(err)
-	}
 	return &AttentionRequiredOutput{
 		GeneratedAt:         now,
 		ExpiringSoon:        expiring,
@@ -98,6 +91,6 @@ func (uc *AttentionRequired) Execute(ctx context.Context, in AttentionRequiredIn
 		InactiveInvoluntary: inactive,
 		LowStock:            stock,
 		PendingBalances:     bal,
-		BirthdaysToday:      bdays,
+		BirthdaysToday:      []MemberBirthdayRow{}, // Compatibility for older clients; birthday notices were retired.
 	}, nil
 }

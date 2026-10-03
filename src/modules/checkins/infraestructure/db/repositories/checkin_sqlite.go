@@ -204,8 +204,19 @@ func (r *CheckinSQLiteRepository) ListRecentByGym(tx sharedDomain.Transaction, g
 // la lista iba corrida 6 horas y nunca cuadraba con la barra).
 // Misma shape de salida que ListRecentByGym.
 func (r *CheckinSQLiteRepository) ListByGymBetween(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time, limit int) ([]chkRepo.RecentCheckinRow, error) {
+	return r.listByGymBetween(tx, gymID, tzName, from, to, limit, 0, false)
+}
+
+func (r *CheckinSQLiteRepository) ListByGymBetweenPage(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time, limit, offset int) ([]chkRepo.RecentCheckinRow, error) {
+	if offset < 0 {
+		offset = 0
+	}
+	return r.listByGymBetween(tx, gymID, tzName, from, to, limit, offset, true)
+}
+
+func (r *CheckinSQLiteRepository) listByGymBetween(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time, limit, offset int, allowedOnly bool) ([]chkRepo.RecentCheckinRow, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
-	if limit <= 0 || limit > 500 {
+	if limit <= 0 || limit > 501 {
 		limit = 200
 	}
 	fromT, toT := tz.DayBounds(tzName, from, to)
@@ -238,8 +249,9 @@ func (r *CheckinSQLiteRepository) ListByGymBetween(tx sharedDomain.Transaction, 
 		LEFT JOIN users u ON u.id = c.operator_id AND u.deleted_at IS NULL
 		WHERE c.gym_id = ? AND c.deleted_at IS NULL
 		  AND c.checkin_at >= ? AND c.checkin_at < ?
-		ORDER BY c.checkin_at DESC
-		LIMIT ?`, gymID.String(), fromMs, toMs, limit); err != nil {
+		  AND (? = false OR c.result LIKE 'allowed%')
+		ORDER BY c.checkin_at DESC, c.id DESC
+		LIMIT ? OFFSET ?`, gymID.String(), fromMs, toMs, allowedOnly, limit, offset); err != nil {
 		return nil, err
 	}
 	out := make([]chkRepo.RecentCheckinRow, 0, len(rows))
@@ -438,4 +450,16 @@ func nullableUUIDString(p *uuid.UUID) any {
 		return nil
 	}
 	return p.String()
+}
+
+func (r *CheckinSQLiteRepository) LastEntryAt(tx sharedDomain.Transaction, gymID, memberID uuid.UUID) (*time.Time, error) {
+	var value sql.NullInt64
+	err := tx.(*sharedDomain.SqlxTransaction).Get(context.Background(), &value, `SELECT MAX(checkin_at) FROM checkins
+		WHERE gym_id=? AND member_id=? AND deleted_at IS NULL
+		AND result IN ('allowed_active','allowed_expiring_soon','allowed_override')`, gymID.String(), memberID.String())
+	if err != nil || !value.Valid {
+		return nil, err
+	}
+	at := time.UnixMilli(value.Int64).UTC()
+	return &at, nil
 }

@@ -213,6 +213,14 @@ func (r *MemberPostgresRepository) List(tx sharedDomain.Transaction, q memRepo.L
 	case "expired":
 		// "Por cobrar": vencidos clásicos + pending_payment + sin membership.
 		base = base.Where("m.status = ? AND (ms.id IS NULL OR ms.status = 'pending_payment' OR (ms.status = 'active' AND ms.expiry_date < ?::date))", memberDomain.StatusActive, today)
+	case "unrenewed":
+		base = base.Where(`m.status <> 'lost' AND EXISTS (
+ SELECT 1 FROM memberships expired WHERE expired.member_id=m.id AND expired.deleted_at IS NULL
+ AND expired.expiry_date < ? AND expired.expiry_date >= ?
+) AND NOT EXISTS (
+ SELECT 1 FROM memberships covered WHERE covered.member_id=m.id AND covered.deleted_at IS NULL
+ AND covered.status IN ('active','replaced') AND covered.start_date <= ? AND covered.expiry_date >= ?
+)`, today, today.AddDate(0, 0, -60), today, today)
 	case "inactive":
 		base = base.Where("m.status <> ?", memberDomain.StatusActive)
 	}

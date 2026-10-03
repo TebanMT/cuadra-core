@@ -23,18 +23,21 @@ type SaleItem struct {
 	ProductID           uuid.UUID
 	ProductNameSnapshot string
 	UnitPriceSnapshot   float64
-	Quantity            int
-	LineTotal           float64
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
-	DeletedAt           *time.Time
+	// UnitCostSnapshot is nil only when cost was unknown at the moment of
+	// sale. It is frozen here so future restocks do not rewrite old margins.
+	UnitCostSnapshot *float64
+	Quantity         int
+	LineTotal        float64
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	DeletedAt        *time.Time
 }
 
 // NewItem constructs a SaleItem after validating the snapshot fields. The
 // caller (RegisterSale use case) provides the snapshot from the Product it
 // just decremented.
 func NewItem(id, gymID, saleID, productID uuid.UUID,
-	productName string, unitPrice float64, quantity int, now time.Time) (*SaleItem, error) {
+	productName string, unitPrice float64, unitCost *float64, quantity int, now time.Time) (*SaleItem, error) {
 	productName = strings.TrimSpace(productName)
 	if productName == "" {
 		return nil, billingErrors.ErrSaleItemNameRequired
@@ -45,6 +48,14 @@ func NewItem(id, gymID, saleID, productID uuid.UUID,
 	if quantity <= 0 {
 		return nil, billingErrors.ErrSaleItemQuantityInvalid
 	}
+	if unitCost != nil && *unitCost <= 0 {
+		return nil, billingErrors.ErrAmountInvalid
+	}
+	var frozenCost *float64
+	if unitCost != nil {
+		v := roundCents(*unitCost)
+		frozenCost = &v
+	}
 	return &SaleItem{
 		ID:                  id,
 		GymID:               gymID,
@@ -53,6 +64,7 @@ func NewItem(id, gymID, saleID, productID uuid.UUID,
 		ProductID:           productID,
 		ProductNameSnapshot: productName,
 		UnitPriceSnapshot:   roundCents(unitPrice),
+		UnitCostSnapshot:    frozenCost,
 		Quantity:            quantity,
 		LineTotal:           roundCents(unitPrice * float64(quantity)),
 		CreatedAt:           now,
@@ -63,18 +75,19 @@ func NewItem(id, gymID, saleID, productID uuid.UUID,
 // Sale is the aggregate root. It owns its line items by id, but the items are
 // persisted as their own table (sale_items) so reports can run cheap GROUP BYs.
 type Sale struct {
-	ID        uuid.UUID
-	GymID     uuid.UUID
-	Version   int
-	PaymentID uuid.UUID
-	MemberID  *uuid.UUID
-	Subtotal  float64
-	Discount  float64
-	Total     float64
-	Items     []*SaleItem
-	CreatedAt time.Time
-	UpdatedAt time.Time
-	DeletedAt *time.Time
+	ID                uuid.UUID
+	GymID             uuid.UUID
+	Version           int
+	CorrectionVersion int
+	PaymentID         uuid.UUID
+	MemberID          *uuid.UUID
+	Subtotal          float64
+	Discount          float64
+	Total             float64
+	Items             []*SaleItem
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+	DeletedAt         *time.Time
 }
 
 // NewSaleInput is the constructor input. `Items` is the list of (product, qty,
@@ -93,6 +106,7 @@ type ItemInput struct {
 	ProductID           uuid.UUID
 	ProductNameSnapshot string
 	UnitPriceSnapshot   float64
+	UnitCostSnapshot    *float64
 	Quantity            int
 }
 
@@ -110,7 +124,7 @@ func NewSale(id uuid.UUID, in NewSaleInput, now time.Time) (*Sale, error) {
 	var subtotal float64
 	for _, it := range in.Items {
 		si, err := NewItem(uuid.New(), in.GymID, id, it.ProductID,
-			it.ProductNameSnapshot, it.UnitPriceSnapshot, it.Quantity, now)
+			it.ProductNameSnapshot, it.UnitPriceSnapshot, it.UnitCostSnapshot, it.Quantity, now)
 		if err != nil {
 			return nil, err
 		}

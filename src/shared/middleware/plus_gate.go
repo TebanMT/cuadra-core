@@ -26,13 +26,12 @@ type PlanGateResponse struct {
 // NO pasan mientras Plus no se libere (ver gymDomain.CanAccessPlusFeatures
 // para el WHY y cuándo revertir).
 //
-// Fail-open: si el repo/UoW son nil (tests que no montan dominio) o el
-// lookup falla, dejamos pasar — preferimos un riesgo de "operó con Plus
-// indebidamente" a "bug del lookup bloquea al gym entero". El audit del
-// uso es la red de seguridad post-hoc.
+// Fail-closed: si no podemos comprobar el plan, la función no se ejecuta.
+// Un fallo de infraestructura se distingue del 402 para que el FE muestre
+// "no pudimos verificar" y permita reintentar, nunca un falso upsell.
 func RequirePlusPlan(gyms gymRepo.GymRepository, uow sharedDomain.UnitOfWork) gin.HandlerFunc {
 	if gyms == nil || uow == nil {
-		return func(c *gin.Context) { c.Next() }
+		return func(c *gin.Context) { abortPlanCheckUnavailable(c) }
 	}
 	return func(c *gin.Context) {
 		gymID, ok := GetGymID(c)
@@ -44,12 +43,12 @@ func RequirePlusPlan(gyms gymRepo.GymRepository, uow sharedDomain.UnitOfWork) gi
 		}
 		tx, err := uow.Query(c.Request.Context())
 		if err != nil {
-			c.Next()
+			abortPlanCheckUnavailable(c)
 			return
 		}
 		g, err := gyms.GetByID(tx, gymID)
 		if err != nil || g == nil {
-			c.Next()
+			abortPlanCheckUnavailable(c)
 			return
 		}
 		if gymDomain.CanAccessPlusFeatures(g.SubscriptionPlan) {
@@ -73,7 +72,8 @@ func RequirePlusPlan(gyms gymRepo.GymRepository, uow sharedDomain.UnitOfWork) gi
 // caller debe seguir; false si ya abortó la response con 402.
 func EnforcePlusInline(c *gin.Context, gyms gymRepo.GymRepository, uow sharedDomain.UnitOfWork) bool {
 	if gyms == nil || uow == nil {
-		return true
+		abortPlanCheckUnavailable(c)
+		return false
 	}
 	gymID, ok := GetGymID(c)
 	if !ok {
@@ -81,11 +81,13 @@ func EnforcePlusInline(c *gin.Context, gyms gymRepo.GymRepository, uow sharedDom
 	}
 	tx, err := uow.Query(c.Request.Context())
 	if err != nil {
-		return true
+		abortPlanCheckUnavailable(c)
+		return false
 	}
 	g, err := gyms.GetByID(tx, gymID)
 	if err != nil || g == nil {
-		return true
+		abortPlanCheckUnavailable(c)
+		return false
 	}
 	if gymDomain.CanAccessPlusFeatures(g.SubscriptionPlan) {
 		return true
@@ -97,4 +99,11 @@ func EnforcePlusInline(c *gin.Context, gyms gymRepo.GymRepository, uow sharedDom
 		Message:      "Esta acción requiere el plan Plus. Mejora tu suscripción para usarla.",
 	})
 	return false
+}
+
+func abortPlanCheckUnavailable(c *gin.Context) {
+	c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
+		"error":   "plan_check_unavailable",
+		"message": "No pudimos verificar tu plan en este momento. Intenta de nuevo.",
+	})
 }

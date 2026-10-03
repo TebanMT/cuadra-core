@@ -36,8 +36,9 @@ var (
 	ErrInvalidGender       = errors.New("género inválido (usa hombre, mujer o no_especificado)")
 
 	// Membership
-	ErrMembershipNotFound = errors.New("membresía no encontrada")
-	ErrNoActiveMembership = errors.New("el socio no tiene membresía vigente")
+	ErrMembershipNotFound         = errors.New("membresía no encontrada")
+	ErrNoActiveMembership         = errors.New("el socio no tiene membresía vigente")
+	ErrMembershipRefundNotCurrent = errors.New("ese pago corresponde a una membresía anterior; no se puede cancelar una renovación posterior")
 
 	// Adjustment
 	ErrAdjustmentReasonRequired = errors.New("la razón del ajuste es obligatoria (mínimo 5 caracteres)")
@@ -52,6 +53,7 @@ var (
 	ErrInvalidContactChannel     = errors.New("canal de contacto inválido (whatsapp/phone/in_person/other)")
 	ErrInvalidContactNoteTooLong = errors.New("la nota de contacto es demasiado larga")
 	ErrMemberAlreadyLost         = errors.New("este socio ya está marcado como perdido")
+	ErrMemberStillCovered        = errors.New("no puedes marcar como perdido a un socio con membresía vigente")
 
 	// CSV import (UC-046)
 	ErrCSVMalformed         = errors.New("el archivo no se ve como un CSV válido")

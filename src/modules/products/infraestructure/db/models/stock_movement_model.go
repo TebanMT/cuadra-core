@@ -21,9 +21,14 @@ type StockMovementModel struct {
 	Delta        int        `gorm:"not null;column:delta"`
 	Reason       *string    `gorm:"column:reason"`
 	Cost         *float64   `gorm:"type:numeric(12,2);column:cost"`
-	IsPurchase   bool       `gorm:"not null;default:true;column:is_purchase"`
-	SaleItemID   *uuid.UUID `gorm:"type:uuid;column:sale_item_id"`
-	OperatorID   uuid.UUID  `gorm:"type:uuid;not null;column:operator_id"`
+	// No GORM default: default:true replaces an explicit false on Create,
+	// turning a correction/capture into a second purchase in financial reports.
+	IsPurchase             bool       `gorm:"not null;column:is_purchase"`
+	SaleItemID             *uuid.UUID `gorm:"type:uuid;column:sale_item_id"`
+	OperatorID             uuid.UUID  `gorm:"type:uuid;not null;column:operator_id"`
+	IdempotencyKey         *string    `gorm:"column:idempotency_key"`
+	IdempotencyFingerprint *string    `gorm:"column:idempotency_fingerprint"`
+	IdempotencyResult      *string    `gorm:"type:jsonb;column:idempotency_result"`
 }
 
 func (StockMovementModel) TableName() string { return "stock_movements" }

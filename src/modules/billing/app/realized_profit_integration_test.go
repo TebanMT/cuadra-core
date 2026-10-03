@@ -12,12 +12,12 @@ import (
 
 	reportsInfra "github.com/cuadra/cuadra-core/src/application/reports/infraestructure"
 	billingApp "github.com/cuadra/cuadra-core/src/modules/billing/app"
+	refundDomain "github.com/cuadra/cuadra-core/src/modules/billing/domain/refund"
 	prodApp "github.com/cuadra/cuadra-core/src/modules/products/app"
 )
 
-// Ganancia realizada de productos del período (revenue − COGS), excluyendo
-// ventas reembolsadas. El COGS aplica el costo unitario promedio ACTUAL del
-// producto a ventas pasadas (aproximación deliberada de Standard).
+// Ganancia realizada de productos del período (revenue − COGS) en base de
+// caja. Abonos reconocen costo proporcional y refunds lo revierten.
 
 func rpFloatEq(a, b float64) bool { return math.Abs(a-b) < 0.005 }
 
@@ -59,13 +59,18 @@ func (f *salesFixture) realizedBetween(t *testing.T, from, to time.Time) (revenu
 
 func (f *salesFixture) refundSale(t *testing.T, saleID uuid.UUID) {
 	t.Helper()
-	refundUC := billingApp.NewRefundSale(
-		f.saleRepo,
-		billingApp.NewRefundPayment(f.paymentRepo, f.folios, f.memberSvc, f.uow, f.recorder),
-		f.uow,
-	)
+	detail, err := financedCorrectionUC(f).Detail(context.Background(), f.gymID, saleID)
+	if err != nil {
+		t.Fatalf("sale detail: %v", err)
+	}
+	items := make([]refundDomain.ItemInput, 0, len(detail.Lines))
+	for _, line := range detail.Lines {
+		items = append(items, refundDomain.ItemInput{SaleItemID: line.SaleItemID, Quantity: line.Quantity, Disposition: refundDomain.ReturnedToStock})
+	}
+	refundUC := financedRefundUC(f)
 	if _, err := refundUC.Execute(context.Background(), billingApp.RefundSaleInput{
 		GymID: f.gymID, ActorUserID: f.ownerID, SaleID: saleID, Method: "cash", Reason: "test",
+		IdempotencyKey: "full-refund-" + saleID.String(), Items: items,
 	}); err != nil {
 		t.Fatalf("refund: %v", err)
 	}
@@ -164,5 +169,63 @@ func TestRealizedProfit_FiltersByPaymentDate(t *testing.T) {
 	pRev, pCogs, pItems, _ := f.realizedBetween(t, prevStart, prevEnd)
 	if !rpFloatEq(pRev, 0) || !rpFloatEq(pCogs, 0) || pItems != 0 {
 		t.Errorf("mes anterior: rev=%v cogs=%v items=%d, want 0/0/0", pRev, pCogs, pItems)
+	}
+}
+
+func TestRealizedProfit_FiadoRecognizesCOGSProportionally(t *testing.T) {
+	f := setupSales(t)
+	protein := f.seedProductWithCost(t, "Proteína", 600, 10, 300)
+	paid := 200.0
+	out, err := f.registerSale().Execute(context.Background(), billingApp.RegisterSaleInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, Method: "cash",
+		MemberID: &f.memberID, Paid: &paid,
+		Items: []billingApp.SaleLineInput{{ProductID: protein, Quantity: 1}},
+	})
+	if err != nil {
+		t.Fatalf("fiado: %v", err)
+	}
+
+	from, to := monthRange()
+	rev, cogs, _, _ := f.realizedBetween(t, from, to)
+	if !rpFloatEq(rev, 200) || !rpFloatEq(cogs, 100) {
+		t.Fatalf("initial cash basis = %v/%v, want 200/100", rev, cogs)
+	}
+
+	settle := billingApp.NewSettlePendingBalance(f.paymentRepo, f.folios, f.uow, f.recorder)
+	if _, err := settle.Execute(context.Background(), billingApp.SettlePendingBalanceInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, ParentPaymentID: out.PaymentID,
+		Amount: 400, Method: "cash",
+	}); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+	rev, cogs, _, _ = f.realizedBetween(t, from, to)
+	if !rpFloatEq(rev, 600) || !rpFloatEq(cogs, 300) {
+		t.Errorf("settled cash basis = %v/%v, want 600/300", rev, cogs)
+	}
+}
+
+func TestRealizedProfit_PartialRefundReversesRevenueAndCOGS(t *testing.T) {
+	f := setupSales(t)
+	product := f.seedProductWithCost(t, "Accesorio", 20, 10, 12)
+	out, err := f.registerSale().Execute(context.Background(), billingApp.RegisterSaleInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, Method: "cash",
+		Items: []billingApp.SaleLineInput{{ProductID: product, Quantity: 5}},
+	})
+	if err != nil {
+		t.Fatalf("sale: %v", err)
+	}
+	refund := financedRefundUC(f)
+	if _, err := refund.Execute(context.Background(), billingApp.RefundSaleInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, SaleID: out.SaleID,
+		Method: "cash", Reason: "devolución parcial", IdempotencyKey: "realized-partial",
+		Items: []refundDomain.ItemInput{{SaleItemID: out.Items[0].SaleItemID, Quantity: 1, Disposition: refundDomain.ReturnedToStock}},
+	}); err != nil {
+		t.Fatalf("refund: %v", err)
+	}
+
+	from, to := monthRange()
+	rev, cogs, _, _ := f.realizedBetween(t, from, to)
+	if !rpFloatEq(rev, 80) || !rpFloatEq(cogs, 48) || !rpFloatEq(rev-cogs, 32) {
+		t.Errorf("partial refund = rev %v cogs %v profit %v, want 80/48/32", rev, cogs, rev-cogs)
 	}
 }

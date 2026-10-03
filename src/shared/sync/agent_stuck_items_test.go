@@ -42,6 +42,11 @@ func TestClassifyStuckError(t *testing.T) {
 			wantMsg:  "rejected_unknown_entity_type: unknown entity_type: promos",
 		},
 		{
+			in:       "rejected_financial_conflict: otro escritorio ya devolvió este cobro",
+			wantKind: StuckKindFinancialConflict,
+			wantMsg:  "otro escritorio ya devolvió este cobro",
+		},
+		{
 			in:       "insert or update on table violates foreign key constraint",
 			wantKind: StuckKindOther,
 			wantMsg:  "insert or update on table violates foreign key constraint",
@@ -53,6 +58,55 @@ func TestClassifyStuckError(t *testing.T) {
 		if kind != c.wantKind || msg != c.wantMsg {
 			t.Errorf("classifyStuckError(%q) = (%q, %q), want (%q, %q)", c.in, kind, msg, c.wantKind, c.wantMsg)
 		}
+	}
+}
+
+func TestFinancialConflict_RemainsUnsyncedAndVisibleForReview(t *testing.T) {
+	gymID := uuid.New()
+	db, uow := compositeKeyTestDB(t, gymID)
+	agent := NewAgent(AgentConfig{BaseURL: "http://unused"}, db, uow)
+	ctx := context.Background()
+	refundID := uuid.New()
+	payload, _ := json.Marshal(map[string]any{
+		"id": refundID.String(), "gym_id": gymID.String(), "version": 1,
+		"root_payment_id": uuid.NewString(), "amount": 60,
+		"idempotency_key": "refund:offline-b",
+	})
+	queue := NewSqliteQueue()
+	if err := uow.Command(ctx, func(tx sharedDomain.Transaction) error {
+		return queue.Enqueue(ctx, tx, "refunds", refundID.String(), "upsert", payload, 1)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	batch, err := agent.takeBatch(ctx)
+	if err != nil || len(batch) != 1 {
+		t.Fatalf("take batch: %v (%d items)", err, len(batch))
+	}
+	message := "otro escritorio ya consumió el saldo reembolsable"
+	response := &PushResponse{Results: []PushItemResult{{
+		QueueID: batch[0].QueueID, EntityID: refundID.String(),
+		Status: StatusRejectedFinancialConflict, Error: message,
+	}}}
+	for i := 0; i < stuckPushThreshold; i++ {
+		if err := agent.handlePushResponse(ctx, batch, response); err != nil {
+			t.Fatal(err)
+		}
+	}
+	agent.refreshPendingCount(ctx)
+	snapshot := agent.Snapshot()
+	if snapshot.PendingCount != 1 || snapshot.StuckPushCount != 1 || len(snapshot.StuckItems) != 1 {
+		t.Fatalf("snapshot=%+v", snapshot)
+	}
+	if snapshot.StuckItems[0].Kind != StuckKindFinancialConflict || snapshot.StuckItems[0].Message != message {
+		t.Fatalf("stuck item=%+v", snapshot.StuckItems[0])
+	}
+	var syncedAt *int64
+	var lastError string
+	if err := db.QueryRow(`SELECT synced_at,last_error FROM sync_queue WHERE id=?`, batch[0].QueueID).Scan(&syncedAt, &lastError); err != nil {
+		t.Fatal(err)
+	}
+	if syncedAt != nil || lastError != StatusRejectedFinancialConflict+": "+message {
+		t.Fatalf("synced_at=%v last_error=%q", syncedAt, lastError)
 	}
 }
 

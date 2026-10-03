@@ -187,7 +187,8 @@ func (s *MemberService) RenewMembershipForPayment(ctx context.Context, tx shared
 // previous expiry is preserved on the predecessor row, so no re-computation
 // is needed).
 type RevertMembershipFromPaymentInput struct {
-	MemberID uuid.UUID
+	MemberID     uuid.UUID
+	MembershipID uuid.UUID
 }
 
 type RevertMembershipFromPaymentOutput struct {
@@ -201,16 +202,29 @@ type RevertMembershipFromPaymentOutput struct {
 // `replaced` row pointing at it) back to `active`. Returns business errors
 // when there is no active membership or no predecessor to restore.
 func (s *MemberService) RevertMembershipFromPayment(ctx context.Context, tx sharedDomain.Transaction, in RevertMembershipFromPaymentInput, now time.Time) (*RevertMembershipFromPaymentOutput, error) {
+	if in.MembershipID == uuid.Nil {
+		return nil, sharedDomain.NewBusinessError(memErrors.ErrMembershipRefundNotCurrent, "el pago histórico no identifica la membresía exacta")
+	}
+	target, err := s.Memberships.GetByID(tx, in.MembershipID)
+	if err != nil {
+		return nil, err
+	}
+	if target.MemberID != in.MemberID || target.Status != membershipDomain.StatusActive {
+		return nil, sharedDomain.NewBusinessError(memErrors.ErrMembershipRefundNotCurrent, "")
+	}
 	current, err := s.Memberships.GetCurrentByMember(tx, in.MemberID)
 	if err != nil {
 		return nil, err
 	}
-	predecessor, err := s.Memberships.GetReplacedBy(tx, current.ID)
+	if current.ID != target.ID {
+		return nil, sharedDomain.NewBusinessError(memErrors.ErrMembershipRefundNotCurrent, "")
+	}
+	predecessor, err := s.Memberships.GetReplacedBy(tx, target.ID)
 	if err != nil {
 		return nil, err
 	}
-	current.Cancel(now)
-	if _, err := s.Memberships.Update(tx, current); err != nil {
+	target.Cancel(now)
+	if _, err := s.Memberships.Update(tx, target); err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}
 	if predecessor != nil {
@@ -223,7 +237,7 @@ func (s *MemberService) RevertMembershipFromPayment(ctx context.Context, tx shar
 		}
 	}
 	return &RevertMembershipFromPaymentOutput{
-		CancelledMembership: current,
+		CancelledMembership: target,
 		RestoredMembership:  predecessor,
 	}, nil
 }

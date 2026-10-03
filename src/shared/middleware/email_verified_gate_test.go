@@ -123,8 +123,8 @@ func TestEmailGate_AllowsVerified(t *testing.T) {
 }
 
 // TestEmailGate_NilDepsNoOp — repo/uow nil = el middleware no debe romper
-// nada. Mismo contrato que RequirePlusPlan (fail-open en infra para no
-// bloquear todo el dashboard por bug del wiring).
+// nada. EmailVerified conserva fail-open porque protege el wizard de setup;
+// RequirePlusPlan es deliberadamente fail-closed para no filtrar Plus.
 func TestEmailGate_NilDepsNoOp(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
@@ -142,7 +142,8 @@ func TestEmailGate_NilDepsNoOp(t *testing.T) {
 // TestEmailGate_FailsOpenOnRepoError — si el repo devuelve error (DB caída,
 // user no encontrado), dejamos pasar. Es la misma decisión que toma
 // RequirePlusPlan: preferimos un riesgo de "pasó sin verificar por bug
-// del lookup" a "wizard entero bloqueado por DB caída".
+// del lookup" a "wizard entero bloqueado por DB caída". Esta decisión es
+// específica del gate de verificación; Plus falla cerrado.
 func TestEmailGate_FailsOpenOnRepoError(t *testing.T) {
 	repo := &fakeUserRepoForGate{err: errors.New("db down")}
 	r := newVerifiedGateRouter(t, repo, fakeEmailGateUoW{})

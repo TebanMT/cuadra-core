@@ -208,3 +208,17 @@ func TestPayment_ApplyDiscount(t *testing.T) {
 		t.Errorf("blank reason must fail")
 	}
 }
+
+func TestNewOtherIncomePayment_RequiresDescription(t *testing.T) {
+	now := time.Now().UTC()
+	p, err := NewOtherIncomePayment(uuid.New(), uuid.New(), uuid.New(), "OTH-000001", 2500, MethodTransfer, " Venta de caminadora usada ", now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Concept != ConceptOther || p.Amount != 2500 || p.Notes == nil || *p.Notes != "Venta de caminadora usada" {
+		t.Fatalf("other income = %+v", p)
+	}
+	if _, err = NewOtherIncomePayment(uuid.New(), uuid.New(), uuid.New(), "OTH-000002", 10, MethodCash, "   ", now, now); err == nil {
+		t.Fatal("blank description must fail")
+	}
+}

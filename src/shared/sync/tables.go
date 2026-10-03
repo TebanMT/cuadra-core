@@ -51,6 +51,16 @@ var SyncedTables = []EntityTable{
 		},
 	},
 	{
+		// Stable cash-location catalog. It follows gyms and precedes every
+		// physical writer that may reference cash_drawer_id.
+		Type:  "cash_drawers",
+		Table: "cash_drawers",
+		Columns: []string{
+			"id", "gym_id", "version", "created_at", "updated_at", "deleted_at",
+			"code", "name", "active", "is_main", "idempotency_key",
+		},
+	},
+	{
 		Type:  "users",
 		Table: "users",
 		Columns: []string{
@@ -79,7 +89,7 @@ var SyncedTables = []EntityTable{
 		Table: "products",
 		Columns: []string{
 			"id", "gym_id", "version", "created_at", "updated_at", "deleted_at",
-			"name", "price", "stock", "stock_minimum", "category", "image_url", "active",
+			"name", "price", "stock", "stock_base", "stock_minimum", "category", "image_url", "active",
 		},
 	},
 	{
@@ -146,9 +156,21 @@ var SyncedTables = []EntityTable{
 		Table: "payments",
 		Columns: []string{
 			"id", "gym_id", "version", "created_at", "updated_at", "deleted_at",
-			"folio", "member_id", "amount", "payment_method", "concept",
+			"folio", "member_id", "membership_id", "amount", "recognized_amount", "payment_method", "concept",
 			"parent_payment_id", "discount_amount", "discount_reason",
 			"balance_pending", "payment_date", "notes", "breakdown", "operator_id",
+			"cash_drawer_id", "cash_destination", "idempotency_key", "idempotency_fingerprint", "idempotency_result",
+		},
+	},
+	{
+		// Immutable administrative evidence for membership and extraordinary
+		// income corrections. It follows payments because payment_id is required.
+		Type:  "payment_corrections",
+		Table: "payment_corrections",
+		Columns: []string{
+			"id", "gym_id", "version", "created_at", "updated_at", "deleted_at",
+			"payment_id", "expected_payment_version", "reason", "before_snapshot", "after_snapshot",
+			"idempotency_key", "idempotency_fingerprint", "idempotency_result", "created_by",
 		},
 	},
 	{
@@ -156,7 +178,7 @@ var SyncedTables = []EntityTable{
 		Table: "sales",
 		Columns: []string{
 			"id", "gym_id", "version", "created_at", "updated_at", "deleted_at",
-			"payment_id", "member_id", "subtotal", "discount", "total",
+			"payment_id", "member_id", "subtotal", "discount", "total", "correction_version",
 		},
 	},
 	{
@@ -165,7 +187,40 @@ var SyncedTables = []EntityTable{
 		Columns: []string{
 			"id", "gym_id", "version", "created_at", "updated_at", "deleted_at",
 			"sale_id", "product_id", "product_name_snapshot",
-			"unit_price_snapshot", "quantity", "line_total",
+			"unit_price_snapshot", "unit_cost_snapshot", "quantity", "line_total",
+		},
+	},
+	{
+		// Corrections precede refunds because a correction can create an
+		// overcollection settlement. refund_id is deliberately not mirrored:
+		// it is the redundant half of the correction<->refund cycle and the
+		// canonical relationship is refunds.correction_id. Omitting it keeps
+		// full-sync topological and the relationship remains derivable.
+		Type:  "sale_corrections",
+		Table: "sale_corrections",
+		Columns: []string{
+			"id", "gym_id", "version", "created_at", "updated_at", "deleted_at",
+			"sale_id", "expected_sale_version", "reason", "correction_type", "money_resolution", "increase_resolution",
+			"monetary_delta", "before_snapshot", "after_snapshot",
+			"idempotency_key", "idempotency_fingerprint", "idempotency_result", "created_by",
+		},
+	},
+	{
+		Type:  "refunds",
+		Table: "refunds",
+		Columns: []string{
+			"id", "gym_id", "version", "created_at", "updated_at", "deleted_at",
+			"root_payment_id", "refund_payment_id", "sale_id", "amount", "method",
+			"refunded_on", "reason", "kind", "balance_cancelled", "legacy_incomplete",
+			"correction_id", "idempotency_key", "idempotency_fingerprint", "idempotency_result", "created_by",
+		},
+	},
+	{
+		Type:  "refund_items",
+		Table: "refund_items",
+		Columns: []string{
+			"id", "gym_id", "version", "created_at", "updated_at", "deleted_at",
+			"refund_id", "sale_item_id", "quantity", "amount", "disposition",
 		},
 	},
 	{
@@ -191,19 +246,43 @@ var SyncedTables = []EntityTable{
 		Columns: []string{
 			"id", "gym_id", "version", "created_at", "updated_at", "deleted_at",
 			"product_id", "movement_type", "delta", "reason", "cost",
-			"is_purchase", "sale_item_id", "operator_id",
+			"is_purchase", "sale_item_id", "operator_id", "idempotency_key",
+			"idempotency_fingerprint", "idempotency_result",
 		},
 	},
 	{
-		// expenses — gastos generales del gym (renta, servicios, etc.).
-		// Topológicamente va después de users porque created_by referencia
-		// a users(id). No tiene FKs hacia products / sales.
+		Type: "recurring_expense_templates", Table: "recurring_expense_templates",
+		Columns: []string{"id", "gym_id", "version", "created_at", "updated_at", "deleted_at", "name", "payee_name", "category", "expected_amount", "usual_payment_method", "classification", "frequency", "starts_on", "ends_on", "next_due_on", "active", "created_by"},
+	},
+	{
+		Type: "expense_occurrences", Table: "expense_occurrences",
+		Columns: []string{"id", "gym_id", "version", "created_at", "updated_at", "deleted_at", "template_id", "due_on", "expected_amount", "category", "payee_name", "payment_method", "classification", "status", "expense_id", "resolved_by", "resolved_at", "skip_reason"},
+	},
+	{
+		Type: "cash_movements", Table: "cash_movements",
+		Columns: []string{"id", "gym_id", "version", "created_at", "updated_at", "deleted_at", "movement_on", "amount", "movement_type", "reason", "operator_id", "expense_id", "classification_status", "cash_drawer_id"},
+	},
+	{
+		// Depends on products, stock_movements, users and optionally a physical
+		// cash_movement, hence it must follow all four in the full-sync registry.
+		Type:  "inventory_purchases",
+		Table: "inventory_purchases",
+		Columns: []string{
+			"id", "gym_id", "version", "created_at", "updated_at", "deleted_at",
+			"stock_movement_id", "product_id", "quantity", "unit_cost", "total_amount",
+			"status", "paid_on", "payment_method", "paid_from", "cash_movement_id",
+			"idempotency_key", "created_by", "origin",
+		},
+	},
+	{
+		// Expenses follow their optional source entities, preserving FK order.
 		Type:  "expenses",
 		Table: "expenses",
 		Columns: []string{
 			"id", "gym_id", "version", "created_at", "updated_at", "deleted_at",
 			"expense_date", "amount", "category", "description",
-			"payment_method", "created_by",
+			"payment_method", "paid_from", "created_by", "payee_name", "reference",
+			"classification", "source", "recurring_occurrence_id", "cash_movement_id",
 		},
 	},
 	{
@@ -228,8 +307,20 @@ var SyncedTables = []EntityTable{
 		Table: "cash_close_events",
 		Columns: []string{
 			"id", "gym_id", "version", "created_at", "updated_at", "deleted_at",
-			"close_date", "calculated_cash", "counted_cash",
-			"discrepancy_reason", "closed_by",
+			"drawer_id", "drawer_code", "operational_date", "sequence", "status",
+			"close_date", "opening_cash", "opening_cash_known", "activity_cash",
+			"calculated_cash", "counted_cash", "cash_left", "withdrawn_cash",
+			"withdrawal_destination", "discrepancy_reason", "correction_reason",
+			"adjusted_after_withdrawal", "integrity_note",
+			"opened_at", "opened_by", "closed_at", "closed_by", "reconciled_at",
+			"reconciled_by", "stale_at", "withdrawn_at", "withdrawn_by",
+		},
+	},
+	{
+		Type: "cash_transfers", Table: "cash_transfers",
+		Columns: []string{
+			"id", "gym_id", "version", "created_at", "updated_at", "deleted_at",
+			"session_id", "drawer_id", "destination", "amount", "transferred_at", "transferred_by",
 		},
 	},
 	{
@@ -369,6 +460,10 @@ var SyncedTables = []EntityTable{
 			"superseded_at", "superseded_by_id",
 		},
 	},
+	// Append only: persisted full-sync cursors contain registry indexes.
+	{Type: "inventory_purchase_receipts", Table: "inventory_purchase_receipts", Columns: []string{
+		"id", "gym_id", "version", "created_at", "updated_at", "deleted_at", "purchase_id", "product_id", "quantity", "unit_cost", "received_by",
+	}},
 }
 
 // FindTable returns the registry entry for an entity_type, or nil if the

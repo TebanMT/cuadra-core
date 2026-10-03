@@ -17,11 +17,121 @@ import (
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 )
 
+// CashCountSummary describes the physical counts captured in completed cash
+// closes. CountedCloses can be lower than TotalCloses because the API permits
+// closing without a count; callers must not calculate a reconciliation from
+// an incomplete set.
+type CashCountSummary struct {
+	Counted       float64
+	CountedCloses int
+	TotalCloses   int
+	Withdrawn     float64
+	// Session counters form a partition over tracked, non-deleted sessions in the
+	// requested operational-date range. TotalCloses intentionally excludes
+	// OpenSessions; TotalSessions includes them.
+	// Dates and legacy cuts before the first explicit opening are history,
+	// not missing work. Activity totals still include those dates.
+	HistoricalActivityDays          int
+	HistoricalSessions              int
+	ActiveDays                      int
+	MissingActiveDays               int
+	UncoveredActivityDays           int
+	OpenSessions                    int
+	ClosedUnverifiedSessions        int
+	ReconciledSessions              int
+	StaleSessions                   int
+	WithdrawnSessions               int
+	UnknownOpeningSessions          int
+	AdjustedAfterWithdrawalSessions int
+	// See CanonicalFinancialSnapshot.LegacyCashSourceUnverifiedCount. These
+	// rows are deliberately excluded from physical activity until repaired.
+	LegacyCashSourceUnverifiedCount int
+	TotalSessions                   int
+	LatestSessionID                 *uuid.UUID
+	LatestExpected                  *float64
+	LatestCounted                   *float64
+	LatestDifference                *float64
+	LatestCountedAt                 *time.Time
+	LatestStatus                    string
+	LatestNeedsRecount              bool
+}
+
+// CanonicalFinancialSnapshot is the single source for the Standard business
+// summary. Values are cash-basis period amounts; counts preserve uncertainty
+// instead of silently converting incomplete legacy data into zero.
+type CanonicalFinancialSnapshot struct {
+	MembershipIncome                 float64
+	ProductIncome                    float64
+	OtherIncome                      float64
+	UnclassifiedIncome               float64
+	OperatingExpenses                float64
+	InventoryPurchases               float64
+	Refunds                          float64
+	UnclassifiedIncomeCount          int
+	UnclassifiedCashOutCount         int
+	InvalidCashInClassificationCount int
+	// LegacyCashSourceUnverifiedCount counts historical cash-method expenses
+	// whose migration guessed "cash register" but did not create a linked
+	// physical movement. They remain valid operating expenses; only their
+	// effect on the drawer is unknown until an owner confirms Caja or Fondo.
+	LegacyCashSourceUnverifiedCount int
+	LegacyPurchaseCount             int
+	LegacyRefundCount               int
+}
+
+// CanonicalFinancialReader is optional for compatibility with old/fake
+// readers. PostgreSQL and SQLite implement it; RangeReport uses a transparent
+// legacy fallback only in tests/one-release adapters.
+type CanonicalFinancialReader interface {
+	CanonicalFinancialBetween(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time) (CanonicalFinancialSnapshot, error)
+}
+
+// FinancialReadMetadata lets clients distinguish "calculated now" from
+// "the newest financial mutation included in this snapshot". SyncPending is
+// intentionally nullable: SQLite can answer it from its local queue, while
+// the cloud cannot know whether a particular desktop still has unsent work.
+type FinancialReadMetadata struct {
+	DataWatermark *time.Time
+	SyncPending   *bool
+}
+
+type FinancialMetadataReader interface {
+	FinancialReadMetadata(tx sharedDomain.Transaction, gymID uuid.UUID) (FinancialReadMetadata, error)
+}
+
+type ProductProfitabilityReader interface {
+	ProductProfitabilityBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) ([]ProductProfitabilityRow, error)
+}
+
+type ProductProfitabilityRow struct {
+	ProductID    uuid.UUID `json:"product_id"`
+	ProductName  string    `json:"product_name"`
+	Quantity     int       `json:"quantity"`
+	Revenue      float64   `json:"revenue"`
+	COGS         float64   `json:"cogs"`
+	GrossProfit  float64   `json:"gross_profit"`
+	MarginPct    *float64  `json:"margin_pct,omitempty"`
+	CostComplete bool      `json:"cost_complete"`
+}
+
 // Reader is the cross-context query surface for reports.
 type Reader interface {
 	// Dashboard KPIs (UC-033)
 	CountActiveMembers(tx sharedDomain.Transaction, gymID uuid.UUID, today time.Time) (int, error)
 	SumPaymentsBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (float64, error)
+	// SumOtherIncomeBetween is the subset of income captured with concept
+	// "other" (sale of old equipment, one-off income, etc.).
+	SumOtherIncomeBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (float64, error)
+	// SumCashClosedBetween is the legacy method name for the complete physical
+	// cash activity in the period: cash payments (refunds are negative) plus
+	// cash-in minus cash-out movements. It intentionally includes activity with
+	// no close, an open session, or activity after a withdrawal; session coverage
+	// reports whether that activity has been counted and certified.
+	SumCashClosedBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (float64, error)
+	// SumCashCountedBetween returns the physical cash recorded in the closes
+	// plus coverage, so reports only show a difference when every close in the
+	// selected period has a physical count.
+	SumCashCountedBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (CashCountSummary, error)
 	CountExpiringBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (int, error)
 	CountExpiredRecoverable(tx sharedDomain.Transaction, gymID uuid.UUID, today time.Time, withinDays int) (int, error)
 	TodayCashByMethod(tx sharedDomain.Transaction, gymID uuid.UUID, today time.Time) (map[string]float64, error)
@@ -73,16 +183,11 @@ type Reader interface {
 	TopMembersBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time, limit int) ([]TopMemberRow, error)
 	CheckinsDailySeries(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time) ([]DailyCount, error)
 
-	// ExpensesDailySeries totaliza por día la combinación de gastos
-	// generales (expenses) + compras de mercancía (stock_movements
-	// restock con costo). Alimenta el chart "Ingresos vs Egresos por
-	// día". Las dos fuentes se suman por fecha — la UI no necesita el
-	// desglose, sólo el total egresado del día.
-	// Lleva tzName porque combina fuentes de los DOS tipos: gastos
-	// (expense_date) y devoluciones (payment_date) ya vienen en día local,
-	// pero la mercancía va por stock_movements.created_at, que es un
-	// instante. Sin la zona, un restock de la tarde caía en una barra
-	// distinta que el gasto capturado el mismo día.
+	// ExpensesDailySeries totaliza por día gastos generales pagados,
+	// compras explícitas de inventario pagadas y devoluciones reales de
+	// ingreso. Todas usan su fecha económica local (expense_date, paid_on o
+	// refunded_on), de modo que la serie cuadra con los egresos canónicos.
+	// tzName se conserva en la interfaz por compatibilidad entre lectores.
 	ExpensesDailySeries(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time) ([]DailyAmount, error)
 
 	// ExpensesByCategoryBetween devuelve el total de gastos generales
@@ -115,39 +220,22 @@ type Reader interface {
 	// dashboard's "últimos cobros" widget.
 	ListRecentPayments(tx sharedDomain.Transaction, gymID uuid.UUID, limit int) ([]RecentPaymentRow, error)
 
-	// SumInventoryCostBetween totaliza los egresos por mercancía (restock
-	// movements con costo) en un rango. cost en stock_movements es costo
-	// unitario; el total real desembolsado es cost * delta. Usado por:
+	// SumInventoryCostBetween totaliza las compras explícitas de inventario
+	// efectivamente pagadas en un rango, según paid_on. Un ajuste de stock no
+	// es por sí mismo una salida de dinero. Usado por:
 	//   - Dashboard (KPI inventory_cost_month, current + previous)
 	//   - RangeReport (totals.inventory_cost del período seleccionado)
 	SumInventoryCostBetween(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time) (float64, error)
 
-	// RealizedProductProfitBetween — ganancia REALIZADA de productos en el
-	// rango: revenue (SUM precio_snapshot × qty) − COGS (SUM qty ×
-	// costo_promedio_del_producto), sobre sale_items de ventas NO
-	// reembolsadas, filtradas por payment_date (mismo windowing que
-	// IncomeMonth / TopProductsBetween). El costo es el promedio ponderado
-	// por cantidad all-time de las entradas `restock` con costo UNITARIO
-	// (SUM(cost·delta)/SUM(delta)). COGS y la cobertura solo cuentan items
-	// cuyo producto tiene costo capturado; los demás suman a revenue pero no
-	// a COGS, y se reportan en ItemsTotal/ItemsWithCost para honestidad.
-	//
-	// APROXIMACIÓN DELIBERADA (Standard): se aplica el costo promedio ACTUAL
-	// del producto a ventas pasadas — no hay capas de costo por lote, así que
-	// si el costo subió/bajó después de la venta el COGS histórico no lo
-	// refleja. Es el trade-off de "promedio simple" del tier Standard.
-	//
-	// DIFERIDO A PLUS (NO implementar aquí — documentado en CUADRA-SPEC §9.6):
-	// margen por producto en el tiempo / tendencia, costeo por capas
-	// (FIFO/lotes), varianza de costo + alertas, margen por venta individual,
-	// top/bottom productos por margen, margen por proveedor, y el "resultado
-	// mensual" completo (Ingresos − COGS − Gastos). El modelo de datos ya lo
-	// soporta (el costo vive por entrada en stock_movements); el faseo es por
-	// UX/pricing, no por límite técnico.
+	// RealizedProductProfitBetween — ganancia REALIZADA Plus: ingreso de
+	// productos reconocido en caja menos COGS reconocido proporcionalmente.
+	// El costo unitario es el snapshot congelado en sale_items al vender; una
+	// compra posterior nunca reescribe el margen histórico. Los productos con
+	// alguna línea sin snapshot siguen en revenue y se declaran incompletos.
 	RealizedProductProfitBetween(tx sharedDomain.Transaction, gymID uuid.UUID, from, to time.Time) (RealizedProductProfit, error)
 
-	// ListInventoryCostsBetween lista los movimientos de restock con
-	// costo en un rango, ordenados por created_at DESC. JOINea
+	// ListInventoryCostsBetween lista las compras explícitas pagadas en un
+	// rango, ordenadas por paid_on DESC. JOINea
 	// product_name para que el FE no tenga que hacer N+1. Usado por la
 	// tabla "Compras de inventario" en la página de reportes.
 	ListInventoryCostsBetween(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time, limit int) ([]InventoryCostRow, error)
@@ -213,15 +301,14 @@ type ExpenseRow struct {
 	PaymentMethod string
 }
 
-// InventoryCostRow — una compra/restock con costo capturado. cost es
-// unitario; el total = cost * delta. created_at puede ser el restock
-// inicial al crear el producto (reason="Stock inicial") o ajustes
-// posteriores via /adjust-stock.
+// InventoryCostRow — una compra explícita pagada. CostUnit es unitario y
+// CostTotal = CostUnit * Delta. OccurredAt representa paid_on; MovementID
+// conserva el vínculo auditable con la entrada de stock.
 type InventoryCostRow struct {
 	MovementID  uuid.UUID
 	ProductID   uuid.UUID
 	ProductName string
-	Delta       int     // unidades recibidas (siempre positivo para restock)
+	Delta       int     // unidades compradas; la recepción puede seguir pendiente
 	CostUnit    float64 // costo unitario en moneda (no cents)
 	CostTotal   float64 // CostUnit * Delta — pre-computado para evitar N+1 en FE
 	Reason      *string
@@ -231,8 +318,8 @@ type InventoryCostRow struct {
 // RealizedProductProfit — desglose de la ganancia realizada de productos
 // en un rango. Revenue y COGS en pesos; el caso de uso calcula
 // realized = Revenue − COGS y arma el KPI. ItemsTotal/ItemsWithCost es la
-// cobertura: cuántas líneas de venta tienen costo capturado para la parte
-// de COGS (las que no, suman a Revenue pero no a COGS).
+// cobertura: cuántos productos con actividad tienen costo completo en todas
+// sus líneas (los demás suman a Revenue, pero no exponen un margen engañoso).
 type RealizedProductProfit struct {
 	Revenue       float64
 	COGS          float64
@@ -355,6 +442,10 @@ type RecentPaymentRow struct {
 	Method      string
 	Concept     string
 	PaymentDate time.Time
+	// SaleSummary — productos de la venta ("Agua 1L ×2 · Proteína") cuando
+	// el pago es concept='product'. Título del widget para ventas walk-in
+	// (sin socio), que antes se pintaban como "—".
+	SaleSummary *string
 }
 
 // SaleExportRow — flat row for the ventas export.

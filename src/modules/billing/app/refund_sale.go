@@ -6,31 +6,33 @@ import (
 	"github.com/google/uuid"
 
 	billingErrors "github.com/cuadra/cuadra-core/src/modules/billing/domain/errors"
+	refundDomain "github.com/cuadra/cuadra-core/src/modules/billing/domain/refund"
 	billingRepo "github.com/cuadra/cuadra-core/src/modules/billing/domain/repository"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
+	"time"
 )
 
-// RefundSaleInput backs UC-026.
-//
-// MVP NOTE: per the Sesión 4 brief ("Devolución de venta — P2, manual con UC-022"),
-// the dedicated sale-refund path is intentionally a thin wrapper that resolves
-// the parent Payment from the Sale id and delegates to UC-022 (RefundPayment)
-// — the operator may then call UC-024 (AdjustStock 'restock') manually if they
-// want stock back. We keep this seam so the interface is in place for V1.0
-// when ops feedback may justify a richer flow that auto-restocks each line.
+// RefundSaleInput backs UC-026. The sale-specific path resolves the aggregate
+// root and delegates the atomic money, debt, selected-line and stock effects to
+// RefundPayment. Each returned line must state its physical disposition.
 type RefundSaleInput struct {
-	GymID        uuid.UUID
-	ActorUserID  uuid.UUID
-	SaleID       uuid.UUID
-	Reason       string
-	Method       string
-	RestoreStock bool // when true, IncrementForRefund per item (V1.0+)
+	GymID          uuid.UUID
+	ActorUserID    uuid.UUID
+	SaleID         uuid.UUID
+	Reason         string
+	Method         string
+	CashDrawerID   *uuid.UUID
+	Amount         float64
+	PaymentDate    time.Time
+	IdempotencyKey string
+	Items          []refundDomain.ItemInput
 }
 
 type RefundSaleOutput struct {
-	RefundID uuid.UUID
-	Amount   float64
-	Restored bool
+	RefundID         uuid.UUID
+	Amount           float64
+	BalanceCancelled float64
+	Restored         bool
 }
 
 type RefundSale struct {
@@ -44,8 +46,8 @@ func NewRefundSale(sales billingRepo.SaleRepository, refund *RefundPayment, uow 
 }
 
 func (uc *RefundSale) Execute(ctx context.Context, in RefundSaleInput) (*RefundSaleOutput, error) {
-	// MVP path: read Sale → take its payment_id → call UC-022. We do NOT
-	// auto-restore stock yet (DA-26 deferred). RestoreStock is reserved for V1.0.
+	// Resolve Sale → root Payment, then execute the complete refund command.
+	// Stock returns only for items explicitly marked returned_to_stock.
 	tx, err := uc.UoW.Query(ctx)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
@@ -63,13 +65,27 @@ func (uc *RefundSale) Execute(ctx context.Context, in RefundSaleInput) (*RefundS
 		ParentPaymentID: s.PaymentID,
 		Reason:          in.Reason,
 		Method:          in.Method,
+		CashDrawerID:    in.CashDrawerID,
+		Amount:          in.Amount,
+		PaymentDate:     in.PaymentDate,
+		IdempotencyKey:  in.IdempotencyKey,
+		SaleID:          &s.ID,
+		Items:           in.Items,
 	})
 	if err != nil {
 		return nil, err
 	}
+	restored := false
+	for _, item := range in.Items {
+		if item.Quantity > 0 && item.Disposition == refundDomain.ReturnedToStock {
+			restored = true
+			break
+		}
+	}
 	return &RefundSaleOutput{
-		RefundID: out.RefundID,
-		Amount:   out.Amount,
-		Restored: false,
+		RefundID:         out.RefundID,
+		Amount:           out.Amount,
+		BalanceCancelled: out.BalanceCancelled,
+		Restored:         restored,
 	}, nil
 }

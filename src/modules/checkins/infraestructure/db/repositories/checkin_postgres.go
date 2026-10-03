@@ -128,8 +128,19 @@ func (r *CheckinPostgresRepository) ListRecentByGym(tx sharedDomain.Transaction,
 // barra — además el cast inutilizaba el índice).
 // Misma forma de salida que ListRecentByGym para que el FE renderee igual.
 func (r *CheckinPostgresRepository) ListByGymBetween(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time, limit int) ([]chkRepo.RecentCheckinRow, error) {
+	return r.listByGymBetween(tx, gymID, tzName, from, to, limit, 0, false)
+}
+
+func (r *CheckinPostgresRepository) ListByGymBetweenPage(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time, limit, offset int) ([]chkRepo.RecentCheckinRow, error) {
+	if offset < 0 {
+		offset = 0
+	}
+	return r.listByGymBetween(tx, gymID, tzName, from, to, limit, offset, true)
+}
+
+func (r *CheckinPostgresRepository) listByGymBetween(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time, limit, offset int, allowedOnly bool) ([]chkRepo.RecentCheckinRow, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
-	if limit <= 0 || limit > 500 {
+	if limit <= 0 || limit > 501 {
 		limit = 200
 	}
 	start, end := tz.DayBounds(tzName, from, to)
@@ -161,9 +172,10 @@ func (r *CheckinPostgresRepository) ListByGymBetween(tx sharedDomain.Transaction
 		LEFT JOIN users u ON u.id = c.operator_id AND u.deleted_at IS NULL
 		WHERE c.gym_id = ? AND c.deleted_at IS NULL
 		  AND c.checkin_at >= ? AND c.checkin_at < ?
-		ORDER BY c.checkin_at DESC
-		LIMIT ?`,
-		gymID, start, end, limit).Scan(&rows).Error; err != nil {
+		  AND (? = false OR c.result LIKE 'allowed%')
+		ORDER BY c.checkin_at DESC, c.id DESC
+		LIMIT ? OFFSET ?`,
+		gymID, start, end, allowedOnly, limit, offset).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 	out := make([]chkRepo.RecentCheckinRow, len(rows))
@@ -248,4 +260,12 @@ func checkinFromModel(r *models.CheckinModel) *checkinDomain.Checkin {
 		UpdatedAt:      r.UpdatedAt,
 		DeletedAt:      r.DeletedAt,
 	}
+}
+
+func (r *CheckinPostgresRepository) LastEntryAt(tx sharedDomain.Transaction, gymID, memberID uuid.UUID) (*time.Time, error) {
+	var row struct{ LastEntryAt *time.Time }
+	err := tx.(*sharedDomain.GormTransaction).Tx.Raw(`SELECT MAX(checkin_at) AS last_entry_at FROM checkins
+		WHERE gym_id=? AND member_id=? AND deleted_at IS NULL
+		AND result IN ('allowed_active','allowed_expiring_soon','allowed_override')`, gymID, memberID).Scan(&row).Error
+	return row.LastEntryAt, err
 }

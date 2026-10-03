@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -14,29 +15,52 @@ import (
 	reportsApp "github.com/cuadra/cuadra-core/src/application/reports"
 	billingApp "github.com/cuadra/cuadra-core/src/modules/billing/app"
 	paymentDomain "github.com/cuadra/cuadra-core/src/modules/billing/domain/payment"
+	refundDomain "github.com/cuadra/cuadra-core/src/modules/billing/domain/refund"
 	"github.com/cuadra/cuadra-core/src/shared/auth"
 	"github.com/cuadra/cuadra-core/src/shared/middleware"
 	"github.com/cuadra/cuadra-core/src/shared/utils"
 )
 
 var (
-	errBadID   = errors.New("id inválido")
-	errBadAuth = errors.New("autenticación requerida")
+	errBadID               = errors.New("id inválido")
+	errBadAuth             = errors.New("autenticación requerida")
+	errIdempotencyRequired = errors.New("la operación requiere idempotency_key")
 )
 
 // PaymentController bundles UC-018 ... UC-022 + UC-025/UC-026/UC-027.
 type PaymentController struct {
-	Register     *billingApp.RegisterMembershipPayment
-	Settle       *billingApp.SettlePendingBalance
-	Receipt      *billingApp.GenerateReceipt
-	SendReceipt  *billingApp.SendReceipt
-	ListByMember *billingApp.ListMemberPayments
-	ListByGym    *billingApp.ListGymPayments
-	Refund       *billingApp.RefundPayment
-	RegisterSale *billingApp.RegisterSale
-	RefundSale   *billingApp.RefundSale
-	CashClose    *reportsApp.CashClose
-	Tokens       auth.TokenService
+	Register       *billingApp.RegisterMembershipPayment
+	Settle         *billingApp.SettlePendingBalance
+	Receipt        *billingApp.GenerateReceipt
+	SendReceipt    *billingApp.SendReceipt
+	ListByMember   *billingApp.ListMemberPayments
+	ListByGym      *billingApp.ListGymPayments
+	Refund         *billingApp.RefundPayment
+	RegisterSale   *billingApp.RegisterSale
+	OtherIncome    *billingApp.RegisterOtherIncome
+	RefundSale     *billingApp.RefundSale
+	CorrectSale    *billingApp.CorrectSale
+	CorrectPayment *billingApp.CorrectPayment
+	CashClose      *reportsApp.CashClose
+	Tokens         auth.TokenService
+}
+
+func (ctrl *PaymentController) WithOtherIncome(uc *billingApp.RegisterOtherIncome) *PaymentController {
+	ctrl.OtherIncome = uc
+	return ctrl
+}
+
+// WithSaleCorrections enables the product-sale correction/detail endpoints.
+// Keeping it as an option preserves construction compatibility for narrow
+// controller tests while both production binaries wire the complete use case.
+func (ctrl *PaymentController) WithSaleCorrections(uc *billingApp.CorrectSale) *PaymentController {
+	ctrl.CorrectSale = uc
+	return ctrl
+}
+
+func (ctrl *PaymentController) WithPaymentCorrections(uc *billingApp.CorrectPayment) *PaymentController {
+	ctrl.CorrectPayment = uc
+	return ctrl
 }
 
 func NewPaymentController(
@@ -70,16 +94,32 @@ func (ctrl *PaymentController) RegisterRoutes(r *gin.Engine) {
 		api.POST("/payments/:id/send-receipt", ctrl.handleSendReceipt)
 		api.GET("/members/:id/payments", ctrl.handleListByMember)
 		api.GET("/payments", ctrl.handleListByGym)
+		api.GET("/payments/:id/refund-preview", middleware.RequireOwner(), ctrl.handleRefundPreview)
 		api.POST("/payments/:id/refund", middleware.RequireOwner(), ctrl.handleRefund)
 		api.POST("/sales", ctrl.handleRegisterSale)
+		api.POST("/payments/other", middleware.RequireOwner(), ctrl.handleOtherIncome)
 		api.POST("/sales/:id/refund", middleware.RequireOwner(), ctrl.handleRefundSale)
+		if ctrl.CorrectSale != nil {
+			api.GET("/sales/:id", ctrl.handleSaleDetail)
+			api.POST("/sales/:id/corrections", ctrl.handleCorrectSale)
+			api.POST("/sale-corrections/:id/settle", ctrl.handleSettleSaleCorrection)
+		}
+		if ctrl.CorrectPayment != nil {
+			api.POST("/payments/:id/corrections", middleware.RequireOwner(), ctrl.handleCorrectPayment)
+			api.GET("/payments/:id/corrections", middleware.RequireOwner(), ctrl.handlePaymentCorrectionHistory)
+		}
 		// Cash close (cierre de caja) es STANDARD desde ago-2026 (decisión
 		// de producto: el corte diario es operación básica del gym, no
 		// admin avanzado — dogfooding del gym piloto). El desglose fino de
-		// gastos (BC expenses) sigue en Plus; el corte de un gym Standard
-		// simplemente muestra esa sección vacía.
+		// gastos también es Standard; el rol operador puede ocultar el detalle
+		// administrativo, pero el cálculo físico del cajón siempre es correcto.
 		api.GET("/cash-close", ctrl.handleCashCloseReport)
 		api.POST("/cash-close", ctrl.handleCashClose)
+		api.POST("/cash-sessions/open", ctrl.handleCashOpen)
+		api.POST("/cash-close/reopen", middleware.RequireOwner(), ctrl.handleCashReopen)
+		api.POST("/cash-sessions/:id/reopen", middleware.RequireOwner(), ctrl.handleCashReopen)
+		api.POST("/cash-sessions/:id/reconcile", ctrl.handleCashReconcile)
+		api.POST("/cash-sessions/:id/withdraw", ctrl.handleCashWithdraw)
 	}
 }
 
@@ -101,6 +141,7 @@ type registerPaymentReq struct {
 	MemberID         string  `json:"member_id" validate:"required,uuid"`
 	MembershipTypeID string  `json:"membership_type_id" validate:"required,uuid"`
 	Method           string  `json:"payment_method" validate:"required,oneof=cash transfer card"`
+	CashDrawerID     *string `json:"cash_drawer_id,omitempty"`
 	PaymentDate      string  `json:"payment_date,omitempty"` // YYYY-MM-DD
 	Notes            *string `json:"notes,omitempty"`
 	Discount         float64 `json:"discount_amount,omitempty"`
@@ -113,6 +154,7 @@ type registerPaymentReq struct {
 	EnrollmentAmount  float64            `json:"enrollment_amount,omitempty"`
 	MaintenanceAmount float64            `json:"maintenance_amount,omitempty"`
 	Promotion         *promotionApplyReq `json:"promotion,omitempty"`
+	IdempotencyKey    string             `json:"idempotency_key,omitempty"`
 }
 
 type registerPaymentResp struct {
@@ -136,10 +178,22 @@ type registerPaymentResp struct {
 }
 
 type settleReq struct {
-	Amount      float64 `json:"amount" validate:"required,gt=0"`
-	Method      string  `json:"payment_method" validate:"required,oneof=cash transfer card"`
-	PaymentDate string  `json:"payment_date,omitempty"`
-	Notes       *string `json:"notes,omitempty"`
+	Amount         float64 `json:"amount" validate:"required,gt=0"`
+	Method         string  `json:"payment_method" validate:"required,oneof=cash transfer card"`
+	CashDrawerID   *string `json:"cash_drawer_id,omitempty"`
+	PaymentDate    string  `json:"payment_date,omitempty"`
+	Notes          *string `json:"notes,omitempty"`
+	IdempotencyKey string  `json:"idempotency_key,omitempty"`
+}
+
+type otherIncomeReq struct {
+	CashDestination string  `json:"cash_destination,omitempty"`
+	Amount          float64 `json:"amount" validate:"required,gt=0"`
+	Method          string  `json:"payment_method" validate:"required,oneof=cash transfer card"`
+	CashDrawerID    *string `json:"cash_drawer_id,omitempty"`
+	Description     string  `json:"description" validate:"required,min=3,max=2000"`
+	PaymentDate     string  `json:"payment_date,omitempty"`
+	IdempotencyKey  string  `json:"idempotency_key,omitempty"`
 }
 
 type settleResp struct {
@@ -154,37 +208,62 @@ type sendReceiptReq struct {
 }
 
 type refundReq struct {
-	Reason           string  `json:"reason" validate:"required,min=3,max=500"`
+	Reason           string  `json:"reason" validate:"required,min=3,max=200"`
 	Method           string  `json:"payment_method" validate:"required,oneof=cash transfer card"`
+	CashDrawerID     *string `json:"cash_drawer_id,omitempty"`
 	Amount           float64 `json:"amount,omitempty"`
 	PaymentDate      string  `json:"payment_date,omitempty"`
 	RevertMembership bool    `json:"revert_membership,omitempty"`
+	IdempotencyKey   string  `json:"idempotency_key,omitempty"`
 }
 
 type refundResp struct {
-	RefundID    uuid.UUID `json:"refund_id"`
-	RefundFolio string    `json:"folio"`
-	Amount      float64   `json:"amount"`
-	Reverted    bool      `json:"reverted_membership"`
+	RefundID         uuid.UUID `json:"refund_id"`
+	RefundFolio      string    `json:"folio"`
+	Amount           float64   `json:"amount"`
+	BalanceCancelled float64   `json:"balance_cancelled,omitempty"`
+	Reverted         bool      `json:"reverted_membership"`
+}
+
+type refundPreviewResp struct {
+	SelectedPaymentID       uuid.UUID `json:"selected_payment_id"`
+	RootPaymentID           uuid.UUID `json:"root_payment_id"`
+	SelectedRefundable      float64   `json:"selected_refundable"`
+	AggregateCollected      float64   `json:"aggregate_collected"`
+	AggregateRefunded       float64   `json:"aggregate_refunded"`
+	AggregateRefundable     float64   `json:"aggregate_refundable"`
+	BalancePending          float64   `json:"balance_pending"`
+	RevertMembershipTotal   float64   `json:"revert_membership_total"`
+	MembershipRevertAllowed bool      `json:"membership_revert_allowed"`
+	MembershipRevertReason  string    `json:"membership_revert_block_reason,omitempty"`
 }
 
 type paymentResp struct {
-	ID              uuid.UUID  `json:"id"`
-	Folio           string     `json:"folio"`
-	Reference       string     `json:"reference"`
-	MemberID        *uuid.UUID `json:"member_id,omitempty"`
-	MemberName      string     `json:"member_name,omitempty"`
-	Amount          float64    `json:"amount"`
-	PaymentMethod   string     `json:"payment_method"`
-	Concept         string     `json:"concept"`
-	ParentPaymentID *uuid.UUID `json:"parent_payment_id,omitempty"`
-	DiscountAmount  float64    `json:"discount_amount"`
-	DiscountReason  *string    `json:"discount_reason,omitempty"`
-	BalancePending  float64    `json:"balance_pending"`
-	PaymentDate     string     `json:"payment_date"`
-	Notes           *string    `json:"notes,omitempty"`
-	OperatorID      uuid.UUID  `json:"operator_id"`
-	CreatedAt       time.Time  `json:"created_at"`
+	ID         uuid.UUID  `json:"id"`
+	Version    int        `json:"version"`
+	SaleID     *uuid.UUID `json:"sale_id,omitempty"`
+	Folio      string     `json:"folio"`
+	Reference  string     `json:"reference"`
+	MemberID   *uuid.UUID `json:"member_id,omitempty"`
+	MemberName string     `json:"member_name,omitempty"`
+	// SaleSummary — productos de la venta ("Agua 1L ×2 · Proteína") para
+	// concept='product' y sus refunds. El FE lo usa como título cuando no
+	// hay socio (venta walk-in) y como detalle cuando sí lo hay.
+	SaleSummary      string     `json:"sale_summary,omitempty"`
+	Amount           float64    `json:"amount"`
+	RecognizedAmount float64    `json:"recognized_amount"`
+	PaymentMethod    string     `json:"payment_method"`
+	CashDrawerID     *uuid.UUID `json:"cash_drawer_id,omitempty"`
+	CashDestination  string     `json:"cash_destination"`
+	Concept          string     `json:"concept"`
+	ParentPaymentID  *uuid.UUID `json:"parent_payment_id,omitempty"`
+	DiscountAmount   float64    `json:"discount_amount"`
+	DiscountReason   *string    `json:"discount_reason,omitempty"`
+	BalancePending   float64    `json:"balance_pending"`
+	PaymentDate      string     `json:"payment_date"`
+	Notes            *string    `json:"notes,omitempty"`
+	OperatorID       uuid.UUID  `json:"operator_id"`
+	CreatedAt        time.Time  `json:"created_at"`
 }
 
 // listMemberPaymentsResp agrega el rollup `total_pending` (cuánto debe el
@@ -262,12 +341,23 @@ func (ctrl *PaymentController) handleRegister(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, err)
 		return
 	}
+	drawerID, err := parseOptionalCashDrawerID(req.CashDrawerID)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, errBadID)
+		return
+	}
+	commandKey := strings.TrimSpace(firstNonEmpty(req.IdempotencyKey, c.GetHeader("Idempotency-Key")))
+	if commandKey == "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, errIdempotencyRequired)
+		return
+	}
 	out, err := ctrl.Register.Execute(c.Request.Context(), billingApp.RegisterMembershipPaymentInput{
 		GymID:             gymID,
 		ActorUserID:       userID,
 		MemberID:          memberID,
 		MembershipTypeID:  typeID,
 		Method:            req.Method,
+		CashDrawerID:      drawerID,
 		PaymentDate:       paymentDate,
 		Notes:             req.Notes,
 		Discount:          req.Discount,
@@ -278,6 +368,7 @@ func (ctrl *PaymentController) handleRegister(c *gin.Context) {
 		EnrollmentAmount:  req.EnrollmentAmount,
 		MaintenanceAmount: req.MaintenanceAmount,
 		Promotion:         promo,
+		IdempotencyKey:    commandKey,
 	})
 	if err != nil {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
@@ -351,14 +442,26 @@ func (ctrl *PaymentController) handleSettle(c *gin.Context) {
 		}
 		paymentDate = t
 	}
+	drawerID, err := parseOptionalCashDrawerID(req.CashDrawerID)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, errBadID)
+		return
+	}
+	commandKey := strings.TrimSpace(firstNonEmpty(req.IdempotencyKey, c.GetHeader("Idempotency-Key")))
+	if commandKey == "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, errIdempotencyRequired)
+		return
+	}
 	out, err := ctrl.Settle.Execute(c.Request.Context(), billingApp.SettlePendingBalanceInput{
 		GymID:           gymID,
 		ActorUserID:     userID,
 		ParentPaymentID: id,
 		Amount:          req.Amount,
 		Method:          req.Method,
+		CashDrawerID:    drawerID,
 		PaymentDate:     paymentDate,
 		Notes:           req.Notes,
+		IdempotencyKey:  commandKey,
 	})
 	if err != nil {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
@@ -369,6 +472,40 @@ func (ctrl *PaymentController) handleSettle(c *gin.Context) {
 		SettlementFolio:   out.SettlementFolio,
 		NewBalancePending: out.NewBalancePending,
 	})
+}
+
+func (ctrl *PaymentController) handleOtherIncome(c *gin.Context) {
+	gymID, _ := middleware.GetGymID(c)
+	userID, _ := middleware.GetUserID(c)
+	var req otherIncomeReq
+	if !bindJSON(c, &req) {
+		return
+	}
+	var paymentDate time.Time
+	if req.PaymentDate != "" {
+		var err error
+		paymentDate, err = time.Parse("2006-01-02", req.PaymentDate)
+		if err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, err)
+			return
+		}
+	}
+	drawerID, err := parseOptionalCashDrawerID(req.CashDrawerID)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, errBadID)
+		return
+	}
+	out, err := ctrl.OtherIncome.Execute(c.Request.Context(), billingApp.RegisterOtherIncomeInput{
+		GymID: gymID, ActorUserID: userID, Amount: req.Amount, Method: req.Method, CashDestination: req.CashDestination,
+		CashDrawerID: drawerID,
+		Description:  req.Description, PaymentDate: paymentDate,
+		IdempotencyKey: firstNonEmpty(req.IdempotencyKey, c.GetHeader("Idempotency-Key")),
+	})
+	if err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	utils.JsonResponse(c, http.StatusCreated, gin.H{"payment_id": out.PaymentID, "folio": out.Folio, "amount": out.Amount})
 }
 
 func (ctrl *PaymentController) handleReceipt(c *gin.Context) {
@@ -447,7 +584,11 @@ func (ctrl *PaymentController) handleListByMember(c *gin.Context) {
 	}
 	items := make([]paymentResp, 0, len(out.Items))
 	for _, p := range out.Items {
-		items = append(items, toPaymentResp(p))
+		row := toPaymentResp(p)
+		if saleID, exists := out.SaleIDs[p.ID]; exists {
+			row.SaleID = &saleID
+		}
+		items = append(items, row)
 	}
 	utils.JsonResponse(c, http.StatusOK, listMemberPaymentsResp{
 		Items: items, Total: out.Total, Page: out.Page, PageSize: out.PageSize,
@@ -497,6 +638,12 @@ func (ctrl *PaymentController) handleListByGym(c *gin.Context) {
 				row.MemberName = name
 			}
 		}
+		if s, ok := out.SaleSummaries[p.ID]; ok {
+			row.SaleSummary = s
+		}
+		if saleID, ok := out.SaleIDs[p.ID]; ok {
+			row.SaleID = &saleID
+		}
 		items = append(items, row)
 	}
 	utils.JsonResponse(c, http.StatusOK, listGymPaymentsResp{
@@ -533,25 +680,60 @@ func (ctrl *PaymentController) handleRefund(c *gin.Context) {
 		}
 		paymentDate = t
 	}
+	drawerID, err := parseOptionalCashDrawerID(req.CashDrawerID)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, errBadID)
+		return
+	}
+	commandKey := strings.TrimSpace(firstNonEmpty(req.IdempotencyKey, c.GetHeader("Idempotency-Key")))
+	if commandKey == "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, errIdempotencyRequired)
+		return
+	}
 	out, err := ctrl.Refund.Execute(c.Request.Context(), billingApp.RefundPaymentInput{
 		GymID:            gymID,
 		ActorUserID:      userID,
 		ParentPaymentID:  id,
 		Reason:           req.Reason,
 		Method:           req.Method,
+		CashDrawerID:     drawerID,
 		Amount:           req.Amount,
 		PaymentDate:      paymentDate,
 		RevertMembership: req.RevertMembership,
+		IdempotencyKey:   commandKey,
 	})
 	if err != nil {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
 		return
 	}
 	utils.JsonResponse(c, http.StatusCreated, refundResp{
-		RefundID:    out.RefundID,
-		RefundFolio: out.RefundFolio,
-		Amount:      out.Amount,
-		Reverted:    out.Reverted,
+		RefundID:         out.RefundID,
+		RefundFolio:      out.RefundFolio,
+		Amount:           out.Amount,
+		BalanceCancelled: out.BalanceCancelled,
+		Reverted:         out.Reverted,
+	})
+}
+
+func (ctrl *PaymentController) handleRefundPreview(c *gin.Context) {
+	gymID, _ := middleware.GetGymID(c)
+	id, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	out, err := ctrl.Refund.Preview(c.Request.Context(), gymID, id)
+	if err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	utils.JsonResponse(c, http.StatusOK, refundPreviewResp{
+		SelectedPaymentID: out.SelectedPaymentID, RootPaymentID: out.RootPaymentID,
+		SelectedRefundable: out.SelectedRefundable,
+		AggregateCollected: out.AggregateCollected, AggregateRefunded: out.AggregateRefunded,
+		AggregateRefundable: out.AggregateRefundable, BalancePending: out.BalancePending,
+		RevertMembershipTotal:   out.RevertMembershipTotal,
+		MembershipRevertAllowed: out.MembershipRevertAllowed,
+		MembershipRevertReason:  out.MembershipRevertReason,
 	})
 }
 
@@ -581,6 +763,26 @@ func parseUUIDParam(c *gin.Context, name string) (uuid.UUID, bool) {
 	return id, true
 }
 
+func parseOptionalCashDrawerID(raw *string) (*uuid.UUID, error) {
+	if raw == nil || *raw == "" {
+		return nil, nil
+	}
+	id, err := uuid.Parse(*raw)
+	if err != nil || id == uuid.Nil {
+		return nil, errBadID
+	}
+	return &id, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 // ---------------------------------------------------------------------------
 // UC-025/UC-026/UC-027 — Sales + cash close
 // ---------------------------------------------------------------------------
@@ -601,14 +803,17 @@ type saleLineReq struct {
 // los abonos a mensualidades). Si se omite, el cobro es completo.
 // Requiere `member_id` — no se fía a un walk-in.
 type registerSaleReq struct {
-	Method      string             `json:"payment_method" validate:"required,oneof=cash transfer card"`
-	MemberID    *string            `json:"member_id,omitempty"`
-	Discount    float64            `json:"discount,omitempty"`
-	Paid        *float64           `json:"paid,omitempty"`
-	PaymentDate string             `json:"payment_date,omitempty"`
-	Notes       *string            `json:"notes,omitempty"`
-	Items       []saleLineReq      `json:"line_items" validate:"required,min=1,dive"`
-	Promotion   *promotionApplyReq `json:"promotion,omitempty"`
+	ExpectedTotal  *float64           `json:"expected_total,omitempty"`
+	Method         string             `json:"payment_method" validate:"required,oneof=cash transfer card"`
+	CashDrawerID   *string            `json:"cash_drawer_id,omitempty"`
+	MemberID       *string            `json:"member_id,omitempty"`
+	Discount       float64            `json:"discount,omitempty"`
+	Paid           *float64           `json:"paid,omitempty"`
+	PaymentDate    string             `json:"payment_date,omitempty"`
+	Notes          *string            `json:"notes,omitempty"`
+	Items          []saleLineReq      `json:"line_items" validate:"required,min=1,dive"`
+	Promotion      *promotionApplyReq `json:"promotion,omitempty"`
+	IdempotencyKey string             `json:"idempotency_key,omitempty"`
 }
 
 type saleItemResp struct {
@@ -636,13 +841,110 @@ type registerSaleResp struct {
 }
 
 type refundSaleReq struct {
-	Reason string `json:"reason" validate:"required,min=3,max=500"`
-	Method string `json:"method" validate:"required,oneof=cash transfer card"`
+	Reason         string              `json:"reason" validate:"required,min=3,max=200"`
+	Method         string              `json:"method,omitempty" validate:"omitempty,oneof=cash transfer card"`
+	CashDrawerID   *string             `json:"cash_drawer_id,omitempty"`
+	Amount         float64             `json:"amount,omitempty"`
+	PaymentDate    string              `json:"payment_date,omitempty"`
+	IdempotencyKey string              `json:"idempotency_key,omitempty"`
+	Items          []refundSaleLineReq `json:"line_items,omitempty" validate:"omitempty,dive"`
+}
+
+type refundSaleLineReq struct {
+	SaleItemID  string  `json:"sale_item_id" validate:"required,uuid"`
+	Quantity    int     `json:"quantity" validate:"required,min=1"`
+	Amount      float64 `json:"amount,omitempty"`
+	Disposition string  `json:"disposition" validate:"required,oneof=returned_to_stock damaged not_returned"`
 }
 
 type refundSaleResp struct {
-	RefundID uuid.UUID `json:"refund_id"`
-	Amount   float64   `json:"amount"`
+	RefundID         uuid.UUID `json:"refund_id"`
+	Amount           float64   `json:"amount"`
+	BalanceCancelled float64   `json:"balance_cancelled"`
+}
+
+type correctSaleLineReq struct {
+	SaleItemID *string `json:"sale_item_id,omitempty"`
+	ProductID  string  `json:"product_id" validate:"required,uuid"`
+	Quantity   int     `json:"quantity" validate:"required,min=1"`
+}
+
+type correctPaymentReq struct {
+	CashDestination string   `json:"cash_destination,omitempty"`
+	ExpectedVersion int      `json:"expected_version" validate:"required,min=1"`
+	Reason          string   `json:"reason" validate:"required,min=3,max=200"`
+	Annul           bool     `json:"annul,omitempty"`
+	Amount          *float64 `json:"amount,omitempty" validate:"omitempty,gt=0"`
+	PaymentMethod   string   `json:"payment_method,omitempty" validate:"omitempty,oneof=cash transfer card"`
+	CashDrawerID    *string  `json:"cash_drawer_id,omitempty"`
+	PaymentDate     string   `json:"payment_date,omitempty"`
+	IdempotencyKey  string   `json:"idempotency_key,omitempty" validate:"omitempty,max=120"`
+}
+
+type correctSaleReq struct {
+	ExpectedVersion        int                  `json:"expected_version" validate:"min=0"`
+	Annul                  bool                 `json:"annul"`
+	Reason                 string               `json:"reason" validate:"required,min=3,max=200"`
+	Lines                  []correctSaleLineReq `json:"lines" validate:"dive"`
+	MoneyResolution        string               `json:"money_resolution" validate:"required,oneof=record_only refund_excess refund_pending"`
+	IncreaseResolution     string               `json:"increase_resolution,omitempty" validate:"omitempty,oneof=pending already_collected collect_now"`
+	RefundMethod           string               `json:"refund_method,omitempty" validate:"omitempty,oneof=cash transfer card"`
+	CashDrawerID           *string              `json:"cash_drawer_id,omitempty"`
+	CollectionMethod       string               `json:"collection_method,omitempty" validate:"omitempty,oneof=cash transfer card"`
+	CollectionCashDrawerID *string              `json:"collection_cash_drawer_id,omitempty"`
+	CollectionDate         string               `json:"collection_date,omitempty"`
+	IdempotencyKey         string               `json:"idempotency_key,omitempty"`
+}
+
+type settleSaleCorrectionReq struct {
+	Method         string  `json:"payment_method" validate:"required,oneof=cash transfer card"`
+	CashDrawerID   *string `json:"cash_drawer_id,omitempty"`
+	PaymentDate    string  `json:"payment_date,omitempty"`
+	IdempotencyKey string  `json:"idempotency_key,omitempty"`
+}
+
+type saleDetailPaymentResp struct {
+	Amount           float64 `json:"amount"`
+	RecognizedAmount float64 `json:"recognized_amount"`
+	PaymentMethod    string  `json:"payment_method"`
+	PaymentDate      string  `json:"payment_date"`
+}
+
+type saleDetailLineResp struct {
+	SaleItemID         uuid.UUID `json:"sale_item_id"`
+	ProductID          uuid.UUID `json:"product_id"`
+	ProductName        string    `json:"product_name"`
+	UnitPrice          float64   `json:"unit_price"`
+	Quantity           int       `json:"quantity"`
+	LineTotal          float64   `json:"line_total"`
+	RefundableQuantity int       `json:"refundable_quantity"`
+	RefundedQuantity   int       `json:"refunded_quantity"`
+}
+
+type pendingRefundResp struct {
+	CorrectionID uuid.UUID `json:"correction_id"`
+	AmountDue    float64   `json:"amount_due"`
+	CreatedAt    time.Time `json:"created_at"`
+	Reason       string    `json:"reason"`
+}
+
+type saleDetailResp struct {
+	ID               uuid.UUID             `json:"id"`
+	Version          int                   `json:"version"`
+	PaymentID        uuid.UUID             `json:"payment_id"`
+	MemberID         *uuid.UUID            `json:"member_id"`
+	Folio            string                `json:"folio"`
+	Collected        float64               `json:"collected"`
+	Refunded         float64               `json:"refunded"`
+	Refundable       float64               `json:"refundable"`
+	BalancePending   float64               `json:"balance_pending"`
+	Payment          saleDetailPaymentResp `json:"payment"`
+	Subtotal         float64               `json:"subtotal"`
+	Discount         float64               `json:"discount"`
+	Total            float64               `json:"total"`
+	Lines            []saleDetailLineResp  `json:"lines"`
+	PendingRefundDue float64               `json:"pending_refund_due"`
+	PendingRefunds   []pendingRefundResp   `json:"pending_refunds"`
 }
 
 type operatorTotalResp struct {
@@ -661,9 +963,8 @@ type conceptTotalResp struct {
 	Count int     `json:"count"`
 }
 
-// cashCloseExpenseResp — one row of the "Gastos del día" section inside
-// the cash close. Mirrors the expenses entity at the wire edge so the FE
-// can render description / category / amount / method.
+// cashCloseExpenseResp — one expense paid from today's register. Fund and
+// external expenses are intentionally absent from the cash close.
 type cashCloseExpenseResp struct {
 	ID            string  `json:"id"`
 	Category      string  `json:"category"`
@@ -673,43 +974,151 @@ type cashCloseExpenseResp struct {
 }
 
 type cashCloseClosedResp struct {
-	ClosedAt     string  `json:"closed_at"`
-	CountedCash  float64 `json:"counted_cash"`
-	Diff         float64 `json:"diff"`
-	Reason       *string `json:"reason,omitempty"`
-	ClosedByName *string `json:"closed_by_name,omitempty"`
+	ClosedAt              string  `json:"closed_at"`
+	CalculatedCash        float64 `json:"calculated_cash"`
+	CurrentCalculatedCash float64 `json:"current_calculated_cash"`
+	CountedCash           float64 `json:"counted_cash"`
+	Diff                  float64 `json:"diff"`
+	IsOutdated            bool    `json:"is_outdated"`
+	Reason                *string `json:"reason,omitempty"`
+	ClosedByName          *string `json:"closed_by_name,omitempty"`
+}
+
+type cashLedgerEntryResp struct {
+	ID           uuid.UUID `json:"id"`
+	RecordedAt   string    `json:"recorded_at"`
+	Amount       float64   `json:"amount"`
+	Concept      string    `json:"concept"`
+	Reason       string    `json:"reason"`
+	OperatorName string    `json:"operator_name"`
 }
 
 type cashCloseReportResp struct {
-	Date      string                      `json:"date"`
-	ByMethod  map[string]float64          `json:"by_method"`
-	ByConcept map[string]conceptTotalResp `json:"by_concept"`
-	Operators []operatorTotalResp         `json:"operators"`
-	Total     float64                     `json:"total"`
+	Timezone             string                      `json:"timezone"`
+	Entries              []cashLedgerEntryResp       `json:"entries"`
+	SuggestedOpeningCash *float64                    `json:"suggested_opening_cash"`
+	Date                 string                      `json:"date"`
+	ByMethod             map[string]float64          `json:"by_method"`
+	ByConcept            map[string]conceptTotalResp `json:"by_concept"`
+	Operators            []operatorTotalResp         `json:"operators"`
+	Total                float64                     `json:"total"`
 	// RefundsTotal / RefundByMethod van en MAGNITUD POSITIVA (el dominio los
 	// guarda negativos). El FE los muestra con un "−" explícito y resta los
 	// refunds en efectivo del cajón.
 	RefundsTotal     float64                `json:"refunds_total"`
 	RefundsCount     int                    `json:"refunds_count"`
 	RefundByMethod   map[string]float64     `json:"refund_by_method"`
-	Expenses         []cashCloseExpenseResp `json:"expenses"`
-	ExpensesTotal    float64                `json:"expenses_total"`
-	ExpensesByMethod map[string]float64     `json:"expenses_by_method"`
-	NetTotal         float64                `json:"net_total"`
-	Closed           *cashCloseClosedResp   `json:"closed,omitempty"`
+	Expenses         []cashCloseExpenseResp `json:"expenses,omitempty"`
+	ExpensesTotal    *float64               `json:"expenses_total,omitempty"`
+	ExpensesByMethod map[string]float64     `json:"expenses_by_method,omitempty"`
+	// Deprecated: compatibility alias with mixed semantics. New clients use
+	// session.activity_cash / expected_cash for physical reconciliation.
+	NetTotal              *float64             `json:"net_total,omitempty"`
+	CashMovements         []cashMovementResp   `json:"cash_movements"`
+	CashInTotal           float64              `json:"cash_in_total"`
+	CashOutTotal          float64              `json:"cash_out_total"`
+	Closed                *cashCloseClosedResp `json:"closed,omitempty"`
+	Session               *cashSessionResp     `json:"session,omitempty"`
+	Sessions              []*cashSessionResp   `json:"sessions"`
+	CashDrawerID          uuid.UUID            `json:"cash_drawer_id"`
+	Drawers               []cashDrawerResp     `json:"drawers"`
+	UncoveredCashActivity float64              `json:"uncovered_cash_activity"`
+	RequiresNewSession    bool                 `json:"requires_new_session"`
+}
+
+type cashSessionResp struct {
+	CurrentExpectedCash     *float64  `json:"current_expected_cash,omitempty"`
+	FinishedAt              *string   `json:"finished_at"`
+	ClosedByName            *string   `json:"closed_by_name"`
+	DiscrepancyReason       *string   `json:"discrepancy_reason"`
+	ID                      uuid.UUID `json:"id"`
+	DrawerID                uuid.UUID `json:"drawer_id"`
+	DrawerCode              string    `json:"drawer_code"`
+	OperationalDate         string    `json:"operational_date"`
+	Sequence                int       `json:"sequence"`
+	Status                  string    `json:"status"`
+	OpeningCash             float64   `json:"opening_cash"`
+	OpeningCashKnown        bool      `json:"opening_cash_known"`
+	ActivityCash            float64   `json:"activity_cash"`
+	ExpectedCash            float64   `json:"expected_cash"`
+	CountedCash             *float64  `json:"counted_cash"`
+	Difference              *float64  `json:"difference"`
+	CashLeft                *float64  `json:"cash_left"`
+	WithdrawnCash           *float64  `json:"withdrawn_cash"`
+	WithdrawalDestination   *string   `json:"withdrawal_destination"`
+	OpenedAt                string    `json:"opened_at"`
+	ClosedAt                *string   `json:"closed_at"`
+	ReconciledAt            *string   `json:"reconciled_at"`
+	StaleAt                 *string   `json:"stale_at"`
+	WithdrawnAt             *string   `json:"withdrawn_at"`
+	IsStale                 bool      `json:"is_stale"`
+	AdjustedAfterWithdrawal bool      `json:"adjusted_after_withdrawal"`
+	IntegrityNote           *string   `json:"integrity_note"`
+	CorrectionReason        *string   `json:"correction_reason,omitempty"`
+	UncoveredCashActivity   float64   `json:"uncovered_cash_activity"`
+	RequiresNewSession      bool      `json:"requires_new_session"`
+}
+type cashMovementResp struct {
+	ID                   uuid.UUID `json:"id"`
+	CashDrawerID         uuid.UUID `json:"cash_drawer_id"`
+	MovementType         string    `json:"movement_type"`
+	Reason               string    `json:"reason"`
+	Amount               float64   `json:"amount"`
+	OperatorID           uuid.UUID `json:"operator_id"`
+	ClassificationStatus string    `json:"classification_status"`
+}
+
+type cashDrawerResp struct {
+	ID           uuid.UUID `json:"id"`
+	Code         string    `json:"code"`
+	Name         string    `json:"name"`
+	Active       bool      `json:"active"`
+	IsMain       bool      `json:"is_main"`
+	ActivityCash float64   `json:"activity_cash"`
+	HasActivity  bool      `json:"has_activity"`
+	SessionCount int       `json:"session_count"`
 }
 
 type cashCloseReq struct {
+	ExpectedCash      *float64 `json:"expected_cash"`
+	SessionID         string   `json:"session_id"`
+	Finish            bool     `json:"finish"`
 	Date              string   `json:"date" validate:"required"`
+	CashDrawerID      *string  `json:"cash_drawer_id,omitempty"`
+	DrawerID          *string  `json:"drawer_id,omitempty"` // backward-compatible alias
+	OpeningCash       *float64 `json:"opening_cash,omitempty"`
 	CountedCash       *float64 `json:"counted_cash,omitempty"`
 	DiscrepancyReason *string  `json:"discrepancy_reason,omitempty"`
+	CorrectionReason  *string  `json:"correction_reason,omitempty"`
+	CashLeft          *float64 `json:"cash_left,omitempty"`
+	Withdraw          bool     `json:"withdraw,omitempty"`
 }
 
 type cashCloseResp struct {
-	CashCloseID    uuid.UUID `json:"cash_close_id"`
-	CalculatedCash float64   `json:"calculated_cash"`
-	CountedCash    *float64  `json:"counted_cash,omitempty"`
-	Discrepancy    *float64  `json:"discrepancy,omitempty"`
+	CashCloseID    uuid.UUID        `json:"cash_close_id"`
+	CalculatedCash float64          `json:"calculated_cash"`
+	CountedCash    *float64         `json:"counted_cash,omitempty"`
+	Discrepancy    *float64         `json:"discrepancy,omitempty"`
+	Session        *cashSessionResp `json:"session,omitempty"`
+}
+
+type cashReopenReq struct {
+	Date         string  `json:"date,omitempty"`
+	CashDrawerID *string `json:"cash_drawer_id,omitempty"`
+	DrawerID     *string `json:"drawer_id,omitempty"` // backward-compatible alias
+	Reason       string  `json:"reason" validate:"required,min=3,max=200"`
+}
+
+type cashReconcileReq struct {
+	Finish            bool     `json:"finish"`
+	CountedCash       *float64 `json:"counted_cash"`
+	DiscrepancyReason *string  `json:"discrepancy_reason,omitempty"`
+	CorrectionReason  *string  `json:"correction_reason,omitempty"`
+}
+
+type cashWithdrawReq struct {
+	CashLeft    float64 `json:"cash_left"`
+	Destination string  `json:"destination,omitempty"`
 }
 
 func (ctrl *PaymentController) handleRegisterSale(c *gin.Context) {
@@ -755,17 +1164,30 @@ func (ctrl *PaymentController) handleRegisterSale(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, err)
 		return
 	}
+	drawerID, err := parseOptionalCashDrawerID(req.CashDrawerID)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, errBadID)
+		return
+	}
+	commandKey := strings.TrimSpace(firstNonEmpty(req.IdempotencyKey, c.GetHeader("Idempotency-Key")))
+	if commandKey == "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, errIdempotencyRequired)
+		return
+	}
 	out, err := ctrl.RegisterSale.Execute(c.Request.Context(), billingApp.RegisterSaleInput{
-		GymID:       gymID,
-		ActorUserID: userID,
-		Method:      req.Method,
-		MemberID:    memberID,
-		Discount:    req.Discount,
-		Paid:        req.Paid,
-		PaymentDate: paymentDate,
-		Notes:       req.Notes,
-		Items:       items,
-		Promotion:   promo,
+		ExpectedTotal:  req.ExpectedTotal,
+		GymID:          gymID,
+		ActorUserID:    userID,
+		Method:         req.Method,
+		CashDrawerID:   drawerID,
+		MemberID:       memberID,
+		Discount:       req.Discount,
+		Paid:           req.Paid,
+		PaymentDate:    paymentDate,
+		Notes:          req.Notes,
+		Items:          items,
+		Promotion:      promo,
+		IdempotencyKey: commandKey,
 	})
 	if err != nil {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
@@ -801,20 +1223,284 @@ func (ctrl *PaymentController) handleRefundSale(c *gin.Context) {
 	if !bindJSON(c, &req) {
 		return
 	}
+	var paymentDate time.Time
+	if req.PaymentDate != "" {
+		parsed, err := time.Parse("2006-01-02", req.PaymentDate)
+		if err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, err)
+			return
+		}
+		paymentDate = parsed
+	}
+	drawerID, err := parseOptionalCashDrawerID(req.CashDrawerID)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, errBadID)
+		return
+	}
+	items := make([]refundDomain.ItemInput, 0, len(req.Items))
+	for _, line := range req.Items {
+		lineID, err := uuid.Parse(line.SaleItemID)
+		if err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, errBadID)
+			return
+		}
+		items = append(items, refundDomain.ItemInput{
+			SaleItemID: lineID, Quantity: line.Quantity, Amount: line.Amount, Disposition: line.Disposition,
+		})
+	}
 	out, err := ctrl.RefundSale.Execute(c.Request.Context(), billingApp.RefundSaleInput{
-		GymID:       gymID,
-		ActorUserID: userID,
-		SaleID:      id,
-		Reason:      req.Reason,
-		Method:      req.Method,
+		GymID:          gymID,
+		ActorUserID:    userID,
+		SaleID:         id,
+		Reason:         req.Reason,
+		Method:         req.Method,
+		CashDrawerID:   drawerID,
+		Amount:         req.Amount,
+		PaymentDate:    paymentDate,
+		IdempotencyKey: firstNonEmpty(req.IdempotencyKey, c.GetHeader("Idempotency-Key")),
+		Items:          items,
 	})
 	if err != nil {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
 		return
 	}
 	utils.JsonResponse(c, http.StatusCreated, refundSaleResp{
-		RefundID: out.RefundID, Amount: out.Amount,
+		RefundID: out.RefundID, Amount: out.Amount, BalanceCancelled: out.BalanceCancelled,
 	})
+}
+
+func (ctrl *PaymentController) handleSaleDetail(c *gin.Context) {
+	gymID, _ := middleware.GetGymID(c)
+	saleID, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	out, err := ctrl.CorrectSale.Detail(c.Request.Context(), gymID, saleID)
+	if err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	utils.JsonResponse(c, http.StatusOK, saleDetailToResp(out))
+}
+
+func saleDetailToResp(out *billingApp.SaleDetailOutput) saleDetailResp {
+	lines := make([]saleDetailLineResp, 0, len(out.Lines))
+	for _, line := range out.Lines {
+		lines = append(lines, saleDetailLineResp{
+			SaleItemID: line.SaleItemID, ProductID: line.ProductID, ProductName: line.ProductName,
+			UnitPrice: line.UnitPrice, Quantity: line.Quantity, LineTotal: line.LineTotal,
+			RefundableQuantity: line.RefundableQuantity, RefundedQuantity: line.RefundedQuantity,
+		})
+	}
+	pending := make([]pendingRefundResp, 0, len(out.PendingRefunds))
+	for _, item := range out.PendingRefunds {
+		pending = append(pending, pendingRefundResp{CorrectionID: item.CorrectionID, AmountDue: item.AmountDue,
+			CreatedAt: item.CreatedAt, Reason: item.Reason})
+	}
+	return saleDetailResp{
+		ID: out.ID, Version: out.Version, PaymentID: out.PaymentID, MemberID: out.MemberID, Folio: out.Folio,
+		Collected: out.Collected, Refunded: out.Refunded, Refundable: out.Refundable,
+		BalancePending: out.BalancePending,
+		Payment: saleDetailPaymentResp{Amount: out.Payment.Amount, RecognizedAmount: out.Payment.RecognizedAmount,
+			PaymentMethod: out.Payment.PaymentMethod, PaymentDate: out.Payment.PaymentDate.Format("2006-01-02")},
+		Subtotal: out.Subtotal, Discount: out.Discount, Total: out.Total, Lines: lines,
+		PendingRefundDue: out.PendingRefundDue, PendingRefunds: pending,
+	}
+}
+
+func (ctrl *PaymentController) handleCorrectPayment(c *gin.Context) {
+	gymID, _ := middleware.GetGymID(c)
+	actorID, _ := middleware.GetUserID(c)
+	role, _ := middleware.GetRole(c)
+	paymentID, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	var req correctPaymentReq
+	if !bindJSON(c, &req) {
+		return
+	}
+	drawerID, err := parseOptionalCashDrawerID(req.CashDrawerID)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, errBadID)
+		return
+	}
+	var paymentDate time.Time
+	if req.PaymentDate != "" {
+		paymentDate, err = time.Parse("2006-01-02", req.PaymentDate)
+		if err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, err)
+			return
+		}
+	}
+	key := strings.TrimSpace(firstNonEmpty(req.IdempotencyKey, c.GetHeader("Idempotency-Key")))
+	if key == "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, errIdempotencyRequired)
+		return
+	}
+	out, err := ctrl.CorrectPayment.Execute(c.Request.Context(), billingApp.CorrectPaymentInput{
+		GymID: gymID, ActorUserID: actorID, ActorRole: role, PaymentID: paymentID,
+		ExpectedVersion: req.ExpectedVersion, Reason: req.Reason, Annul: req.Annul, Amount: req.Amount,
+		PaymentMethod: req.PaymentMethod, CashDrawerID: drawerID, CashDestination: req.CashDestination, PaymentDate: paymentDate, IdempotencyKey: key,
+	})
+	if err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	utils.JsonResponse(c, http.StatusOK, out)
+}
+
+func (ctrl *PaymentController) handlePaymentCorrectionHistory(c *gin.Context) {
+	gymID, _ := middleware.GetGymID(c)
+	paymentID, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	items, err := ctrl.CorrectPayment.History(c.Request.Context(), gymID, paymentID)
+	if err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	utils.JsonResponse(c, http.StatusOK, gin.H{"items": items, "total": len(items)})
+}
+
+func (ctrl *PaymentController) handleCorrectSale(c *gin.Context) {
+	gymID, _ := middleware.GetGymID(c)
+	actorID, _ := middleware.GetUserID(c)
+	role, _ := middleware.GetRole(c)
+	saleID, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	var req correctSaleReq
+	if !bindJSON(c, &req) {
+		return
+	}
+	lines := make([]billingApp.CorrectSaleLineInput, 0, len(req.Lines))
+	for _, line := range req.Lines {
+		productID, err := uuid.Parse(line.ProductID)
+		if err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, errBadID)
+			return
+		}
+		var saleItemID *uuid.UUID
+		if line.SaleItemID != nil && *line.SaleItemID != "" {
+			parsed, err := uuid.Parse(*line.SaleItemID)
+			if err != nil {
+				utils.ErrorResponse(c, http.StatusBadRequest, errBadID)
+				return
+			}
+			saleItemID = &parsed
+		}
+		lines = append(lines, billingApp.CorrectSaleLineInput{SaleItemID: saleItemID, ProductID: productID, Quantity: line.Quantity})
+	}
+	drawerID, err := parseOptionalCashDrawerID(req.CashDrawerID)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, errBadID)
+		return
+	}
+	collectionDrawerID, err := parseOptionalCashDrawerID(req.CollectionCashDrawerID)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, errBadID)
+		return
+	}
+	var collectionDate time.Time
+	if req.CollectionDate != "" {
+		collectionDate, err = time.Parse("2006-01-02", req.CollectionDate)
+		if err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, err)
+			return
+		}
+	}
+	out, err := ctrl.CorrectSale.Execute(c.Request.Context(), billingApp.CorrectSaleInput{
+		GymID: gymID, ActorUserID: actorID, ActorRole: role, SaleID: saleID,
+		ExpectedVersion: req.ExpectedVersion, Annul: req.Annul, Reason: req.Reason, Lines: lines,
+		MoneyResolution: req.MoneyResolution, RefundMethod: req.RefundMethod,
+		RefundCashDrawerID: drawerID,
+		IncreaseResolution: req.IncreaseResolution, CollectionMethod: req.CollectionMethod,
+		CollectionCashDrawerID: collectionDrawerID, CollectionDate: collectionDate,
+		IdempotencyKey: firstNonEmpty(req.IdempotencyKey, c.GetHeader("Idempotency-Key")),
+	})
+	if err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	var saleResponse any
+	if !out.Annulled {
+		detail, detailErr := ctrl.CorrectSale.Detail(c.Request.Context(), gymID, saleID)
+		if detailErr != nil {
+			utils.ErrorResponse(c, utils.DomainErrorToHttpCode(detailErr), detailErr)
+			return
+		}
+		saleResponse = saleDetailToResp(detail)
+	}
+	moneyStatus := "settled"
+	if out.MoneyEffect.PendingRefundDue > 0 {
+		moneyStatus = "refund_pending"
+	}
+	utils.JsonResponse(c, http.StatusOK, gin.H{
+		"correction_id":     out.CorrectionID,
+		"correction_type":   out.CorrectionType,
+		"annulled":          out.Annulled,
+		"idempotency_key":   firstNonEmpty(req.IdempotencyKey, c.GetHeader("Idempotency-Key")),
+		"sale_version":      out.SaleVersion,
+		"sale":              saleResponse,
+		"inventory_effects": out.InventoryEffects,
+		"money_effect": gin.H{
+			"previous_total": out.MoneyEffect.PreviousTotal, "corrected_total": out.MoneyEffect.CorrectedTotal,
+			"physical_collected": out.MoneyEffect.PhysicalCollected, "recognized_income": out.MoneyEffect.RecognizedIncome,
+			"refunded_now": out.MoneyEffect.RefundedNow, "pending_refund_due": out.MoneyEffect.PendingRefundDue,
+			"status":         out.MoneyEffect.Status,
+			"old_sale_total": out.MoneyEffect.PreviousTotal, "new_sale_total": out.MoneyEffect.CorrectedTotal,
+			"collected": out.MoneyEffect.PhysicalCollected, "refund_due": out.MoneyEffect.PendingRefundDue,
+			"money_status": moneyStatus, "refund_id": out.MoneyEffect.RefundID,
+			"refund_amount": out.MoneyEffect.RefundedNow, "refund_method": out.MoneyEffect.RefundMethod,
+			"additional_collected_now":        out.MoneyEffect.AdditionalCollectedNow,
+			"additional_pending":              out.MoneyEffect.AdditionalPending,
+			"additional_historical_collected": out.MoneyEffect.AdditionalHistoricalCollected,
+			"settlement_id":                   out.MoneyEffect.SettlementID,
+		},
+	})
+}
+
+func (ctrl *PaymentController) handleSettleSaleCorrection(c *gin.Context) {
+	gymID, _ := middleware.GetGymID(c)
+	actorID, _ := middleware.GetUserID(c)
+	role, _ := middleware.GetRole(c)
+	correctionID, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	var req settleSaleCorrectionReq
+	if !bindJSON(c, &req) {
+		return
+	}
+	var paymentDate time.Time
+	if req.PaymentDate != "" {
+		parsed, err := time.Parse("2006-01-02", req.PaymentDate)
+		if err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, err)
+			return
+		}
+		paymentDate = parsed
+	}
+	drawerID, err := parseOptionalCashDrawerID(req.CashDrawerID)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, errBadID)
+		return
+	}
+	out, err := ctrl.CorrectSale.SettlePending(c.Request.Context(), billingApp.SettlePendingRefundInput{
+		GymID: gymID, ActorUserID: actorID, ActorRole: role, CorrectionID: correctionID,
+		Method: req.Method, CashDrawerID: drawerID, PaymentDate: paymentDate,
+		IdempotencyKey: firstNonEmpty(req.IdempotencyKey, c.GetHeader("Idempotency-Key")),
+	})
+	if err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	utils.JsonResponse(c, http.StatusCreated, gin.H{"refund_id": out.RefundID, "amount": out.Amount,
+		"payment_method": out.PaymentMethod, "refunded_on": out.RefundedOn.Format("2006-01-02"),
+		"pending_amount": out.PendingAmount})
 }
 
 func (ctrl *PaymentController) handleCashCloseReport(c *gin.Context) {
@@ -830,8 +1516,19 @@ func (ctrl *PaymentController) handleCashCloseReport(c *gin.Context) {
 			return
 		}
 	}
+	var drawerID *uuid.UUID
+	rawDrawerID := firstNonEmpty(c.Query("cash_drawer_id"), c.Query("drawer_id"))
+	if rawDrawerID != "" {
+		parsed, err := uuid.Parse(rawDrawerID)
+		if err != nil || parsed == uuid.Nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, errBadID)
+			return
+		}
+		drawerID = &parsed
+	}
+	role, _ := middleware.GetRole(c)
 	out, err := ctrl.CashClose.Report(c.Request.Context(), reportsApp.CashCloseReportInput{
-		GymID: gymID, Date: date,
+		GymID: gymID, Date: date, DrawerID: drawerID, HideAdministrative: role != "owner",
 	})
 	if err != nil {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
@@ -866,29 +1563,63 @@ func (ctrl *PaymentController) handleCashCloseReport(c *gin.Context) {
 	for k, v := range out.Totals.RefundByMethod {
 		refundByMethod[k] = -v
 	}
+	moves := make([]cashMovementResp, len(out.CashMovements))
+	for i, m := range out.CashMovements {
+		moves[i] = cashMovementResp{ID: m.ID, CashDrawerID: m.CashDrawerID, MovementType: m.MovementType,
+			Reason: m.Reason, Amount: m.Amount, OperatorID: m.OperatorID, ClassificationStatus: m.ClassificationStatus}
+	}
+	drawers := make([]cashDrawerResp, len(out.Drawers))
+	for i, drawer := range out.Drawers {
+		drawers[i] = cashDrawerResp{ID: drawer.ID, Code: drawer.Code, Name: drawer.Name,
+			Active: drawer.Active, IsMain: drawer.IsMain, ActivityCash: drawer.ActivityCash,
+			HasActivity: drawer.HasActivity, SessionCount: drawer.SessionCount}
+	}
 	resp := cashCloseReportResp{
-		Date:             date.Format("2006-01-02"),
-		ByMethod:         out.Totals.ByMethod,
-		ByConcept:        concepts,
-		Operators:        ops,
-		Total:            out.Totals.GrandTotal,
-		RefundsTotal:     -out.Totals.RefundTotal,
-		RefundsCount:     out.Totals.RefundCount,
-		RefundByMethod:   refundByMethod,
-		Expenses:         gastos,
-		ExpensesTotal:    out.ExpensesTotal,
-		ExpensesByMethod: out.ExpensesByMethod,
-		NetTotal:         out.NetTotal,
+		// El use case puede resolver la fecha por defecto en el día local del
+		// gym; responder con la variable del handler emitía 0001-01-01 cuando
+		// el caller omitía ?date=.
+		Date:           out.Date.Format("2006-01-02"),
+		ByMethod:       out.Totals.ByMethod,
+		ByConcept:      concepts,
+		Operators:      ops,
+		Total:          out.Totals.GrandTotal,
+		RefundsTotal:   -out.Totals.RefundTotal,
+		RefundsCount:   out.Totals.RefundCount,
+		RefundByMethod: refundByMethod,
+		CashMovements:  moves, CashInTotal: out.CashInTotal, CashOutTotal: out.CashOutTotal,
+		CashDrawerID: out.SelectedDrawerID, Drawers: drawers,
+	}
+	if out.AdministrativeIncluded {
+		resp.Expenses = gastos
+		resp.ExpensesTotal = &out.ExpensesTotal
+		resp.ExpensesByMethod = out.ExpensesByMethod
+		resp.NetTotal = &out.NetTotal
 	}
 	if out.Closed != nil {
 		resp.Closed = &cashCloseClosedResp{
-			ClosedAt:     out.Closed.ClosedAt.Format(time.RFC3339),
-			CountedCash:  out.Closed.CountedCash,
-			Diff:         out.Closed.Diff,
-			Reason:       out.Closed.Reason,
-			ClosedByName: out.Closed.ClosedByName,
+			ClosedAt:              out.Closed.ClosedAt.Format(time.RFC3339),
+			CalculatedCash:        out.Closed.CalculatedCash,
+			CurrentCalculatedCash: out.Closed.CurrentCalculatedCash,
+			CountedCash:           out.Closed.CountedCash,
+			Diff:                  out.Closed.Diff,
+			IsOutdated:            out.Closed.IsOutdated,
+			Reason:                out.Closed.Reason,
+			ClosedByName:          out.Closed.ClosedByName,
 		}
 	}
+	resp.Session = cashSessionToResp(out.Session)
+	resp.Sessions = make([]*cashSessionResp, 0, len(out.Sessions))
+	for _, session := range out.Sessions {
+		resp.Sessions = append(resp.Sessions, cashSessionToResp(session))
+	}
+	resp.Timezone = out.Timezone
+	resp.SuggestedOpeningCash = out.SuggestedOpeningCash
+	resp.Entries = make([]cashLedgerEntryResp, 0, len(out.Entries))
+	for _, e := range out.Entries {
+		resp.Entries = append(resp.Entries, cashLedgerEntryResp{ID: e.ID, RecordedAt: e.RecordedAt.Format(time.RFC3339Nano), Amount: e.Amount, Concept: e.Concept, Reason: e.Reason, OperatorName: e.OperatorName})
+	}
+	resp.UncoveredCashActivity = out.UncoveredCashActivity
+	resp.RequiresNewSession = out.RequiresNewSession
 	utils.JsonResponse(c, http.StatusOK, resp)
 }
 
@@ -904,12 +1635,39 @@ func (ctrl *PaymentController) handleCashClose(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, err)
 		return
 	}
+	var drawerID *uuid.UUID
+	rawDrawerID := req.CashDrawerID
+	if rawDrawerID == nil {
+		rawDrawerID = req.DrawerID
+	}
+	if rawDrawerID != nil && *rawDrawerID != "" {
+		parsed, err := uuid.Parse(*rawDrawerID)
+		if err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, errBadID)
+			return
+		}
+		drawerID = &parsed
+	}
+	var sessionID uuid.UUID
+	if req.SessionID != "" {
+		sessionID, err = uuid.Parse(req.SessionID)
+		if err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, errBadID)
+			return
+		}
+	}
 	out, err := ctrl.CashClose.Close(c.Request.Context(), reportsApp.CashCloseInput{
-		GymID:             gymID,
-		ActorUserID:       userID,
-		Date:              date,
+		GymID:       gymID,
+		ActorUserID: userID,
+		Date:        date,
+		DrawerID:    drawerID,
+		OpeningCash: req.OpeningCash,
+		SessionID:   sessionID, Finish: req.Finish, ExpectedCash: req.ExpectedCash,
 		CountedCash:       req.CountedCash,
 		DiscrepancyReason: req.DiscrepancyReason,
+		CorrectionReason:  req.CorrectionReason,
+		CashLeft:          req.CashLeft,
+		Withdraw:          req.Withdraw,
 	})
 	if err != nil {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
@@ -919,6 +1677,7 @@ func (ctrl *PaymentController) handleCashClose(c *gin.Context) {
 		CashCloseID:    out.CashCloseID,
 		CalculatedCash: out.CalculatedCash,
 		CountedCash:    out.CountedCash,
+		Session:        cashSessionToResp(out.Session),
 	}
 	if out.Discrepancy != nil {
 		resp.Discrepancy = out.Discrepancy
@@ -926,22 +1685,201 @@ func (ctrl *PaymentController) handleCashClose(c *gin.Context) {
 	utils.JsonResponse(c, http.StatusCreated, resp)
 }
 
-func toPaymentResp(p *paymentDomain.Payment) paymentResp {
-	return paymentResp{
-		ID:              p.ID,
-		Folio:           p.Folio,
-		Reference:       p.Folio, // FE alias — comprobantes use this as folio.
-		MemberID:        p.MemberID,
-		Amount:          p.Amount,
-		PaymentMethod:   p.PaymentMethod,
-		Concept:         p.Concept,
-		ParentPaymentID: p.ParentPaymentID,
-		DiscountAmount:  p.DiscountAmount,
-		DiscountReason:  p.DiscountReason,
-		BalancePending:  p.BalancePending,
-		PaymentDate:     p.PaymentDate.Format("2006-01-02"),
-		Notes:           p.Notes,
-		OperatorID:      p.OperatorID,
-		CreatedAt:       p.CreatedAt,
+func (ctrl *PaymentController) handleCashReopen(c *gin.Context) {
+	gymID, _ := middleware.GetGymID(c)
+	userID, _ := middleware.GetUserID(c)
+	var req cashReopenReq
+	if !bindJSON(c, &req) {
+		return
 	}
+	var sessionID uuid.UUID
+	if rawSessionID := c.Param("id"); rawSessionID != "" {
+		parsed, err := uuid.Parse(rawSessionID)
+		if err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, errBadID)
+			return
+		}
+		sessionID = parsed
+	}
+	var date time.Time
+	if req.Date != "" {
+		parsed, err := time.Parse("2006-01-02", req.Date)
+		if err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, err)
+			return
+		}
+		date = parsed
+	} else if sessionID == uuid.Nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, errors.New("date es obligatorio para la reapertura por fecha"))
+		return
+	}
+	rawDrawerID := req.CashDrawerID
+	if rawDrawerID == nil {
+		rawDrawerID = req.DrawerID
+	}
+	drawerID, err := parseOptionalCashDrawerID(rawDrawerID)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, errBadID)
+		return
+	}
+	reason := req.Reason
+	if err := ctrl.CashClose.Reopen(c.Request.Context(), reportsApp.CashReopenInput{
+		GymID: gymID, ActorUserID: userID, SessionID: sessionID,
+		Date: date, DrawerID: drawerID, Reason: &reason,
+	}); err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+func (ctrl *PaymentController) handleCashReconcile(c *gin.Context) {
+	gymID, _ := middleware.GetGymID(c)
+	userID, _ := middleware.GetUserID(c)
+	role, _ := middleware.GetRole(c)
+	sessionID, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	var req cashReconcileReq
+	if !bindJSON(c, &req) {
+		return
+	}
+	if req.CountedCash == nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, errors.New("counted_cash es obligatorio"))
+		return
+	}
+	out, err := ctrl.CashClose.Reconcile(c.Request.Context(), reportsApp.CashReconcileInput{
+		GymID: gymID, ActorUserID: userID, ActorRole: role, SessionID: sessionID,
+		CountedCash: *req.CountedCash, Finish: req.Finish, DiscrepancyReason: req.DiscrepancyReason,
+		CorrectionReason: req.CorrectionReason,
+	})
+	if err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	utils.JsonResponse(c, http.StatusOK, cashSessionToResp(out))
+}
+
+func (ctrl *PaymentController) handleCashWithdraw(c *gin.Context) {
+	gymID, _ := middleware.GetGymID(c)
+	userID, _ := middleware.GetUserID(c)
+	sessionID, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	var req cashWithdrawReq
+	if !bindJSON(c, &req) {
+		return
+	}
+	out, err := ctrl.CashClose.Withdraw(c.Request.Context(), reportsApp.CashWithdrawInput{
+		GymID: gymID, ActorUserID: userID, SessionID: sessionID,
+		CashLeft: req.CashLeft, Destination: req.Destination,
+	})
+	if err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	utils.JsonResponse(c, http.StatusOK, cashSessionToResp(out))
+}
+
+func cashSessionToResp(in *reportsApp.CashSessionView) *cashSessionResp {
+	if in == nil {
+		return nil
+	}
+	out := &cashSessionResp{
+		ID: in.ID, DrawerID: in.DrawerID, DrawerCode: in.DrawerCode,
+		OperationalDate: in.OperationalDate.Format("2006-01-02"), Sequence: in.Sequence,
+		Status: in.Status, OpeningCash: in.OpeningCash, OpeningCashKnown: in.OpeningCashKnown,
+		ActivityCash: in.ActivityCash, ExpectedCash: in.ExpectedCash,
+		CountedCash: in.CountedCash, Difference: in.Difference, CashLeft: in.CashLeft,
+		WithdrawnCash: in.WithdrawnCash, WithdrawalDestination: in.WithdrawalDestination,
+		OpenedAt: in.OpenedAt.Format(time.RFC3339Nano), IsStale: in.IsStale,
+		AdjustedAfterWithdrawal: in.AdjustedAfterWithdrawal, IntegrityNote: in.IntegrityNote,
+		CorrectionReason:      in.CorrectionReason,
+		UncoveredCashActivity: in.UncoveredCashActivity, RequiresNewSession: in.RequiresNewSession,
+	}
+	out.CurrentExpectedCash = in.CurrentExpectedCash
+	out.FinishedAt = formatOptionalTime(in.FinishedAt)
+	out.ClosedByName = in.ClosedByName
+	out.DiscrepancyReason = in.DiscrepancyReason
+	out.ClosedAt = formatOptionalTime(in.ClosedAt)
+	out.ReconciledAt = formatOptionalTime(in.ReconciledAt)
+	out.StaleAt = formatOptionalTime(in.StaleAt)
+	out.WithdrawnAt = formatOptionalTime(in.WithdrawnAt)
+	return out
+}
+
+func formatOptionalTime(in *time.Time) *string {
+	if in == nil {
+		return nil
+	}
+	v := in.UTC().Format(time.RFC3339Nano)
+	return &v
+}
+
+func toPaymentResp(p *paymentDomain.Payment) paymentResp {
+	drawerID := p.CashDrawerID
+	if p.EffectiveCashDestination() == "gym_fund" {
+		drawerID = nil
+	}
+	if p.PaymentMethod == paymentDomain.MethodCash && p.EffectiveCashDestination() != "gym_fund" && (drawerID == nil || *drawerID == uuid.Nil) {
+		mainDrawerID := p.GymID
+		drawerID = &mainDrawerID
+	}
+	return paymentResp{
+		ID:               p.ID,
+		Version:          p.Version,
+		Folio:            p.Folio,
+		Reference:        p.Folio, // FE alias — comprobantes use this as folio.
+		MemberID:         p.MemberID,
+		Amount:           p.Amount,
+		RecognizedAmount: p.RecognizedAmount,
+		PaymentMethod:    p.PaymentMethod,
+		CashDrawerID:     drawerID,
+		CashDestination:  p.EffectiveCashDestination(),
+		Concept:          p.Concept,
+		ParentPaymentID:  p.ParentPaymentID,
+		DiscountAmount:   p.DiscountAmount,
+		DiscountReason:   p.DiscountReason,
+		BalancePending:   p.BalancePending,
+		PaymentDate:      p.PaymentDate.Format("2006-01-02"),
+		Notes:            p.Notes,
+		OperatorID:       p.OperatorID,
+		CreatedAt:        p.CreatedAt,
+	}
+}
+
+func (ctrl *PaymentController) handleCashOpen(c *gin.Context) {
+	gymID, _ := middleware.GetGymID(c)
+	actorID, _ := middleware.GetUserID(c)
+	var req struct {
+		Date         string   `json:"date" validate:"required"`
+		CashDrawerID *string  `json:"cash_drawer_id"`
+		OpeningCash  *float64 `json:"opening_cash"`
+		Sequence     int      `json:"sequence" validate:"min=1"`
+	}
+	if !bindJSON(c, &req) {
+		return
+	}
+	if req.OpeningCash == nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, errors.New("indica el efectivo inicial"))
+		return
+	}
+	date, err := time.Parse("2006-01-02", req.Date)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err)
+		return
+	}
+	drawer, err := parseOptionalCashDrawerID(req.CashDrawerID)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, errBadID)
+		return
+	}
+	out, err := ctrl.CashClose.Open(c.Request.Context(), reportsApp.CashOpenInput{GymID: gymID, ActorUserID: actorID, Date: date, DrawerID: drawer, OpeningCash: *req.OpeningCash, Sequence: req.Sequence})
+	if err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	utils.JsonResponse(c, http.StatusCreated, cashSessionToResp(out))
 }

@@ -6,6 +6,8 @@
 package payment
 
 import (
+	"encoding/json"
+	"math"
 	"strings"
 	"time"
 
@@ -46,13 +48,30 @@ type BreakdownLine struct {
 // float64 here for ergonomics; the SQLite mapper converts to cents at the
 // edge. Negative `amount` is reserved for refunds (DA-22.1).
 type Payment struct {
-	ID              uuid.UUID
-	GymID           uuid.UUID
-	Version         int
-	Folio           string
-	MemberID        *uuid.UUID
-	Amount          float64
-	PaymentMethod   string
+	ID       uuid.UUID
+	GymID    uuid.UUID
+	Version  int
+	Folio    string
+	MemberID *uuid.UUID
+	// MembershipID identifies the exact service obligation created/activated
+	// by a membership payment. It is intentionally separate from MemberID so
+	// refunding an old payment can never cancel a later renewal.
+	MembershipID *uuid.UUID
+	// Keyed financial commands persist their request fingerprint and original
+	// response on the payment they create, so retries never repeat side effects.
+	IdempotencyKey         string
+	IdempotencyFingerprint string
+	IdempotencyResult      json.RawMessage
+	Amount                 float64
+	// RecognizedAmount is the economic income attributed to this collection.
+	// It normally equals Amount; a corrected overcollection keeps physical
+	// Amount intact while recognizing only the real sale total.
+	RecognizedAmount float64
+	PaymentMethod    string
+	// CashDrawerID attributes a physical cash event to one drawer. Nil means
+	// the deterministic main drawer and remains valid for older clients.
+	CashDrawerID    *uuid.UUID
+	CashDestination string
 	Concept         string
 	ParentPaymentID *uuid.UUID
 	DiscountAmount  float64
@@ -76,6 +95,70 @@ type Payment struct {
 func (p *Payment) SetBreakdown(lines []BreakdownLine) *Payment {
 	p.Breakdown = lines
 	return p
+}
+
+func (p *Payment) WithCashDrawer(drawerID uuid.UUID) *Payment {
+	if p != nil && p.PaymentMethod == MethodCash && p.EffectiveCashDestination() != "gym_fund" && drawerID != uuid.Nil {
+		id := drawerID
+		p.CashDrawerID = &id
+	}
+	return p
+}
+
+func (p *Payment) WithMembership(membershipID uuid.UUID) *Payment {
+	if p != nil && membershipID != uuid.Nil && (p.Concept == ConceptMembership || p.Concept == ConceptBalanceSettlement) {
+		id := membershipID
+		p.MembershipID = &id
+	}
+	return p
+}
+
+// WithProductSaleDiscount mirrors Sale.Discount onto the payment read model
+// so receipts and payment exports do not report a discounted sale as if it
+// had no discount. Product discounts may be manual and therefore need not
+// have a reason.
+func (p *Payment) WithProductSaleDiscount(amount float64, reason *string) *Payment {
+	if p == nil || p.Concept != ConceptProduct || amount < 0 {
+		return p
+	}
+	p.DiscountAmount = roundCents(amount)
+	if reason != nil && strings.TrimSpace(*reason) != "" {
+		clean := strings.TrimSpace(*reason)
+		p.DiscountReason = &clean
+	}
+	return p
+}
+
+func (p *Payment) BeginIdempotency(key, fingerprint string) error {
+	key, fingerprint = strings.TrimSpace(key), strings.TrimSpace(fingerprint)
+	if p == nil || key == "" || len(key) > 120 || fingerprint == "" {
+		return billingErrors.ErrIdempotencyKeyRequired
+	}
+	p.IdempotencyKey = key
+	p.IdempotencyFingerprint = fingerprint
+	return nil
+}
+
+func (p *Payment) FinalizeIdempotency(result []byte, now time.Time) error {
+	if p == nil || p.IdempotencyKey == "" || p.IdempotencyFingerprint == "" || !json.Valid(result) {
+		return billingErrors.ErrIdempotencyKeyRequired
+	}
+	p.IdempotencyResult = append(json.RawMessage(nil), result...)
+	p.Version++
+	p.UpdatedAt = now.UTC()
+	return nil
+}
+
+// EffectiveCashDrawerID normalizes legacy/nil cash attribution to the
+// deterministic main drawer. Non-cash payments have no physical drawer.
+func (p *Payment) EffectiveCashDrawerID() uuid.UUID {
+	if p == nil || p.PaymentMethod != MethodCash || p.EffectiveCashDestination() == "gym_fund" {
+		return uuid.Nil
+	}
+	if p.CashDrawerID != nil && *p.CashDrawerID != uuid.Nil {
+		return *p.CashDrawerID
+	}
+	return p.GymID
 }
 
 // NewMembershipPayment builds a new Payment row for UC-018. Caller passes the
@@ -128,22 +211,23 @@ func NewMembershipPayment(
 	}
 	mID := memberID
 	return &Payment{
-		ID:             id,
-		GymID:          gymID,
-		Version:        1,
-		Folio:          folio,
-		MemberID:       &mID,
-		Amount:         roundCents(paid),
-		PaymentMethod:  method,
-		Concept:        ConceptMembership,
-		DiscountAmount: roundCents(discount),
-		DiscountReason: discountReason,
-		BalancePending: roundCents(balancePending),
-		PaymentDate:    truncateDate(paymentDate),
-		Notes:          notes,
-		OperatorID:     operatorID,
-		CreatedAt:      now,
-		UpdatedAt:      now,
+		ID:               id,
+		GymID:            gymID,
+		Version:          1,
+		Folio:            folio,
+		MemberID:         &mID,
+		Amount:           roundCents(paid),
+		RecognizedAmount: roundCents(paid),
+		PaymentMethod:    method,
+		Concept:          ConceptMembership,
+		DiscountAmount:   roundCents(discount),
+		DiscountReason:   discountReason,
+		BalancePending:   roundCents(balancePending),
+		PaymentDate:      truncateDate(paymentDate),
+		Notes:            notes,
+		OperatorID:       operatorID,
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	}, nil
 }
 
@@ -188,20 +272,22 @@ func NewBalanceSettlementPayment(
 	}
 	parentID := parent.ID
 	return &Payment{
-		ID:              id,
-		GymID:           gymID,
-		Version:         1,
-		Folio:           folio,
-		MemberID:        parent.MemberID,
-		Amount:          roundCents(amount),
-		PaymentMethod:   method,
-		Concept:         ConceptBalanceSettlement,
-		ParentPaymentID: &parentID,
-		PaymentDate:     truncateDate(paymentDate),
-		Notes:           notes,
-		OperatorID:      operatorID,
-		CreatedAt:       now,
-		UpdatedAt:       now,
+		ID:               id,
+		GymID:            gymID,
+		Version:          1,
+		Folio:            folio,
+		MemberID:         parent.MemberID,
+		MembershipID:     parent.MembershipID,
+		Amount:           roundCents(amount),
+		RecognizedAmount: roundCents(amount),
+		PaymentMethod:    method,
+		Concept:          ConceptBalanceSettlement,
+		ParentPaymentID:  &parentID,
+		PaymentDate:      truncateDate(paymentDate),
+		Notes:            notes,
+		OperatorID:       operatorID,
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	}, nil
 }
 
@@ -209,11 +295,10 @@ func NewBalanceSettlementPayment(
 // `total` is the post-discount cart total (caller computed it from the Sale
 // aggregate). `memberID` is optional (anonymous walk-in sale — DA-25.3).
 // `paid` puede ser igual al total (cobro completo, caso default) o menor
-// (fiado — se cobra una parte y el resto queda como balance_pending para
+// (fiado — se cobra una parte o nada y el resto queda como balance_pending para
 // liquidar después vía POST /payments/:id/settle, el mismo flujo que los
-// abonos a mensualidades). La verificación de que el caller pase un
-// member en el caso de fiado vive en el use case (RegisterSale), no
-// aquí — el domain solo enforce que paid > 0 y paid ≤ total.
+// abonos a mensualidades). El fiado requiere un socio; cero cobrado
+// conserva la deuda sin registrar ingresos.
 func NewProductSalePayment(
 	id, gymID, operatorID uuid.UUID,
 	memberID *uuid.UUID,
@@ -229,11 +314,14 @@ func NewProductSalePayment(
 		}
 		return nil, billingErrors.ErrPaymentMethodInvalid
 	}
-	if total <= 0 {
+	if math.IsNaN(total) || math.IsInf(total, 0) || total <= 0 {
 		return nil, billingErrors.ErrAmountInvalid
 	}
-	if paid <= 0 || roundCents(paid) > roundCents(total) {
-		return nil, billingErrors.ErrPartialAmountInvalid
+	if math.IsNaN(paid) || math.IsInf(paid, 0) || paid < 0 || roundCents(paid) > roundCents(total) {
+		return nil, billingErrors.ErrSalePaidInvalid
+	}
+	if roundCents(paid) < roundCents(total) && memberID == nil {
+		return nil, billingErrors.ErrCreditRequiresMember
 	}
 	if err := validateNotes(notes); err != nil {
 		return nil, err
@@ -243,20 +331,60 @@ func NewProductSalePayment(
 	}
 	balance := roundCents(total - paid)
 	return &Payment{
-		ID:             id,
-		GymID:          gymID,
-		Version:        1,
-		Folio:          folio,
-		MemberID:       memberID,
-		Amount:         roundCents(paid),
-		PaymentMethod:  method,
-		Concept:        ConceptProduct,
-		BalancePending: balance,
-		PaymentDate:    truncateDate(paymentDate),
-		Notes:          notes,
-		OperatorID:     operatorID,
-		CreatedAt:      now,
-		UpdatedAt:      now,
+		ID:               id,
+		GymID:            gymID,
+		Version:          1,
+		Folio:            folio,
+		MemberID:         memberID,
+		Amount:           roundCents(paid),
+		RecognizedAmount: roundCents(paid),
+		PaymentMethod:    method,
+		Concept:          ConceptProduct,
+		BalancePending:   balance,
+		PaymentDate:      truncateDate(paymentDate),
+		Notes:            notes,
+		OperatorID:       operatorID,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}, nil
+}
+
+// NewOtherIncomePayment records income that is not a membership charge or a
+// product sale (for example, selling old equipment). The description lives in
+// Notes because payments are append-only and this concept does not need a
+// separate aggregate.
+func NewOtherIncomePayment(
+	id, gymID, operatorID uuid.UUID,
+	folio string,
+	amount float64,
+	method string,
+	description string,
+	paymentDate, now time.Time,
+) (*Payment, error) {
+	if !validMethod(method) {
+		if method == "" {
+			return nil, billingErrors.ErrPaymentMethodMissing
+		}
+		return nil, billingErrors.ErrPaymentMethodInvalid
+	}
+	if amount <= 0 {
+		return nil, billingErrors.ErrAmountInvalid
+	}
+	description = strings.TrimSpace(description)
+	if description == "" {
+		return nil, billingErrors.ErrOtherIncomeDescriptionRequired
+	}
+	if err := validateNotes(&description); err != nil {
+		return nil, err
+	}
+	if paymentDate.IsZero() {
+		return nil, billingErrors.ErrPaymentDateInvalid
+	}
+	return &Payment{
+		ID: id, GymID: gymID, Version: 1, Folio: folio,
+		Amount: roundCents(amount), RecognizedAmount: roundCents(amount), PaymentMethod: method, Concept: ConceptOther,
+		PaymentDate: truncateDate(paymentDate), Notes: &description,
+		OperatorID: operatorID, CreatedAt: now, UpdatedAt: now,
 	}, nil
 }
 
@@ -271,7 +399,22 @@ func NewRefundPayment(
 	reason string,
 	paymentDate, now time.Time,
 ) (*Payment, error) {
-	if !validMethod(method) {
+	return NewRefundPaymentWithin(id, gymID, operatorID, parent, folio, amount,
+		parentRefundLimit(parent), method, reason, paymentDate, now)
+}
+
+// NewRefundPaymentWithin validates against the aggregate refundable balance
+// supplied by a repository lock (root + settlements - previous refunds).
+func NewRefundPaymentWithin(
+	id, gymID, operatorID uuid.UUID,
+	parent *Payment,
+	folio string,
+	amount, refundable float64,
+	method string,
+	reason string,
+	paymentDate, now time.Time,
+) (*Payment, error) {
+	if !validRefundMethod(method) {
 		if method == "" {
 			return nil, billingErrors.ErrPaymentMethodMissing
 		}
@@ -281,7 +424,7 @@ func NewRefundPayment(
 		return nil, billingErrors.ErrPaymentNotFound
 	}
 	switch parent.Concept {
-	case ConceptMembership, ConceptProduct, ConceptOther:
+	case ConceptMembership, ConceptProduct, ConceptOther, ConceptBalanceSettlement:
 	default:
 		return nil, billingErrors.ErrCannotRefundNonPayment
 	}
@@ -295,27 +438,36 @@ func NewRefundPayment(
 	if amount <= 0 {
 		return nil, billingErrors.ErrAmountInvalid
 	}
-	if roundCents(amount) > roundCents(parent.Amount) {
-		return nil, billingErrors.ErrAmountInvalid
+	if roundCents(amount) > roundCents(refundable) {
+		return nil, billingErrors.ErrRefundExceedsCollected
 	}
 	parentID := parent.ID
 	notes := r
 	return &Payment{
-		ID:              id,
-		GymID:           gymID,
-		Version:         1,
-		Folio:           folio,
-		MemberID:        parent.MemberID,
-		Amount:          -roundCents(amount),
-		PaymentMethod:   method,
-		Concept:         ConceptRefund,
-		ParentPaymentID: &parentID,
-		PaymentDate:     truncateDate(paymentDate),
-		Notes:           &notes,
-		OperatorID:      operatorID,
-		CreatedAt:       now,
-		UpdatedAt:       now,
+		ID:               id,
+		GymID:            gymID,
+		Version:          1,
+		Folio:            folio,
+		MemberID:         parent.MemberID,
+		MembershipID:     parent.MembershipID,
+		Amount:           -roundCents(amount),
+		RecognizedAmount: 0,
+		PaymentMethod:    method,
+		Concept:          ConceptRefund,
+		ParentPaymentID:  &parentID,
+		PaymentDate:      truncateDate(paymentDate),
+		Notes:            &notes,
+		OperatorID:       operatorID,
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	}, nil
+}
+
+func parentRefundLimit(parent *Payment) float64 {
+	if parent == nil {
+		return 0
+	}
+	return parent.Amount
 }
 
 // ApplyDiscount is exposed for tests / explicit construction flows. The use
@@ -345,10 +497,105 @@ func (p *Payment) RecordPartialPayment(paid, balance float64, now time.Time) err
 		return billingErrors.ErrPartialAmountInvalid
 	}
 	p.Amount = roundCents(paid)
+	p.RecognizedAmount = roundCents(paid)
 	p.BalancePending = roundCents(balance)
 	p.Version++
 	p.UpdatedAt = now
 	return nil
+}
+
+// CorrectSaleAmounts is the only domain mutation that may rewrite Amount.
+// It is intentionally called only by the audited sale-correction use case;
+// ordinary payment updates remain append-only.
+func (p *Payment) CorrectSaleAmounts(physicalAmount, recognizedAmount, balancePending, discountAmount float64, breakdown []BreakdownLine, now time.Time) error {
+	if p.Concept != ConceptProduct || physicalAmount < 0 || recognizedAmount < 0 ||
+		recognizedAmount > physicalAmount || balancePending < 0 || discountAmount < 0 {
+		return billingErrors.ErrAmountInvalid
+	}
+	p.Amount = roundCents(physicalAmount)
+	p.RecognizedAmount = roundCents(recognizedAmount)
+	p.BalancePending = roundCents(balancePending)
+	p.DiscountAmount = roundCents(discountAmount)
+	p.Breakdown = append([]BreakdownLine(nil), breakdown...)
+	p.Version++
+	p.UpdatedAt = now.UTC()
+	return nil
+}
+
+// CorrectAdministrative rewrites capture facts for membership/other income
+// only. It does not alter the membership service period; product payments,
+// settlements and refunds have dedicated flows with additional consequences.
+func (p *Payment) CorrectAdministrative(amount, balancePending float64, method string, cashDrawerID *uuid.UUID, paymentDate, now time.Time) error {
+	if p == nil || p.ParentPaymentID != nil || (p.Concept != ConceptMembership && p.Concept != ConceptOther) ||
+		amount <= 0 || balancePending < 0 || !validMethod(method) || paymentDate.IsZero() {
+		return billingErrors.ErrPaymentCorrectionUnsupported
+	}
+	if p.Concept == ConceptOther && balancePending != 0 {
+		return billingErrors.ErrPaymentCorrectionUnsupported
+	}
+	if method != MethodCash || p.EffectiveCashDestination() == "gym_fund" {
+		cashDrawerID = nil
+	} else if cashDrawerID == nil || *cashDrawerID == uuid.Nil {
+		main := p.GymID
+		cashDrawerID = &main
+	} else {
+		copyID := *cashDrawerID
+		cashDrawerID = &copyID
+	}
+	p.Amount = roundCents(amount)
+	p.RecognizedAmount = roundCents(amount)
+	p.BalancePending = roundCents(balancePending)
+	p.PaymentMethod = method
+	p.CashDrawerID = cashDrawerID
+	p.PaymentDate = truncateDate(paymentDate)
+	p.Version++
+	p.UpdatedAt = now.UTC()
+	return nil
+}
+
+// AnnulAdministrative tombstones an extraordinary-income capture that never
+// happened. It deliberately does not create a refund or zero the historical
+// amount: reports ignore the tombstone while the correction snapshot retains
+// the exact erroneous capture. Membership payments are excluded because
+// removing one safely also requires reverting its service effects.
+func (p *Payment) AnnulAdministrative(now time.Time) error {
+	if p == nil || p.ParentPaymentID != nil || p.Concept != ConceptOther || p.DeletedAt != nil {
+		return billingErrors.ErrPaymentCorrectionUnsupported
+	}
+	at := now.UTC()
+	p.DeletedAt = &at
+	p.Version++
+	p.UpdatedAt = at
+	return nil
+}
+
+// CancelBalance removes the uncollected portion of an obligation without
+// creating a cash event. Product returns apply their economic value to this
+// balance first; only any excess becomes money physically refunded.
+func (p *Payment) CancelBalance(amount float64, now time.Time) (float64, error) {
+	if amount <= 0 || roundCents(amount) > roundCents(p.BalancePending) {
+		return p.BalancePending, billingErrors.ErrAmountInvalid
+	}
+	p.BalancePending = roundCents(p.BalancePending - amount)
+	p.Version++
+	p.UpdatedAt = now.UTC()
+	return p.BalancePending, nil
+}
+
+// ReopenBalance reverses a collection previously applied by a child
+// balance_settlement. Refunding that child returns physical money and makes
+// exactly the same amount collectible again on the original obligation.
+func (p *Payment) ReopenBalance(amount float64, now time.Time) (float64, error) {
+	if p == nil || (p.Concept != ConceptMembership && p.Concept != ConceptProduct) || amount <= 0 {
+		if p == nil {
+			return 0, billingErrors.ErrAmountInvalid
+		}
+		return p.BalancePending, billingErrors.ErrAmountInvalid
+	}
+	p.BalancePending = roundCents(p.BalancePending + amount)
+	p.Version++
+	p.UpdatedAt = now.UTC()
+	return p.BalancePending, nil
 }
 
 // DecrementBalance is the UC-019 update on the parent: subtract the settled
@@ -398,7 +645,10 @@ func (p *Payment) IsRefund() bool { return p.Concept == ConceptRefund }
 // existing rows.
 func (p *Payment) IsRefundable() bool {
 	switch p.Concept {
-	case ConceptMembership, ConceptProduct, ConceptOther:
+	case ConceptProduct:
+		// The root may collect zero; returns can cancel its debt or refund later settlements.
+		return p.Amount >= 0
+	case ConceptMembership, ConceptOther, ConceptBalanceSettlement:
 		return p.Amount > 0
 	}
 	return false
@@ -410,6 +660,10 @@ func validMethod(m string) bool {
 		return true
 	}
 	return false
+}
+
+func validRefundMethod(m string) bool {
+	return validMethod(m)
 }
 
 func validateNotes(n *string) error {
@@ -433,4 +687,28 @@ func roundCents(v float64) float64 {
 		return float64(int64(v*100+0.5)) / 100
 	}
 	return float64(int64(v*100-0.5)) / 100
+}
+
+// EffectiveCashDestination preserves the physical attribution of older clients.
+func (p *Payment) EffectiveCashDestination() string {
+	if p != nil && p.CashDestination == "gym_fund" {
+		return "gym_fund"
+	}
+	return "cash_drawer"
+}
+func (p *Payment) SetCashDestination(destination string) error {
+	if destination == "" {
+		destination = "cash_drawer"
+	}
+	if destination != "cash_drawer" && destination != "gym_fund" {
+		return billingErrors.ErrPaymentCorrectionUnsupported
+	}
+	if destination == "gym_fund" && p.Concept != ConceptOther {
+		return billingErrors.ErrPaymentCorrectionUnsupported
+	}
+	p.CashDestination = destination
+	if destination == "gym_fund" {
+		p.CashDrawerID = nil
+	}
+	return nil
 }

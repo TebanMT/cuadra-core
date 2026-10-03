@@ -433,7 +433,7 @@ CREATE TABLE IF NOT EXISTS cash_close_events (
     discrepancy_reason  TEXT,
     closed_by           TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT
 );
-CREATE INDEX IF NOT EXISTS idx_cash_close_events_gym_date ON cash_close_events(gym_id, close_date DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_cash_close_events_gym_date ON cash_close_events(gym_id, close_date) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_cash_close_events_sync ON cash_close_events(gym_id, updated_at);
 
 -- ---------------------------------------------------------------------------

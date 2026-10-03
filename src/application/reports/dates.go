@@ -1,6 +1,8 @@
 package reports
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -49,6 +51,41 @@ func localTodayAndTZ(
 		return truncateUTC(now), ""
 	}
 	return tz.LocalToday(g.Timezone, now), g.Timezone
+}
+
+// cashCommandLocalTodayAndTZ is the strict calendar resolver for commands
+// that certify or modify a physical cash session. A report may remain
+// available with the historical UTC fallback when the gym lookup is
+// temporarily unavailable, but a mutation must never guess the operational
+// day: around midnight UTC that could certify tomorrow in the gym's calendar.
+//
+// A nil repository is retained as an explicit compatibility mode for legacy
+// tests/adapters that have not wired gyms yet. Once a repository is wired,
+// lookup failures, missing gyms and invalid timezones all fail closed.
+func cashCommandLocalTodayAndTZ(
+	tx sharedDomain.Transaction,
+	gyms gymRepo.GymRepository,
+	gymID uuid.UUID,
+	now time.Time,
+) (time.Time, string, error) {
+	if gyms == nil {
+		return truncateUTC(now), "", nil
+	}
+	g, err := gyms.GetByID(tx, gymID)
+	if err != nil {
+		return time.Time{}, "", err
+	}
+	if g == nil {
+		return time.Time{}, "", fmt.Errorf("gym %s is unavailable", gymID)
+	}
+	timezone := strings.TrimSpace(g.Timezone)
+	if timezone == "" {
+		return time.Time{}, "", fmt.Errorf("gym %s has no timezone", gymID)
+	}
+	if _, err := time.LoadLocation(timezone); err != nil {
+		return time.Time{}, "", fmt.Errorf("gym %s has invalid timezone %q: %w", gymID, timezone, err)
+	}
+	return tz.LocalToday(timezone, now), timezone, nil
 }
 
 // nowUTC es el reloj del paquete. Variable y no llamada directa para que

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -13,16 +14,18 @@ import (
 
 // ListExpensesInput — filtros para GET /api/v1/expenses.
 type ListExpensesInput struct {
-	GymID         uuid.UUID
-	From          *time.Time
-	To            *time.Time
-	Category      string
-	PaymentMethod string
-	Search        string
-	Sort          string
-	Direction     string
-	Page          int
-	PageSize      int
+	GymID          uuid.UUID
+	From           *time.Time
+	To             *time.Time
+	Category       string
+	PaymentMethod  string
+	Source         string
+	Classification string
+	Search         string
+	Sort           string
+	Direction      string
+	Page           int
+	PageSize       int
 }
 
 type ListExpensesOutput struct {
@@ -38,11 +41,36 @@ type ListExpenses struct {
 	UoW      sharedDomain.UnitOfWork
 }
 
+type GetExpense struct {
+	Expenses expRepo.ExpenseRepository
+	UoW      sharedDomain.UnitOfWork
+}
+
+func NewGetExpense(r expRepo.ExpenseRepository, u sharedDomain.UnitOfWork) *GetExpense {
+	return &GetExpense{r, u}
+}
+func (uc *GetExpense) Execute(ctx context.Context, gym, id uuid.UUID) (*expenseDomain.Expense, error) {
+	tx, err := uc.UoW.Query(ctx)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
+	e, err := uc.Expenses.GetByID(tx, gym, id)
+	if err != nil {
+		return nil, err
+	}
+	return e, nil
+}
+
 func NewListExpenses(expenses expRepo.ExpenseRepository, uow sharedDomain.UnitOfWork) *ListExpenses {
 	return &ListExpenses{Expenses: expenses, UoW: uow}
 }
 
 func (uc *ListExpenses) Execute(ctx context.Context, in ListExpensesInput) (*ListExpensesOutput, error) {
+	if in.From != nil && in.To != nil {
+		if in.From.After(*in.To) {
+			return nil, sharedDomain.NewValidationError(fmt.Errorf("el periodo debe estar ordenado"))
+		}
+	}
 	tx, err := uc.UoW.Query(ctx)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
@@ -56,24 +84,28 @@ func (uc *ListExpenses) Execute(ctx context.Context, in ListExpensesInput) (*Lis
 		pageSize = 50
 	}
 	listQuery := expRepo.ListQuery{
-		GymID:         in.GymID,
-		From:          in.From,
-		To:            in.To,
-		Category:      in.Category,
-		PaymentMethod: in.PaymentMethod,
-		Search:        in.Search,
-		Sort:          in.Sort,
-		Direction:     in.Direction,
-		Page:          page,
-		PageSize:      pageSize,
+		GymID:          in.GymID,
+		From:           in.From,
+		To:             in.To,
+		Category:       in.Category,
+		PaymentMethod:  in.PaymentMethod,
+		Source:         in.Source,
+		Classification: in.Classification,
+		Search:         in.Search,
+		Sort:           in.Sort,
+		Direction:      in.Direction,
+		Page:           page,
+		PageSize:       pageSize,
 	}
 	rows, total, err := uc.Expenses.List(tx, listQuery)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}
-	// Aggregates corre sobre el mismo filtro — alimenta StatCards. Si
-	// falla, degrada a ceros (mismo posture que ListProducts).
-	aggs, _ := uc.Expenses.ListAggregates(tx, listQuery)
+	// Financial aggregates must never degrade to plausible zeroes.
+	aggs, err := uc.Expenses.ListAggregates(tx, listQuery)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
 	return &ListExpensesOutput{
 		Items:      rows,
 		Total:      total,

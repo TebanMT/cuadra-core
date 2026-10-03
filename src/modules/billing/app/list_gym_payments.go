@@ -44,6 +44,11 @@ type ListGymPaymentsOutput struct {
 	TransferTotal float64
 	CardTotal     float64
 	MemberNames   map[uuid.UUID]string // id → full_name for the rows in this page
+	// SaleSummaries — payment_id de la FILA → "Agua 1L ×2 · Proteína". Cubre
+	// ventas (concept='product') y sus refunds (resueltos vía parent). Sin
+	// esto, una venta walk-in (member_id NULL) se pintaba como "—" en Cobros.
+	SaleSummaries map[uuid.UUID]string
+	SaleIDs       map[uuid.UUID]uuid.UUID
 }
 
 type ListGymPayments struct {
@@ -53,6 +58,9 @@ type ListGymPayments struct {
 	// Gyms (opcional) → default de rango en el día LOCAL del gym cuando el
 	// caller no manda from/to (ver gymLocalPaymentDate). Nil = día UTC.
 	Gyms gymRepo.GymRepository
+	// Sales (opcional) → resúmenes de productos por pago. Nil = sin resumen
+	// (compat con wiring viejo en tests).
+	Sales billingRepo.SaleItemRepository
 }
 
 func NewListGymPayments(payments billingRepo.PaymentRepository, members memRepo.MemberRepository, uow sharedDomain.UnitOfWork) *ListGymPayments {
@@ -63,6 +71,13 @@ func NewListGymPayments(payments billingRepo.PaymentRepository, members memRepo.
 // calendario del gym en SU zona horaria.
 func (uc *ListGymPayments) WithGyms(g gymRepo.GymRepository) *ListGymPayments {
 	uc.Gyms = g
+	return uc
+}
+
+// WithSales cablea el repo de sale_items para resolver los resúmenes de
+// producto por pago.
+func (uc *ListGymPayments) WithSales(s billingRepo.SaleItemRepository) *ListGymPayments {
+	uc.Sales = s
 	return uc
 }
 
@@ -123,6 +138,52 @@ func (uc *ListGymPayments) Execute(ctx context.Context, in ListGymPaymentsInput)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}
+	// Resumen de productos por fila. La clave del lookup es el pago de la
+	// VENTA: la fila misma para concept='product', el parent para refunds
+	// (el refund no tiene venta propia — apunta a la original).
+	summaries := map[uuid.UUID]string{}
+	saleIDs := map[uuid.UUID]uuid.UUID{}
+	if uc.Sales != nil {
+		requestedIDs := make([]uuid.UUID, 0, len(rows))
+		for _, p := range rows {
+			requestedIDs = append(requestedIDs, p.ID)
+		}
+		saleIDs, err = uc.Sales.SaleIDsByPaymentIDs(tx, requestedIDs)
+		if err != nil {
+			return nil, sharedDomain.NewUnexpectedError(err)
+		}
+		keys := make([]uuid.UUID, 0, len(rows))
+		seenKeys := make(map[uuid.UUID]struct{}, len(rows))
+		saleKey := func(p *paymentDomain.Payment) *uuid.UUID {
+			switch {
+			case p.Concept == paymentDomain.ConceptProduct:
+				return &p.ID
+			case p.Concept == paymentDomain.ConceptRefund && p.ParentPaymentID != nil:
+				return p.ParentPaymentID
+			default:
+				return nil
+			}
+		}
+		for _, p := range rows {
+			if k := saleKey(p); k != nil {
+				if _, ok := seenKeys[*k]; !ok {
+					seenKeys[*k] = struct{}{}
+					keys = append(keys, *k)
+				}
+			}
+		}
+		bySale, err := uc.Sales.SaleSummariesByPaymentIDs(tx, keys)
+		if err != nil {
+			return nil, sharedDomain.NewUnexpectedError(err)
+		}
+		for _, p := range rows {
+			if k := saleKey(p); k != nil {
+				if s, ok := bySale[*k]; ok {
+					summaries[p.ID] = s
+				}
+			}
+		}
+	}
 	return &ListGymPaymentsOutput{
 		Items:         rows,
 		Total:         total,
@@ -134,5 +195,7 @@ func (uc *ListGymPayments) Execute(ctx context.Context, in ListGymPaymentsInput)
 		TransferTotal: agg.TransferTotal,
 		CardTotal:     agg.CardTotal,
 		MemberNames:   names,
+		SaleSummaries: summaries,
+		SaleIDs:       saleIDs,
 	}, nil
 }

@@ -53,21 +53,24 @@ func setupProducts(t *testing.T) *productsFixture {
 	t.Cleanup(func() { db.Close() })
 	db.SetMaxOpenConns(1)
 
-	for _, m := range []string{
-		"../../../../db_migrations/sqlite/001_init_schema.sql",
-		"../../../../db_migrations/sqlite/005_users_pin.sql",
-		"../../../../db_migrations/sqlite/008_gym_charge_settings.sql",
-		"../../../../db_migrations/sqlite/018_gyms_stripe_customer.sql",
-		"../../../../db_migrations/sqlite/030_stock_movements_is_purchase.sql",
-	} {
+	entries, err := os.ReadDir("../../../../db_migrations/sqlite")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".sql" {
+			continue
+		}
+		m := filepath.Join("../../../../db_migrations/sqlite", entry.Name())
 		schema, err := os.ReadFile(m)
 		if err != nil {
-			t.Fatalf("read %s: %v", m, err)
+			t.Fatal(err)
 		}
-		if _, err := db.Exec(string(schema)); err != nil {
+		if _, err = db.Exec(string(schema)); err != nil {
 			t.Fatalf("apply %s: %v", m, err)
 		}
 	}
+
 	uow := sharedDomain.NewSQLiteUnitOfWork(db, syncpkg.NewSqliteQueue())
 	recorder := audit.NewSQLiteRecorder()
 
@@ -202,7 +205,7 @@ func TestUC024_Restock_IncreasesStockAndLogsMovement(t *testing.T) {
 	reason := "Proveedor Coca"
 	out, err := f.adjustStockUC().Execute(context.Background(), prodApp.AdjustStockInput{
 		GymID: f.gymID, ActorUserID: f.ownerID, ProductID: createdOut.ProductID,
-		MovementType: "restock", Quantity: 100, Cost: &cost, Reason: &reason,
+		MovementType: "restock", Quantity: 100, Cost: &cost, Reason: &reason, IdempotencyKey: "restock-coca-1",
 	})
 	if err != nil {
 		t.Fatalf("adjust: %v", err)
@@ -224,7 +227,7 @@ func TestUC024_Shrinkage_DecreasesAndRespectsFloor(t *testing.T) {
 	})
 	out, err := f.adjustStockUC().Execute(context.Background(), prodApp.AdjustStockInput{
 		GymID: f.gymID, ActorUserID: f.ownerID, ProductID: createdOut.ProductID,
-		MovementType: "shrinkage", Quantity: 1,
+		MovementType: "shrinkage", Quantity: 1, IdempotencyKey: "shrink-botella-1",
 	})
 	if err != nil {
 		t.Fatalf("shrinkage: %v", err)
@@ -235,7 +238,7 @@ func TestUC024_Shrinkage_DecreasesAndRespectsFloor(t *testing.T) {
 	// Cannot go below zero.
 	if _, err := f.adjustStockUC().Execute(context.Background(), prodApp.AdjustStockInput{
 		GymID: f.gymID, ActorUserID: f.ownerID, ProductID: createdOut.ProductID,
-		MovementType: "shrinkage", Quantity: 999,
+		MovementType: "shrinkage", Quantity: 999, IdempotencyKey: "shrink-botella-too-much",
 	}); err == nil {
 		t.Errorf("oversize shrinkage should fail")
 	}
@@ -248,7 +251,7 @@ func TestUC024_CountCorrection_ReplacesStock(t *testing.T) {
 	})
 	out, err := f.adjustStockUC().Execute(context.Background(), prodApp.AdjustStockInput{
 		GymID: f.gymID, ActorUserID: f.ownerID, ProductID: createdOut.ProductID,
-		MovementType: "count_correction", Quantity: 15,
+		MovementType: "count_correction", Quantity: 15, IdempotencyKey: "count-snacks-15",
 	})
 	if err != nil {
 		t.Fatalf("count: %v", err)
@@ -263,6 +266,84 @@ func TestUC024_CountCorrection_ReplacesStock(t *testing.T) {
 	_ = f.db.Get(&movement, "SELECT delta, movement_type FROM stock_movements WHERE product_id=? AND movement_type='count_correction'", createdOut.ProductID.String())
 	if movement.Delta != -3 {
 		t.Errorf("logged delta = %d, want -3", movement.Delta)
+	}
+}
+
+func TestUC024_AllManualAdjustments_AreExactlyIdempotent(t *testing.T) {
+	f := setupProducts(t)
+	created, err := f.createProductUC().Execute(context.Background(), prodApp.CreateProductInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, Name: "Barra", Price: 30, InitialStock: 10,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	uc := f.adjustStockUC()
+
+	restock := prodApp.AdjustStockInput{GymID: f.gymID, ActorUserID: f.ownerID, ProductID: created.ProductID,
+		MovementType: "restock", Quantity: 2, IdempotencyKey: "idem-restock"}
+	firstRestock, err := uc.Execute(context.Background(), restock)
+	if err != nil {
+		t.Fatalf("restock: %v", err)
+	}
+	replayedRestock, err := uc.Execute(context.Background(), restock)
+	if err != nil {
+		t.Fatalf("replay restock: %v", err)
+	}
+	if *replayedRestock != *firstRestock {
+		t.Fatalf("restock replay=%+v, want exact %+v", replayedRestock, firstRestock)
+	}
+
+	shrink := prodApp.AdjustStockInput{GymID: f.gymID, ActorUserID: f.ownerID, ProductID: created.ProductID,
+		MovementType: "shrinkage", Quantity: 2, IdempotencyKey: "idem-shrink"}
+	firstShrink, err := uc.Execute(context.Background(), shrink)
+	if err != nil {
+		t.Fatalf("shrink: %v", err)
+	}
+	if replay, replayErr := uc.Execute(context.Background(), shrink); replayErr != nil || *replay != *firstShrink {
+		t.Fatalf("shrink replay=%+v err=%v, want exact %+v", replay, replayErr, firstShrink)
+	}
+
+	count := prodApp.AdjustStockInput{GymID: f.gymID, ActorUserID: f.ownerID, ProductID: created.ProductID,
+		MovementType: "count_correction", Quantity: 5, IdempotencyKey: "idem-count"}
+	firstCount, err := uc.Execute(context.Background(), count)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	// A later command changes current stock. Replaying the old count command
+	// must return its original response without applying that absolute count.
+	after := prodApp.AdjustStockInput{GymID: f.gymID, ActorUserID: f.ownerID, ProductID: created.ProductID,
+		MovementType: "restock", Quantity: 1, IdempotencyKey: "idem-after-count"}
+	if _, err = uc.Execute(context.Background(), after); err != nil {
+		t.Fatalf("later restock: %v", err)
+	}
+	if replay, replayErr := uc.Execute(context.Background(), count); replayErr != nil || *replay != *firstCount {
+		t.Fatalf("count replay=%+v err=%v, want exact %+v", replay, replayErr, firstCount)
+	}
+
+	changed := count
+	changed.Quantity = 4
+	if _, err = uc.Execute(context.Background(), changed); !errors.Is(err, prodErrors.ErrAdjustmentIdempotencyConflict) {
+		t.Fatalf("changed keyed request err=%v, want conflict", err)
+	}
+	if _, err = uc.Execute(context.Background(), prodApp.AdjustStockInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, ProductID: created.ProductID,
+		MovementType: "restock", Quantity: 1,
+	}); !errors.Is(err, prodErrors.ErrAdjustmentIdempotencyRequired) {
+		t.Fatalf("missing key err=%v, want required", err)
+	}
+
+	var stock, keyedRows, completeRows int
+	if err = f.db.Get(&stock, `SELECT stock FROM products WHERE id=?`, created.ProductID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.db.Get(&keyedRows, `SELECT COUNT(*) FROM stock_movements WHERE product_id=? AND idempotency_key IS NOT NULL`, created.ProductID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.db.Get(&completeRows, `SELECT COUNT(*) FROM stock_movements WHERE product_id=? AND idempotency_fingerprint IS NOT NULL AND idempotency_result IS NOT NULL`, created.ProductID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if stock != 6 || keyedRows != 4 || completeRows != 4 {
+		t.Fatalf("stock=%d keyed=%d complete=%d, want 6/4/4", stock, keyedRows, completeRows)
 	}
 }
 
@@ -382,7 +463,7 @@ func TestUC023_List_LargePageSizeReturnsAllActive(t *testing.T) {
 // ProductService.DecrementForSale — DA-25.2 enforcement at the seam.
 // ---------------------------------------------------------------------------
 
-func TestProductService_DecrementForSale_RejectsOversell(t *testing.T) {
+func TestProductService_DecrementForSale_PreservesNegativeStock(t *testing.T) {
 	f := setupProducts(t)
 	createdOut, _ := f.createProductUC().Execute(context.Background(), prodApp.CreateProductInput{
 		GymID: f.gymID, ActorUserID: f.ownerID, Name: "Limited", Price: 10, InitialStock: 3,
@@ -395,23 +476,16 @@ func TestProductService_DecrementForSale_RejectsOversell(t *testing.T) {
 		}, time.Now().UTC())
 		return err
 	})
-	if err == nil || !errors.Is(err, prodErrors.ErrInsufficientStock) {
-		// Custom errors wrap; double-check via .Error() substring as fallback.
-		if err == nil || (err.Error() == "" || !contains(err.Error(), "stock insuficiente")) {
-			t.Errorf("expected insufficient stock, got: %v", err)
-		}
+	if err != nil {
+		t.Fatal(err)
 	}
-	// Stock untouched on rollback.
 	var stock int
-	_ = f.db.Get(&stock, "SELECT stock FROM products WHERE id=?", createdOut.ProductID.String())
-	if stock != 3 {
-		t.Errorf("stock mutated despite failure: %d", stock)
+	if err := f.db.Get(&stock, "SELECT stock FROM products WHERE id=?", createdOut.ProductID.String()); err != nil || stock != -2 {
+		t.Fatalf("stock=%d err=%v", stock, err)
 	}
-	// No stock_movement of type 'sale' exists.
-	var nMv int
-	_ = f.db.Get(&nMv, "SELECT COUNT(*) FROM stock_movements WHERE product_id=? AND movement_type='sale'", createdOut.ProductID.String())
-	if nMv != 0 {
-		t.Errorf("expected 0 sale movements after failed tx, got %d", nMv)
+	var movements int
+	if err := f.db.Get(&movements, "SELECT COUNT(*) FROM stock_movements WHERE product_id=? AND movement_type='sale'", createdOut.ProductID.String()); err != nil || movements != 1 {
+		t.Fatalf("movements=%d err=%v", movements, err)
 	}
 }
 
@@ -467,11 +541,12 @@ func TestIsPurchase_CatalogCaptureVsRealRestock(t *testing.T) {
 		t.Errorf("avg unit cost = %v, want 6.50 (la captura debe contar al margen)", got)
 	}
 
-	// Restock posterior SIN el campo → compra (default true, semántica previa).
+	// Restock posterior SIN el campo sigue siendo captura física: una compra
+	// financiera siempre debe marcarse explícitamente.
 	restockCost := 7.00
 	if _, err := f.adjustStockUC().Execute(context.Background(), prodApp.AdjustStockInput{
 		GymID: f.gymID, ActorUserID: f.ownerID, ProductID: out.ProductID,
-		MovementType: "restock", Quantity: 5, Cost: &restockCost,
+		MovementType: "restock", Quantity: 5, Cost: &restockCost, IdempotencyKey: "capture-agua-5",
 	}); err != nil {
 		t.Fatalf("restock: %v", err)
 	}
@@ -481,7 +556,40 @@ func TestIsPurchase_CatalogCaptureVsRealRestock(t *testing.T) {
 		out.ProductID.String()); err != nil {
 		t.Fatalf("count purchases: %v", err)
 	}
-	if purchases != 1 {
-		t.Errorf("compras reales = %d, want 1 (sólo el restock)", purchases)
+	if purchases != 0 {
+		t.Errorf("compras reales = %d, want 0 (ninguna se marcó como compra)", purchases)
+	}
+}
+
+func TestAdjustStock_OperatorCannotAssertPaidInventoryPurchase(t *testing.T) {
+	f := setupProducts(t)
+	created, err := f.createProductUC().Execute(context.Background(), prodApp.CreateProductInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, Name: "Bebida", Price: 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	isPurchase := true
+	cost := 5.0
+	for _, status := range []string{"paid", ""} {
+		_, err = f.adjustStockUC().Execute(context.Background(), prodApp.AdjustStockInput{
+			GymID: f.gymID, ActorUserID: f.ownerID, ActorRole: "operator",
+			ProductID: created.ProductID, MovementType: "restock", Quantity: 4,
+			Cost: &cost, IsPurchase: &isPurchase, PurchaseStatus: status,
+			IdempotencyKey: "operator-financial-purchase-" + status,
+		})
+		if !errors.Is(err, prodErrors.ErrPurchaseOwnerRequired) {
+			t.Fatalf("operator purchase status %q error=%v, want owner requirement", status, err)
+		}
+	}
+	var stock, movements int
+	if err = f.db.Get(&stock, `SELECT stock FROM products WHERE id=?`, created.ProductID); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.db.Get(&movements, `SELECT COUNT(*) FROM stock_movements WHERE product_id=?`, created.ProductID); err != nil {
+		t.Fatal(err)
+	}
+	if stock != 0 || movements != 0 {
+		t.Fatalf("rejected operator payment mutated stock/movements=%d/%d", stock, movements)
 	}
 }

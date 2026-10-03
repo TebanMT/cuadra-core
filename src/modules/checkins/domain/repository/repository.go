@@ -14,6 +14,8 @@ import (
 // CheckinRepository — UC-029 / UC-030 / UC-032 writes + history reads
 // (UC-015 member detail reuses the per-member listing).
 type CheckinRepository interface {
+	// LastEntryAt ignores denied attempts and does not depend on history pagination.
+	LastEntryAt(tx sharedDomain.Transaction, gymID, memberID uuid.UUID) (*time.Time, error)
 	Create(tx sharedDomain.Transaction, c *checkinDomain.Checkin) (*checkinDomain.Checkin, error)
 	GetByID(tx sharedDomain.Transaction, id uuid.UUID) (*checkinDomain.Checkin, error)
 	// CountFailedPinAttemptsSince supports DA-32 lockout. Counts checkins
@@ -59,4 +61,10 @@ type RecentCheckinRow struct {
 	OperatorName   *string
 	CheckinAt      time.Time
 	ExpiryDate     *time.Time
+}
+
+// PagedCheckinReader is an optional read capability for historical reports.
+// It does not alter check-in commands or synchronization.
+type PagedCheckinReader interface {
+	ListByGymBetweenPage(tx sharedDomain.Transaction, gymID uuid.UUID, tzName string, from, to time.Time, limit, offset int) ([]RecentCheckinRow, error)
 }

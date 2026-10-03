@@ -38,20 +38,21 @@ func paymentWirePayload(t *testing.T, paymentID string, gymID, operatorID uuid.U
 	t.Helper()
 	now := time.Now().UTC()
 	payload, err := json.Marshal(map[string]any{
-		"id":              paymentID,
-		"gym_id":          gymID.String(),
-		"version":         version,
-		"created_at":      now.UnixMilli(),
-		"updated_at":      now.UnixMilli(),
-		"folio":           "P-550",
-		"member_id":       nil,
-		"amount":          amountWire,
-		"payment_method":  "cash",
-		"concept":         "membership",
-		"discount_amount": 0,
-		"balance_pending": 0,
-		"payment_date":    now.Format("2006-01-02"),
-		"operator_id":     operatorID.String(),
+		"id":                paymentID,
+		"gym_id":            gymID.String(),
+		"version":           version,
+		"created_at":        now.UnixMilli(),
+		"updated_at":        now.UnixMilli(),
+		"folio":             "P-550",
+		"member_id":         nil,
+		"amount":            amountWire,
+		"recognized_amount": amountWire,
+		"payment_method":    "cash",
+		"concept":           "membership",
+		"discount_amount":   0,
+		"balance_pending":   0,
+		"payment_date":      now.Format("2006-01-02"),
+		"operator_id":       operatorID.String(),
 	})
 	if err != nil {
 		t.Fatalf("marshal payment payload: %v", err)

@@ -4,6 +4,9 @@ package sync
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,19 +26,32 @@ func (q *SqliteQueue) Enqueue(
 	clientVersion int,
 ) error {
 	stx := tx.(*sharedDomain.SqlxTransaction)
+	if stx.SyncWrites == nil {
+		stx.SyncWrites = make(map[string]bool)
+	}
+	stx.SyncWrites[expenseMemberKey(entityType, entityID)] = true
 	nowMs := time.Now().UTC().UnixMilli()
 
-	res, err := stx.Exec(ctx, `
-		UPDATE sync_queue
-		SET payload = ?, operation = ?, client_version = ?, enqueued_at = ?
-		WHERE entity_type = ? AND entity_id = ? AND synced_at IS NULL`,
-		string(payload), operation, clientVersion, nowMs, entityType, entityID,
-	)
-	if err != nil {
+	// A coalesced mutable row (most notably the root Payment) can connect
+	// several immutable refund graphs. Replacing its JSON snapshot must retain
+	// those protocol-only ids or a later refund could silently split the first
+	// graph across HTTP batches.
+	var existing struct {
+		ID      string `db:"id"`
+		Payload string `db:"payload"`
+	}
+	err := stx.Get(ctx, &existing, `SELECT id,payload FROM sync_queue
+		WHERE entity_type=? AND entity_id=? AND synced_at IS NULL LIMIT 1`, entityType, entityID)
+	if err == nil {
+		payload = mergeRefundGraphMetadata(json.RawMessage(existing.Payload), payload)
+		payload = mergeExpenseGraphMetadata(json.RawMessage(existing.Payload), payload)
+		_, err = stx.Exec(ctx, `UPDATE sync_queue
+			SET payload=?,operation=?,client_version=?,enqueued_at=? WHERE id=? AND synced_at IS NULL`,
+			string(payload), operation, clientVersion, nowMs, existing.ID)
 		return err
 	}
-	if n, _ := res.RowsAffected(); n > 0 {
-		return nil
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
 	}
 
 	id := uuid.New().String()
@@ -46,4 +62,34 @@ func (q *SqliteQueue) Enqueue(
 		id, entityType, entityID, operation, string(payload), clientVersion, nowMs,
 	)
 	return err
+}
+
+func mergeRefundGraphMetadata(existing, incoming json.RawMessage) json.RawMessage {
+	existingRaw, incomingRaw := decodePushPayload(existing), decodePushPayload(incoming)
+	if incomingRaw == nil {
+		return incoming
+	}
+	seen := make(map[string]bool)
+	var graphIDs []string
+	for _, payload := range []json.RawMessage{existing, incoming} {
+		for _, graphID := range refundGraphIDs(payload) {
+			if !seen[graphID] {
+				seen[graphID] = true
+				graphIDs = append(graphIDs, graphID)
+			}
+		}
+	}
+	if len(graphIDs) > 0 {
+		incomingRaw[refundGraphIDsKey] = graphIDs
+	}
+	if _, present := incomingRaw[refundGraphExpectedItemsKey]; !present {
+		if expected, exists := existingRaw[refundGraphExpectedItemsKey]; exists {
+			incomingRaw[refundGraphExpectedItemsKey] = expected
+		}
+	}
+	encoded, err := json.Marshal(incomingRaw)
+	if err != nil {
+		return incoming
+	}
+	return encoded
 }

@@ -5,6 +5,7 @@
 package stockmovement
 
 import (
+	"encoding/json"
 	"strings"
 	"time"
 
@@ -44,9 +45,29 @@ type StockMovement struct {
 	IsPurchase bool
 	SaleItemID *uuid.UUID
 	OperatorID uuid.UUID
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
-	DeletedAt  *time.Time
+	// Manual stock commands persist their semantic request and exact response.
+	// Sale/refund generated movements intentionally leave these empty.
+	IdempotencyKey         string
+	IdempotencyFingerprint string
+	IdempotencyResult      json.RawMessage
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
+	DeletedAt              *time.Time
+}
+
+// WithIdempotency makes a manually-triggered adjustment safely replayable.
+// Keeping all three values together prevents a key from existing without
+// enough information to distinguish a changed request or replay its result.
+func (m *StockMovement) WithIdempotency(key, fingerprint string, result json.RawMessage) error {
+	key = strings.TrimSpace(key)
+	fingerprint = strings.TrimSpace(fingerprint)
+	if key == "" || len(key) > 120 || fingerprint == "" || !json.Valid(result) {
+		return prodErrors.ErrAdjustmentIdempotencyRequired
+	}
+	m.IdempotencyKey = key
+	m.IdempotencyFingerprint = fingerprint
+	m.IdempotencyResult = append(json.RawMessage(nil), result...)
+	return nil
 }
 
 // New constructs a StockMovement. The caller (use case) is responsible for

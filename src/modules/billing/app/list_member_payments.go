@@ -36,12 +36,19 @@ type ListMemberPaymentsOutput struct {
 	// banner del perfil y el chip de deuda del POS. Sumar en el FE la página
 	// visible escondería deudas viejas.
 	TotalPending float64
+	SaleIDs      map[uuid.UUID]uuid.UUID
 }
 
 type ListMemberPayments struct {
 	Payments billingRepo.PaymentRepository
 	Members  memRepo.MemberRepository
 	UoW      sharedDomain.UnitOfWork
+	Sales    billingRepo.SaleItemRepository
+}
+
+func (uc *ListMemberPayments) WithSales(s billingRepo.SaleItemRepository) *ListMemberPayments {
+	uc.Sales = s
+	return uc
 }
 
 func NewListMemberPayments(payments billingRepo.PaymentRepository, members memRepo.MemberRepository,
@@ -85,11 +92,23 @@ func (uc *ListMemberPayments) Execute(ctx context.Context, in ListMemberPayments
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}
+	saleIDs := map[uuid.UUID]uuid.UUID{}
+	if uc.Sales != nil {
+		paymentIDs := make([]uuid.UUID, 0, len(rows))
+		for _, row := range rows {
+			paymentIDs = append(paymentIDs, row.ID)
+		}
+		saleIDs, err = uc.Sales.SaleIDsByPaymentIDs(tx, paymentIDs)
+		if err != nil {
+			return nil, sharedDomain.NewUnexpectedError(err)
+		}
+	}
 	return &ListMemberPaymentsOutput{
 		Items:        rows,
 		Total:        total,
 		Page:         page,
 		PageSize:     pageSize,
 		TotalPending: pending,
+		SaleIDs:      saleIDs,
 	}, nil
 }

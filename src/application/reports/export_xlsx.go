@@ -169,7 +169,7 @@ func renderAttentionRequiredXLSX(out *AttentionRequiredOutput) ([]byte, error) {
 		}
 		inaR[i] = []any{r.FullName, r.Phone, last, r.DaysAbsent}
 	}
-	if err := writeSection("Inactivos involuntarios", []string{"Socio", "Teléfono", "Último check-in", "Días sin venir"}, inaR); err != nil {
+	if err := writeSection("Sin entradas registradas en 21 días", []string{"Socio", "Teléfono", "Última asistencia", "Días sin registro"}, inaR); err != nil {
 		return nil, err
 	}
 
@@ -177,7 +177,7 @@ func renderAttentionRequiredXLSX(out *AttentionRequiredOutput) ([]byte, error) {
 	for i, r := range out.LowStock {
 		stkR[i] = []any{r.Name, r.Stock, r.StockMinimum}
 	}
-	if err := writeSection("Stock bajo", []string{"Producto", "Stock", "Mínimo"}, stkR); err != nil {
+	if err := writeSection("Existencias bajas", []string{"Producto", "Existencias", "Mínimo"}, stkR); err != nil {
 		return nil, err
 	}
 
@@ -186,14 +186,6 @@ func renderAttentionRequiredXLSX(out *AttentionRequiredOutput) ([]byte, error) {
 		balR[i] = []any{r.FullName, r.Phone, r.BalancePending}
 	}
 	if err := writeSection("Saldos pendientes", []string{"Socio", "Teléfono", "Saldo"}, balR); err != nil {
-		return nil, err
-	}
-
-	bdR := make([][]any, len(out.BirthdaysToday))
-	for i, r := range out.BirthdaysToday {
-		bdR[i] = []any{r.FullName, r.Phone}
-	}
-	if err := writeSection("Cumpleañeros del día", []string{"Socio", "Teléfono"}, bdR); err != nil {
 		return nil, err
 	}
 

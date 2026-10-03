@@ -3,6 +3,7 @@ package reports_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -267,15 +268,66 @@ func TestExport_PeriodSummary_XLSX_HasSections(t *testing.T) {
 	}
 	flat := blob.String()
 	needles := []string{
-		"Resumen del período", "Stock crítico",
-		"Indicadores", "Utilidad", "Ingresos vs Egresos",
-		"Gastos por categoría", "Top productos", "Proteina",
-		"Gastos del período", "Compras de inventario",
+		"Resumen del período", "Existencias bajas",
+		"Indicadores", "Ingresos", "Salidas", "Resultado del período",
+		"Compras pagadas", "Otros ingresos",
+		"Ingresos y salidas por día", "Resultado diario",
+		"Gastos por categoría", "Productos con más ingresos", "Proteina",
+		"Gastos de operación del período",
 	}
 	for _, n := range needles {
 		if !strings.Contains(flat, n) {
 			t.Errorf("XLSX missing expected text %q", n)
 		}
+	}
+	for _, legacy := range []string{"Resultado neto", "Flujo de caja", "Flujo diario"} {
+		if strings.Contains(flat, legacy) {
+			t.Errorf("XLSX still publishes legacy concept %q", legacy)
+		}
+	}
+}
+
+func TestExport_PeriodSummary_UsesOneSnapshotAndDoesNotDropRow201(t *testing.T) {
+	expenses := make([]reports.ExpenseRow, 201)
+	inventory := make([]reports.InventoryCostRow, 201)
+	for i := range expenses {
+		expenses[i] = reports.ExpenseRow{ID: uuid.New(), ExpenseDate: time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC), Category: "otros", PaymentMethod: "transfer", Amount: 1}
+		inventory[i] = reports.InventoryCostRow{MovementID: uuid.New(), ProductID: uuid.New(), ProductName: "Producto", Delta: 1, CostUnit: 1, CostTotal: 1, OccurredAt: time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)}
+	}
+	reader := &fakeReader{expenseRows: expenses, inventoryCostRows: inventory}
+	uow := &snapshotSpyUoW{}
+	gyms := &fakeGymRepo{gym: sampleGym()}
+	rng := reports.NewRangeReport(reader, uow).WithGyms(gyms)
+	uc := reports.NewExportReport(reader, gyms, uow, reports.NewAttentionRequired(reader, uow), rng)
+	out, err := uc.Execute(context.Background(), reports.ExportInput{
+		GymID: uuid.New(), Type: reports.ReportTypePeriodSummary, Format: reports.FormatXLSX, Period: reports.PeriodMonth,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uow.snapshots != 1 || uow.queries != 0 {
+		t.Fatalf("snapshots=%d queries=%d, want one snapshot and no loose query", uow.snapshots, uow.queries)
+	}
+	if reader.inventoryListLimit != -1 || reader.expenseListLimit != -1 {
+		t.Fatalf("export limits inventory/expenses=%d/%d, want unbounded sentinel -1", reader.inventoryListLimit, reader.expenseListLimit)
+	}
+	f, err := excelize.OpenReader(bytes.NewReader(out.Bytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	rows, err := f.GetRows("Sheet1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	productRows := 0
+	for _, row := range rows {
+		if len(row) > 1 && row[0] == "2026-08-01" && row[1] == "Producto" {
+			productRows++
+		}
+	}
+	if productRows != 201 {
+		t.Fatalf("exported inventory rows=%d, want all 201", productRows)
 	}
 }
 
@@ -298,5 +350,83 @@ func TestExport_PeriodSummary_CustomWindow_InFilename(t *testing.T) {
 	}
 	if !strings.Contains(out.Filename, "20260305") || !strings.Contains(out.Filename, "20260318") {
 		t.Errorf("filename %q should embed custom window 20260305..20260318", out.Filename)
+	}
+}
+
+func TestExport_PeriodSummaryRejectsInvalidWindowBeforeReading(t *testing.T) {
+	uc := newExportFixture(t, &fakeReader{})
+	today := time.Date(2026, 8, 24, 0, 0, 0, 0, time.UTC)
+	tomorrow := today.AddDate(0, 0, 1)
+	cases := []struct {
+		name string
+		in   reports.ExportInput
+		want error
+	}{
+		{name: "unknown period", in: reports.ExportInput{Period: "quarter"}, want: reports.ErrReportPeriodInvalid},
+		{name: "custom missing bound", in: reports.ExportInput{Period: reports.PeriodCustom, From: &today}, want: reports.ErrCustomReportRangeRequired},
+		{name: "preset missing bound", in: reports.ExportInput{Period: reports.PeriodMonth, From: &today}, want: reports.ErrCustomReportRangeRequired},
+		{name: "custom reversed", in: reports.ExportInput{Period: reports.PeriodCustom, From: &tomorrow, To: &today}, want: reports.ErrReportRangeInvalid},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.in.GymID = uuid.New()
+			tc.in.Type = reports.ReportTypePeriodSummary
+			tc.in.Format = reports.FormatXLSX
+			_, err := uc.Execute(context.Background(), tc.in)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("Execute() error = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+// A download may run after midnight, but must use the dates and comparison
+// already shown to the owner, including calendar-month alignment.
+func TestExport_PeriodSummaryFreezesDatesAndComparison(t *testing.T) {
+	for _, tc := range []struct{ period, from, to, previousFrom, previousTo string }{
+		{reports.PeriodMonth, "2026-09-01", "2026-09-28", "2026-08-01", "2026-08-28"},
+		{reports.PeriodLastMonth, "2026-08-01", "2026-08-31", "2026-07-01", "2026-07-31"},
+		{reports.PeriodMonth, "2026-03-01", "2026-03-31", "2026-02-01", "2026-02-28"},
+		{reports.PeriodCustom, "2026-09-01", "2026-09-28", "2026-08-04", "2026-08-31"},
+	} {
+		t.Run(tc.period+tc.from, func(t *testing.T) {
+			spy := &windowSpy{}
+			rng := reports.NewRangeReport(spy, fakeUoW{})
+			rng.Now = func() time.Time { return time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC) }
+			uc := reports.NewExportReport(spy, &fakeGymRepo{gym: sampleGym()}, fakeUoW{}, nil, rng)
+			from, _ := time.Parse("2006-01-02", tc.from)
+			to, _ := time.Parse("2006-01-02", tc.to)
+			out, err := uc.Execute(context.Background(), reports.ExportInput{GymID: uuid.New(), Type: reports.ReportTypePeriodSummary, Format: reports.FormatXLSX, Period: tc.period, From: &from, To: &to})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(spy.windows) < 2 {
+				t.Fatalf("missing current/previous queries: %v", spy.windows)
+			}
+			for i, want := range [][2]string{{tc.from, tc.to}, {tc.previousFrom, tc.previousTo}} {
+				got := [2]string{spy.windows[i][0].Format("2006-01-02"), spy.windows[i][1].Format("2006-01-02")}
+				if got != want {
+					t.Fatalf("query %d: got %v, want %v", i, got, want)
+				}
+			}
+			f, err := excelize.OpenReader(bytes.NewReader(out.Bytes))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer f.Close()
+			rows, err := f.GetRows(f.GetSheetName(0))
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, row := range rows {
+				if len(row) >= 3 && row[0] == "Comparación" && row[1] == tc.previousFrom && row[2] == tc.previousTo {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("download omits comparison %s..%s", tc.previousFrom, tc.previousTo)
+			}
+		})
 	}
 }

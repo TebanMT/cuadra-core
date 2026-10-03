@@ -234,7 +234,8 @@ type countTodayResp struct {
 }
 
 type recentCheckinsResp struct {
-	Items []checkinEventWire `json:"items"`
+	Items   []checkinEventWire `json:"items"`
+	HasMore *bool              `json:"has_more,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -309,6 +310,22 @@ func (c *CheckinController) handleListRecent(ctx *gin.Context) {
 			toT = t
 		}
 	}
+	pageSize, page := 0, 1
+	if raw := ctx.Query("page_size"); raw != "" {
+		var parseErr error
+		pageSize, parseErr = strconv.Atoi(raw)
+		if parseErr != nil || pageSize < 1 || pageSize > 200 || fromT.IsZero() || toT.IsZero() || fromT.After(toT) {
+			utils.ErrorResponse(ctx, http.StatusBadRequest, errors.New("período o tamaño de página inválido"))
+			return
+		}
+		if rawPage := ctx.Query("page"); rawPage != "" {
+			page, parseErr = strconv.Atoi(rawPage)
+			if parseErr != nil || page < 1 || page > 100000 {
+				utils.ErrorResponse(ctx, http.StatusBadRequest, errors.New("página inválida"))
+				return
+			}
+		}
+	}
 	if c.Repo == nil || c.UoW == nil {
 		utils.JsonResponse(ctx, http.StatusOK, recentCheckinsResp{Items: []checkinEventWire{}})
 		return
@@ -319,11 +336,26 @@ func (c *CheckinController) handleListRecent(ctx *gin.Context) {
 		return
 	}
 	var rows []chkRepo.RecentCheckinRow
+	var hasMore *bool
 	if !fromT.IsZero() && !toT.IsZero() {
 		// La ventana del drill-down se interpreta en el día LOCAL del gym
 		// — igual que la barra del chart de la que viene el click.
 		tzName, _ := c.gymTZAndToday(tx, gymID)
-		rows, err = c.Repo.ListByGymBetween(tx, gymID, tzName, fromT, toT, limit)
+		if pageSize > 0 {
+			reader, ok := c.Repo.(chkRepo.PagedCheckinReader)
+			if !ok {
+				utils.ErrorResponse(ctx, http.StatusNotImplemented, errors.New("actualiza Tinta para consultar el historial completo"))
+				return
+			}
+			rows, err = reader.ListByGymBetweenPage(tx, gymID, tzName, fromT, toT, pageSize+1, (page-1)*pageSize)
+			more := len(rows) > pageSize
+			hasMore = &more
+			if more {
+				rows = rows[:pageSize]
+			}
+		} else {
+			rows, err = c.Repo.ListByGymBetween(tx, gymID, tzName, fromT, toT, limit)
+		}
 	} else {
 		rows, err = c.Repo.ListRecentByGym(tx, gymID, limit)
 	}
@@ -335,7 +367,7 @@ func (c *CheckinController) handleListRecent(ctx *gin.Context) {
 	for _, r := range rows {
 		items = append(items, recentToWire(r))
 	}
-	utils.JsonResponse(ctx, http.StatusOK, recentCheckinsResp{Items: items})
+	utils.JsonResponse(ctx, http.StatusOK, recentCheckinsResp{Items: items, HasMore: hasMore})
 }
 
 func (c *CheckinController) handleMethods(ctx *gin.Context) {
@@ -397,7 +429,15 @@ func (c *CheckinController) handleListByMember(ctx *gin.Context) {
 	for _, r := range rows {
 		items = append(items, recentToWire(r))
 	}
-	utils.JsonResponse(ctx, http.StatusOK, recentCheckinsResp{Items: items})
+	lastEntry, err := c.Repo.LastEntryAt(tx, gymID, memberID)
+	if err != nil {
+		utils.ErrorResponse(ctx, http.StatusInternalServerError, err)
+		return
+	}
+	utils.JsonResponse(ctx, http.StatusOK, struct {
+		Items       []checkinEventWire `json:"items"`
+		LastEntryAt *time.Time         `json:"last_entry_at"`
+	}{Items: items, LastEntryAt: lastEntry})
 }
 
 func (c *CheckinController) handleOverride(ctx *gin.Context) {

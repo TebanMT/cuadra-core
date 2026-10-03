@@ -30,7 +30,7 @@ import (
 // ejecuta INSERT ... ON CONFLICT DO UPDATE SET col = excluded.col para
 // CADA columna registrada, incluso si el payload no la trae. Sin la
 // columna en el payload, excluded.col es NULL y la UPDATE rompe NOT NULL.
-func freshSidecarDBWithGym(t *testing.T, gymID uuid.UUID) (*sqlx.DB, sharedDomain.UnitOfWork) {
+func freshSidecarDBWithGym(t *testing.T, gymID uuid.UUID, migrationCeiling ...string) (*sqlx.DB, sharedDomain.UnitOfWork) {
 	t.Helper()
 	dir := t.TempDir()
 	db, err := sqlx.Open("sqlite3", filepath.Join(dir, "test.db")+"?_foreign_keys=on")
@@ -45,6 +45,9 @@ func freshSidecarDBWithGym(t *testing.T, gymID uuid.UUID) (*sqlx.DB, sharedDomai
 		t.Fatalf("read migrations dir: %v", err)
 	}
 	for _, e := range entries {
+		if len(migrationCeiling) > 0 && e.Name() > migrationCeiling[0] {
+			continue
+		}
 		if e.IsDir() || filepath.Ext(e.Name()) != ".sql" {
 			continue
 		}

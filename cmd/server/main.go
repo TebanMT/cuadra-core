@@ -129,11 +129,21 @@ func main() {
 	paymentRepo := billingRepoPg.NewPaymentPostgresRepository()
 	saleRepo := billingRepoPg.NewSalePostgresRepository()
 	saleItemRepo := billingRepoPg.NewSaleItemPostgresRepository()
+	refundRepo := billingRepoPg.NewRefundPostgresRepository()
+	saleCorrectionRepo := billingRepoPg.NewSaleCorrectionPostgresRepository()
+	paymentCorrectionRepo := billingRepoPg.NewPaymentCorrectionPostgresRepository()
 	cashCloseReader := billingRepoPg.NewCashClosePostgresReader()
 	cashCloseEventRepo := billingRepoPg.NewCashCloseEventPostgresRepository()
+	cashDrawerRepo := billingRepoPg.NewCashDrawerPostgresRepository()
 	productRepo := prodRepoPg.NewProductPostgresRepository()
 	stockMovementRepo := prodRepoPg.NewStockMovementPostgresRepository()
+	inventoryPurchaseRepo := prodRepoPg.NewInventoryPurchasePostgresRepository()
+	inventoryReceiptRepo := prodRepoPg.NewInventoryPurchaseReceiptPostgresRepository()
 	expenseRepo := expRepoPg.NewExpensePostgresRepository()
+	cashMovementRepo := expRepoPg.NewCashMovementPostgresRepository()
+	recurringTemplateRepo := expRepoPg.NewRecurringTemplatePostgresRepository()
+	expenseOccurrenceRepo := expRepoPg.NewOccurrencePostgresRepository()
+	cashDayLock := expRepoPg.NewCashDayLockPostgres()
 	fingerprintRepo := memRepoPg.NewFingerprintPostgresRepository()
 	checkinRepo := chkRepoPg.NewCheckinPostgresRepository()
 	contactAttemptRepo := memRepoPg.NewContactAttemptPostgresRepository()
@@ -240,7 +250,7 @@ func main() {
 	// CreateMember se puede enchufar después con WithPromotions una vez
 	// que applyPromo y memberSvc estén listos (ver línea ~232).
 	updateMember := memApp.NewUpdateMember(memberRepo, uow, recorder)
-	listMembers := memApp.NewListMembers(memberRepo, uow)
+	listMembers := memApp.NewListMembers(memberRepo, uow).WithGyms(gymRepo)
 	memberDetail := memApp.NewGetMemberDetail(memberRepo, fingerprintRepo, uow)
 	toggleMember := memApp.NewToggleMemberStatus(memberRepo, uow, recorder)
 	lockExpiry := memApp.NewLockMembershipExpiry(membershipRepo, adjustmentRepo, uow, recorder)
@@ -363,42 +373,94 @@ func main() {
 	// lo sube a R2 y mete la URL en el template de recibo ({receipt_url}).
 	dispatchNoti.Receipt = receiptPDFRenderer{gen: receiptPayment}
 	sendReceipt := billingApp.NewSendReceipt(paymentRepo, uow).WithPublisher(billingSubscriber).WithResender(billingSubscriber)
-	listMemberPayments := billingApp.NewListMemberPayments(paymentRepo, memberRepo, uow)
-	listGymPayments := billingApp.NewListGymPayments(paymentRepo, memberRepo, uow).WithGyms(gymRepo)
+	listMemberPayments := billingApp.NewListMemberPayments(paymentRepo, memberRepo, uow).WithSales(saleItemRepo)
+	listGymPayments := billingApp.NewListGymPayments(paymentRepo, memberRepo, uow).WithGyms(gymRepo).WithSales(saleItemRepo)
 	refundPayment := billingApp.NewRefundPayment(paymentRepo, folios, memberSvc, uow, recorder).
-		WithGyms(gymRepo)
+		WithGyms(gymRepo).
+		WithRefunds(refundRepo)
+	registerOtherIncome := billingApp.NewRegisterOtherIncome(paymentRepo, folios, uow, recorder).WithGyms(gymRepo)
 
 	// ── Products + Billing pt.2 (Sesión 4) ────────────────────────────────
 	productSvc := prodApp.NewProductService(productRepo, stockMovementRepo)
+	refundPayment.WithSaleDetails(saleRepo, saleItemRepo, productSvc)
 	createProduct := prodApp.NewCreateProduct(productRepo, stockMovementRepo, uow, recorder)
 	updateProduct := prodApp.NewUpdateProduct(productRepo, uow, recorder)
 	deactivateProduct := prodApp.NewDeactivateProduct(productRepo, uow, recorder)
 	reactivateProduct := prodApp.NewReactivateProduct(productRepo, uow, recorder)
 	listProducts := prodApp.NewListProducts(productRepo, uow)
-	adjustStock := prodApp.NewAdjustStock(productRepo, stockMovementRepo, uow, recorder)
+	inventoryPurchaseCash := expApp.NewInventoryPurchaseCashService(cashMovementRepo).WithAudit(recorder)
+	adjustStock := prodApp.NewAdjustStock(productRepo, stockMovementRepo, uow, recorder).
+		WithPurchases(inventoryPurchaseRepo, inventoryPurchaseCash).
+		WithGyms(gymRepo)
+	listInventoryPurchases := prodApp.NewListInventoryPurchases(inventoryPurchaseRepo, productRepo, inventoryPurchaseCash, uow).WithReceipts(inventoryReceiptRepo).WithGyms(gymRepo)
+	payInventoryPurchase := prodApp.NewPayInventoryPurchase(inventoryPurchaseRepo, productRepo, inventoryPurchaseCash, uow, recorder).WithGyms(gymRepo).WithReceipts(inventoryReceiptRepo)
+	reopenInventoryPurchase := prodApp.NewReopenInventoryPurchase(inventoryPurchaseRepo, productRepo, inventoryPurchaseCash, uow, recorder).WithReceipts(inventoryReceiptRepo)
+	correctInventoryPurchase := prodApp.NewCorrectInventoryPurchase(inventoryPurchaseRepo, productRepo, stockMovementRepo, uow, recorder).WithCash(inventoryPurchaseCash)
 	// Expenses (gastos generales del gym) — CRUD + listado con filtros.
-	createExpense := expApp.NewCreateExpense(expenseRepo, uow, recorder)
-	updateExpense := expApp.NewUpdateExpense(expenseRepo, uow, recorder)
-	deleteExpense := expApp.NewDeleteExpense(expenseRepo, uow, recorder)
+	expensePolicy := expApp.OperationalPolicy{DayLock: cashDayLock, Gyms: gymRepo}
+	createExpense := expApp.NewCreateExpense(expenseRepo, uow, recorder).WithOperational(cashMovementRepo, expensePolicy)
+	updateExpense := expApp.NewUpdateExpense(expenseRepo, uow, recorder).WithOccurrences(expenseOccurrenceRepo).WithOperational(cashMovementRepo, expensePolicy)
+	deleteExpense := expApp.NewDeleteExpense(expenseRepo, uow, recorder).WithOperational(cashMovementRepo, expensePolicy).WithOccurrences(expenseOccurrenceRepo)
 	listExpenses := expApp.NewListExpenses(expenseRepo, uow)
+	getExpense := expApp.NewGetExpense(expenseRepo, uow)
+	createCashMovement := expApp.NewCreateCashMovement(cashMovementRepo, uow, recorder, expensePolicy).WithExpenses(expenseRepo)
+	updateCashMovement := expApp.NewUpdateCashMovement(cashMovementRepo, uow, recorder, expensePolicy)
+	deleteCashMovement := expApp.NewDeleteCashMovement(cashMovementRepo, uow, recorder, expensePolicy)
+	listCashMovements := expApp.NewListCashMovementsByDate(cashMovementRepo, uow)
+	classifyCashMovement := expApp.NewClassifyCashMovement(cashMovementRepo, expenseRepo, uow, recorder, expensePolicy)
+	unclassifyCashMovement := expApp.NewUnclassifyCashMovement(cashMovementRepo, uow, recorder).WithExpenses(expenseRepo).WithOccurrences(expenseOccurrenceRepo)
+	createExpenseTemplate := expApp.NewCreateRecurringExpenseTemplate(recurringTemplateRepo, uow, recorder)
+	updateExpenseTemplate := expApp.NewUpdateRecurringExpenseTemplate(recurringTemplateRepo, expenseOccurrenceRepo, uow, recorder, expensePolicy)
+	setExpenseTemplateActive := expApp.NewDeactivateRecurringExpenseTemplate(recurringTemplateRepo, uow, recorder).WithOperationalPolicy(expensePolicy)
+	listExpenseTemplates := expApp.NewListRecurringExpenseTemplates(recurringTemplateRepo, uow)
+	materializeExpenseOccurrences := expApp.NewMaterializeExpenseOccurrences(recurringTemplateRepo, expenseOccurrenceRepo, uow, recorder)
+	listExpenseOccurrences := expApp.NewListExpenseOccurrences(expenseOccurrenceRepo, uow).WithDetails(recurringTemplateRepo, expenseRepo)
+	payExpenseOccurrence := expApp.NewMarkExpenseOccurrencePaid(expenseOccurrenceRepo, expenseRepo, cashMovementRepo, uow, recorder, expensePolicy)
+	skipExpenseOccurrence := expApp.NewSkipExpenseOccurrence(expenseOccurrenceRepo, uow, recorder)
+	reopenExpenseOccurrence := expApp.NewReopenExpenseOccurrence(expenseOccurrenceRepo, expenseRepo, cashMovementRepo, uow, recorder)
 	registerSale := billingApp.NewRegisterSale(paymentRepo, saleRepo, saleItemRepo, folios, productSvc, memberRepo, uow, recorder, billingSubscriber).
 		WithPromotions(applyPromo).
 		WithGyms(gymRepo)
 	refundSale := billingApp.NewRefundSale(saleRepo, refundPayment, uow)
 	cashClose := reportsApp.NewCashClose(cashCloseReader, cashCloseEventRepo, uow, recorder).
 		WithExpenses(expenseRepo).
+		WithCashMovements(cashMovementRepo).
+		WithCashDrawers(cashDrawerRepo).
 		WithUsers(userRepo).
 		WithSubscriber(notiApp.NewCashCloseAlertSubscriber(enqueueOwnerAlert)).
 		WithGyms(gymRepo)
+	updateExpense.WithCashSessionMarker(cashClose)
+	deleteExpense.WithCashSessionMarker(cashClose)
+	updateCashMovement.WithCashSessionMarker(cashClose)
+	deleteCashMovement.WithCashSessionMarker(cashClose)
+	reopenExpenseOccurrence.WithCashSessionMarker(cashClose)
+	correctSale := billingApp.NewCorrectSale(saleRepo, saleItemRepo, paymentRepo, saleCorrectionRepo,
+		refundRepo, productSvc, folios, cashClose, uow, recorder).WithGyms(gymRepo)
+	correctPayment := billingApp.NewCorrectPayment(paymentRepo, paymentCorrectionRepo, cashClose, uow, recorder).WithGyms(gymRepo)
+	cashDrawers := billingApp.NewCashDrawers(cashDrawerRepo, uow, recorder)
+	registerPayment.WithCashDrawers(cashDrawers)
+	settlePayment.WithCashDrawers(cashDrawers)
+	registerSale.WithCashDrawers(cashDrawers)
+	registerOtherIncome.WithCashDrawers(cashDrawers)
+	refundPayment.WithCashDrawers(cashDrawers)
+	correctSale.WithCashDrawers(cashDrawers)
+	correctPayment.WithCashDrawers(cashDrawers)
+	createExpense.WithCashDrawerValidator(cashDrawers)
+	updateExpense.WithCashDrawerValidator(cashDrawers)
+	createCashMovement.WithCashDrawerValidator(cashDrawers)
+	updateCashMovement.WithCashDrawerValidator(cashDrawers)
+	payExpenseOccurrence.WithCashDrawerValidator(cashDrawers)
+	inventoryPurchaseCash.WithCashDrawerValidator(cashDrawers)
+	inventoryPurchaseCash.WithCashSessionMarker(cashClose)
 
 	// ── Reports application layer (Sesión 6) ─────────────────────────────
 	dashboard := reportsApp.NewDashboard(reportsReader, uow, 60*time.Second).WithGyms(gymRepo)
 	attentionRequired := reportsApp.NewAttentionRequired(reportsReader, uow).WithGyms(gymRepo)
 	rangeReport := reportsApp.NewRangeReport(reportsReader, uow).WithGyms(gymRepo)
-	exportReport := reportsApp.NewExportReport(reportsReader, gymRepo, uow, attentionRequired, rangeReport)
+	exportReport := reportsApp.NewExportReport(reportsReader, gymRepo, uow, attentionRequired, rangeReport).WithCashClose(cashClose)
 	genderReport := reportsApp.NewGenderReport(reportsReader, uow).WithGyms(gymRepo)
 	markContacted := memApp.NewMarkContacted(memberRepo, contactAttemptRepo, uow, recorder)
-	markLost := memApp.NewMarkLost(memberRepo, uow, recorder)
+	markLost := memApp.NewMarkLost(memberRepo, uow, recorder).WithGyms(gymRepo)
 	// PIN use cases for cloud-side POST/DELETE /auth/me/pin. The dashboard
 	// uses these when the owner sets their reception PIN before installing
 	// the desktop; the value then projects down to every paired sidecar.
@@ -454,14 +516,23 @@ func main() {
 	memberCtrl := memCtrl.NewMemberController(createMember, updateMember, listMembers, memberDetail, toggleMember, lockExpiry, assignNumber, tokens).
 		WithImportCSV(importCSV)
 	fingerprintCtrl := memCtrl.NewFingerprintController(registerFingerprint, deleteFingerprint, tokens)
-	paymentCtrl := billingCtrl.NewPaymentController(registerPayment, settlePayment, receiptPayment, sendReceipt, listMemberPayments, listGymPayments, refundPayment, registerSale, refundSale, cashClose, tokens)
-	productCtrl := prodCtrl.NewProductController(createProduct, updateProduct, deactivateProduct, reactivateProduct, listProducts, adjustStock, tokens)
-	expenseController := expCtrl.NewExpenseController(createExpense, updateExpense, deleteExpense, listExpenses, tokens)
+	paymentCtrl := billingCtrl.NewPaymentController(registerPayment, settlePayment, receiptPayment, sendReceipt, listMemberPayments, listGymPayments, refundPayment, registerSale, refundSale, cashClose, tokens).WithOtherIncome(registerOtherIncome).WithSaleCorrections(correctSale).WithPaymentCorrections(correctPayment)
+	cashDrawerCtrl := billingCtrl.NewCashDrawerController(cashDrawers, tokens)
+	productCtrl := prodCtrl.NewProductController(createProduct, updateProduct, deactivateProduct, reactivateProduct, listProducts, adjustStock, tokens).
+		WithInventoryPurchases(listInventoryPurchases, payInventoryPurchase, reopenInventoryPurchase).
+		WithInventoryPurchaseCorrections(correctInventoryPurchase).
+		WithPurchaseRegistration(prodApp.NewRegisterInventoryPurchase(inventoryPurchaseRepo, inventoryReceiptRepo, productRepo, gymRepo, adjustStock.PurchaseCash, uow, recorder, "cloud")).
+		WithLegacyPurchaseCosts(prodApp.NewListMissingPurchaseCosts(inventoryPurchaseRepo, gymRepo, uow), prodApp.NewCompleteLegacyPurchaseCost(inventoryPurchaseRepo, inventoryPurchaseRepo, uow, recorder)).
+		WithRemotePurchases(prodApp.NewCreateRemoteInventoryPurchase(inventoryPurchaseRepo, productRepo, gymRepo, uow, recorder).WithReceipts(inventoryReceiptRepo), nil)
+	expenseController := expCtrl.NewExpenseController(createExpense, updateExpense, deleteExpense, listExpenses, tokens).
+		WithPlusOperations(getExpense, createCashMovement, updateCashMovement, deleteCashMovement, listCashMovements, classifyCashMovement, createExpenseTemplate, updateExpenseTemplate, setExpenseTemplateActive, listExpenseTemplates, materializeExpenseOccurrences, listExpenseOccurrences, payExpenseOccurrence, skipExpenseOccurrence).
+		WithCorrectionOperations(unclassifyCashMovement, reopenExpenseOccurrence)
 	expenseController.PlanGate = plusGate
 	// Cloud has no biometric reader — fingerprint flows live on the sidecar.
 	checkinCtrl := chkCtrl.NewCheckinController(checkinManual, checkinNumber, checkinOverride, checkinRepo, uow, nil, tokens).WithGyms(gymRepo)
 	reportsController := reportsCtrl.NewReportsController(dashboard, attentionRequired, rangeReport, exportReport, markContacted, markLost, tokens).
-		WithGenderReport(genderReport)
+		WithGenderReport(genderReport).
+		WithPaidExpenses(reportsApp.NewPaidExpenses(reportsReader, uow, gymRepo))
 	reportsController.PlanGate = plusGate
 	// Analytics Plus (plan Reports-improve fase 3) — SOLO cloud: la pestaña
 	// Análisis vive en el dashboard, el sidecar no registra estas rutas y
@@ -528,6 +599,7 @@ func main() {
 	memberCtrl.RegisterRoutes(r)
 	fingerprintCtrl.RegisterRoutes(r)
 	paymentCtrl.RegisterRoutes(r)
+	cashDrawerCtrl.RegisterRoutes(r)
 	productCtrl.RegisterRoutes(r)
 	expenseController.RegisterRoutes(r)
 	checkinCtrl.RegisterRoutes(r)

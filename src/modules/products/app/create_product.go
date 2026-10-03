@@ -28,10 +28,9 @@ type CreateProductInput struct {
 	ImageURL      *string
 	InitialCost   *float64 // optional — DA-24.3
 	InitialReason *string  // free-text, e.g. "Stock inicial"
-	// InitialIsPurchase — false = el stock inicial es inventario que YA
-	// existía (captura de catálogo, no salió dinero): conserva el costo
-	// para el margen pero NO cuenta como egreso del período. nil/true =
-	// compra (semántica previa, callers viejos sin el campo).
+	// InitialIsPurchase is retained for one-release request compatibility.
+	// Product creation is a catalogue capture (nil/false); a real purchase
+	// must use AdjustStock so payment/source/idempotency are captured atomically.
 	InitialIsPurchase *bool
 }
 
@@ -54,6 +53,9 @@ func NewCreateProduct(products prodRepo.ProductRepository, movements prodRepo.St
 }
 
 func (uc *CreateProduct) Execute(ctx context.Context, in CreateProductInput) (*CreateProductOutput, error) {
+	if in.InitialIsPurchase != nil && *in.InitialIsPurchase {
+		return nil, sharedDomain.NewValidationError(prodErrors.ErrIncompletePurchasePayment)
+	}
 	now := time.Now().UTC()
 	var out CreateProductOutput
 	err := uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
@@ -84,9 +86,7 @@ func (uc *CreateProduct) Execute(ctx context.Context, in CreateProductInput) (*C
 			if err != nil {
 				return sharedDomain.NewValidationError(err)
 			}
-			if in.InitialIsPurchase != nil && !*in.InitialIsPurchase {
-				mv.MarkAsCapture()
-			}
+			mv.MarkAsCapture()
 			if _, err := uc.StockMovements.Create(tx, mv); err != nil {
 				return sharedDomain.NewUnexpectedError(err)
 			}

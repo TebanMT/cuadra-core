@@ -53,6 +53,7 @@ type RegisterMembershipPaymentInput struct {
 	MemberID         uuid.UUID
 	MembershipTypeID uuid.UUID
 	Method           string
+	CashDrawerID     *uuid.UUID
 	PaymentDate      time.Time
 	Notes            *string
 
@@ -86,7 +87,8 @@ type RegisterMembershipPaymentInput struct {
 	// misma tx del cobro. MAX 1 promo por cobro (sin stacking en MVP).
 	// Si la validación falla (expirada, sobre-límite, etc.) el cobro entero
 	// se rollbackea.
-	Promotion *PromotionApply
+	Promotion      *PromotionApply
+	IdempotencyKey string
 }
 
 // RegisterMembershipPaymentOutput is what the controller returns. NewExpiry
@@ -131,7 +133,13 @@ type RegisterMembershipPayment struct {
 	Welcome memApp.WelcomeNotifier
 	// Gyms (opcional) → default de PaymentDate en el día LOCAL del gym
 	// cuando el caller no manda fecha. Nil = día UTC (tests viejos).
-	Gyms gymRepo.GymRepository
+	Gyms        gymRepo.GymRepository
+	CashDrawers CashDrawerValidator
+}
+
+func (uc *RegisterMembershipPayment) WithCashDrawers(v CashDrawerValidator) *RegisterMembershipPayment {
+	uc.CashDrawers = v
+	return uc
 }
 
 func NewRegisterMembershipPayment(
@@ -180,22 +188,40 @@ func (uc *RegisterMembershipPayment) WithGyms(g gymRepo.GymRepository) *Register
 }
 
 func (uc *RegisterMembershipPayment) Execute(ctx context.Context, in RegisterMembershipPaymentInput) (*RegisterMembershipPaymentOutput, error) {
+	key, err := validatePaymentCommandKey(in.IdempotencyKey)
+	if err != nil {
+		return nil, err
+	}
+	in.IdempotencyKey = key
+	fingerprint, err := paymentCommandFingerprint(in)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
 	now := time.Now().UTC()
 	if in.Method == "" {
 		return nil, sharedDomain.NewValidationError(billingErrors.ErrPaymentMethodMissing)
 	}
 
 	var (
-		out RegisterMembershipPaymentOutput
-		evt PaymentCompletedEvent
+		out       RegisterMembershipPaymentOutput
+		evt       PaymentCompletedEvent
+		wasReplay bool
 	)
-	err := uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
-		// 0. Default de fecha: el día LOCAL del gym, no el día UTC. Un
-		// cobro a las 10 PM de CDMX pertenece al día en curso — anclarlo
-		// en UTC corría el vencimiento de la renovación +1 día y mandaba
-		// el pago a la caja del día siguiente.
-		if in.PaymentDate.IsZero() {
-			in.PaymentDate = gymLocalPaymentDate(tx, uc.Gyms, in.GymID, now)
+	err = uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
+		paymentDay, dateErr := resolveMonetaryDate(tx, uc.Gyms, in.GymID, in.PaymentDate, now)
+		if dateErr != nil {
+			return dateErr
+		}
+		in.PaymentDate = paymentDay
+		if replayed, err := replayPaymentCommand(tx, uc.Payments, in.GymID, key, fingerprint,
+			paymentDomain.ConceptMembership, &out); err != nil {
+			return err
+		} else if replayed {
+			wasReplay = true
+			return nil
+		}
+		if err := validateRequestedCashDrawer(uc.CashDrawers, tx, in.GymID, in.Method, in.CashDrawerID); err != nil {
+			return err
 		}
 
 		// 1. Member sanity check: must exist + belong to gym.
@@ -334,6 +360,13 @@ func (uc *RegisterMembershipPayment) Execute(ctx context.Context, in RegisterMem
 		)
 		if err != nil {
 			return sharedDomain.NewValidationError(err)
+		}
+		if in.CashDrawerID != nil {
+			p.WithCashDrawer(*in.CashDrawerID)
+		}
+		p.WithMembership(renewed.NewMembership.ID)
+		if err := beginPaymentCommand(p, key, fingerprint); err != nil {
+			return err
 		}
 		// Adjuntar el desglose por concepto para que el recibo PDF lo
 		// pueda imprimir línea por línea. El plan siempre va; las cuotas
@@ -475,12 +508,17 @@ func (uc *RegisterMembershipPayment) Execute(ctx context.Context, in RegisterMem
 			}
 			out.PromotionGiftedIDs = giftedIDs
 		}
+		if err := finalizePaymentCommand(tx, uc.Payments, p, out, now); err != nil {
+			return err
+		}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	uc.Publisher.PublishPaymentCompleted(ctx, evt)
+	if !wasReplay {
+		uc.Publisher.PublishPaymentCompleted(ctx, evt)
+	}
 	return &out, nil
 }
 

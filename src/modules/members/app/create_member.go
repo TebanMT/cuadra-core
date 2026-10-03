@@ -474,6 +474,7 @@ func (uc *CreateMember) Execute(ctx context.Context, in CreateMemberInput) (*Cre
 			if err != nil {
 				return sharedDomain.NewValidationError(err)
 			}
+			p.WithMembership(ms.ID)
 			// Desglose para el recibo del primer pago — el plan + las
 			// cuotas que el operador eligió cobrar.
 			lines := []paymentDomain.BreakdownLine{

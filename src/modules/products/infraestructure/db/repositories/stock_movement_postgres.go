@@ -3,7 +3,11 @@
 package repositories
 
 import (
+	"errors"
+	"strings"
+
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 
 	stockMovementDomain "github.com/cuadra/cuadra-core/src/modules/products/domain/stockmovement"
 	"github.com/cuadra/cuadra-core/src/modules/products/infraestructure/db/models"
@@ -14,6 +18,19 @@ type StockMovementPostgresRepository struct{}
 
 func NewStockMovementPostgresRepository() *StockMovementPostgresRepository {
 	return &StockMovementPostgresRepository{}
+}
+
+func (r *StockMovementPostgresRepository) GetByIdempotencyKey(tx sharedDomain.Transaction, gymID uuid.UUID, key string) (*stockMovementDomain.StockMovement, error) {
+	var row models.StockMovementModel
+	err := tx.(*sharedDomain.GormTransaction).Tx.
+		Where("gym_id=? AND idempotency_key=? AND deleted_at IS NULL", gymID, strings.TrimSpace(key)).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return stockMovementFromModel(&row), nil
 }
 
 func (r *StockMovementPostgresRepository) Create(tx sharedDomain.Transaction, m *stockMovementDomain.StockMovement) (*stockMovementDomain.StockMovement, error) {
@@ -43,7 +60,7 @@ func (r *StockMovementPostgresRepository) ListByProduct(tx sharedDomain.Transact
 }
 
 func stockMovementToModel(m *stockMovementDomain.StockMovement) models.StockMovementModel {
-	return models.StockMovementModel{
+	row := models.StockMovementModel{
 		ID:           m.ID,
 		GymID:        m.GymID,
 		Version:      m.Version,
@@ -59,10 +76,23 @@ func stockMovementToModel(m *stockMovementDomain.StockMovement) models.StockMove
 		SaleItemID:   m.SaleItemID,
 		OperatorID:   m.OperatorID,
 	}
+	if m.IdempotencyKey != "" {
+		key := m.IdempotencyKey
+		row.IdempotencyKey = &key
+	}
+	if m.IdempotencyFingerprint != "" {
+		fingerprint := m.IdempotencyFingerprint
+		row.IdempotencyFingerprint = &fingerprint
+	}
+	if len(m.IdempotencyResult) > 0 {
+		result := string(m.IdempotencyResult)
+		row.IdempotencyResult = &result
+	}
+	return row
 }
 
 func stockMovementFromModel(m *models.StockMovementModel) *stockMovementDomain.StockMovement {
-	return &stockMovementDomain.StockMovement{
+	out := &stockMovementDomain.StockMovement{
 		ID:           m.ID,
 		GymID:        m.GymID,
 		Version:      m.Version,
@@ -78,4 +108,14 @@ func stockMovementFromModel(m *models.StockMovementModel) *stockMovementDomain.S
 		UpdatedAt:    m.UpdatedAt,
 		DeletedAt:    m.DeletedAt,
 	}
+	if m.IdempotencyKey != nil {
+		out.IdempotencyKey = *m.IdempotencyKey
+	}
+	if m.IdempotencyFingerprint != nil {
+		out.IdempotencyFingerprint = *m.IdempotencyFingerprint
+	}
+	if m.IdempotencyResult != nil {
+		out.IdempotencyResult = append([]byte(nil), (*m.IdempotencyResult)...)
+	}
+	return out
 }

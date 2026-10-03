@@ -79,11 +79,11 @@ type SidecarAuthProxy struct {
 	OnSidecarTokenChanged func(token string)
 
 	// OnActiveGymChanged (optional) tells process-wide stateful subsystems
-	// which gym the operator just signed in to. Today only the biometric
-	// matcher consumes it (NBIS matcher needs the per-gym GMK to decrypt
-	// the gallery in Identify). Fires on every successful login (cloud or
-	// offline, password or PIN, redeem-installer) and on refresh; uuid.Nil
-	// means "no operator signed in" so subsystems can clear state.
+	// which gym the operator just signed in to. The biometric matcher uses
+	// it for the per-gym gallery and the sync agent uses it to bind its
+	// checkpoint/queue to the tenant. Fires on every successful login
+	// (cloud or offline, password or PIN, redeem-installer) and on refresh;
+	// uuid.Nil means "no operator signed in" so subsystems can clear state.
 	OnActiveGymChanged func(gymID uuid.UUID)
 
 	// ClientID is the persistent UUID this sidecar advertises to the
@@ -701,21 +701,36 @@ func (p *SidecarAuthProxy) absorbAuthResponse(ctx context.Context, email, passwo
 		return
 	}
 	d := env.Data
+	var activeGymID uuid.UUID
+	if rawGymID, ok := d["gym_id"].(string); ok {
+		activeGymID, _ = uuid.Parse(rawGymID)
+	}
+	var freshSidecarToken string
+	// Ordering is load-bearing on a gym switch: bind/reset the tenant
+	// checkpoint first, then hot-swap the credential and wake the agent.
+	// A single deferred notifier also keeps this true if local credential
+	// hashing/caching fails — auth succeeded and sync may still proceed.
+	defer func() {
+		if activeGymID != uuid.Nil && p.OnActiveGymChanged != nil {
+			p.OnActiveGymChanged(activeGymID)
+		}
+		if freshSidecarToken != "" {
+			if p.OnSidecarTokenChanged != nil {
+				p.OnSidecarTokenChanged(freshSidecarToken)
+			}
+			if p.AgentReload != nil {
+				p.AgentReload()
+			}
+		}
+	}()
 
-	// Persist sidecar_token if the cloud minted one. Two hooks fire in
-	// order: (1) hand the token to the agent's in-memory cache so the very
-	// next sync attempt uses it (no need to wait for a restart), (2) nudge
-	// the agent loop to run immediately.
+	// Persist sidecar_token if the cloud minted one. The in-memory callback
+	// is deferred until after OnActiveGymChanged has rebound the checkpoint.
 	if tok, ok := d["sidecar_token"].(string); ok && tok != "" {
+		freshSidecarToken = tok
 		_ = p.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
 			return syncShared.SetSidecarToken(ctx, tx, tok)
 		})
-		if p.OnSidecarTokenChanged != nil {
-			p.OnSidecarTokenChanged(tok)
-		}
-		if p.AgentReload != nil {
-			p.AgentReload()
-		}
 	}
 
 	// Cache the credential for offline login. We hash the *plaintext*
@@ -797,11 +812,6 @@ func (p *SidecarAuthProxy) absorbAuthResponse(ctx context.Context, email, passwo
 		})
 	}
 
-	if p.OnActiveGymChanged != nil {
-		if gymID, err := uuid.Parse(cached.GymID); err == nil {
-			p.OnActiveGymChanged(gymID)
-		}
-	}
 }
 
 // mirrorCloudIdentity upserts the gym + user rows into local SQLite from

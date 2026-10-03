@@ -53,8 +53,19 @@ func setupExpenses(t *testing.T) *expensesFixture {
 		"../../../../db_migrations/sqlite/001_init_schema.sql",
 		"../../../../db_migrations/sqlite/005_users_pin.sql",
 		"../../../../db_migrations/sqlite/008_gym_charge_settings.sql",
+		"../../../../db_migrations/sqlite/010_payment_breakdown.sql",
 		"../../../../db_migrations/sqlite/012_expenses.sql",
 		"../../../../db_migrations/sqlite/018_gyms_stripe_customer.sql",
+		"../../../../db_migrations/sqlite/030_stock_movements_is_purchase.sql",
+		"../../../../db_migrations/sqlite/032_expenses_plus.sql",
+		"../../../../db_migrations/sqlite/033_simple_financial_model.sql",
+		"../../../../db_migrations/sqlite/034_financial_integrity.sql",
+		"../../../../db_migrations/sqlite/035_cash_sessions.sql",
+		"../../../../db_migrations/sqlite/037_stock_adjustment_idempotency.sql",
+		"../../../../db_migrations/sqlite/039_inventory_purchase_corrections.sql",
+		"../../../../db_migrations/sqlite/043_payment_cash_destination.sql",
+		"../../../../db_migrations/sqlite/044_remote_inventory_purchases.sql",
+		"../../../../db_migrations/sqlite/045_purchase_registration.sql",
 	} {
 		schema, err := os.ReadFile(m)
 		if err != nil {
@@ -97,7 +108,8 @@ func setupExpenses(t *testing.T) *expensesFixture {
 }
 
 func (f *expensesFixture) createUC() *expApp.CreateExpense {
-	return expApp.NewCreateExpense(f.expenseRepo, f.uow, f.recorder)
+	return expApp.NewCreateExpense(f.expenseRepo, f.uow, f.recorder).
+		WithOperational(expRepoLite.NewCashMovementSQLiteRepository(), expApp.OperationalPolicy{})
 }
 
 func (f *expensesFixture) listUC() *expApp.ListExpenses {
@@ -119,6 +131,7 @@ func TestCreateExpense_PersistsRow(t *testing.T) {
 		Category:      expenseDomain.CategoryUtilities,
 		Description:   &desc,
 		PaymentMethod: expenseDomain.PaymentTransfer,
+		PaidFrom:      expenseDomain.PaidFromGymFund,
 	})
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -147,6 +160,7 @@ func TestCreateExpense_RejectsInvalidAmount(t *testing.T) {
 		Amount:        0,
 		Category:      expenseDomain.CategoryRent,
 		PaymentMethod: expenseDomain.PaymentCash,
+		PaidFrom:      expenseDomain.PaidFromCashRegister,
 	})
 	if err == nil {
 		t.Errorf("expected validation error for zero amount")
@@ -166,6 +180,7 @@ func TestCreateExpense_RejectsInvalidCategory(t *testing.T) {
 		Amount:        100,
 		Category:      "no_existe",
 		PaymentMethod: expenseDomain.PaymentCash,
+		PaidFrom:      expenseDomain.PaidFromCashRegister,
 	})
 	if err == nil {
 		t.Errorf("expected validation error for bad category")
@@ -181,6 +196,7 @@ func TestCreateExpense_RejectsInvalidPaymentMethod(t *testing.T) {
 		Amount:        100,
 		Category:      expenseDomain.CategoryRent,
 		PaymentMethod: "crypto",
+		PaidFrom:      expenseDomain.PaidFromGymFund,
 	})
 	if err == nil {
 		t.Errorf("expected validation error for bad payment method")
@@ -203,16 +219,19 @@ func TestListExpenses_FiltersAndAggregates(t *testing.T) {
 	_, _ = createUC.Execute(context.Background(), expApp.CreateExpenseInput{
 		GymID: f.gymID, ActorUserID: f.ownerID,
 		ExpenseDate: d1, Amount: 5000, Category: expenseDomain.CategoryRent, PaymentMethod: expenseDomain.PaymentCash,
+		PaidFrom: expenseDomain.PaidFromCashRegister,
 	})
 	// Servicios transfer 1500
 	_, _ = createUC.Execute(context.Background(), expApp.CreateExpenseInput{
 		GymID: f.gymID, ActorUserID: f.ownerID,
 		ExpenseDate: d3, Amount: 1500, Category: expenseDomain.CategoryUtilities, PaymentMethod: expenseDomain.PaymentTransfer,
+		PaidFrom: expenseDomain.PaidFromGymFund,
 	})
 	// Sueldos cash 8000 — categoría dominante
 	_, _ = createUC.Execute(context.Background(), expApp.CreateExpenseInput{
 		GymID: f.gymID, ActorUserID: f.ownerID,
-		ExpenseDate: d3, Amount: 8000, Category: expenseDomain.CategorySalaries, PaymentMethod: expenseDomain.PaymentCash,
+		ExpenseDate: d3, Amount: 8000, Category: expenseDomain.CategoryPayroll, PaymentMethod: expenseDomain.PaymentCash,
+		PaidFrom: expenseDomain.PaidFromCashRegister,
 	})
 
 	out, err := f.listUC().Execute(context.Background(), expApp.ListExpensesInput{GymID: f.gymID})
@@ -231,8 +250,8 @@ func TestListExpenses_FiltersAndAggregates(t *testing.T) {
 	if got := out.Aggregates.NonCashTotal; got != 1500 {
 		t.Errorf("aggregates.NonCashTotal = %v, want 1500", got)
 	}
-	if out.Aggregates.DominantCategory != expenseDomain.CategorySalaries {
-		t.Errorf("dominant category = %q, want %q", out.Aggregates.DominantCategory, expenseDomain.CategorySalaries)
+	if out.Aggregates.DominantCategory != expenseDomain.CategoryPayroll {
+		t.Errorf("dominant category = %q, want %q", out.Aggregates.DominantCategory, expenseDomain.CategoryPayroll)
 	}
 
 	// Filtro categoría=renta
@@ -259,5 +278,73 @@ func TestListExpenses_FiltersAndAggregates(t *testing.T) {
 	})
 	if cash.Total != 2 {
 		t.Errorf("cash total = %d, want 2", cash.Total)
+	}
+}
+
+func TestListExpenses_AllowsMultiYearRangeAndRejectsReversedRange(t *testing.T) {
+	f := setupExpenses(t)
+	expenseDate, _ := time.Parse("2006-01-02", "2026-05-10")
+	if _, err := f.createUC().Execute(context.Background(), expApp.CreateExpenseInput{
+		GymID: f.gymID, ActorUserID: f.ownerID,
+		ExpenseDate: expenseDate, Amount: 1500, Category: expenseDomain.CategoryUtilities,
+		PaymentMethod: expenseDomain.PaymentTransfer, PaidFrom: expenseDomain.PaidFromGymFund,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	from, _ := time.Parse("2006-01-02", "2021-12-27")
+	to, _ := time.Parse("2006-01-02", "2026-08-25")
+	out, err := f.listUC().Execute(context.Background(), expApp.ListExpensesInput{
+		GymID: f.gymID, From: &from, To: &to, Sort: "date", Direction: "desc", Page: 1, PageSize: 50,
+	})
+	if err != nil {
+		t.Fatalf("multi-year range: %v", err)
+	}
+	if out.Total != 1 || len(out.Items) != 1 {
+		t.Fatalf("multi-year range total=%d items=%d, want 1", out.Total, len(out.Items))
+	}
+
+	_, err = f.listUC().Execute(context.Background(), expApp.ListExpensesInput{
+		GymID: f.gymID, From: &to, To: &from, Page: 1, PageSize: 50,
+	})
+	if err == nil {
+		t.Fatal("reversed range must remain invalid")
+	}
+}
+
+func TestListExpenses_SearchIsAccentInsensitiveAndTreatsWildcardsLiterally(t *testing.T) {
+	f := setupExpenses(t)
+	day, _ := time.Parse("2006-01-02", "2026-05-10")
+	payee := "MÁQUINAS_100% MÉXICO"
+	other := "Maquinas ABC"
+
+	for _, name := range []*string{&payee, &other} {
+		if _, err := f.createUC().Execute(context.Background(), expApp.CreateExpenseInput{
+			GymID: f.gymID, ActorUserID: f.ownerID, ExpenseDate: day,
+			Amount: 100, Category: expenseDomain.CategoryMaintenance,
+			PaymentMethod: expenseDomain.PaymentTransfer, PaidFrom: expenseDomain.PaidFromGymFund, PayeeName: name,
+		}); err != nil {
+			t.Fatalf("create search fixture: %v", err)
+		}
+	}
+
+	accented, err := f.listUC().Execute(context.Background(), expApp.ListExpensesInput{
+		GymID: f.gymID, Search: "maquinas_100% mexico",
+	})
+	if err != nil {
+		t.Fatalf("accented search: %v", err)
+	}
+	if accented.Total != 1 || accented.Items[0].PayeeName == nil || *accented.Items[0].PayeeName != payee {
+		t.Fatalf("accented search returned %#v, want only %q", accented.Items, payee)
+	}
+
+	literalPercent, err := f.listUC().Execute(context.Background(), expApp.ListExpensesInput{
+		GymID: f.gymID, Search: "%",
+	})
+	if err != nil {
+		t.Fatalf("literal wildcard search: %v", err)
+	}
+	if literalPercent.Total != 1 {
+		t.Fatalf("literal %% search total=%d, want 1", literalPercent.Total)
 	}
 }

@@ -2,6 +2,7 @@ package analytics
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -104,28 +105,27 @@ func TestCohortsToWire_SoloMesesMaduros(t *testing.T) {
 	}
 }
 
-func TestBuildProjection_FallbackGlobal(t *testing.T) {
-	m := func(name string, rate float64) MemberMonthlyRate {
-		return MemberMonthlyRate{MemberID: uuid.New(), TypeName: name, MonthlyRate: rate}
+func TestBuildProjection_OnlyNextMonthAndNoInventedRate(t *testing.T) {
+	today := time.Date(2026, 8, 10, 0, 0, 0, 0, time.UTC)
+	monthlyID, premiumID := uuid.New(), uuid.New()
+	due := []RenewalDueRow{
+		{TypeID: monthlyID, TypeName: "Mensual", Due: 3, RenewalAmount: 500},
+		{TypeID: premiumID, TypeName: "Premium", Due: 1, RenewalAmount: 800},
 	}
-	rates := []MemberMonthlyRate{m("Mensual", 500), m("Mensual", 500), m("Mensual", 500), m("Premium", 800)}
-	renewals := []RenewalRateRow{{TypeName: "Mensual", Expirations: 10, Renewed: 8}} // Premium sin datos → global 80%
+	renewals := []RenewalRateRow{{TypeID: monthlyID, TypeName: "Mensual anterior", Expirations: 10, Renewed: 8}}
 
-	p := buildProjection(rates, renewals)
-	// Mensual: 3 × 0.8 × 500 = 1200; Premium: 1 × 0.8 × 800 = 640.
-	if p.Total != 1840 {
-		t.Errorf("total = %v, want 1840", p.Total)
+	p := buildProjection(due, renewals, today)
+	if p.Complete || p.Total != nil || p.Low != nil || p.High != nil {
+		t.Errorf("projection with missing history must be incomplete: %+v", p)
 	}
-	if p.Low != 1725 || p.High != 1955 { // ±5 pp
-		t.Errorf("low/high = %v/%v, want 1725/1955", p.Low, p.High)
+	if p.TargetMonth != "2026-09" || len(p.Rows) != 2 {
+		t.Errorf("target/rows = %s/%+v", p.TargetMonth, p.Rows)
 	}
-	if len(p.Rows) != 2 || p.Rows[0].TypeName != "Mensual" || p.Rows[0].Projected != 1200 {
-		t.Errorf("rows = %+v", p.Rows)
+	if p.Rows[0].TypeName != "Mensual" || p.Rows[0].Projected == nil || *p.Rows[0].Projected != 1200 {
+		t.Errorf("known row = %+v, want 1200", p.Rows[0])
 	}
-	for _, r := range p.Rows {
-		if r.RenewalPct == nil || *r.RenewalPct != 80 {
-			t.Errorf("renewal pct de %s = %v, want 80", r.TypeName, r.RenewalPct)
-		}
+	if p.Rows[1].RenewalPct != nil || p.Rows[1].Projected != nil {
+		t.Errorf("unknown Premium history must stay nil: %+v", p.Rows[1])
 	}
 }
 
@@ -141,6 +141,7 @@ type fakeReader struct {
 	pl                  []PLMonthRow
 	gender, genderPrev  []GenderRetentionRow
 	renewals            []RenewalRateRow
+	renewalsDue         []RenewalDueRow
 	deep                ProductsDeep
 	roi                 PromotionsROI
 
@@ -157,14 +158,51 @@ type fakeReader struct {
 
 	ratesCalls     int
 	retentionCalls int
+	ratesErr       error
 }
 
 func (f *fakeReader) ActiveMonthlyRates(_ sharedDomain.Transaction, _ uuid.UUID, _ time.Time) ([]MemberMonthlyRate, error) {
-	f.ratesCalls++
-	if f.ratesCalls == 1 {
-		return f.ratesNow, nil
+	if f.ratesErr != nil {
+		return nil, f.ratesErr
 	}
+	f.ratesCalls++
 	return f.ratesPrev, nil
+}
+func (f *fakeReader) CurrentMonthlyRates(_ sharedDomain.Transaction, _ uuid.UUID, _ time.Time) ([]MemberMonthlyRate, error) {
+	if f.ratesErr != nil {
+		return nil, f.ratesErr
+	}
+	f.ratesCalls++
+	return f.ratesNow, nil
+}
+
+func TestOverview_DoesNotTurnQueryFailureIntoZero(t *testing.T) {
+	uc := NewOverview(&fakeReader{ratesErr: errors.New("database unavailable")}, fakeUoW{})
+	_, err := uc.Execute(context.Background(), OverviewInput{GymID: uuid.New()})
+	if err == nil {
+		t.Fatal("query failure must surface; zero analytics would be misleading")
+	}
+	var custom sharedDomain.CustomError
+	if !errors.As(err, &custom) || custom.ErrorCode != sharedDomain.CodeUnexpected {
+		t.Errorf("err = %#v, want unexpected domain error", err)
+	}
+}
+
+func TestProductsDeepToWire_ProfitAndMarginRequireCost(t *testing.T) {
+	cost := 5.0
+	out := productsDeepToWire(ProductsDeep{Rows: []ProductDeepRow{
+		{Name: "Agua", Revenue30: 150, COGS30: 50, Units30: 10, AvgCost: &cost},
+		{Name: "Sin costo", Revenue30: 80, Units30: 2},
+	}}, 0)
+	if out.Rows[0].Profit30d == nil || *out.Rows[0].Profit30d != 100 {
+		t.Fatalf("profit_30d = %v, want 100", out.Rows[0].Profit30d)
+	}
+	if out.Rows[0].MarginPct == nil || round2(*out.Rows[0].MarginPct) != 66.67 {
+		t.Fatalf("margin_pct = %v, want 66.67", out.Rows[0].MarginPct)
+	}
+	if out.Rows[1].Profit30d != nil || out.Rows[1].MarginPct != nil {
+		t.Fatalf("missing cost must keep profit/margin unknown: %+v", out.Rows[1])
+	}
 }
 func (f *fakeReader) CountNewMembersBetween(_ sharedDomain.Transaction, _ uuid.UUID, _ string, _, _ time.Time) (int, error) {
 	return f.newMembers, nil
@@ -209,6 +247,9 @@ func (f *fakeReader) TenureMonths(_ sharedDomain.Transaction, _ uuid.UUID, _ tim
 func (f *fakeReader) RenewalRatesByType(_ sharedDomain.Transaction, _ uuid.UUID, _ time.Time) ([]RenewalRateRow, error) {
 	return f.renewals, nil
 }
+func (f *fakeReader) RenewalsDueNextMonth(_ sharedDomain.Transaction, _ uuid.UUID, _ time.Time) ([]RenewalDueRow, error) {
+	return f.renewalsDue, nil
+}
 func (f *fakeReader) ProductsDeep(_ sharedDomain.Transaction, _ uuid.UUID, _ time.Time) (ProductsDeep, error) {
 	return f.deep, nil
 }
@@ -228,6 +269,46 @@ func (fakeUoW) Rollback(sharedDomain.Transaction) error                 { return
 func (fakeUoW) Query(context.Context) (sharedDomain.Transaction, error) { return fakeTx{}, nil }
 func (fakeUoW) Command(_ context.Context, fn func(sharedDomain.Transaction) error) error {
 	return fn(fakeTx{})
+}
+
+type snapshotSpyUoW struct {
+	fakeUoW
+	snapshots  int
+	queries    int
+	inSnapshot bool
+}
+
+func (u *snapshotSpyUoW) Query(context.Context) (sharedDomain.Transaction, error) {
+	u.queries++
+	return fakeTx{}, nil
+}
+
+func (u *snapshotSpyUoW) ReadSnapshot(_ context.Context, fn func(sharedDomain.Transaction) error) error {
+	u.snapshots++
+	u.inSnapshot = true
+	defer func() { u.inSnapshot = false }()
+	return fn(fakeTx{})
+}
+
+func TestOverview_ComposesEveryReadAndTimestampInsideOneSnapshot(t *testing.T) {
+	uow := &snapshotSpyUoW{}
+	uc := NewOverview(&fakeReader{}, uow)
+	uc.Now = func() time.Time {
+		if !uow.inSnapshot {
+			t.Error("GeneratedAt was calculated outside the read snapshot")
+		}
+		return time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	}
+	out, err := uc.Execute(context.Background(), OverviewInput{GymID: uuid.New()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uow.snapshots != 1 || uow.queries != 0 {
+		t.Fatalf("snapshots=%d queries=%d, want one snapshot and no loose query", uow.snapshots, uow.queries)
+	}
+	if out.GeneratedAt.IsZero() {
+		t.Fatal("generated_at must identify the snapshot")
+	}
 }
 
 func TestOverview_ComponeKPIs(t *testing.T) {
@@ -254,7 +335,7 @@ func TestOverview_ComponeKPIs(t *testing.T) {
 			{Bucket: "hombre", Active: 12, Checkins30d: 60, Spend30d: 2400},
 			{Bucket: "mujer", Active: 8, Checkins30d: 48, Spend30d: 2000},
 		},
-		pl:          []PLMonthRow{{Month: "2026-08", Income: 100, COGS: 20, Expenses: 30, Refunds: 10}},
+		pl:          []PLMonthRow{{Month: "2026-08", Income: 100, COGS: 15, ProductPurchases: 20, Expenses: 30, Refunds: 10}},
 		fixedCosts:  10000,
 		fixedMonths: 3,
 		tenure:      f64(7.5),
@@ -296,7 +377,7 @@ func TestOverview_ComponeKPIs(t *testing.T) {
 	if m.MRR.Starting != 500 || m.MRR.New != 500 || m.MRR.Ending != 1000 {
 		t.Errorf("movement.mrr = %+v", m.MRR)
 	}
-	// P&L: net derivado = 100 − 20 − 30 − 10 = 40.
+	// Resultado simple: net = ingresos − compras − gastos − devoluciones.
 	if len(out.PLMonthly) != 1 || out.PLMonthly[0].Net != 40 {
 		t.Errorf("pl = %+v", out.PLMonthly)
 	}
@@ -322,6 +403,25 @@ func TestOverview_ComponeKPIs(t *testing.T) {
 	// Payday siempre trae los 31 días (rellenados en 0).
 	if len(out.Payday.Days) != 31 {
 		t.Errorf("payday days = %d, want 31", len(out.Payday.Days))
+	}
+}
+
+func TestOverview_MonthlyResultMatchesGoldenFinancialEquation(t *testing.T) {
+	reader := &fakeReader{pl: []PLMonthRow{{
+		Month:            "2026-08",
+		Income:           415,
+		ProductPurchases: 50,
+		Expenses:         1500,
+		Refunds:          0,
+	}}}
+	uc := NewOverview(reader, fakeUoW{})
+	uc.Now = func() time.Time { return time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC) }
+	out, err := uc.Execute(context.Background(), OverviewInput{GymID: uuid.New()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.PLMonthly) != 1 || out.PLMonthly[0].Net != -1135 {
+		t.Fatalf("monthly result = %+v, want income 415 - purchases 50 - expenses 1500 - refunds 0 = -1135", out.PLMonthly)
 	}
 }
 

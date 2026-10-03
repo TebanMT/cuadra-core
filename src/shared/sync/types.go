@@ -8,7 +8,8 @@ import (
 // SchemaVersion is the wire-protocol version. Servers reject pushes whose
 // `schema_version` is greater than this (ADR-001 §3.8) with 426 Upgrade
 // Required. Bump when the wire shape changes incompatibly.
-const SchemaVersion = 1
+// Version 6 permits product payments with zero collected (full credit). Older SQLite constraints cannot receive these records.
+const SchemaVersion = 6
 
 // Operation values match the sync_queue.operation CHECK constraint
 // (ADR-001 §3.2).
@@ -45,6 +46,10 @@ const (
 	// texto aterriza en sync_queue.last_error y de ahí al indicador del
 	// desktop con CTA de resolución.
 	StatusRejectedDuplicate = "rejected_duplicate"
+	// The row is structurally valid, but another offline writer already
+	// consumed the same refundable balance or sale revision. Retrying the
+	// unchanged payload can never make it safe.
+	StatusRejectedFinancialConflict = "rejected_financial_conflict"
 )
 
 // PushItem is one entry of a push batch. Payload is kept as raw JSON so the
@@ -76,6 +81,7 @@ type PushItemResult struct {
 	ServerVersion   int             `json:"server_version,omitempty"`
 	ServerUpdatedAt *time.Time      `json:"server_updated_at,omitempty"`
 	ServerPayload   json.RawMessage `json:"server_payload,omitempty"`
+	RelatedChanges  []PullChange    `json:"related_changes,omitempty"`
 	Error           string          `json:"error,omitempty"`
 }
 
@@ -112,6 +118,7 @@ type FullSyncResponse = PullResponse
 // StatusResponse — body of GET /api/v1/sync/status (sidecar local).
 type StatusResponse struct {
 	State               string     `json:"state"`
+	SyncInProgress      bool       `json:"sync_in_progress"`
 	LastSyncedAt        *time.Time `json:"last_synced_at,omitempty"`
 	LastPulledAt        *time.Time `json:"last_pulled_at,omitempty"`
 	QueuePendingCount   int        `json:"queue_pending_count"`
@@ -160,6 +167,9 @@ const (
 	// el operador edite el registro local — renombrar re-encola (coalescing
 	// de sync_queue) y el siguiente push entra limpio.
 	StuckKindDuplicate = "duplicate"
+	// Competing offline refund/correction. Kept distinct so support can route
+	// the owner to a financial review instead of suggesting a catalog rename.
+	StuckKindFinancialConflict = "financial_conflict"
 	// StuckKindOther: cualquier otro rechazo persistente (FK huérfana,
 	// schema, etc.) — visible pero sin acción directa de UI.
 	StuckKindOther = "other"
@@ -175,7 +185,7 @@ type StuckQueueItem struct {
 	EntityID   string `json:"entity_id"`
 	Operation  string `json:"operation"`
 	RetryCount int    `json:"retry_count"`
-	// Kind — StuckKindDuplicate | StuckKindOther.
+	// Kind — StuckKindDuplicate | StuckKindFinancialConflict | StuckKindOther.
 	Kind string `json:"kind"`
 	// Message — razón del rechazo, sin el prefijo de status. Para clouds
 	// viejos que aún mandan el error crudo de Postgres, viaja tal cual

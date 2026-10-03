@@ -29,19 +29,26 @@ type ExpenseSQLiteRepository struct{}
 func NewExpenseSQLiteRepository() *ExpenseSQLiteRepository { return &ExpenseSQLiteRepository{} }
 
 type sqliteExpenseRow struct {
-	ID            string         `db:"id"`
-	GymID         string         `db:"gym_id"`
-	Version       int            `db:"version"`
-	CreatedAt     int64          `db:"created_at"`
-	UpdatedAt     int64          `db:"updated_at"`
-	DeletedAt     sql.NullInt64  `db:"deleted_at"`
-	SyncedAt      sql.NullInt64  `db:"synced_at"`
-	ExpenseDate   string         `db:"expense_date"`
-	Amount        int64          `db:"amount"`
-	Category      string         `db:"category"`
-	Description   sql.NullString `db:"description"`
-	PaymentMethod string         `db:"payment_method"`
-	CreatedBy     string         `db:"created_by"`
+	ID                    string         `db:"id"`
+	GymID                 string         `db:"gym_id"`
+	Version               int            `db:"version"`
+	CreatedAt             int64          `db:"created_at"`
+	UpdatedAt             int64          `db:"updated_at"`
+	DeletedAt             sql.NullInt64  `db:"deleted_at"`
+	SyncedAt              sql.NullInt64  `db:"synced_at"`
+	ExpenseDate           string         `db:"expense_date"`
+	Amount                int64          `db:"amount"`
+	Category              string         `db:"category"`
+	PayeeName             sql.NullString `db:"payee_name"`
+	Description           sql.NullString `db:"description"`
+	Reference             sql.NullString `db:"reference"`
+	PaymentMethod         string         `db:"payment_method"`
+	PaidFrom              string         `db:"paid_from"`
+	Classification        string         `db:"classification"`
+	Source                string         `db:"source"`
+	RecurringOccurrenceID sql.NullString `db:"recurring_occurrence_id"`
+	CashMovementID        sql.NullString `db:"cash_movement_id"`
+	CreatedBy             string         `db:"created_by"`
 }
 
 func (r *ExpenseSQLiteRepository) Create(tx sharedDomain.Transaction, e *expenseDomain.Expense) (*expenseDomain.Expense, error) {
@@ -50,10 +57,12 @@ func (r *ExpenseSQLiteRepository) Create(tx sharedDomain.Transaction, e *expense
 	const stmt = `
 		INSERT INTO expenses (
 		    id, gym_id, version, created_at, updated_at, deleted_at,
-		    expense_date, amount, category, description, payment_method, created_by
+		    expense_date, amount, category, payee_name, description, reference, payment_method,
+		    paid_from, classification, source, recurring_occurrence_id, cash_movement_id, created_by
 		) VALUES (
 		    :id, :gym_id, :version, :created_at, :updated_at, :deleted_at,
-		    :expense_date, :amount, :category, :description, :payment_method, :created_by
+		    :expense_date, :amount, :category, :payee_name, :description, :reference, :payment_method,
+		    :paid_from, :classification, :source, :recurring_occurrence_id, :cash_movement_id, :created_by
 		)`
 	if _, err := stx.NamedExec(context.Background(), stmt, row); err != nil {
 		return nil, err
@@ -72,10 +81,17 @@ func (r *ExpenseSQLiteRepository) Update(tx sharedDomain.Transaction, e *expense
 		UPDATE expenses SET
 		    version = :version, updated_at = :updated_at, deleted_at = :deleted_at,
 		    expense_date = :expense_date, amount = :amount, category = :category,
-		    description = :description, payment_method = :payment_method
-		WHERE id = :id`
-	if _, err := stx.NamedExec(context.Background(), stmt, row); err != nil {
+		    payee_name=:payee_name, description = :description, reference=:reference,
+		    payment_method = :payment_method, paid_from=:paid_from, classification=:classification, source=:source,
+		    recurring_occurrence_id=:recurring_occurrence_id, cash_movement_id=:cash_movement_id
+		WHERE gym_id=:gym_id AND id = :id AND version=:previous_version`
+	params := map[string]any{"id": row.ID, "gym_id": row.GymID, "version": row.Version, "previous_version": row.Version - 1, "updated_at": row.UpdatedAt, "deleted_at": nullInt(row.DeletedAt), "expense_date": row.ExpenseDate, "amount": row.Amount, "category": row.Category, "payee_name": nullString(row.PayeeName), "description": nullString(row.Description), "reference": nullString(row.Reference), "payment_method": row.PaymentMethod, "paid_from": row.PaidFrom, "classification": row.Classification, "source": row.Source, "recurring_occurrence_id": nullString(row.RecurringOccurrenceID), "cash_movement_id": nullString(row.CashMovementID)}
+	res, err := stx.NamedExec(context.Background(), stmt, params)
+	if err != nil {
 		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return nil, expErrors.ErrVersionConflict
 	}
 	if err := enqueueExpense(stx, e); err != nil {
 		return nil, err
@@ -83,18 +99,22 @@ func (r *ExpenseSQLiteRepository) Update(tx sharedDomain.Transaction, e *expense
 	return e, nil
 }
 
-func (r *ExpenseSQLiteRepository) GetByID(tx sharedDomain.Transaction, id uuid.UUID) (*expenseDomain.Expense, error) {
+func (r *ExpenseSQLiteRepository) GetByID(tx sharedDomain.Transaction, gymID, id uuid.UUID) (*expenseDomain.Expense, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	var row sqliteExpenseRow
 	err := stx.Get(context.Background(), &row,
-		`SELECT * FROM expenses WHERE id = ? AND deleted_at IS NULL`, id.String())
+		`SELECT * FROM expenses WHERE gym_id = ? AND id = ? AND deleted_at IS NULL`, gymID.String(), id.String())
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, sharedDomain.NewBusinessError(expErrors.ErrExpenseNotFound, "")
 	}
 	if err != nil {
 		return nil, err
 	}
-	return expenseFromRow(&row), nil
+	e := expenseFromRow(&row)
+	if err := hydrateExpenseCashDrawersSQLite(tx.(*sharedDomain.SqlxTransaction), gymID, []*expenseDomain.Expense{e}); err != nil {
+		return nil, err
+	}
+	return e, nil
 }
 
 func (r *ExpenseSQLiteRepository) List(tx sharedDomain.Transaction, q expRepo.ListQuery) ([]*expenseDomain.Expense, int, error) {
@@ -117,6 +137,9 @@ func (r *ExpenseSQLiteRepository) List(tx sharedDomain.Transaction, q expRepo.Li
 	for i := range rows {
 		out[i] = expenseFromRow(&rows[i])
 	}
+	if err := hydrateExpenseCashDrawersSQLite(stx, q.GymID, out); err != nil {
+		return nil, 0, err
+	}
 	return out, total, nil
 }
 
@@ -124,15 +147,19 @@ func (r *ExpenseSQLiteRepository) ListAggregates(tx sharedDomain.Transaction, q 
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	whereClause, args := buildExpenseWhereSqlite(q)
 	var row struct {
-		TotalCents   sql.NullInt64 `db:"total"`
-		CashCents    sql.NullInt64 `db:"cash_total"`
-		NonCashCents sql.NullInt64 `db:"non_cash_total"`
+		TotalCents    sql.NullInt64 `db:"total"`
+		CashCents     sql.NullInt64 `db:"cash_total"`
+		NonCashCents  sql.NullInt64 `db:"non_cash_total"`
+		FixedCents    sql.NullInt64 `db:"fixed_total"`
+		VariableCents sql.NullInt64 `db:"variable_total"`
 	}
 	stmt := fmt.Sprintf(`
 		SELECT
 		  COALESCE(SUM(amount), 0) AS total,
 		  COALESCE(SUM(CASE WHEN payment_method = 'cash' THEN amount ELSE 0 END), 0) AS cash_total,
-		  COALESCE(SUM(CASE WHEN payment_method <> 'cash' THEN amount ELSE 0 END), 0) AS non_cash_total
+		  COALESCE(SUM(CASE WHEN payment_method <> 'cash' THEN amount ELSE 0 END), 0) AS non_cash_total,
+		  COALESCE(SUM(CASE WHEN classification = 'fixed' THEN amount ELSE 0 END), 0) AS fixed_total,
+		  COALESCE(SUM(CASE WHEN classification = 'variable' THEN amount ELSE 0 END), 0) AS variable_total
 		FROM expenses WHERE %s`, whereClause)
 	if err := stx.Get(context.Background(), &row, stmt, args...); err != nil {
 		return expRepo.ExpenseAggregates{}, err
@@ -152,9 +179,11 @@ func (r *ExpenseSQLiteRepository) ListAggregates(tx sharedDomain.Transaction, q 
 		return expRepo.ExpenseAggregates{}, err
 	}
 	out := expRepo.ExpenseAggregates{
-		Total:        fromCents(row.TotalCents.Int64),
-		CashTotal:    fromCents(row.CashCents.Int64),
-		NonCashTotal: fromCents(row.NonCashCents.Int64),
+		Total:         fromCents(row.TotalCents.Int64),
+		CashTotal:     fromCents(row.CashCents.Int64),
+		NonCashTotal:  fromCents(row.NonCashCents.Int64),
+		FixedTotal:    fromCents(row.FixedCents.Int64),
+		VariableTotal: fromCents(row.VariableCents.Int64),
 	}
 	if len(cats) > 0 {
 		out.DominantCategory = cats[0].Category
@@ -180,7 +209,52 @@ func (r *ExpenseSQLiteRepository) ListByDate(tx sharedDomain.Transaction, gymID 
 	for i := range rows {
 		out[i] = expenseFromRow(&rows[i])
 	}
+	if err := hydrateExpenseCashDrawersSQLite(stx, gymID, out); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+func hydrateExpenseCashDrawersSQLite(tx *sharedDomain.SqlxTransaction, gymID uuid.UUID, expenses []*expenseDomain.Expense) error {
+	ids := make([]uuid.UUID, 0, len(expenses))
+	byMovement := make(map[uuid.UUID]*expenseDomain.Expense, len(expenses))
+	for _, e := range expenses {
+		if e != nil && e.CashMovementID != nil {
+			ids = append(ids, *e.CashMovementID)
+			byMovement[*e.CashMovementID] = e
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	args := make([]any, 0, len(ids)+1)
+	args = append(args, gymID.String())
+	marks := make([]string, len(ids))
+	for i, id := range ids {
+		marks[i] = "?"
+		args = append(args, id.String())
+	}
+	var rows []struct {
+		ID           string `db:"id"`
+		CashDrawerID string `db:"cash_drawer_id"`
+	}
+	query := `SELECT id,COALESCE(cash_drawer_id,gym_id) AS cash_drawer_id FROM cash_movements
+		WHERE gym_id=? AND deleted_at IS NULL AND id IN (` + strings.Join(marks, ",") + `)`
+	if err := tx.Select(context.Background(), &rows, query, args...); err != nil {
+		return err
+	}
+	for _, row := range rows {
+		movementID, movementErr := uuid.Parse(row.ID)
+		drawerID, drawerErr := uuid.Parse(row.CashDrawerID)
+		if movementErr != nil || drawerErr != nil {
+			continue
+		}
+		if e := byMovement[movementID]; e != nil {
+			d := drawerID
+			e.CashDrawerID = &d
+		}
+	}
+	return nil
 }
 
 func buildExpenseWhereSqlite(q expRepo.ListQuery) (string, []any) {
@@ -202,9 +276,18 @@ func buildExpenseWhereSqlite(q expRepo.ListQuery) (string, []any) {
 		where = append(where, "payment_method = ?")
 		args = append(args, q.PaymentMethod)
 	}
-	if s := strings.TrimSpace(q.Search); s != "" {
-		where = append(where, "description LIKE ? COLLATE NOCASE")
-		args = append(args, "%"+s+"%")
+	if q.Source != "" {
+		where = append(where, "source = ?")
+		args = append(args, q.Source)
+	}
+	if q.Classification != "" {
+		where = append(where, "classification = ?")
+		args = append(args, q.Classification)
+	}
+	if s := normalizeExpenseSearch(q.Search); s != "" {
+		pattern := "%" + escapeLike(s) + "%"
+		where = append(where, "("+sqliteNormalizedSearchColumn("payee_name")+" LIKE ? ESCAPE '!' OR "+sqliteNormalizedSearchColumn("description")+" LIKE ? ESCAPE '!' OR "+sqliteNormalizedSearchColumn("reference")+" LIKE ? ESCAPE '!')")
+		args = append(args, pattern, pattern, pattern)
 	}
 	return strings.Join(where, " AND "), args
 }
@@ -229,29 +312,44 @@ func sortClauseSqlite(sort, dir string) string {
 		direction = "ASC"
 	}
 	if sort == expRepo.SortDate || sort == "" {
-		return col + " " + direction + ", created_at DESC"
+		return col + " " + direction + ", created_at DESC, id ASC"
 	}
-	return col + " " + direction + ", expense_date DESC, created_at DESC"
+	return col + " " + direction + ", expense_date DESC, created_at DESC, id ASC"
 }
 
 func expenseToRow(e *expenseDomain.Expense) sqliteExpenseRow {
 	row := sqliteExpenseRow{
-		ID:            e.ID.String(),
-		GymID:         e.GymID.String(),
-		Version:       e.Version,
-		CreatedAt:     e.CreatedAt.UnixMilli(),
-		UpdatedAt:     e.UpdatedAt.UnixMilli(),
-		ExpenseDate:   e.ExpenseDate.Format("2006-01-02"),
-		Amount:        toCents(e.Amount),
-		Category:      e.Category,
-		PaymentMethod: e.PaymentMethod,
-		CreatedBy:     e.CreatedBy.String(),
+		ID:             e.ID.String(),
+		GymID:          e.GymID.String(),
+		Version:        e.Version,
+		CreatedAt:      e.CreatedAt.UnixMilli(),
+		UpdatedAt:      e.UpdatedAt.UnixMilli(),
+		ExpenseDate:    e.ExpenseDate.Format("2006-01-02"),
+		Amount:         toCents(e.Amount),
+		Category:       e.Category,
+		Classification: e.Classification,
+		Source:         e.Source,
+		PaymentMethod:  e.PaymentMethod,
+		PaidFrom:       e.PaidFrom,
+		CreatedBy:      e.CreatedBy.String(),
 	}
 	if e.DeletedAt != nil {
 		row.DeletedAt = sql.NullInt64{Int64: e.DeletedAt.UnixMilli(), Valid: true}
 	}
 	if e.Description != nil {
 		row.Description = sql.NullString{String: *e.Description, Valid: true}
+	}
+	if e.PayeeName != nil {
+		row.PayeeName = sql.NullString{String: *e.PayeeName, Valid: true}
+	}
+	if e.Reference != nil {
+		row.Reference = sql.NullString{String: *e.Reference, Valid: true}
+	}
+	if e.RecurringOccurrenceID != nil {
+		row.RecurringOccurrenceID = sql.NullString{String: e.RecurringOccurrenceID.String(), Valid: true}
+	}
+	if e.CashMovementID != nil {
+		row.CashMovementID = sql.NullString{String: e.CashMovementID.String(), Valid: true}
 	}
 	return row
 }
@@ -262,16 +360,19 @@ func expenseFromRow(r *sqliteExpenseRow) *expenseDomain.Expense {
 	createdBy, _ := uuid.Parse(r.CreatedBy)
 	date, _ := time.Parse("2006-01-02", r.ExpenseDate)
 	e := &expenseDomain.Expense{
-		ID:            id,
-		GymID:         gymID,
-		Version:       r.Version,
-		ExpenseDate:   date,
-		Amount:        fromCents(r.Amount),
-		Category:      r.Category,
-		PaymentMethod: r.PaymentMethod,
-		CreatedBy:     createdBy,
-		CreatedAt:     time.UnixMilli(r.CreatedAt).UTC(),
-		UpdatedAt:     time.UnixMilli(r.UpdatedAt).UTC(),
+		ID:             id,
+		GymID:          gymID,
+		Version:        r.Version,
+		ExpenseDate:    date,
+		PaidOn:         date,
+		Amount:         fromCents(r.Amount),
+		Category:       r.Category,
+		PaymentMethod:  r.PaymentMethod,
+		PaidFrom:       r.PaidFrom,
+		Classification: r.Classification, Source: r.Source,
+		CreatedBy: createdBy,
+		CreatedAt: time.UnixMilli(r.CreatedAt).UTC(),
+		UpdatedAt: time.UnixMilli(r.UpdatedAt).UTC(),
 	}
 	if r.DeletedAt.Valid {
 		t := time.UnixMilli(r.DeletedAt.Int64).UTC()
@@ -281,6 +382,14 @@ func expenseFromRow(r *sqliteExpenseRow) *expenseDomain.Expense {
 		d := r.Description.String
 		e.Description = &d
 	}
+	if r.PayeeName.Valid {
+		e.PayeeName = &r.PayeeName.String
+	}
+	if r.Reference.Valid {
+		e.Reference = &r.Reference.String
+	}
+	e.RecurringOccurrenceID = parseUUIDPtr(r.RecurringOccurrenceID)
+	e.CashMovementID = parseUUIDPtr(r.CashMovementID)
 	return e
 }
 
@@ -297,17 +406,46 @@ func enqueueExpense(stx *sharedDomain.SqlxTransaction, e *expenseDomain.Expense)
 		"version":        e.Version,
 		"created_at":     e.CreatedAt.UnixMilli(),
 		"updated_at":     e.UpdatedAt.UnixMilli(),
+		"deleted_at":     nullableMillis(e.DeletedAt),
 		"expense_date":   e.ExpenseDate.Format("2006-01-02"),
 		"amount":         e.Amount,
 		"category":       e.Category,
+		"payee_name":     e.PayeeName,
 		"description":    strPtrOrNil(e.Description),
+		"reference":      e.Reference,
 		"payment_method": e.PaymentMethod,
-		"created_by":     e.CreatedBy.String(),
+		"paid_from":      e.PaidFrom,
+		"classification": e.Classification, "source": e.Source, "recurring_occurrence_id": e.RecurringOccurrenceID, "cash_movement_id": e.CashMovementID,
+		"created_by": e.CreatedBy.String(),
 	})
 	if err != nil {
 		return err
 	}
-	return stx.EnqueueSync(context.Background(), "expenses", e.ID.String(), "upsert", payload, e.Version)
+	operation := "upsert"
+	if e.DeletedAt != nil {
+		operation = "delete"
+	}
+	return stx.EnqueueSync(context.Background(), "expenses", e.ID.String(), operation, payload, e.Version)
+}
+
+func nullString(v sql.NullString) any {
+	if !v.Valid {
+		return nil
+	}
+	return v.String
+}
+func nullInt(v sql.NullInt64) any {
+	if !v.Valid {
+		return nil
+	}
+	return v.Int64
+}
+
+func nullableMillis(t *time.Time) any {
+	if t == nil {
+		return nil
+	}
+	return t.UnixMilli()
 }
 
 func strPtrOrNil(p *string) any {

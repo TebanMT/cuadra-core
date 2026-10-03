@@ -82,3 +82,22 @@ sqlite_fix_only: sqlite=026_checkin_pin_queue_fix.sql reason="reescribe payloads
 pair: pg=032_notification_held_status.sql sqlite=028_notification_held_status.sql
 sqlite_fix_only: sqlite=027_repair_gym_setup_completed_at.sql reason="repara in-place el setup_completed_at TEXT (RFC3339) que el apply pre-v1.0.6 escribió en la columna INTEGER; Postgres nunca tuvo el veneno porque su columna es TIMESTAMPTZ y el projector coerce ISO nativo"
 sqlite_fix_only: sqlite=029_sync_quarantine.sql reason="registro de filas del pull que no se pudieron aplicar tras el umbral de intentos (self-heal del sync); vive SÓLO en el sidecar, igual que sync_queue — Postgres no tiene cuarentena de aplicación"
+pair: pg=033_stock_movements_is_purchase.sql sqlite=030_stock_movements_is_purchase.sql
+pair: pg=034_cash_close_unique.sql sqlite=031_cash_close_unique.sql
+pair: pg=035_expenses_plus.sql sqlite=032_expenses_plus.sql
+cloud_only: pg=036_repair_membership_type_sync_money.sql reason="repara y re-versiona payloads históricos de sync_entities desde el row canónico Postgres; SQLite recibe la corrección por pull y no cambia de schema"
+cloud_only: pg=037_repair_stock_movement_sync_money.sql reason="repara y re-versiona costos históricos ×100 del journal de stock_movements; SQLite recibe el costo canónico en pesos por pull"
+pair: pg=038_simple_financial_model.sql sqlite=033_simple_financial_model.sql
+pair: pg=039_financial_integrity.sql sqlite=034_financial_integrity.sql
+pair: pg=040_cash_sessions.sql sqlite=035_cash_sessions.sql
+pair: pg=041_refund_idempotency.sql sqlite=036_refund_idempotency.sql
+pair: pg=042_stock_adjustment_idempotency.sql sqlite=037_stock_adjustment_idempotency.sql
+pair: pg=043_sale_correction_idempotency.sql sqlite=038_sale_correction_idempotency.sql
+pair: pg=044_inventory_purchase_corrections.sql sqlite=039_inventory_purchase_corrections.sql
+pair: pg=045_payment_corrections.sql sqlite=040_payment_corrections.sql
+pair: pg=046_cash_in_non_operating.sql sqlite=041_cash_in_non_operating.sql
+pair: pg=047_repair_financial_schema_drift.sql sqlite=042_repair_financial_schema_drift.sql
+pair: pg=048_payment_cash_destination.sql sqlite=043_payment_cash_destination.sql
+pair: pg=049_remote_inventory_purchases.sql sqlite=044_remote_inventory_purchases.sql
+pair: pg=050_purchase_registration.sql sqlite=045_purchase_registration.sql
+pair: pg=051_product_credit_sales.sql sqlite=046_product_credit_sales.sql

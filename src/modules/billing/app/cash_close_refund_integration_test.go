@@ -21,14 +21,14 @@ func TestCashClose_CashRefund_NetAndDrawer(t *testing.T) {
 	agua := f.seedProduct(t, "Agua", 20, 100)
 
 	// Venta 1 (se conserva): Agua x5 = $100 cash.
-	if _, err := f.registerSale().Execute(context.Background(), billingApp.RegisterSaleInput{
+	if _, err := f.registerSale().WithGyms(f.gymRepo).Execute(context.Background(), billingApp.RegisterSaleInput{
 		GymID: f.gymID, ActorUserID: f.ownerID, Method: "cash",
 		Items: []billingApp.SaleLineInput{{ProductID: agua, Quantity: 5}},
 	}); err != nil {
 		t.Fatalf("sale1: %v", err)
 	}
 	// Venta 2: Agua x2 = $40 cash, luego reembolsada en efectivo.
-	sale2, err := f.registerSale().Execute(context.Background(), billingApp.RegisterSaleInput{
+	sale2, err := f.registerSale().WithGyms(f.gymRepo).Execute(context.Background(), billingApp.RegisterSaleInput{
 		GymID: f.gymID, ActorUserID: f.ownerID, Method: "cash",
 		Items: []billingApp.SaleLineInput{{ProductID: agua, Quantity: 2}},
 	})
@@ -38,7 +38,14 @@ func TestCashClose_CashRefund_NetAndDrawer(t *testing.T) {
 	f.refundSale(t, sale2.SaleID)
 
 	cashClose := reportsApp.NewCashClose(f.cashCloseReader, f.cashCloseEvents, f.uow, f.recorder)
-	now := time.Now().UTC()
+	var localDay string
+	if err := f.db.Get(&localDay, `SELECT payment_date FROM payments WHERE concept='refund' ORDER BY created_at DESC LIMIT 1`); err != nil {
+		t.Fatal(err)
+	}
+	now, err := time.Parse("2006-01-02", localDay)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// (a) Report: NetTotal = ingresos($140) − |reembolso|($40) − gastos(0) = $100.
 	rep, err := cashClose.Report(context.Background(), reportsApp.CashCloseReportInput{GymID: f.gymID, Date: now})

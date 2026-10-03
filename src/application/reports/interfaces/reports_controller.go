@@ -32,6 +32,7 @@ type ReportsController struct {
 	Range             *reportsApp.RangeReport
 	Export            *reportsApp.ExportReport
 	Gender            *reportsApp.GenderReport
+	PaidExpenses      *reportsApp.PaidExpenses
 	MarkContacted     *memApp.MarkContacted
 	MarkLost          *memApp.MarkLost
 	Tokens            auth.TokenService
@@ -64,6 +65,11 @@ func (ctrl *ReportsController) WithGenderReport(uc *reportsApp.GenderReport) *Re
 	return ctrl
 }
 
+func (ctrl *ReportsController) WithPaidExpenses(uc *reportsApp.PaidExpenses) *ReportsController {
+	ctrl.PaidExpenses = uc
+	return ctrl
+}
+
 func (ctrl *ReportsController) RegisterRoutes(r *gin.Engine) {
 	api := r.Group("/api/v1")
 	api.Use(middleware.AuthMiddleware(ctrl.Tokens))
@@ -80,6 +86,9 @@ func (ctrl *ReportsController) RegisterRoutes(r *gin.Engine) {
 		// operadores).
 		owner := api.Group("", middleware.RequireOwner())
 		owner.GET("/reports", ctrl.handleRange)
+		if ctrl.PaidExpenses != nil {
+			owner.GET("/reports/paid-expenses", ctrl.handlePaidExpenses)
+		}
 		owner.GET("/reports/gender", ctrl.handleGenderReport)
 		// Export de reportes (PDF/Excel) es Plus además de owner-only.
 		plus := owner.Group("")
@@ -121,11 +130,11 @@ func (ctrl *ReportsController) handleRange(c *gin.Context) {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
 		return
 	}
-	// Augment with the two FE-only extras (recent_payments, attention_required_count).
-	// Both come from the dashboard cache so we don't duplicate the heavy
-	// Reader calls when the same gym is also viewing the dashboard.
-	dash, _ := ctrl.Dashboard.Execute(c.Request.Context(), reportsApp.DashboardInput{GymID: gymID})
-	utils.JsonResponse(c, http.StatusOK, toRangeWire(out, dash))
+	// The financial range is a single canonical snapshot. Dashboard widgets
+	// are current/global (and cached independently), so mixing their latest
+	// payments into a historical range made the response internally
+	// inconsistent and could even fail a healthy report when a widget failed.
+	utils.JsonResponse(c, http.StatusOK, toRangeWire(out, nil))
 }
 
 // ---------------------------------------------------------------------------
@@ -189,6 +198,9 @@ type recentPaymentWire struct {
 	PaymentMethod string  `json:"payment_method"`
 	PaymentDate   string  `json:"payment_date"`
 	Concept       string  `json:"concept"`
+	// SaleSummary — productos de la venta para concept='product'; el FE lo
+	// usa como título en ventas walk-in (member_name vacío).
+	SaleSummary string `json:"sale_summary,omitempty"`
 }
 
 // dailyAmountWire / dailyCountWire — un punto de las series diarias. La fecha
@@ -236,15 +248,30 @@ type cashTodayWire struct {
 }
 
 type dashboardWire struct {
+	LocalDate     string       `json:"local_date"`
+	Timezone      string       `json:"timezone"`
+	PreviousFrom  string       `json:"previous_from"`
+	PreviousTo    string       `json:"previous_to"`
 	GeneratedAt   time.Time    `json:"generated_at"`
+	DataWatermark *time.Time   `json:"data_watermark"`
+	SyncPending   *bool        `json:"sync_pending"`
 	ActiveMembers kpiTrendWire `json:"active_members"`
 	// KPIs de dinero del MES — owner-only (plan Reports-improve transversal
 	// §2). Para operadores van AUSENTES (nil + omitempty), no en cero: cero
 	// es un dato falso, ausente es "no es tuyo". El FE del desktop decide
 	// el home por rol; esto es el enforcement del lado del wire.
-	IncomeMonth *kpiTrendWire `json:"income_month,omitempty"`
+	IncomeMonth             *kpiTrendWire                  `json:"income_month,omitempty"`
+	MembershipIncomeMonth   *kpiTrendWire                  `json:"membership_income_month,omitempty"`
+	ProductIncomeMonth      *kpiTrendWire                  `json:"product_income_month,omitempty"`
+	OtherIncomeMonth        *kpiTrendWire                  `json:"other_income_month,omitempty"`
+	UnclassifiedIncomeMonth *kpiTrendWire                  `json:"unclassified_income_month,omitempty"`
+	OperatingExpensesMonth  *kpiTrendWire                  `json:"operating_expenses_month,omitempty"`
+	InventoryPurchasesMonth *kpiTrendWire                  `json:"inventory_purchases_month,omitempty"`
+	RefundsMonth            *kpiTrendWire                  `json:"refunds_month,omitempty"`
+	PeriodResultMonth       *kpiTrendWire                  `json:"period_result_month,omitempty"`
+	Integrity               *reportsApp.FinancialIntegrity `json:"integrity,omitempty"`
 	// RealizedProfitMonth — ganancia realizada de productos del mes
-	// (Standard). RealizedProfitCoverage acompaña con la cobertura para
+	// (Plus). RealizedProfitCoverage acompaña con la cobertura para
 	// el hint "X de Y con costo".
 	RealizedProfitMonth    *kpiTrendWire              `json:"realized_profit_month,omitempty"`
 	RealizedProfitCoverage *reportsApp.ProfitCoverage `json:"realized_profit_coverage,omitempty"`
@@ -273,7 +300,10 @@ type dashboardWire struct {
 
 func toDashboardWire(d *reportsApp.DashboardOutput, includeMoney bool) dashboardWire {
 	w := dashboardWire{
+		LocalDate: d.LocalDate, Timezone: d.Timezone, PreviousFrom: d.PreviousFrom, PreviousTo: d.PreviousTo,
 		GeneratedAt:   d.GeneratedAt,
+		DataWatermark: d.DataWatermark,
+		SyncPending:   d.SyncPending,
 		ActiveMembers: kpiToWire(d.ActiveMembers),
 		CheckinsToday: d.CheckinsToday,
 		Income30d:     []dailyAmountWire{},
@@ -291,13 +321,33 @@ func toDashboardWire(d *reportsApp.DashboardOutput, includeMoney bool) dashboard
 	}
 	if includeMoney {
 		income := kpiToWire(d.IncomeMonth)
-		realized := kpiToWire(d.RealizedProfitMonth)
+		membershipIncome := kpiToWire(d.MembershipIncomeMonth)
+		productIncome := kpiToWire(d.ProductIncomeMonth)
+		otherIncome := kpiToWire(d.OtherIncomeMonth)
+		unclassifiedIncome := kpiToWire(d.UnclassifiedIncomeMonth)
+		operatingExpenses := kpiToWire(d.OperatingExpensesMonth)
+		inventoryPurchases := kpiToWire(d.InventoryPurchasesMonth)
+		refunds := kpiToWire(d.RefundsMonth)
+		periodResult := kpiToWire(d.PeriodResultMonth)
 		expenses := kpiToWire(d.ExpensesMonth)
-		coverage := d.RealizedProfitCoverage
+		integrity := d.Integrity
 		w.IncomeMonth = &income
-		w.RealizedProfitMonth = &realized
-		w.RealizedProfitCoverage = &coverage
-		w.RealizedProfitMarginPct = d.RealizedProfitMarginPct
+		w.MembershipIncomeMonth = &membershipIncome
+		w.ProductIncomeMonth = &productIncome
+		w.OtherIncomeMonth = &otherIncome
+		w.UnclassifiedIncomeMonth = &unclassifiedIncome
+		w.OperatingExpensesMonth = &operatingExpenses
+		w.InventoryPurchasesMonth = &inventoryPurchases
+		w.RefundsMonth = &refunds
+		w.PeriodResultMonth = &periodResult
+		w.Integrity = &integrity
+		if d.RealizedProfitMonth != nil && d.RealizedProfitCoverage != nil {
+			realized := kpiToWire(*d.RealizedProfitMonth)
+			coverage := *d.RealizedProfitCoverage
+			w.RealizedProfitMonth = &realized
+			w.RealizedProfitCoverage = &coverage
+			w.RealizedProfitMarginPct = d.RealizedProfitMarginPct
+		}
 		w.ExpensesMonth = &expenses
 		w.Income30d = dailyIncomeToWire(d.IncomeLast30Days)
 	}
@@ -321,6 +371,10 @@ func recentPaymentsToWire(in []reportsApp.RecentPaymentRow) []recentPaymentWire 
 		if r.MemberName != nil {
 			name = *r.MemberName
 		}
+		summary := ""
+		if r.SaleSummary != nil {
+			summary = *r.SaleSummary
+		}
 		out = append(out, recentPaymentWire{
 			ID:            r.ID.String(),
 			MemberName:    name,
@@ -328,6 +382,7 @@ func recentPaymentsToWire(in []reportsApp.RecentPaymentRow) []recentPaymentWire 
 			PaymentMethod: r.Method,
 			PaymentDate:   r.PaymentDate.Format("2006-01-02"),
 			Concept:       r.Concept,
+			SaleSummary:   summary,
 		})
 	}
 	return out
@@ -511,37 +566,62 @@ func timePtrToISO(t *time.Time) *string {
 // FE-only extras (recent_payments, attention_required_count) come from the
 // dashboard's cached widget.
 type rangeWire struct {
-	Period                 string                         `json:"period"`
-	From                   string                         `json:"from"`
-	To                     string                         `json:"to"`
-	Totals                 rangeTotalsWire                `json:"totals"`
-	ProductSales           productSalesWire               `json:"product_sales"`
-	IncomeByDay            []dailyAmountWire              `json:"income_by_day"`
-	ExpensesByDay          []dailyAmountWire              `json:"expenses_by_day"`
-	CheckinsByDay          []dailyCountWire               `json:"checkins_by_day"`
-	IncomeByMethod         map[string]float64             `json:"income_by_method"`
-	ExpensesByCategory     map[string]float64             `json:"expenses_by_category"`
-	IncomeByMembershipType map[string]float64             `json:"income_by_membership_type"`
-	MembersByType          map[string]int                 `json:"members_by_membership_type"`
-	TopMembers             []reportsApp.TopMemberRow      `json:"top_members"`
-	TopProducts            []reportsApp.TopProductRow     `json:"top_products"`
-	InventoryCosts         []inventoryCostWire            `json:"inventory_costs"`
-	Expenses               []expenseWire                  `json:"expenses"`
-	CriticalStock          reportsApp.CriticalStockCounts `json:"critical_stock"`
-	RecentPayments         []recentPaymentWire            `json:"recent_payments"`
-	AttentionRequiredCount int                            `json:"attention_required_count"`
+	PreviousFrom           string                           `json:"previous_from"`
+	PreviousTo             string                           `json:"previous_to"`
+	CalculatedAt           time.Time                        `json:"calculated_at"`
+	DataWatermark          *time.Time                       `json:"data_watermark"`
+	SyncPending            *bool                            `json:"sync_pending"`
+	Period                 string                           `json:"period"`
+	From                   string                           `json:"from"`
+	To                     string                           `json:"to"`
+	Totals                 rangeTotalsWire                  `json:"totals"`
+	CashReconciliation     reportsApp.CashReconciliation    `json:"cash_reconciliation"`
+	ProductSales           productSalesWire                 `json:"product_sales"`
+	IncomeByDay            []dailyAmountWire                `json:"income_by_day"`
+	ExpensesByDay          []dailyAmountWire                `json:"expenses_by_day"`
+	CheckinsByDay          []dailyCountWire                 `json:"checkins_by_day"`
+	IncomeByMethod         map[string]float64               `json:"income_by_method"`
+	ExpensesByCategory     map[string]float64               `json:"expenses_by_category"`
+	IncomeByMembershipType map[string]float64               `json:"income_by_membership_type"`
+	MembersByType          map[string]int                   `json:"members_by_membership_type"`
+	TopMembers             []reportsApp.TopMemberRow        `json:"top_members"`
+	TopProducts            []reportsApp.TopProductRow       `json:"top_products"`
+	InventoryCosts         []inventoryCostWire              `json:"inventory_costs"`
+	Expenses               []expenseWire                    `json:"expenses"`
+	CriticalStock          reportsApp.CriticalStockCounts   `json:"critical_stock"`
+	Integrity              reportsApp.FinancialIntegrity    `json:"integrity"`
+	ProductProfitability   *reportsApp.ProductProfitability `json:"product_profitability,omitempty"`
+	DetailMetadata         reportsApp.RangeDetailMetadata   `json:"detail_metadata"`
+	RecentPayments         []recentPaymentWire              `json:"recent_payments"`
+	AttentionRequiredCount int                              `json:"attention_required_count"`
 }
 
 // rangeTotalsWire — cada total como KPI trend para que el FE renderee
 // deltas en los StatCards.
 type rangeTotalsWire struct {
-	Income          kpiTrendWire `json:"income"`
-	InventoryCost   kpiTrendWire `json:"inventory_cost"`
-	ExpensesGeneral kpiTrendWire `json:"expenses_general"`
-	Refunds         kpiTrendWire `json:"refunds"`
-	NewMembers      kpiTrendWire `json:"new_members"`
-	Checkins        kpiTrendWire `json:"checkins"`
-	Net             kpiTrendWire `json:"net"`
+	Income             kpiTrendWire `json:"income"`
+	MembershipIncome   kpiTrendWire `json:"membership_income"`
+	ProductIncome      kpiTrendWire `json:"product_income"`
+	OtherIncome        kpiTrendWire `json:"other_income"`
+	UnclassifiedIncome kpiTrendWire `json:"unclassified_income"`
+	OperatingExpenses  kpiTrendWire `json:"operating_expenses"`
+	InventoryPurchases kpiTrendWire `json:"inventory_purchases"`
+	Outflows           kpiTrendWire `json:"outflows"`
+	PeriodResult       kpiTrendWire `json:"period_result"`
+	InventoryCost      kpiTrendWire `json:"inventory_cost"`
+	ExpensesGeneral    kpiTrendWire `json:"expenses_general"`
+	Refunds            kpiTrendWire `json:"refunds"`
+	NewMembers         kpiTrendWire `json:"new_members"`
+	Checkins           kpiTrendWire `json:"checkins"`
+	// Deprecated: use period_result. Kept for one compatibility window.
+	Net kpiTrendWire `json:"net"`
+	// Deprecated: use period_result. Kept for one compatibility window.
+	NetResult kpiTrendWire `json:"net_result"`
+	// Deprecated: use period_result. Kept for one compatibility window.
+	OperatingResult kpiTrendWire `json:"operating_result"`
+	// Deprecated: use cash_from_closes. Kept for one compatibility window.
+	CashFlow       kpiTrendWire `json:"cash_flow"`
+	CashFromCloses kpiTrendWire `json:"cash_from_closes"`
 }
 
 // productSalesWire — KPI "Ventas de productos": $ con trend + unidades del
@@ -610,17 +690,35 @@ func inventoryCostsToWire(in []reportsApp.InventoryCostRow) []inventoryCostWire 
 
 func toRangeWire(r *reportsApp.RangeReportOutput, dash *reportsApp.DashboardOutput) rangeWire {
 	w := rangeWire{
-		Period: r.Period,
-		From:   r.From,
-		To:     r.To,
+		PreviousFrom:       r.PreviousFrom,
+		PreviousTo:         r.PreviousTo,
+		CalculatedAt:       r.CalculatedAt,
+		DataWatermark:      r.DataWatermark,
+		SyncPending:        r.SyncPending,
+		Period:             r.Period,
+		From:               r.From,
+		To:                 r.To,
+		CashReconciliation: r.CashReconciliation,
 		Totals: rangeTotalsWire{
-			Income:          kpiToWire(r.Totals.Income),
-			InventoryCost:   kpiToWire(r.Totals.InventoryCost),
-			ExpensesGeneral: kpiToWire(r.Totals.ExpensesGeneral),
-			Refunds:         kpiToWire(r.Totals.Refunds),
-			NewMembers:      kpiToWire(r.Totals.NewMembers),
-			Checkins:        kpiToWire(r.Totals.Checkins),
-			Net:             kpiToWire(r.Totals.Net),
+			Income:             kpiToWire(r.Totals.Income),
+			MembershipIncome:   kpiToWire(r.Totals.MembershipIncome),
+			ProductIncome:      kpiToWire(r.Totals.ProductIncome),
+			OtherIncome:        kpiToWire(r.Totals.OtherIncome),
+			UnclassifiedIncome: kpiToWire(r.Totals.UnclassifiedIncome),
+			OperatingExpenses:  kpiToWire(r.Totals.OperatingExpenses),
+			InventoryPurchases: kpiToWire(r.Totals.InventoryPurchases),
+			Outflows:           kpiToWire(r.Totals.Outflows),
+			PeriodResult:       kpiToWire(r.Totals.PeriodResult),
+			InventoryCost:      kpiToWire(r.Totals.InventoryCost),
+			ExpensesGeneral:    kpiToWire(r.Totals.ExpensesGeneral),
+			Refunds:            kpiToWire(r.Totals.Refunds),
+			NewMembers:         kpiToWire(r.Totals.NewMembers),
+			Checkins:           kpiToWire(r.Totals.Checkins),
+			Net:                kpiToWire(r.Totals.Net),
+			NetResult:          kpiToWire(r.Totals.NetResult),
+			OperatingResult:    kpiToWire(r.Totals.OperatingResult),
+			CashFlow:           kpiToWire(r.Totals.CashFlow),
+			CashFromCloses:     kpiToWire(r.Totals.CashFromCloses),
 		},
 		ProductSales: productSalesWire{
 			Amount: kpiToWire(r.ProductSales.Amount),
@@ -638,6 +736,9 @@ func toRangeWire(r *reportsApp.RangeReportOutput, dash *reportsApp.DashboardOutp
 		InventoryCosts:         inventoryCostsToWire(r.InventoryCosts),
 		Expenses:               expensesToWire(r.Expenses),
 		CriticalStock:          r.CriticalStock,
+		Integrity:              r.Integrity,
+		ProductProfitability:   r.ProductProfitability,
+		DetailMetadata:         r.DetailMetadata,
 		RecentPayments:         []recentPaymentWire{},
 	}
 	if dash != nil {
@@ -831,4 +932,30 @@ func parseUUIDParam(c *gin.Context, name string) (uuid.UUID, bool) {
 		return uuid.Nil, false
 	}
 	return id, true
+}
+
+func (ctrl *ReportsController) handlePaidExpenses(c *gin.Context) {
+	gymID, ok := middleware.GetGymID(c)
+	if !ok {
+		utils.ErrorResponse(c, http.StatusUnauthorized, errBadAuth)
+		return
+	}
+	from, err := time.Parse("2006-01-02", c.Query("from"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err)
+		return
+	}
+	to, err := time.Parse("2006-01-02", c.Query("to"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err)
+		return
+	}
+	page, _ := strconv.Atoi(c.Query("page"))
+	size, _ := strconv.Atoi(c.Query("page_size"))
+	out, err := ctrl.PaidExpenses.Execute(c.Request.Context(), reportsApp.PaidExpensesInput{GymID: gymID, From: from, To: to, Query: c.Query("q"), Page: page, PageSize: size})
+	if err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	utils.JsonResponse(c, http.StatusOK, out)
 }

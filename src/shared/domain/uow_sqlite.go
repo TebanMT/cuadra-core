@@ -20,6 +20,8 @@ type SqlxTransaction struct {
 	DB    *sqlx.DB
 	Tx    *sqlx.Tx
 	Queue SyncQueueWriter
+	// Entity snapshots written in this transaction, used by queue finalizers.
+	SyncWrites map[string]bool
 }
 
 func (s *SqlxTransaction) Execute(fn func(tx Transaction) error) error {
@@ -107,7 +109,16 @@ func (u *sqlxUnitOfWork) Begin(ctx context.Context) (Transaction, error) {
 }
 
 func (u *sqlxUnitOfWork) Commit(tx Transaction) error {
-	return tx.(*SqlxTransaction).Tx.Commit()
+	stx := tx.(*SqlxTransaction)
+	if finalizer, ok := stx.Queue.(interface {
+		Finalize(context.Context, Transaction) error
+	}); ok {
+		if err := finalizer.Finalize(context.Background(), tx); err != nil {
+			_ = stx.Tx.Rollback()
+			return err
+		}
+	}
+	return stx.Tx.Commit()
 }
 
 func (u *sqlxUnitOfWork) Rollback(tx Transaction) error {
@@ -116,6 +127,25 @@ func (u *sqlxUnitOfWork) Rollback(tx Transaction) error {
 
 func (u *sqlxUnitOfWork) Query(ctx context.Context) (Transaction, error) {
 	return &SqlxTransaction{DB: u.db, Tx: nil, Queue: u.queue}, nil
+}
+
+func (u *sqlxUnitOfWork) ReadSnapshot(ctx context.Context, fn func(tx Transaction) error) error {
+	tx, err := u.db.BeginTxx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return err
+	}
+	handle := &SqlxTransaction{DB: u.db, Tx: tx, Queue: u.queue}
+	defer func() {
+		if r := recover(); r != nil {
+			_ = tx.Rollback()
+			panic(r)
+		}
+	}()
+	if err := fn(handle); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 func (u *sqlxUnitOfWork) Command(ctx context.Context, fn func(tx Transaction) error) error {

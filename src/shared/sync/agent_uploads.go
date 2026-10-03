@@ -484,8 +484,7 @@ func (a *Agent) replaceProductPhotoURL(ctx context.Context, productID, objectKey
 		}
 
 		// 2. Re-read. Money se guarda en cents en SQLite (ADR-002 §2);
-		//    el proyector cloud espera la misma representación entera
-		//    en el payload — no convertimos aquí.
+		//    el wire usa pesos, como enqueueProduct.
 		var row struct {
 			ID           string  `db:"id"`
 			GymID        string  `db:"gym_id"`
@@ -495,6 +494,7 @@ func (a *Agent) replaceProductPhotoURL(ctx context.Context, productID, objectKey
 			Name         string  `db:"name"`
 			Price        int64   `db:"price"`
 			Stock        int     `db:"stock"`
+			StockBase    int     `db:"stock_base"`
 			StockMinimum int     `db:"stock_minimum"`
 			Category     *string `db:"category"`
 			ImageURL     string  `db:"image_url"`
@@ -502,7 +502,7 @@ func (a *Agent) replaceProductPhotoURL(ctx context.Context, productID, objectKey
 		}
 		if err := stx.Get(ctx, &row, `
 			SELECT id, gym_id, version, created_at, updated_at,
-			       name, price, stock, stock_minimum, category, image_url, active
+			       name, price, stock, COALESCE(stock_base,stock) AS stock_base, stock_minimum, category, image_url, active
 			FROM products WHERE id = ?`, productID,
 		); err != nil {
 			return err
@@ -517,8 +517,9 @@ func (a *Agent) replaceProductPhotoURL(ctx context.Context, productID, objectKey
 			"created_at":    row.CreatedAt,
 			"updated_at":    row.UpdatedAt,
 			"name":          row.Name,
-			"price":         row.Price,
+			"price":         float64(row.Price) / 100,
 			"stock":         row.Stock,
+			"stock_base":    row.StockBase,
 			"stock_minimum": row.StockMinimum,
 			"category":      row.Category,
 			"image_url":     row.ImageURL,

@@ -3,6 +3,7 @@
 package repositories
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -26,6 +27,10 @@ func (r *UserPostgresRepository) Create(tx sharedDomain.Transaction, u *userDoma
 	if err := gormTx.Create(&m).Error; err != nil {
 		return nil, err
 	}
+	if err := emitUser(gormTx, u); err != nil {
+		return nil, err
+	}
+	m.Version = u.Version
 	return userToDomain(&m), nil
 }
 
@@ -98,7 +103,52 @@ func (r *UserPostgresRepository) Update(tx sharedDomain.Transaction, u *userDoma
 		Save(&m).Error; err != nil {
 		return nil, err
 	}
+	if err := emitUser(gormTx, u); err != nil {
+		return nil, err
+	}
+	m.Version = u.Version
 	return userToDomain(&m), nil
+}
+
+// Cloud staff changes must reach a paired desktop before it can authenticate
+// the operator offline. Publish in the same transaction as the canonical user;
+// failing to publish must roll back the change instead of leaving a hidden user.
+func emitUser(g *gorm.DB, u *userDomain.User) error {
+	ms := func(t *time.Time) any {
+		if t == nil {
+			return nil
+		}
+		return t.UnixMilli()
+	}
+	payload, err := json.Marshal(map[string]any{
+		"id": u.ID, "gym_id": u.GymID, "version": u.Version,
+		"created_at": u.CreatedAt.UnixMilli(), "updated_at": u.UpdatedAt.UnixMilli(), "deleted_at": ms(u.DeletedAt),
+		"email": u.Email, "password_hash": u.PasswordHash, "full_name": u.FullName,
+		"phone": u.Phone, "role": u.Role, "active": u.Active, "must_change_password": u.MustChangePassword,
+		"last_login_at": ms(u.LastLoginAt), "created_by": u.CreatedBy,
+		"pin_hash": u.PinHash, "pin_assigned_at": ms(u.PinAssignedAt),
+	})
+	if err != nil {
+		return err
+	}
+	var version int
+	err = g.Raw(`INSERT INTO sync_entities(gym_id,entity_type,entity_id,version,payload,server_updated_at,deleted_at)
+		VALUES(?,'users',?,?,?::jsonb,clock_timestamp(),?)
+		ON CONFLICT(gym_id,entity_type,entity_id) DO UPDATE SET
+		version=GREATEST(sync_entities.version+1,EXCLUDED.version),
+		payload=jsonb_set(EXCLUDED.payload,'{version}',to_jsonb(GREATEST(sync_entities.version+1,EXCLUDED.version))),
+		server_updated_at=clock_timestamp(),deleted_at=EXCLUDED.deleted_at RETURNING version`,
+		u.GymID, u.ID, u.Version, string(payload), u.DeletedAt).Scan(&version).Error
+	if err != nil {
+		return err
+	}
+	if version != u.Version {
+		if err := g.Exec(`UPDATE users SET version=? WHERE gym_id=? AND id=?`, version, u.GymID, u.ID).Error; err != nil {
+			return err
+		}
+		u.Version = version
+	}
+	return nil
 }
 
 func (r *UserPostgresRepository) ListByGym(tx sharedDomain.Transaction, gymID uuid.UUID) ([]*userDomain.User, error) {

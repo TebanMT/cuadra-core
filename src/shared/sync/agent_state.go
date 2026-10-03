@@ -21,24 +21,40 @@ const (
 	keyLastSyncedAt           = "last_synced_at_ms"
 	keyInitialSyncCompletedAt = "initial_sync_completed_at_ms"
 	keyFullSyncCursor         = "full_sync_cursor"
+	keyFullSyncStartedAt      = "full_sync_started_at_ms"
+	keyLastPullCursor         = "last_pull_cursor"
 	keyLastError              = "last_error"
 	keyConsecutiveFailures    = "consecutive_failures"
 	keyNextRetryAt            = "next_retry_at_ms"
 	keySidecarToken           = "sidecar_token"
+	// keyActiveGymID binds every cursor/checkpoint above to the gym whose
+	// sidecar credential produced it. A desktop can be re-paired or used by
+	// an owner with another gym while keeping both tenants in the same
+	// SQLite. Without this discriminator, the new gym inherited the old
+	// gym's last_pulled_at and skipped its entire cloud history.
+	keyActiveGymID = "sync_active_gym_id"
+	// Versioned independently from the DB schema: bumping this forces one
+	// canonical full-sync when cursor/materialisation semantics change.
+	keyCheckpointFormatVersion     = "sync_checkpoint_format_version"
+	currentCheckpointFormatVersion = 2
 )
 
 // State is the in-memory projection of sync_state. Use ReadState / WriteState
 // for atomic round-trips; individual setters short-circuit unrelated keys.
 type State struct {
-	ClientID               uuid.UUID
-	LastPulledAt           time.Time
-	LastSyncedAt           time.Time
-	InitialSyncCompletedAt time.Time
-	FullSyncCursor         string
-	LastError              string
-	ConsecutiveFailures    int
-	NextRetryAt            time.Time
-	SidecarToken           string
+	ClientID                uuid.UUID
+	LastPulledAt            time.Time
+	LastSyncedAt            time.Time
+	InitialSyncCompletedAt  time.Time
+	FullSyncCursor          string
+	FullSyncStartedAt       time.Time
+	LastPullCursor          string
+	LastError               string
+	ConsecutiveFailures     int
+	NextRetryAt             time.Time
+	SidecarToken            string
+	ActiveGymID             uuid.UUID
+	CheckpointFormatVersion int
 }
 
 // ReadState — fetches all known sync_state rows for this device. Missing
@@ -65,6 +81,10 @@ func ReadState(ctx context.Context, tx sharedDomain.Transaction) (State, error) 
 			s.LastSyncedAt = parseMs(r.Value)
 		case keyInitialSyncCompletedAt:
 			s.InitialSyncCompletedAt = parseMs(r.Value)
+		case keyFullSyncStartedAt:
+			s.FullSyncStartedAt = parseMs(r.Value)
+		case keyLastPullCursor:
+			s.LastPullCursor = r.Value
 		case keyFullSyncCursor:
 			s.FullSyncCursor = r.Value
 		case keyLastError:
@@ -77,6 +97,14 @@ func ReadState(ctx context.Context, tx sharedDomain.Transaction) (State, error) 
 			s.NextRetryAt = parseMs(r.Value)
 		case keySidecarToken:
 			s.SidecarToken = r.Value
+		case keyActiveGymID:
+			if id, err := uuid.Parse(r.Value); err == nil {
+				s.ActiveGymID = id
+			}
+		case keyCheckpointFormatVersion:
+			if n, err := strconv.Atoi(r.Value); err == nil {
+				s.CheckpointFormatVersion = n
+			}
 		}
 	}
 	return s, nil
@@ -159,6 +187,41 @@ func SetNextRetryAt(ctx context.Context, tx sharedDomain.Transaction, t time.Tim
 // the new credential without restarting the binary.
 func SetSidecarToken(ctx context.Context, tx sharedDomain.Transaction, token string) error {
 	return SetKV(ctx, tx, keySidecarToken, token)
+}
+
+// BindCheckpointToGym atomically binds the global sync checkpoint to gymID.
+// When the binding changes, every cursor-derived value is cleared so the new
+// tenant starts with /sync/full. Operational rows and pending queue items are
+// deliberately preserved; the agent scopes the queue by payload.gym_id and
+// will resume the other tenant if the operator switches back later.
+func BindCheckpointToGym(ctx context.Context, tx sharedDomain.Transaction, gymID uuid.UUID) (bool, error) {
+	if gymID == uuid.Nil {
+		return false, nil
+	}
+	st, err := ReadState(ctx, tx)
+	if err != nil {
+		return false, err
+	}
+	if st.ActiveGymID == gymID && st.CheckpointFormatVersion == currentCheckpointFormatVersion {
+		return false, nil
+	}
+	for key, value := range map[string]string{
+		keyActiveGymID:             gymID.String(),
+		keyCheckpointFormatVersion: strconv.Itoa(currentCheckpointFormatVersion),
+		keyLastPulledAt:            "",
+		keyLastSyncedAt:            "",
+		keyInitialSyncCompletedAt:  "",
+		keyFullSyncCursor:          "",
+		keyLastPullCursor:          "", keyFullSyncStartedAt: "",
+		keyLastError:           "",
+		keyConsecutiveFailures: "0",
+		keyNextRetryAt:         "",
+	} {
+		if err := SetKV(ctx, tx, key, value); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 func parseMs(s string) time.Time {

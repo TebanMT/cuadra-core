@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -31,6 +32,9 @@ func (r *PaymentPostgresRepository) Create(tx sharedDomain.Transaction, p *payme
 	if err := gormTx.Create(&row).Error; err != nil {
 		return nil, err
 	}
+	if err := mirrorPayment(gormTx, p); err != nil {
+		return nil, err
+	}
 	return paymentFromModel(&row), nil
 }
 
@@ -50,7 +54,90 @@ func (r *PaymentPostgresRepository) Update(tx sharedDomain.Transaction, p *payme
 		}).Error; err != nil {
 		return nil, err
 	}
+	if err := mirrorPayment(gormTx, p); err != nil {
+		return nil, err
+	}
 	return p, nil
+}
+
+func (r *PaymentPostgresRepository) UpdateForSaleCorrection(tx sharedDomain.Transaction, p *paymentDomain.Payment) (*paymentDomain.Payment, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	breakdownBytes, err := json.Marshal(p.Breakdown)
+	if err != nil {
+		return nil, err
+	}
+	res := gormTx.Model(&models.PaymentModel{}).
+		Where("gym_id=? AND id=? AND deleted_at IS NULL", p.GymID, p.ID).
+		Updates(map[string]any{
+			"version": p.Version, "updated_at": p.UpdatedAt, "amount": p.Amount,
+			"recognized_amount": p.RecognizedAmount, "balance_pending": p.BalancePending,
+			"discount_amount": p.DiscountAmount, "deleted_at": p.DeletedAt,
+			"breakdown": gorm.Expr("?::jsonb", string(breakdownBytes)),
+		})
+	if res.Error != nil {
+		return nil, res.Error
+	}
+	if res.RowsAffected != 1 {
+		return nil, sharedDomain.NewBusinessError(billingErrors.ErrPaymentNotFound, "")
+	}
+	if err := mirrorPayment(gormTx, p); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+func (r *PaymentPostgresRepository) UpdateForAdministrativeCorrection(tx sharedDomain.Transaction, p *paymentDomain.Payment, expectedVersion int) (*paymentDomain.Payment, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	res := gormTx.Model(&models.PaymentModel{}).
+		Where("gym_id=? AND id=? AND version=? AND deleted_at IS NULL", p.GymID, p.ID, expectedVersion).
+		Updates(map[string]any{
+			"version": p.Version, "updated_at": p.UpdatedAt, "amount": p.Amount,
+			"recognized_amount": p.RecognizedAmount, "balance_pending": p.BalancePending,
+			"cash_destination": p.EffectiveCashDestination(), "payment_method": p.PaymentMethod, "cash_drawer_id": p.CashDrawerID,
+			"payment_date": p.PaymentDate, "deleted_at": p.DeletedAt,
+		})
+	if res.Error != nil {
+		return nil, res.Error
+	}
+	if res.RowsAffected != 1 {
+		return nil, sharedDomain.NewBusinessError(billingErrors.ErrPaymentVersionConflict, "")
+	}
+	if err := mirrorPayment(gormTx, p); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+func (r *PaymentPostgresRepository) GetByIdempotencyKey(tx sharedDomain.Transaction, gymID uuid.UUID, key string) (*paymentDomain.Payment, error) {
+	var row models.PaymentModel
+	err := tx.(*sharedDomain.GormTransaction).Tx.
+		Where("gym_id=? AND idempotency_key=? AND deleted_at IS NULL", gymID, strings.TrimSpace(key)).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return paymentFromModel(&row), nil
+}
+
+func (r *PaymentPostgresRepository) FinalizeIdempotency(tx sharedDomain.Transaction, p *paymentDomain.Payment) error {
+	if len(p.IdempotencyResult) == 0 {
+		return billingErrors.ErrIdempotencyKeyRequired
+	}
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	res := gormTx.Model(&models.PaymentModel{}).
+		Where("gym_id=? AND id=? AND idempotency_key=? AND idempotency_fingerprint=? AND deleted_at IS NULL",
+			p.GymID, p.ID, p.IdempotencyKey, p.IdempotencyFingerprint).
+		Updates(map[string]any{"version": p.Version, "updated_at": p.UpdatedAt,
+			"idempotency_result": gorm.Expr("?::jsonb", string(p.IdempotencyResult))})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected != 1 {
+		return billingErrors.ErrIdempotencyKeyConflict
+	}
+	return mirrorPayment(gormTx, p)
 }
 
 func (r *PaymentPostgresRepository) GetByID(tx sharedDomain.Transaction, id uuid.UUID) (*paymentDomain.Payment, error) {
@@ -186,6 +273,64 @@ func (r *PaymentPostgresRepository) HasRefundFor(tx sharedDomain.Transaction, pa
 	return n > 0, err
 }
 
+func (r *PaymentPostgresRepository) RefundBalanceForUpdate(tx sharedDomain.Transaction, gymID, rootPaymentID uuid.UUID) (billingRepo.RefundBalance, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	return r.refundBalance(gormTx, gymID, rootPaymentID, true)
+}
+
+func (r *PaymentPostgresRepository) RefundBalance(tx sharedDomain.Transaction, gymID, rootPaymentID uuid.UUID) (billingRepo.RefundBalance, error) {
+	return r.refundBalance(tx.(*sharedDomain.GormTransaction).Tx, gymID, rootPaymentID, false)
+}
+
+func (r *PaymentPostgresRepository) refundBalance(gormTx *gorm.DB, gymID, rootPaymentID uuid.UUID, lock bool) (billingRepo.RefundBalance, error) {
+	var root models.PaymentModel
+	query := gormTx
+	if lock {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	err := query.Where("gym_id=? AND id=? AND deleted_at IS NULL", gymID, rootPaymentID).First(&root).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return billingRepo.RefundBalance{}, sharedDomain.NewBusinessError(billingErrors.ErrPaymentNotFound, "")
+	}
+	if err != nil {
+		return billingRepo.RefundBalance{}, err
+	}
+	var sums struct{ Collected, Recognized, Refunded, SourceRefunded float64 }
+	if err := gormTx.Raw(`
+		SELECT ? + COALESCE(SUM(amount) FILTER (WHERE concept='balance_settlement'),0) AS collected,
+		       ? + COALESCE(SUM(recognized_amount) FILTER (WHERE concept='balance_settlement'),0) AS recognized,
+		       COALESCE(SUM(ABS(amount)) FILTER (WHERE concept='refund'),0) AS refunded,
+		       COALESCE(SUM(ABS(amount)) FILTER (
+		         WHERE concept='refund' AND parent_payment_id=?),0) AS source_refunded
+		FROM payments p
+		WHERE p.gym_id=? AND p.deleted_at IS NULL AND (
+		  p.parent_payment_id=? OR (
+		    p.concept='refund' AND EXISTS(
+		      SELECT 1 FROM payments source
+		      WHERE source.id=p.parent_payment_id AND source.gym_id=p.gym_id
+		        AND source.concept='balance_settlement'
+		        AND source.parent_payment_id=? AND source.deleted_at IS NULL
+		    )
+		  )
+		)`,
+		root.Amount, root.RecognizedAmount, rootPaymentID, gymID, rootPaymentID, rootPaymentID).Scan(&sums).Error; err != nil {
+		return billingRepo.RefundBalance{}, err
+	}
+	refundable := sums.Collected - sums.Refunded
+	if refundable < 0 {
+		refundable = 0
+	}
+	sourceRefundable := root.Amount - sums.SourceRefunded
+	if sourceRefundable < 0 {
+		sourceRefundable = 0
+	}
+	return billingRepo.RefundBalance{
+		Root: paymentFromModel(&root), Collected: sums.Collected, Recognized: sums.Recognized,
+		Refunded: sums.Refunded, Refundable: refundable,
+		SourceRefunded: sums.SourceRefunded, SourceRefundable: sourceRefundable,
+	}, nil
+}
+
 // MaxFolioForConcept locks the matching gym/concept folio range with FOR
 // UPDATE so concurrent INSERTs queue behind us.
 func (r *PaymentPostgresRepository) MaxFolioForConcept(tx sharedDomain.Transaction, gymID uuid.UUID, concept string) (string, error) {
@@ -219,25 +364,45 @@ func (r *PaymentPostgresRepository) MaxFolioForConcept(tx sharedDomain.Transacti
 // ---------------------------------------------------------------------------
 
 func paymentToModel(p *paymentDomain.Payment) models.PaymentModel {
+	var cashDrawerID *uuid.UUID
+	if p.PaymentMethod == paymentDomain.MethodCash && p.EffectiveCashDestination() != "gym_fund" {
+		drawerID := p.GymID
+		if p.CashDrawerID != nil && *p.CashDrawerID != uuid.Nil {
+			drawerID = *p.CashDrawerID
+		}
+		cashDrawerID = &drawerID
+	}
 	m := models.PaymentModel{
-		ID:              p.ID,
-		GymID:           p.GymID,
-		Version:         p.Version,
-		CreatedAt:       p.CreatedAt,
-		UpdatedAt:       p.UpdatedAt,
-		DeletedAt:       p.DeletedAt,
-		Folio:           p.Folio,
-		MemberID:        p.MemberID,
-		Amount:          p.Amount,
-		PaymentMethod:   p.PaymentMethod,
-		Concept:         p.Concept,
-		ParentPaymentID: p.ParentPaymentID,
-		DiscountAmount:  p.DiscountAmount,
-		DiscountReason:  p.DiscountReason,
-		BalancePending:  p.BalancePending,
-		PaymentDate:     p.PaymentDate,
-		Notes:           p.Notes,
-		OperatorID:      p.OperatorID,
+		ID:               p.ID,
+		GymID:            p.GymID,
+		Version:          p.Version,
+		CreatedAt:        p.CreatedAt,
+		UpdatedAt:        p.UpdatedAt,
+		DeletedAt:        p.DeletedAt,
+		Folio:            p.Folio,
+		MemberID:         p.MemberID,
+		MembershipID:     p.MembershipID,
+		Amount:           p.Amount,
+		RecognizedAmount: p.RecognizedAmount,
+		CashDestination:  p.EffectiveCashDestination(),
+		PaymentMethod:    p.PaymentMethod,
+		CashDrawerID:     cashDrawerID,
+		Concept:          p.Concept,
+		ParentPaymentID:  p.ParentPaymentID,
+		DiscountAmount:   p.DiscountAmount,
+		DiscountReason:   p.DiscountReason,
+		BalancePending:   p.BalancePending,
+		PaymentDate:      p.PaymentDate,
+		Notes:            p.Notes,
+		OperatorID:       p.OperatorID,
+	}
+	if p.IdempotencyKey != "" {
+		m.IdempotencyKey = &p.IdempotencyKey
+		m.IdempotencyFingerprint = &p.IdempotencyFingerprint
+	}
+	if len(p.IdempotencyResult) > 0 {
+		result := string(p.IdempotencyResult)
+		m.IdempotencyResult = &result
 	}
 	if len(p.Breakdown) > 0 {
 		if b, err := json.Marshal(p.Breakdown); err == nil {
@@ -252,24 +417,37 @@ func paymentToModel(p *paymentDomain.Payment) models.PaymentModel {
 
 func paymentFromModel(r *models.PaymentModel) *paymentDomain.Payment {
 	p := &paymentDomain.Payment{
-		ID:              r.ID,
-		GymID:           r.GymID,
-		Version:         r.Version,
-		Folio:           r.Folio,
-		MemberID:        r.MemberID,
-		Amount:          r.Amount,
-		PaymentMethod:   r.PaymentMethod,
-		Concept:         r.Concept,
-		ParentPaymentID: r.ParentPaymentID,
-		DiscountAmount:  r.DiscountAmount,
-		DiscountReason:  r.DiscountReason,
-		BalancePending:  r.BalancePending,
-		PaymentDate:     r.PaymentDate,
-		Notes:           r.Notes,
-		OperatorID:      r.OperatorID,
-		CreatedAt:       r.CreatedAt,
-		UpdatedAt:       r.UpdatedAt,
-		DeletedAt:       r.DeletedAt,
+		ID:               r.ID,
+		GymID:            r.GymID,
+		Version:          r.Version,
+		Folio:            r.Folio,
+		MemberID:         r.MemberID,
+		MembershipID:     r.MembershipID,
+		Amount:           r.Amount,
+		RecognizedAmount: r.RecognizedAmount,
+		CashDestination:  r.CashDestination,
+		PaymentMethod:    r.PaymentMethod,
+		CashDrawerID:     r.CashDrawerID,
+		Concept:          r.Concept,
+		ParentPaymentID:  r.ParentPaymentID,
+		DiscountAmount:   r.DiscountAmount,
+		DiscountReason:   r.DiscountReason,
+		BalancePending:   r.BalancePending,
+		PaymentDate:      r.PaymentDate,
+		Notes:            r.Notes,
+		OperatorID:       r.OperatorID,
+		CreatedAt:        r.CreatedAt,
+		UpdatedAt:        r.UpdatedAt,
+		DeletedAt:        r.DeletedAt,
+	}
+	if r.IdempotencyKey != nil {
+		p.IdempotencyKey = *r.IdempotencyKey
+	}
+	if r.IdempotencyFingerprint != nil {
+		p.IdempotencyFingerprint = *r.IdempotencyFingerprint
+	}
+	if r.IdempotencyResult != nil {
+		p.IdempotencyResult = append([]byte(nil), (*r.IdempotencyResult)...)
 	}
 	if r.Breakdown != nil && *r.Breakdown != "" {
 		var lines []paymentDomain.BreakdownLine
@@ -280,4 +458,32 @@ func paymentFromModel(r *models.PaymentModel) *paymentDomain.Payment {
 		}
 	}
 	return p
+}
+
+func mirrorPayment(g *gorm.DB, p *paymentDomain.Payment) error {
+	payload, err := json.Marshal(map[string]any{
+		"id": p.ID, "gym_id": p.GymID, "version": p.Version,
+		"created_at": p.CreatedAt.UnixMilli(), "updated_at": p.UpdatedAt.UnixMilli(),
+		"deleted_at": p.DeletedAt, "folio": p.Folio, "member_id": p.MemberID, "membership_id": p.MembershipID,
+		"idempotency_key":         nullablePaymentString(p.IdempotencyKey),
+		"idempotency_fingerprint": nullablePaymentString(p.IdempotencyFingerprint),
+		"idempotency_result":      json.RawMessage(p.IdempotencyResult),
+		"amount":                  p.Amount, "recognized_amount": p.RecognizedAmount,
+		"cash_destination": p.EffectiveCashDestination(), "payment_method": p.PaymentMethod, "cash_drawer_id": p.CashDrawerID,
+		"concept": p.Concept, "parent_payment_id": p.ParentPaymentID,
+		"discount_amount": p.DiscountAmount, "discount_reason": p.DiscountReason,
+		"balance_pending": p.BalancePending, "payment_date": p.PaymentDate.Format("2006-01-02"),
+		"notes": p.Notes, "breakdown": p.Breakdown, "operator_id": p.OperatorID,
+	})
+	if err != nil {
+		return err
+	}
+	return upsertFinancialMirror(g, p.GymID, "payments", p.ID, p.Version, payload, p.DeletedAt)
+}
+
+func nullablePaymentString(value string) any {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return value
 }

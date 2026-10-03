@@ -156,12 +156,21 @@ func (uc *SendReceipt) Execute(ctx context.Context, in SendReceiptInput) (*SendR
 	// dispatcher resuelve el `from` por tier (master sender en Standard).
 	// Query() arriba devuelve un tx read-only sin lock (Tx=nil), así que el
 	// Command de EnqueueReceipt no choca.
+	// The product receipt message describes the purchase. A fully financed
+	// purchase has a positive sale total even though its initial collection is zero.
+	receiptAmount := p.Amount
+	if p.Concept == paymentDomain.ConceptProduct && p.Amount == 0 {
+		for _, line := range p.Breakdown {
+			receiptAmount += line.Amount
+		}
+		receiptAmount -= p.DiscountAmount
+	}
 	evt := PaymentCompletedEvent{
 		GymID:      p.GymID,
 		PaymentID:  in.PaymentID,
 		MemberID:   p.MemberID,
 		Concept:    p.Concept,
-		Amount:     p.Amount,
+		Amount:     receiptAmount,
 		Folio:      p.Folio,
 		OperatorID: p.OperatorID,
 	}
@@ -238,7 +247,12 @@ func buildReceiptLines(gymName, city, whatsapp, rfc, razon *string,
 		lines = append(lines, *razon)
 	}
 	lines = append(lines, "")
-	lines = append(lines, "Comprobante de pago")
+	creditSale := p.Concept == paymentDomain.ConceptProduct && p.Amount == 0
+	if creditSale {
+		lines = append(lines, "Comprobante de venta")
+	} else {
+		lines = append(lines, "Comprobante de pago")
+	}
 	lines = append(lines, "Folio: "+p.Folio)
 	lines = append(lines, "Fecha: "+p.PaymentDate.Format("2006-01-02"))
 	if memberName != "" {
@@ -259,7 +273,15 @@ func buildReceiptLines(gymName, city, whatsapp, rfc, razon *string,
 		lines = append(lines, "Concepto: "+conceptLabel(p.Concept))
 	}
 
-	subtotal := p.Amount + p.DiscountAmount
+	var breakdownTotal float64
+	for _, line := range p.Breakdown {
+		breakdownTotal += line.Amount
+	}
+	subtotal := p.Amount + p.BalancePending + p.DiscountAmount
+	if breakdownTotal > 0 {
+		subtotal = breakdownTotal
+	}
+	correctedSaleTotal := breakdownTotal - p.DiscountAmount
 	if p.DiscountAmount > 0 {
 		lines = append(lines, fmt.Sprintf("Subtotal: $%.2f", subtotal))
 		lines = append(lines, fmt.Sprintf("Descuento: -$%.2f", p.DiscountAmount))
@@ -267,11 +289,28 @@ func buildReceiptLines(gymName, city, whatsapp, rfc, razon *string,
 			lines = append(lines, "Motivo descuento: "+*p.DiscountReason)
 		}
 	}
-	lines = append(lines, fmt.Sprintf("Total: $%.2f", p.Amount))
+	if creditSale {
+		lines = append(lines, fmt.Sprintf("Total de venta: $%.2f", subtotal-p.DiscountAmount))
+		lines = append(lines, "Abono inicial: $0.00")
+	} else if p.Concept == paymentDomain.ConceptProduct && len(p.Breakdown) > 0 &&
+		(!sameMoney(correctedSaleTotal, p.Amount) || !sameMoney(p.RecognizedAmount, p.Amount)) {
+		lines = append(lines, fmt.Sprintf("Total de venta: $%.2f", correctedSaleTotal))
+		lines = append(lines, fmt.Sprintf("Cobrado físicamente: $%.2f", p.Amount))
+		lines = append(lines, fmt.Sprintf("Ingreso reconocido en este cobro: $%.2f", p.RecognizedAmount))
+		if difference := p.Amount - p.RecognizedAmount; difference > 0.004 {
+			lines = append(lines, fmt.Sprintf("Diferencia gestionada por corrección/devolución: $%.2f", difference))
+		}
+	} else {
+		lines = append(lines, fmt.Sprintf("Total: $%.2f", p.Amount))
+	}
 	if p.BalancePending > 0 {
 		lines = append(lines, fmt.Sprintf("Saldo pendiente: $%.2f", p.BalancePending))
 	}
-	lines = append(lines, "Método: "+methodLabel(p.PaymentMethod))
+	if creditSale {
+		lines = append(lines, "Venta a crédito")
+	} else {
+		lines = append(lines, "Método: "+methodLabel(p.PaymentMethod))
+	}
 
 	lines = append(lines, "")
 	lines = append(lines, "Este NO es un comprobante fiscal.")
@@ -302,6 +341,8 @@ func conceptLabel(c string) string {
 		return "Liquidación de saldo"
 	case paymentDomain.ConceptRefund:
 		return "Cancelación / devolución"
+	case paymentDomain.ConceptOther:
+		return "Ingreso extraordinario"
 	}
 	return c
 }

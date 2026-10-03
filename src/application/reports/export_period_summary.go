@@ -19,13 +19,14 @@ import (
 // expenseCategoryLabel — labels human-friendly. Si el enum crece, sólo hay
 // que agregar acá; las llaves desconocidas caen a la propia key.
 var expenseCategoryLabel = map[string]string{
-	"renta":              "Renta",
-	"servicios":          "Servicios",
-	"mantenimiento":      "Mantenimiento",
-	"sueldos":            "Sueldos",
-	"marketing":          "Marketing",
-	"mercaderia_externa": "Mercadería externa",
-	"otros":              "Otros",
+	"renta":                     "Renta",
+	"servicios":                 "Servicios",
+	"mantenimiento":             "Mantenimiento",
+	"nomina":                    "Nómina",
+	"marketing":                 "Publicidad y promoción",
+	"insumos_no_inventariables": "Materiales de uso interno",
+	"impuestos_y_permisos":      "Impuestos y permisos",
+	"otros":                     "Otros",
 }
 
 func labelCategory(k string) string {
@@ -42,11 +43,16 @@ func labelCategory(k string) string {
 func renderPeriodSummaryPDF(gym *gymDomain.Gym, r *RangeReportOutput, from, to time.Time) []byte {
 	pdf := newDoc()
 	pdfHeader(pdf, gym, "Resumen del período", from, to)
+	pdf.SetFont("Helvetica", "", 9)
+	pdf.MultiCell(0, 5, asciiSafe("Resultado: ingresos menos gastos pagados, compras pagadas y devoluciones. Los pagos pendientes aún no se descuentan."), "", "L", false)
+	if r.PreviousFrom != "" && r.PreviousTo != "" {
+		pdf.MultiCell(0, 5, asciiSafe("Comparación: "+r.PreviousFrom+" a "+r.PreviousTo), "", "L", false)
+	}
 
-	// --- Stock crítico arriba (snapshot, no varía con período).
+	// --- Existencias bajas arriba (snapshot, no varía con período).
 	pdf.SetFont("Helvetica", "B", 10)
 	pdf.CellFormat(0, 6,
-		asciiSafe(fmt.Sprintf("Stock crítico (snapshot): %d sin stock · %d bajo mínimo",
+		asciiSafe(fmt.Sprintf("Existencias bajas al generar el reporte: %d sin existencias · %d bajo mínimo",
 			r.CriticalStock.OutCount, r.CriticalStock.LowCount)),
 		"", 1, "L", false, 0, "")
 	pdf.Ln(2)
@@ -70,21 +76,53 @@ func renderPeriodSummaryPDF(gym *gymDomain.Gym, r *RangeReportOutput, from, to t
 		pdf.CellFormat(kpiWidths[3], 5, asciiSafe(fmtKPIDelta(k)), "1", 0, "R", false, 0, "")
 		pdf.Ln(-1)
 	}
-	writeKPI("Utilidad (Ingresos - egresos - devoluciones)", r.Totals.Net, true)
 	writeKPI("Ingresos", r.Totals.Income, true)
-	writeKPI("Egresos por mercancía", r.Totals.InventoryCost, true)
-	writeKPI("Otros gastos", r.Totals.ExpensesGeneral, true)
-	writeKPI("Devoluciones", r.Totals.Refunds, true)
+	writeKPI("Salidas", r.Totals.Outflows, true)
+	writeKPI("Resultado del período", r.Totals.PeriodResult, true)
+	writeKPI("Ingresos por membresías", r.Totals.MembershipIncome, true)
+	writeKPI("Cobros de productos", r.Totals.ProductIncome, true)
+	writeKPI("Otros ingresos", r.Totals.OtherIncome, true)
+	writeKPI("Gastos de operación", r.Totals.OperatingExpenses, true)
+	writeKPI("Compras pagadas", r.Totals.InventoryPurchases, true)
+	writeKPI("Devoluciones de ventas", r.Totals.Refunds, true)
 	writeKPI("Socios nuevos", r.Totals.NewMembers, false)
-	writeKPI("Check-ins", r.Totals.Checkins, false)
+	writeKPI("Asistencias", r.Totals.Checkins, false)
 	pdf.Ln(3)
 
-	// --- Ingresos vs Egresos por día (tabla; las gráficas no se rederean en PDF).
+	// --- Caja del período. Flujo/retiros son acumulados del período;
+	// esperado/contado/diferencia pertenecen a una sola sesión (la última).
 	pdf.SetFont("Helvetica", "B", 11)
-	pdf.CellFormat(0, 6, asciiSafe("Ingresos vs Egresos por día"), "", 1, "L", false, 0, "")
+	pdf.CellFormat(0, 6, asciiSafe("Caja del período"), "", 1, "L", false, 0, "")
+	pdf.SetFont("Helvetica", "", 9)
+	pdfCashRow := func(label string, value *float64) {
+		pdf.CellFormat(70, 5, asciiSafe(label), "1", 0, "L", false, 0, "")
+		if value == nil {
+			pdf.CellFormat(40, 5, asciiSafe("Pendiente"), "1", 1, "R", false, 0, "")
+		} else {
+			pdf.CellFormat(40, 5, fmt.Sprintf("$%.2f", *value), "1", 1, "R", false, 0, "")
+		}
+	}
+	periodActivity, periodWithdrawn := r.CashReconciliation.PeriodActivity, r.CashReconciliation.PeriodWithdrawn
+	pdfCashRow("Actividad de caja del período", &periodActivity)
+	pdfCashRow("Efectivo retirado en el período", &periodWithdrawn)
+	pdfCashRow("Esperado en el último conteo", r.CashReconciliation.LatestExpected)
+	pdfCashRow("Contado en el último conteo", r.CashReconciliation.LatestCounted)
+	pdf.CellFormat(70, 5, asciiSafe("Diferencia del último conteo"), "1", 0, "L", false, 0, "")
+	if r.CashReconciliation.LatestDifference == nil {
+		pdf.CellFormat(40, 5, asciiSafe("Pendiente"), "1", 1, "R", false, 0, "")
+	} else {
+		pdf.CellFormat(40, 5, fmt.Sprintf("$%.2f", *r.CashReconciliation.LatestDifference), "1", 1, "R", false, 0, "")
+	}
+	pdf.CellFormat(70, 5, asciiSafe("Cortes con conteo"), "1", 0, "L", false, 0, "")
+	pdf.CellFormat(40, 5, fmt.Sprintf("%d de %d", r.CashReconciliation.CountedCloses, r.CashReconciliation.TotalCloses), "1", 1, "R", false, 0, "")
+	pdf.Ln(3)
+
+	// --- Ingresos y salidas por día (tabla; las gráficas no se renderizan en PDF).
+	pdf.SetFont("Helvetica", "B", 11)
+	pdf.CellFormat(0, 6, asciiSafe("Ingresos y salidas por día"), "", 1, "L", false, 0, "")
 	mergedDay := mergeDailySeries(r.IncomeByDay, r.ExpensesByDay)
 	pdf.SetFont("Helvetica", "B", 9)
-	dayHeaders := []string{"Día", "Ingresos", "Egresos", "Neto"}
+	dayHeaders := []string{"Día", "Ingresos", "Salidas", "Resultado diario"}
 	dayWidths := []float64{40, 38, 38, 38}
 	for i, h := range dayHeaders {
 		pdf.CellFormat(dayWidths[i], 6, asciiSafe(h), "1", 0, "C", false, 0, "")
@@ -124,14 +162,14 @@ func renderPeriodSummaryPDF(gym *gymDomain.Gym, r *RangeReportOutput, from, to t
 	}
 	pdf.Ln(3)
 
-	// --- Top productos.
+	// --- Productos con más ingresos.
 	pdf.SetFont("Helvetica", "B", 11)
-	pdf.CellFormat(0, 6, asciiSafe("Top productos"), "", 1, "L", false, 0, "")
+	pdf.CellFormat(0, 6, asciiSafe("Productos con más ingresos"), "", 1, "L", false, 0, "")
 	pdf.SetFont("Helvetica", "B", 9)
 	tpWidths := []float64{80, 30, 40}
 	pdf.CellFormat(tpWidths[0], 6, asciiSafe("Producto"), "1", 0, "C", false, 0, "")
 	pdf.CellFormat(tpWidths[1], 6, asciiSafe("Unidades"), "1", 0, "C", false, 0, "")
-	pdf.CellFormat(tpWidths[2], 6, asciiSafe("Revenue"), "1", 0, "C", false, 0, "")
+	pdf.CellFormat(tpWidths[2], 6, asciiSafe("Ventas"), "1", 0, "C", false, 0, "")
 	pdf.Ln(-1)
 	pdf.SetFont("Helvetica", "", 8)
 	if len(r.TopProducts) == 0 {
@@ -202,25 +240,55 @@ func renderPeriodSummaryXLSX(r *RangeReportOutput, from, to time.Time) ([]byte, 
 
 	header(fmt.Sprintf("Resumen del período (%s – %s)",
 		from.Format("2006-01-02"), to.Format("2006-01-02")), big)
-	header(fmt.Sprintf("Stock crítico: %d sin stock · %d bajo mínimo",
+	header(fmt.Sprintf("Existencias bajas al generar el reporte: %d sin existencias · %d bajo mínimo",
 		r.CriticalStock.OutCount, r.CriticalStock.LowCount), bold)
 	rowIdx++
 
 	// KPI table — col1 indicador, col2 actual, col3 anterior, col4 delta.
+	row([]any{"Resultado: ingresos menos gastos pagados, compras pagadas y devoluciones. Los pagos pendientes aún no se descuentan."})
+	if r.PreviousFrom != "" && r.PreviousTo != "" {
+		row([]any{"Comparación", r.PreviousFrom, r.PreviousTo})
+	}
 	header("Indicadores", bold)
 	colsHeader([]string{"Indicador", "Actual", "Anterior", "Cambio"})
-	row([]any{"Utilidad (Ingresos - egresos - devoluciones)", r.Totals.Net.Current, r.Totals.Net.Previous, fmtKPIDelta(r.Totals.Net)})
 	row([]any{"Ingresos", r.Totals.Income.Current, r.Totals.Income.Previous, fmtKPIDelta(r.Totals.Income)})
-	row([]any{"Egresos por mercancía", r.Totals.InventoryCost.Current, r.Totals.InventoryCost.Previous, fmtKPIDelta(r.Totals.InventoryCost)})
-	row([]any{"Otros gastos", r.Totals.ExpensesGeneral.Current, r.Totals.ExpensesGeneral.Previous, fmtKPIDelta(r.Totals.ExpensesGeneral)})
-	row([]any{"Devoluciones", r.Totals.Refunds.Current, r.Totals.Refunds.Previous, fmtKPIDelta(r.Totals.Refunds)})
+	row([]any{"Salidas", r.Totals.Outflows.Current, r.Totals.Outflows.Previous, fmtKPIDelta(r.Totals.Outflows)})
+	row([]any{"Resultado del período", r.Totals.PeriodResult.Current, r.Totals.PeriodResult.Previous, fmtKPIDelta(r.Totals.PeriodResult)})
+	row([]any{"Ingresos por membresías", r.Totals.MembershipIncome.Current, r.Totals.MembershipIncome.Previous, fmtKPIDelta(r.Totals.MembershipIncome)})
+	row([]any{"Cobros de productos", r.Totals.ProductIncome.Current, r.Totals.ProductIncome.Previous, fmtKPIDelta(r.Totals.ProductIncome)})
+	row([]any{"Otros ingresos", r.Totals.OtherIncome.Current, r.Totals.OtherIncome.Previous, fmtKPIDelta(r.Totals.OtherIncome)})
+	row([]any{"Gastos de operación", r.Totals.OperatingExpenses.Current, r.Totals.OperatingExpenses.Previous, fmtKPIDelta(r.Totals.OperatingExpenses)})
+	row([]any{"Compras pagadas", r.Totals.InventoryPurchases.Current, r.Totals.InventoryPurchases.Previous, fmtKPIDelta(r.Totals.InventoryPurchases)})
+	row([]any{"Devoluciones de ventas", r.Totals.Refunds.Current, r.Totals.Refunds.Previous, fmtKPIDelta(r.Totals.Refunds)})
 	row([]any{"Socios nuevos", r.Totals.NewMembers.Current, r.Totals.NewMembers.Previous, fmtKPIDelta(r.Totals.NewMembers)})
-	row([]any{"Check-ins", r.Totals.Checkins.Current, r.Totals.Checkins.Previous, fmtKPIDelta(r.Totals.Checkins)})
+	row([]any{"Asistencias", r.Totals.Checkins.Current, r.Totals.Checkins.Previous, fmtKPIDelta(r.Totals.Checkins)})
+	rowIdx++
+
+	header("Caja del período", bold)
+	colsHeader([]string{"Indicador", "Valor"})
+	row([]any{"Actividad de caja del período", r.CashReconciliation.PeriodActivity})
+	row([]any{"Efectivo retirado en el período", r.CashReconciliation.PeriodWithdrawn})
+	if r.CashReconciliation.LatestExpected == nil {
+		row([]any{"Esperado en el último conteo", "Pendiente"})
+	} else {
+		row([]any{"Esperado en el último conteo", *r.CashReconciliation.LatestExpected})
+	}
+	if r.CashReconciliation.LatestCounted == nil {
+		row([]any{"Contado en el último conteo", "Pendiente"})
+	} else {
+		row([]any{"Contado en el último conteo", *r.CashReconciliation.LatestCounted})
+	}
+	if r.CashReconciliation.LatestDifference == nil {
+		row([]any{"Diferencia del último conteo", "Pendiente"})
+	} else {
+		row([]any{"Diferencia del último conteo", *r.CashReconciliation.LatestDifference})
+	}
+	row([]any{"Cortes con conteo", fmt.Sprintf("%d de %d", r.CashReconciliation.CountedCloses, r.CashReconciliation.TotalCloses)})
 	rowIdx++
 
 	// Daily series.
-	header("Ingresos vs Egresos por día", bold)
-	colsHeader([]string{"Día", "Ingresos", "Egresos", "Neto"})
+	header("Ingresos y salidas por día", bold)
+	colsHeader([]string{"Día", "Ingresos", "Salidas", "Resultado diario"})
 	for _, d := range mergeDailySeries(r.IncomeByDay, r.ExpensesByDay) {
 		row([]any{d.Date.Format("2006-01-02"), d.Income, d.Expenses, d.Income - d.Expenses})
 	}
@@ -233,8 +301,8 @@ func renderPeriodSummaryXLSX(r *RangeReportOutput, from, to time.Time) ([]byte, 
 	}
 	rowIdx++
 
-	header("Top productos", bold)
-	colsHeader([]string{"Producto", "Unidades", "Revenue"})
+	header("Productos con más ingresos", bold)
+	colsHeader([]string{"Producto", "Unidades", "Ventas"})
 	for _, p := range r.TopProducts {
 		row([]any{p.ProductName, p.Quantity, p.Revenue})
 	}
@@ -247,7 +315,7 @@ func renderPeriodSummaryXLSX(r *RangeReportOutput, from, to time.Time) ([]byte, 
 	}
 	rowIdx++
 
-	header("Gastos del período", bold)
+	header("Gastos de operación del período", bold)
 	colsHeader([]string{"Fecha", "Categoría", "Descripción", "Método", "Monto"})
 	for _, e := range r.Expenses {
 		desc := ""
@@ -258,7 +326,7 @@ func renderPeriodSummaryXLSX(r *RangeReportOutput, from, to time.Time) ([]byte, 
 	}
 	rowIdx++
 
-	header("Compras de inventario", bold)
+	header("Compras pagadas", bold)
 	colsHeader([]string{"Fecha", "Producto", "Unidades", "Costo unit.", "Costo total"})
 	for _, ic := range r.InventoryCosts {
 		row([]any{ic.OccurredAt.Format("2006-01-02"), ic.ProductName, ic.Delta, ic.CostUnit, ic.CostTotal})
@@ -275,7 +343,7 @@ func renderPeriodSummaryXLSX(r *RangeReportOutput, from, to time.Time) ([]byte, 
 // helpers
 // ---------------------------------------------------------------------------
 
-// mergedDayRow — fila del bloque "Ingresos vs Egresos por día".
+// mergedDayRow — fila del bloque "Ingresos y salidas por día".
 type mergedDayRow struct {
 	Date     time.Time
 	Income   float64

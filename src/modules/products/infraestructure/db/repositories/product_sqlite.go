@@ -46,6 +46,7 @@ type sqliteProductRow struct {
 	Name         string         `db:"name"`
 	Price        int64          `db:"price"`
 	Stock        int            `db:"stock"`
+	StockBase    sql.NullInt64  `db:"stock_base"`
 	StockMinimum int            `db:"stock_minimum"`
 	Category     sql.NullString `db:"category"`
 	ImageURL     sql.NullString `db:"image_url"`
@@ -53,15 +54,16 @@ type sqliteProductRow struct {
 }
 
 func (r *ProductSQLiteRepository) Create(tx sharedDomain.Transaction, p *productDomain.Product) (*productDomain.Product, error) {
+	p.StockBase = p.Stock
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	row := productToRow(p)
 	const stmt = `
 		INSERT INTO products (
 		    id, gym_id, version, created_at, updated_at, deleted_at,
-		    name, price, stock, stock_minimum, category, image_url, active
+		    name, price, stock, stock_base, stock_minimum, category, image_url, active
 		) VALUES (
 		    :id, :gym_id, :version, :created_at, :updated_at, :deleted_at,
-		    :name, :price, :stock, :stock_minimum, :category, :image_url, :active
+		    :name, :price, :stock, :stock_base, :stock_minimum, :category, :image_url, :active
 		)`
 	if _, err := stx.NamedExec(context.Background(), stmt, row); err != nil {
 		return nil, err
@@ -75,11 +77,16 @@ func (r *ProductSQLiteRepository) Create(tx sharedDomain.Transaction, p *product
 func (r *ProductSQLiteRepository) Update(tx sharedDomain.Transaction, p *productDomain.Product) (*productDomain.Product, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	p.UpdatedAt = time.Now().UTC()
+	receipts, err := ReceiptStockSQLite(stx, p.GymID.String(), p.ID.String())
+	if err != nil {
+		return nil, err
+	}
+	p.Stock = p.StockBase + receipts
 	row := productToRow(p)
 	const stmt = `
 		UPDATE products SET
 		    version = :version, updated_at = :updated_at, deleted_at = :deleted_at,
-		    name = :name, price = :price, stock = :stock, stock_minimum = :stock_minimum,
+		    name = :name, price = :price, stock = :stock, stock_base=:stock_base, stock_minimum = :stock_minimum,
 		    category = :category, image_url = :image_url, active = :active
 		WHERE id = :id`
 	if _, err := stx.NamedExec(context.Background(), stmt, row); err != nil {
@@ -176,12 +183,12 @@ func (r *ProductSQLiteRepository) ListAggregates(tx sharedDomain.Transaction, q 
 	}
 	stmt := fmt.Sprintf(`
 		SELECT
-		  COALESCE(SUM(CASE WHEN p.active = 1 THEN p.price * p.stock ELSE 0 END), 0) AS total_value,
+		  COALESCE(SUM(CASE WHEN p.active = 1 AND p.stock > 0 THEN p.price * p.stock ELSE 0 END), 0) AS total_value,
 		  COALESCE(SUM(CASE WHEN p.active = 1 AND p.stock > 0 AND p.stock <= p.stock_minimum THEN 1 ELSE 0 END), 0) AS low_count,
-		  COALESCE(SUM(CASE WHEN p.active = 1 AND p.stock = 0 THEN 1 ELSE 0 END), 0) AS out_count,
-		  COALESCE(SUM(CASE WHEN p.active = 1 AND c.avg_unit_cost IS NOT NULL THEN p.stock * c.avg_unit_cost ELSE 0 END), 0) AS cost_value,
-		  COALESCE(SUM(CASE WHEN p.active = 1 AND c.avg_unit_cost IS NOT NULL THEN p.stock * (p.price - c.avg_unit_cost) ELSE 0 END), 0) AS potential_profit,
-		  COALESCE(SUM(CASE WHEN p.active = 1 AND c.avg_unit_cost IS NOT NULL THEN p.stock * p.price ELSE 0 END), 0) AS sale_value_with_cost,
+		  COALESCE(SUM(CASE WHEN p.active = 1 AND p.stock <= 0 THEN 1 ELSE 0 END), 0) AS out_count,
+		  COALESCE(SUM(CASE WHEN p.active = 1 AND p.stock > 0 AND c.avg_unit_cost IS NOT NULL THEN p.stock * c.avg_unit_cost ELSE 0 END), 0) AS cost_value,
+		  COALESCE(SUM(CASE WHEN p.active = 1 AND p.stock > 0 AND c.avg_unit_cost IS NOT NULL THEN p.stock * (p.price - c.avg_unit_cost) ELSE 0 END), 0) AS potential_profit,
+		  COALESCE(SUM(CASE WHEN p.active = 1 AND p.stock > 0 AND c.avg_unit_cost IS NOT NULL THEN p.stock * p.price ELSE 0 END), 0) AS sale_value_with_cost,
 		  COALESCE(SUM(CASE WHEN p.active = 1 THEN 1 ELSE 0 END), 0) AS products_total,
 		  COALESCE(SUM(CASE WHEN p.active = 1 AND c.avg_unit_cost IS NOT NULL THEN 1 ELSE 0 END), 0) AS products_with_cost
 		FROM products p
@@ -248,6 +255,25 @@ func (r *ProductSQLiteRepository) ListUnitCosts(tx sharedDomain.Transaction, q p
 	return out, nil
 }
 
+func (r *ProductSQLiteRepository) GetUnitCost(tx sharedDomain.Transaction, gymID, productID uuid.UUID) (*float64, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	var cents sql.NullInt64
+	err := stx.Get(context.Background(), &cents, `
+		SELECT (2*SUM(cost * delta) + SUM(delta)) / (2*SUM(delta))
+		FROM stock_movements
+		WHERE gym_id = ? AND product_id = ? AND movement_type = 'restock'
+		  AND cost IS NOT NULL AND deleted_at IS NULL
+		HAVING SUM(delta) > 0`, gymID.String(), productID.String())
+	if errors.Is(err, sql.ErrNoRows) || !cents.Valid {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	v := fromCents(cents.Int64)
+	return &v, nil
+}
+
 // buildProductWhereSqlite — extraído para reuso entre List y
 // ListAggregates. Cualquier cambio de filtro (nueva columna, nuevo
 // shape) entra aquí una sola vez.
@@ -312,14 +338,14 @@ func sortClauseSqlite(sort, dir string) string {
 
 func productToRow(p *productDomain.Product) sqliteProductRow {
 	row := sqliteProductRow{
-		ID:           p.ID.String(),
-		GymID:        p.GymID.String(),
-		Version:      p.Version,
-		CreatedAt:    p.CreatedAt.UnixMilli(),
-		UpdatedAt:    p.UpdatedAt.UnixMilli(),
-		Name:         p.Name,
-		Price:        toCents(p.Price),
-		Stock:        p.Stock,
+		ID:        p.ID.String(),
+		GymID:     p.GymID.String(),
+		Version:   p.Version,
+		CreatedAt: p.CreatedAt.UnixMilli(),
+		UpdatedAt: p.UpdatedAt.UnixMilli(),
+		Name:      p.Name,
+		Price:     toCents(p.Price),
+		Stock:     p.Stock, StockBase: sql.NullInt64{Int64: int64(p.StockBase), Valid: true},
 		StockMinimum: p.StockMinimum,
 		Active:       boolToInt(p.Active),
 	}
@@ -339,12 +365,12 @@ func productFromRow(r *sqliteProductRow) *productDomain.Product {
 	id, _ := uuid.Parse(r.ID)
 	gymID, _ := uuid.Parse(r.GymID)
 	p := &productDomain.Product{
-		ID:           id,
-		GymID:        gymID,
-		Version:      r.Version,
-		Name:         r.Name,
-		Price:        fromCents(r.Price),
-		Stock:        r.Stock,
+		ID:      id,
+		GymID:   gymID,
+		Version: r.Version,
+		Name:    r.Name,
+		Price:   fromCents(r.Price),
+		Stock:   r.Stock, StockBase: sqliteStockBase(r.StockBase, r.Stock),
 		StockMinimum: r.StockMinimum,
 		Active:       r.Active != 0,
 		CreatedAt:    time.UnixMilli(r.CreatedAt).UTC(),
@@ -373,6 +399,7 @@ func enqueueProduct(stx *sharedDomain.SqlxTransaction, p *productDomain.Product)
 	// UPSERT only emits columns present in the map, and a missing required
 	// column on first-sight INSERT triggers a 23502 NOT NULL violation.
 	payload, err := json.Marshal(map[string]any{
+		"stock_base":    p.StockBase,
 		"id":            p.ID.String(),
 		"gym_id":        p.GymID.String(),
 		"version":       p.Version,
@@ -409,4 +436,11 @@ func uuidPtrOrNil(u *uuid.UUID) any {
 		return nil
 	}
 	return u.String()
+}
+
+func sqliteStockBase(base sql.NullInt64, stock int) int {
+	if !base.Valid {
+		return stock
+	}
+	return int(base.Int64)
 }

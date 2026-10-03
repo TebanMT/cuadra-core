@@ -122,16 +122,33 @@ func TestProxy_LoginForwardsAndAbsorbsToken(t *testing.T) {
 	_, uow := setupSidecarTestDB(t)
 	cloud := newFakeCloud(t)
 	cloud.respStatus = 200
-	cloud.respBody = []byte(`{"status_code":200,"data":{"user_id":"` + uuid.NewString() + `","gym_id":"` + uuid.NewString() + `","role":"owner","access_token":"jwt","refresh_token":"jwt-refresh","setup_completed":true,"subscription_plan":"trial","gyms":[{"id":"` + uuid.NewString() + `","name":"Test Gym"}],"sidecar_token":"sk_live_abc"}}`)
+	gymID := uuid.New()
+	cloud.respBody = []byte(`{"status_code":200,"data":{"user_id":"` + uuid.NewString() + `","gym_id":"` + gymID.String() + `","role":"owner","access_token":"jwt","refresh_token":"jwt-refresh","setup_completed":true,"subscription_plan":"trial","gyms":[{"id":"` + gymID.String() + `","name":"Test Gym"}],"sidecar_token":"sk_live_abc"}}`)
 
 	reloaded := atomic.Int32{}
+	var callbackOrder []string
 	r := newProxyRouter(t, usersCtrl.SidecarAuthProxy{
 		CloudURL:    cloud.srv.URL,
 		UoW:         uow,
 		LocalTokens: auth.NewJWTService("test-secret"),
 		ClientID:    uuid.New(),
 		DeviceLabel: "laptop-1",
-		AgentReload: func() { reloaded.Add(1) },
+		OnActiveGymChanged: func(got uuid.UUID) {
+			if got != gymID {
+				t.Errorf("active gym callback = %s, want %s", got, gymID)
+			}
+			callbackOrder = append(callbackOrder, "gym")
+		},
+		OnSidecarTokenChanged: func(token string) {
+			if token != "sk_live_abc" {
+				t.Errorf("token callback = %q", token)
+			}
+			callbackOrder = append(callbackOrder, "token")
+		},
+		AgentReload: func() {
+			callbackOrder = append(callbackOrder, "reload")
+			reloaded.Add(1)
+		},
 	})
 
 	rec := doProxyReq(r, "POST", "/api/v1/auth/login", map[string]any{
@@ -159,6 +176,9 @@ func TestProxy_LoginForwardsAndAbsorbsToken(t *testing.T) {
 	}
 	if reloaded.Load() != 1 {
 		t.Errorf("expected AgentReload to be called once, got %d", reloaded.Load())
+	}
+	if got := strings.Join(callbackOrder, ","); got != "gym,token,reload" {
+		t.Errorf("callback order = %q, want gym,token,reload", got)
 	}
 }
 

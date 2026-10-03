@@ -17,6 +17,8 @@ import (
 type fakeReader struct {
 	activeNow, activePrev int
 	incomeNow, incomePrev float64
+	cashClosed            float64
+	cashCounted           reports.CashCountSummary
 	expiringWeek          int
 	recoverable           int
 	todayCash             map[string]float64
@@ -27,6 +29,7 @@ type fakeReader struct {
 	inactiveInvol      []reports.MemberInactiveRow
 	lowStock           []reports.ProductLowStockRow
 	pendingBalances    []reports.PendingBalanceRow
+	birthdayQueries    int
 	birthdays          []reports.MemberBirthdayRow
 
 	exportMembers  []reports.MemberExportRow
@@ -44,11 +47,13 @@ type fakeReader struct {
 
 	realizedNow, realizedPrev reports.RealizedProductProfit
 
-	inventoryCost     float64
-	inventoryCostRows []reports.InventoryCostRow
+	inventoryCost      float64
+	inventoryCostRows  []reports.InventoryCostRow
+	inventoryListLimit int
 
-	generalExpenses float64
-	expenseRows     []reports.ExpenseRow
+	generalExpenses  float64
+	expenseRows      []reports.ExpenseRow
+	expenseListLimit int
 
 	expensesDaily      []reports.DailyAmount
 	expensesByCategory map[string]float64
@@ -63,7 +68,40 @@ type fakeReader struct {
 
 	activeCalls   int
 	incomeCalls   int
+	incomeErr     error
 	realizedCalls int
+}
+
+type canonicalDashboardReader struct {
+	*fakeReader
+	current  reports.CanonicalFinancialSnapshot
+	previous reports.CanonicalFinancialSnapshot
+	calls    int
+}
+
+func (r *canonicalDashboardReader) CanonicalFinancialBetween(
+	_ sharedDomain.Transaction,
+	_ uuid.UUID,
+	_ string,
+	_, _ time.Time,
+) (reports.CanonicalFinancialSnapshot, error) {
+	r.calls++
+	if r.calls%2 == 1 {
+		return r.current, nil
+	}
+	return r.previous, nil
+}
+
+func (r *fakeReader) SumOtherIncomeBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time) (float64, error) {
+	return 0, nil
+}
+
+func (r *fakeReader) SumCashClosedBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time) (float64, error) {
+	return r.cashClosed, nil
+}
+
+func (r *fakeReader) SumCashCountedBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time) (reports.CashCountSummary, error) {
+	return r.cashCounted, nil
 }
 
 func (r *fakeReader) CountActiveMembers(_ sharedDomain.Transaction, _ uuid.UUID, t time.Time) (int, error) {
@@ -73,9 +111,13 @@ func (r *fakeReader) CountActiveMembers(_ sharedDomain.Transaction, _ uuid.UUID,
 	}
 	return r.activePrev, nil
 }
+
 func (r *fakeReader) SumPaymentsBetween(_ sharedDomain.Transaction, _ uuid.UUID, from, to time.Time) (float64, error) {
 	if from.After(to) {
 		return 0, errors.New("bad range")
+	}
+	if r.incomeErr != nil {
+		return 0, r.incomeErr
 	}
 	r.incomeCalls++
 	if r.incomeCalls == 1 {
@@ -111,6 +153,7 @@ func (r *fakeReader) ListPendingBalances(_ sharedDomain.Transaction, _ uuid.UUID
 	return r.pendingBalances, nil
 }
 func (r *fakeReader) ListBirthdaysOn(_ sharedDomain.Transaction, _ uuid.UUID, _ time.Time) ([]reports.MemberBirthdayRow, error) {
+	r.birthdayQueries++
 	return r.birthdays, nil
 }
 func (r *fakeReader) ListMembersForExport(_ sharedDomain.Transaction, _ uuid.UUID, _ time.Time) ([]reports.MemberExportRow, error) {
@@ -159,13 +202,15 @@ func (r *fakeReader) RealizedProductProfitBetween(_ sharedDomain.Transaction, _ 
 	}
 	return r.realizedPrev, nil
 }
-func (r *fakeReader) ListInventoryCostsBetween(_ sharedDomain.Transaction, _ uuid.UUID, _ string, _, _ time.Time, _ int) ([]reports.InventoryCostRow, error) {
+func (r *fakeReader) ListInventoryCostsBetween(_ sharedDomain.Transaction, _ uuid.UUID, _ string, _, _ time.Time, limit int) ([]reports.InventoryCostRow, error) {
+	r.inventoryListLimit = limit
 	return r.inventoryCostRows, nil
 }
 func (r *fakeReader) SumExpensesBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time) (float64, error) {
 	return r.generalExpenses, nil
 }
-func (r *fakeReader) ListExpensesBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time, _ int) ([]reports.ExpenseRow, error) {
+func (r *fakeReader) ListExpensesBetween(_ sharedDomain.Transaction, _ uuid.UUID, _, _ time.Time, limit int) ([]reports.ExpenseRow, error) {
+	r.expenseListLimit = limit
 	return r.expenseRows, nil
 }
 func (r *fakeReader) ExpensesDailySeries(_ sharedDomain.Transaction, _ uuid.UUID, _ string, _, _ time.Time) ([]reports.DailyAmount, error) {
@@ -266,11 +311,14 @@ func TestDashboard_ComposesKPIs(t *testing.T) {
 }
 
 func TestDashboard_RealizedProfitKPIAndCoverage(t *testing.T) {
+	t.Setenv("TINTA_MODE", "test")
 	reader := &fakeReader{
 		realizedNow:  reports.RealizedProductProfit{Revenue: 1000, COGS: 600, ItemsTotal: 8, ItemsWithCost: 5},
 		realizedPrev: reports.RealizedProductProfit{Revenue: 800, COGS: 500},
 	}
-	uc := reports.NewDashboard(reader, fakeUoW{}, 0)
+	g := sampleGym()
+	g.SubscriptionPlan = "plus_monthly"
+	uc := reports.NewDashboard(reader, fakeUoW{}, 0).WithGyms(&fakeGymRepo{gym: g})
 	out, err := uc.Execute(context.Background(), reports.DashboardInput{GymID: uuid.New()})
 	if err != nil {
 		t.Fatalf("execute: %v", err)
@@ -290,15 +338,39 @@ func TestDashboard_RealizedProfitKPIAndCoverage(t *testing.T) {
 }
 
 func TestDashboard_RealizedMarginNilWhenNoProductSales(t *testing.T) {
+	t.Setenv("TINTA_MODE", "test")
 	// Sin ventas de productos (Revenue 0) → margen nil (no se muestra chip).
 	reader := &fakeReader{realizedNow: reports.RealizedProductProfit{}}
-	uc := reports.NewDashboard(reader, fakeUoW{}, 0)
+	g := sampleGym()
+	g.SubscriptionPlan = "plus_monthly"
+	uc := reports.NewDashboard(reader, fakeUoW{}, 0).WithGyms(&fakeGymRepo{gym: g})
 	out, err := uc.Execute(context.Background(), reports.DashboardInput{GymID: uuid.New()})
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 	if out.RealizedProfitMarginPct != nil {
 		t.Errorf("margen = %v, want nil (sin ventas)", *out.RealizedProfitMarginPct)
+	}
+}
+
+func TestDashboard_StandardOmitsProductProfitWithoutQueryingIt(t *testing.T) {
+	t.Setenv("TINTA_MODE", "test")
+	reader := &fakeReader{
+		realizedNow:  reports.RealizedProductProfit{Revenue: 1000, COGS: 600, ItemsTotal: 8, ItemsWithCost: 5},
+		realizedPrev: reports.RealizedProductProfit{Revenue: 800, COGS: 500},
+	}
+	g := sampleGym()
+	g.SubscriptionPlan = "standard_monthly"
+	out, err := reports.NewDashboard(reader, fakeUoW{}, 0).WithGyms(&fakeGymRepo{gym: g}).Execute(
+		context.Background(), reports.DashboardInput{GymID: uuid.New()})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if out.RealizedProfitMonth != nil || out.RealizedProfitCoverage != nil || out.RealizedProfitMarginPct != nil {
+		t.Fatalf("standard leaked product profit: %+v / %+v / %v", out.RealizedProfitMonth, out.RealizedProfitCoverage, out.RealizedProfitMarginPct)
+	}
+	if reader.realizedCalls != 0 {
+		t.Fatalf("standard executed %d premium profit queries, want 0", reader.realizedCalls)
 	}
 }
 
@@ -314,29 +386,70 @@ func TestDashboard_PreviousZeroLeavesDeltaNil(t *testing.T) {
 	}
 }
 
-func TestDashboard_CacheServesRepeatCalls(t *testing.T) {
-	reader := &fakeReader{activeNow: 7}
-	// Use a long TTL so the second call must hit the cache.
+func TestDashboard_AlwaysReadsCommittedStateInsteadOfServingStaleCache(t *testing.T) {
+	reader := &canonicalDashboardReader{
+		fakeReader: &fakeReader{activeNow: 7},
+		current:    reports.CanonicalFinancialSnapshot{MembershipIncome: 100},
+	}
+	// A long legacy TTL must not change the fresh-read guarantee.
 	uc := reports.NewDashboard(reader, fakeUoW{}, 60*time.Second)
 	gymID := uuid.New()
 
-	if _, err := uc.Execute(context.Background(), reports.DashboardInput{GymID: gymID}); err != nil {
+	first, err := uc.Execute(context.Background(), reports.DashboardInput{GymID: gymID})
+	if err != nil {
 		t.Fatalf("first: %v", err)
 	}
-	if _, err := uc.Execute(context.Background(), reports.DashboardInput{GymID: gymID}); err != nil {
+	reader.current.MembershipIncome = 125 // committed mutation between requests
+	second, err := uc.Execute(context.Background(), reports.DashboardInput{GymID: gymID})
+	if err != nil {
 		t.Fatalf("second: %v", err)
 	}
-	// The reader should have been hit once for active members on the first
-	// call and not again on the second.
-	if reader.activeCalls != 2 {
-		t.Errorf("expected 2 active-count calls (now+prev) on the first run only, got %d", reader.activeCalls)
+	if first.IncomeMonth.Current != 100 || second.IncomeMonth.Current != 125 {
+		t.Fatalf("income first/second = %.2f/%.2f, want 100/125", first.IncomeMonth.Current, second.IncomeMonth.Current)
 	}
+	if reader.calls != 4 { // current + previous for each request
+		t.Fatalf("canonical reads = %d, want 4", reader.calls)
+	}
+	// Compatibility hook is deliberately harmless now.
 	uc.InvalidateCache(gymID)
-	if _, err := uc.Execute(context.Background(), reports.DashboardInput{GymID: gymID}); err != nil {
-		t.Fatalf("after invalidate: %v", err)
+}
+
+func TestDashboard_CanonicalEquationMatchesGoldenModel(t *testing.T) {
+	reader := &canonicalDashboardReader{
+		fakeReader: &fakeReader{},
+		current: reports.CanonicalFinancialSnapshot{
+			MembershipIncome:   400,
+			ProductIncome:      15,
+			OperatingExpenses:  1500,
+			InventoryPurchases: 50,
+		},
 	}
-	if reader.activeCalls != 4 {
-		t.Errorf("expected 4 calls after invalidate, got %d", reader.activeCalls)
+	out, err := reports.NewDashboard(reader, fakeUoW{}, 0).Execute(context.Background(), reports.DashboardInput{GymID: uuid.New()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.IncomeMonth.Current != 415 || out.ExpensesMonth.Current != 1550 || out.PeriodResultMonth.Current != -1135 {
+		t.Fatalf("income/outflows/result = %.2f/%.2f/%.2f, want 415/1550/-1135",
+			out.IncomeMonth.Current, out.ExpensesMonth.Current, out.PeriodResultMonth.Current)
+	}
+	if out.MembershipIncomeMonth.Current != 400 || out.ProductIncomeMonth.Current != 15 || out.OtherIncomeMonth.Current != 0 {
+		t.Fatalf("income breakdown = membership %.2f, product %.2f, other %.2f",
+			out.MembershipIncomeMonth.Current, out.ProductIncomeMonth.Current, out.OtherIncomeMonth.Current)
+	}
+	if out.OperatingExpensesMonth.Current != 1500 || out.InventoryPurchasesMonth.Current != 50 || out.RefundsMonth.Current != 0 {
+		t.Fatalf("outflow breakdown = expenses %.2f, purchases %.2f, refunds %.2f",
+			out.OperatingExpensesMonth.Current, out.InventoryPurchasesMonth.Current, out.RefundsMonth.Current)
+	}
+}
+
+func TestDashboard_ComposesEveryReadInsideOneSnapshot(t *testing.T) {
+	uow := &snapshotSpyUoW{}
+	_, err := reports.NewDashboard(&fakeReader{}, uow, 60*time.Second).Execute(context.Background(), reports.DashboardInput{GymID: uuid.New()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uow.snapshots != 1 || uow.queries != 0 {
+		t.Fatalf("snapshots=%d queries=%d, want one snapshot and no loose query", uow.snapshots, uow.queries)
 	}
 }
 
@@ -368,7 +481,23 @@ func TestAttentionRequired_ComposesLists(t *testing.T) {
 	}
 	if len(out.ExpiringSoon) != 1 || len(out.RecoverableExpired) != 1 ||
 		len(out.InactiveInvoluntary) != 1 || len(out.LowStock) != 1 ||
-		len(out.PendingBalances) != 1 || len(out.BirthdaysToday) != 1 {
+		len(out.PendingBalances) != 1 || len(out.BirthdaysToday) != 0 {
 		t.Errorf("attention output missing entries: %+v", out)
+	}
+}
+
+func TestBirthdayNoticesRetired(t *testing.T) {
+	reader := &fakeReader{birthdays: []reports.MemberBirthdayRow{{MemberID: uuid.New(), FullName: "Birthday fixture"}}}
+	gym := uuid.New()
+	attention, err := reports.NewAttentionRequired(reader, fakeUoW{}).Execute(context.Background(), reports.AttentionRequiredInput{GymID: gym})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dashboard, err := reports.NewDashboard(reader, fakeUoW{}, 0).Execute(context.Background(), reports.DashboardInput{GymID: gym})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reader.birthdayQueries != 0 || len(attention.BirthdaysToday) != 0 || dashboard.AttentionSummary.BirthdaysToday != 0 {
+		t.Fatalf("retired birthday notices were queried or returned: queries=%d", reader.birthdayQueries)
 	}
 }

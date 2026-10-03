@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -71,16 +72,25 @@ type Agent struct {
 	db  *sqlx.DB
 	uow sharedDomain.UnitOfWork
 
-	mu       sync.RWMutex
-	state    AgentSnapshot
-	clientID uuid.UUID
-	token    string
+	// runMu serializa un ciclo con un cambio de tenant. Sin él, un pull del
+	// gym anterior podría terminar después del re-login y volver a escribir
+	// su cursor sobre el checkpoint recién reiniciado del gym nuevo.
+	runMu sync.Mutex
+	mu    sync.RWMutex
+	state AgentSnapshot
+
+	clientID    uuid.UUID
+	activeGymID uuid.UUID
+	token       string
 	// lastNoTokenLog rate-limits the "skipped — no token" warn so a sidecar
 	// that boots before the desktop logs in doesn't spam stderr every 30s.
 	// Guarded por mu igual que `token` para no requerir un mutex extra.
 	lastNoTokenLog time.Time
 
 	trigger chan struct{}
+	// Local UI activity only, guarded by mu. Includes a queued manual nudge
+	// so accepting /sync/trigger never looks like a completed cycle.
+	syncInProgress bool
 }
 
 // SetToken stores the credential the agent uses for /sync/* requests. Empty
@@ -117,12 +127,60 @@ func (a *Agent) currentToken() string {
 	return ""
 }
 
+func (a *Agent) currentActiveGym() uuid.UUID {
+	a.mu.RLock()
+	gymID := a.activeGymID
+	a.mu.RUnlock()
+	return gymID
+}
+
+// SetActiveGym binds the persisted checkpoint and pending-queue view to the
+// gym represented by the current auth session. A real switch forces a fresh
+// /sync/full, but never deletes local tenant data or the other gym's queue.
+//
+// The method is synchronous on purpose: callers must finish the binding
+// before handing the freshly-minted sidecar token to the agent, otherwise a
+// request could leave with a new credential and an old tenant cursor.
+func (a *Agent) SetActiveGym(ctx context.Context, gymID uuid.UUID) error {
+	if gymID == uuid.Nil {
+		return nil
+	}
+	a.runMu.Lock()
+	var changed bool
+	err := a.uow.Command(ctx, func(tx sharedDomain.Transaction) error {
+		var err error
+		changed, err = BindCheckpointToGym(ctx, tx, gymID)
+		return err
+	})
+	if err == nil {
+		a.mu.Lock()
+		a.activeGymID = gymID
+		if changed {
+			// All fields in AgentSnapshot describe a sync checkpoint. Once the
+			// tenant changes, none of the previous status/cursor values apply.
+			a.state = AgentSnapshot{}
+			// Never let a credential minted for the previous tenant leave with
+			// the new tenant binding. Online auth hands us the fresh token right
+			// after this method; startup bootstrap restores the persisted token.
+			a.token = ""
+		}
+		a.mu.Unlock()
+	}
+	a.runMu.Unlock()
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 // AgentSnapshot is the current state visible to /sync/status. We hold this
 // in memory so the status endpoint never has to take a DB read on the hot
 // path (status is polled every few seconds by the desktop UI).
 type AgentSnapshot struct {
+	SyncInProgress         bool
 	LastPushedAt           time.Time
 	LastPulledAt           time.Time
+	LastPullCursor         string
 	LastSyncedAt           time.Time
 	LastError              string
 	PendingCount           int
@@ -218,9 +276,14 @@ func NewAgent(cfg AgentConfig, db *sqlx.DB, uow sharedDomain.UnitOfWork) *Agent 
 // TriggerNow nudges the loop to run immediately (drops the nudge if one is
 // already queued — coalesces fast bursts).
 func (a *Agent) TriggerNow() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	select {
 	case a.trigger <- struct{}{}:
 	default:
+	}
+	if a.cfg.BaseURL != "" {
+		a.syncInProgress = true
 	}
 }
 
@@ -229,6 +292,7 @@ func (a *Agent) Snapshot() AgentSnapshot {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	snap := a.state
+	snap.SyncInProgress = a.syncInProgress
 	// Copia defensiva del slice: el struct se copia por valor pero el
 	// backing array sería compartido — un refresh concurrente publica un
 	// slice nuevo (no muta), aun así el copy mantiene la garantía sin
@@ -242,6 +306,11 @@ func (a *Agent) Snapshot() AgentSnapshot {
 // Run is the main agent loop. Blocks until ctx is cancelled. Safe to call
 // once per process; calling twice would race the DB writes.
 func (a *Agent) Run(ctx context.Context) {
+	defer func() {
+		a.mu.Lock()
+		a.syncInProgress = false
+		a.mu.Unlock()
+	}()
 	if a.cfg.BaseURL == "" {
 		a.cfg.Logger.Printf("[sync] agent disabled — BaseURL empty")
 		return
@@ -283,6 +352,25 @@ func (a *Agent) Run(ctx context.Context) {
 // Surfaces errors to the in-memory snapshot but doesn't return them; the
 // loop is best-effort.
 func (a *Agent) RunOnce(ctx context.Context) {
+	a.runMu.Lock()
+	defer a.runMu.Unlock()
+	a.mu.Lock()
+	a.syncInProgress = true
+	a.mu.Unlock()
+	defer func() {
+		a.mu.Lock()
+		a.syncInProgress = ctx.Err() == nil && len(a.trigger) > 0
+		a.mu.Unlock()
+	}()
+	if a.currentActiveGym() == uuid.Nil {
+		// A token without a tenant binding is unsafe: it could reuse a cursor
+		// written by whichever gym used this SQLite previously. Wait until
+		// startup/auth calls SetActiveGym.
+		a.mu.Lock()
+		a.state.WaitingForAuth = true
+		a.mu.Unlock()
+		return
+	}
 	if a.currentToken() == "" {
 		// Sin credencial. Antes esto retornaba silencioso, lo que dejaba
 		// al sidecar en un limbo "sano pero parado" imposible de
@@ -369,8 +457,10 @@ func (a *Agent) bootstrap(ctx context.Context) error {
 		}
 		a.clientID = id
 		a.mu.Lock()
+		a.activeGymID = st.ActiveGymID
 		a.state = AgentSnapshot{
 			LastPulledAt:           st.LastPulledAt,
+			LastPullCursor:         st.LastPullCursor,
 			LastSyncedAt:           st.LastSyncedAt,
 			ConsecutiveFailures:    st.ConsecutiveFailures,
 			InitialSyncCompletedAt: st.InitialSyncCompletedAt,
@@ -495,13 +585,21 @@ func (a *Agent) takeBatch(ctx context.Context) ([]PushItem, error) {
 		SELECT id, entity_type, entity_id, operation, payload, client_version, enqueued_at
 		FROM sync_queue
 		WHERE synced_at IS NULL
+		  AND (? = '' OR json_extract(payload, '$.gym_id') = ?)
 		ORDER BY rowid ASC
 		LIMIT ?`
-	rows, err := stx.Ext().QueryxContext(ctx, q, a.cfg.BatchSize)
+	gymID := a.currentActiveGym()
+	activeGymID := gymID.String()
+	if gymID == uuid.Nil {
+		// Direct Push/takeBatch calls in low-level tests and support tooling
+		// retain the historical unscoped behaviour. Production RunOnce never
+		// reaches here without an explicit tenant binding.
+		activeGymID = ""
+	}
+	rows, err := stx.Ext().QueryxContext(ctx, q, activeGymID, activeGymID, a.cfg.BatchSize)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	out := make([]PushItem, 0, a.cfg.BatchSize)
 	bytesUsed := 0
 	for rows.Next() {
@@ -527,7 +625,116 @@ func (a *Agent) takeBatch(ctx context.Context) ([]PushItem, error) {
 			EnqueuedAt:    time.UnixMilli(enqueuedAt).UTC(),
 		})
 	}
-	return out, nil
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	out, err = expandRefundGraphBatch(ctx, stx, out, activeGymID)
+	if err != nil {
+		return nil, err
+	}
+	return expandExpenseGraphBatch(ctx, stx, out, activeGymID)
+}
+
+// expandRefundGraphBatch intentionally overrides BatchSize/MaxBatchBytes for
+// the small connected component of a refund. Splitting it would let the cloud
+// see a negative Payment or debt rewrite before it can validate the Refund and
+// every returned line. Rows may carry several ids because two offline refunds
+// can share the same coalesced root Payment snapshot.
+func expandRefundGraphBatch(
+	ctx context.Context,
+	stx *sharedDomain.SqlxTransaction,
+	initial []PushItem,
+	activeGymID string,
+) ([]PushItem, error) {
+	selectedGraphs := make(map[string]struct{})
+	selectedQueue := make(map[string]struct{}, len(initial))
+	for _, item := range initial {
+		selectedQueue[item.QueueID] = struct{}{}
+		for _, graphID := range refundGraphIDs(item.Payload) {
+			selectedGraphs[graphID] = struct{}{}
+		}
+	}
+	if len(selectedGraphs) == 0 {
+		return initial, nil
+	}
+
+	rows, err := stx.Ext().QueryxContext(ctx, `
+		SELECT id,entity_type,entity_id,operation,payload,client_version,enqueued_at
+		FROM sync_queue
+		WHERE synced_at IS NULL
+		  AND json_type(payload, '$._sync_graph_ids')='array'
+		  AND (? = '' OR json_extract(payload, '$.gym_id') = ?)
+		ORDER BY rowid ASC`, activeGymID, activeGymID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var candidates []PushItem
+	for rows.Next() {
+		var (
+			id, entityType, entityID, operation, payload string
+			clientVersion                                int
+			enqueuedAt                                   int64
+		)
+		if err := rows.Scan(&id, &entityType, &entityID, &operation, &payload, &clientVersion, &enqueuedAt); err != nil {
+			return nil, err
+		}
+		candidates = append(candidates, PushItem{QueueID: id, EntityType: entityType, EntityID: entityID,
+			Operation: operation, ClientVersion: clientVersion, Payload: json.RawMessage(payload),
+			EnqueuedAt: time.UnixMilli(enqueuedAt).UTC()})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	changed := true
+	for changed {
+		changed = false
+		for _, candidate := range candidates {
+			if _, included := selectedQueue[candidate.QueueID]; included {
+				continue
+			}
+			ids := refundGraphIDs(candidate.Payload)
+			connected := false
+			for _, graphID := range ids {
+				if _, ok := selectedGraphs[graphID]; ok {
+					connected = true
+					break
+				}
+			}
+			if !connected {
+				continue
+			}
+			selectedQueue[candidate.QueueID] = struct{}{}
+			for _, graphID := range ids {
+				if _, known := selectedGraphs[graphID]; !known {
+					selectedGraphs[graphID] = struct{}{}
+					changed = true
+				}
+			}
+			changed = true
+		}
+	}
+	for _, candidate := range candidates {
+		if _, included := selectedQueue[candidate.QueueID]; !included {
+			continue
+		}
+		found := false
+		for _, item := range initial {
+			if item.QueueID == candidate.QueueID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			initial = append(initial, candidate)
+		}
+	}
+	return initial, nil
 }
 
 func (a *Agent) postPush(ctx context.Context, req PushRequest) (*PushResponse, error) {
@@ -584,9 +791,71 @@ func (a *Agent) handlePushResponse(ctx context.Context, batch []PushItem, resp *
 		if _, err := stx.Exec(ctx, `PRAGMA defer_foreign_keys = ON`); err != nil {
 			return fmt.Errorf("defer_foreign_keys: %w", err)
 		}
+		// An operator can edit again while the request is in flight. Never
+		// acknowledge or overwrite the replacement queued snapshot; keep an
+		// entire expense component pending if any of its members changed.
+		changed := make(map[string]bool)
+		for _, item := range batch {
+			var matches bool
+			if err := stx.Get(ctx, &matches, `SELECT EXISTS(SELECT 1 FROM sync_queue WHERE id=? AND client_version=? AND payload=? AND synced_at IS NULL)`, item.QueueID, item.ClientVersion, string(item.Payload)); err != nil {
+				return err
+			}
+			changed[item.QueueID] = !matches
+		}
+		for _, indexes := range groupExpensePushItems(batch) {
+			stale := false
+			for _, i := range indexes {
+				stale = stale || changed[batch[i].QueueID]
+			}
+			if stale {
+				for _, i := range indexes {
+					changed[batch[i].QueueID] = true
+				}
+			}
+		}
+		// If a canonical dependency also has a pending local edit, join it
+		// to this component and retry together instead of overwriting it.
+		for _, r := range resp.Results {
+			if changed[r.QueueID] {
+				continue
+			}
+			for _, related := range r.RelatedChanges {
+				if !expenseSyncType(related.EntityType) {
+					continue
+				}
+				var pending bool
+				if err := stx.Get(ctx, &pending, `SELECT EXISTS(SELECT 1 FROM sync_queue WHERE entity_type=? AND entity_id=? AND synced_at IS NULL)`, related.EntityType, related.EntityID); err != nil {
+					return err
+				}
+				if !pending {
+					continue
+				}
+				members := []string{expenseMemberKey(related.EntityType, related.EntityID)}
+				for _, indexes := range groupExpensePushItems(batch) {
+					contains := false
+					for _, i := range indexes {
+						contains = contains || batch[i].QueueID == r.QueueID
+					}
+					if !contains {
+						continue
+					}
+					for _, i := range indexes {
+						changed[batch[i].QueueID] = true
+						members = append(members, expenseMemberKey(batch[i].EntityType, batch[i].EntityID))
+					}
+				}
+				if err := joinPendingExpenseMembers(ctx, stx, members); err != nil {
+					return err
+				}
+			}
+		}
+		var canonical []PullChange
 		nowMs := time.Now().UTC().UnixMilli()
 		for _, r := range resp.Results {
-			orig := itemByQID[r.QueueID]
+			orig, known := itemByQID[r.QueueID]
+			if !known || changed[r.QueueID] {
+				continue
+			}
 			switch r.Status {
 			case StatusAccepted, StatusConflictClientWins:
 				if _, err := stx.Exec(ctx, `
@@ -617,22 +886,29 @@ func (a *Agent) handlePushResponse(ctx context.Context, batch []PushItem, resp *
 						Payload:         r.ServerPayload,
 						ServerUpdatedAt: *r.ServerUpdatedAt,
 					}
-					if err := ApplyPullChange(ctx, tx, change); err != nil {
-						return fmt.Errorf("apply %s/%s (version %d): %w",
-							change.EntityType, change.EntityID, change.Version, err)
+					// Push responses carry the canonical tombstone in the
+					// payload; PullChange's envelope is assembled locally.
+					if deleted := decodePushPayload(r.ServerPayload)["deleted_at"]; deleted != nil {
+						parsed := payloadTimestamp(deleted)
+						if parsed.IsZero() {
+							return fmt.Errorf("invalid canonical deleted_at for %s", orig.EntityID)
+						}
+						change.DeletedAt = &parsed
 					}
+					canonical = append(canonical, change)
+					canonical = append(canonical, r.RelatedChanges...)
 				}
 				_ = recordLocalConflict(ctx, stx, orig, r, "server_wins")
 			case StatusRejectedUnauthorized,
 				StatusRejectedSchema,
 				StatusRejectedUnknownType,
-				StatusRejectedDuplicate:
+				StatusRejectedDuplicate,
+				StatusRejectedFinancialConflict:
 				// Hard-rejected — keep the queue row, bump retry_count, log.
 				// Operator's UI will eventually surface this via /sync/status.
 				// El prefijo de status en last_error es load-bearing para
-				// rejected_duplicate: classifyStuckError lo usa para marcar
-				// la fila como kind=duplicate y que el desktop ofrezca el
-				// CTA de renombrar (el mensaje ya viene legible del cloud).
+				// classifyStuckError usa el prefijo para distinguir duplicados
+				// de conflictos financieros y mantener una salida explícita.
 				if _, err := stx.Exec(ctx, `
 					UPDATE sync_queue SET retry_count = retry_count + 1, last_error = ?
 					WHERE id = ?`, r.Status+": "+r.Error, r.QueueID); err != nil {
@@ -644,6 +920,21 @@ func (a *Agent) handlePushResponse(ctx context.Context, batch []PushItem, resp *
 					WHERE id = ?`, r.Error, r.QueueID); err != nil {
 					return err
 				}
+			}
+		}
+		// Release local unique links before inserting a winner that may use
+		// them. All acknowledgements and canonical rows commit together.
+		sort.SliceStable(canonical, func(i, j int) bool { return canonical[i].DeletedAt != nil && canonical[j].DeletedAt == nil })
+		for _, change := range canonical {
+			var pending bool
+			if err := stx.Get(ctx, &pending, `SELECT EXISTS(SELECT 1 FROM sync_queue WHERE entity_type=? AND entity_id=? AND synced_at IS NULL)`, change.EntityType, change.EntityID); err != nil {
+				return err
+			}
+			if pending {
+				continue
+			}
+			if err := applyPullChange(ctx, tx, change, true); err != nil {
+				return fmt.Errorf("apply canonical %s/%s: %w", change.EntityType, change.EntityID, err)
 			}
 		}
 		return nil
@@ -711,6 +1002,7 @@ func extractGymIDFromPayload(p json.RawMessage) string {
 func (a *Agent) Pull(ctx context.Context) error {
 	a.mu.RLock()
 	since := a.state.LastPulledAt
+	pullCursor := a.state.LastPullCursor
 	a.mu.RUnlock()
 	// pending acumula páginas cuyo COMMIT falló por una cadena FK partida
 	// justo en el límite de página (p.ej. la membresía vieja con
@@ -722,7 +1014,7 @@ func (a *Agent) Pull(ctx context.Context) error {
 	// (ApplyPullPage) el commit del lote unido cierra la cadena.
 	var pending []PullChange
 	for {
-		resp, err := a.getPull(ctx, since)
+		resp, err := a.getPull(ctx, since, pullCursor)
 		if err != nil {
 			return err
 		}
@@ -732,6 +1024,9 @@ func (a *Agent) Pull(ctx context.Context) error {
 		pending = append(pending, resp.Changes...)
 		batch := pending
 		advanceCursor := func(tx sharedDomain.Transaction) error {
+			if err := SetKV(ctx, tx, keyLastPullCursor, resp.NextCursor); err != nil {
+				return err
+			}
 			return SetLastPulledAt(ctx, tx, batch[len(batch)-1].ServerUpdatedAt)
 		}
 		applyErr := ApplyPullPage(ctx, a.uow, batch, advanceCursor)
@@ -740,6 +1035,7 @@ func (a *Agent) Pull(ctx context.Context) error {
 			// server reporta has_more con página vacía (since no avanzaría).
 			if isFKConstraintErr(applyErr) && resp.HasMore && len(resp.Changes) > 0 {
 				since = resp.Changes[len(resp.Changes)-1].ServerUpdatedAt
+				pullCursor = resp.NextCursor
 				continue
 			}
 			if isFKConstraintErr(applyErr) {
@@ -778,8 +1074,10 @@ func (a *Agent) Pull(ctx context.Context) error {
 		pending = nil
 		a.mu.Lock()
 		a.state.LastPulledAt = newSince
+		a.state.LastPullCursor = resp.NextCursor
 		a.mu.Unlock()
 		since = newSince
+		pullCursor = resp.NextCursor
 		if !resp.HasMore {
 			return nil
 		}
@@ -795,7 +1093,7 @@ func (a *Agent) quarantineNonEmpty() bool {
 	return a.state.QuarantinedCount > 0
 }
 
-func (a *Agent) getPull(ctx context.Context, since time.Time) (*PullResponse, error) {
+func (a *Agent) getPull(ctx context.Context, since time.Time, cursors ...string) (*PullResponse, error) {
 	endpoint, err := url.JoinPath(a.cfg.BaseURL, "/api/v1/sync/pull")
 	if err != nil {
 		return nil, err
@@ -805,11 +1103,15 @@ func (a *Agent) getPull(ctx context.Context, since time.Time) (*PullResponse, er
 		q.Set("since", since.UTC().Format(time.RFC3339Nano))
 	}
 	q.Set("limit", strconv.Itoa(a.cfg.PullPageSize))
+	if len(cursors) > 0 && cursors[0] != "" {
+		q.Set("cursor", cursors[0])
+	}
 	endpoint += "?" + q.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
+	req.Header.Set("X-Tinta-Sync-Schema", strconv.Itoa(SchemaVersion))
 	req.Header.Set("Authorization", "Bearer "+a.currentToken())
 	resp, err := a.cfg.HTTPClient.Do(req)
 	if err != nil {
@@ -846,6 +1148,15 @@ func (a *Agent) FullSync(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	tx, err := a.uow.Query(ctx)
+	if err != nil {
+		return err
+	}
+	persisted, err := ReadState(ctx, tx)
+	if err != nil {
+		return err
+	}
+	anchor := persisted.FullSyncStartedAt
 	a.setStateLabel(StateInitialSyncing)
 	// pending: mismo mecanismo anti "cadena FK partida entre páginas" que
 	// Pull — ver el comentario ahí. Acá el cursor avanza sin persistirse
@@ -857,21 +1168,34 @@ func (a *Agent) FullSync(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		if anchor.IsZero() {
+			anchor = resp.ServerNow
+		}
 		pending = append(pending, resp.Changes...)
 		batch := pending
-		applyErr := ApplyPullPage(ctx, a.uow, batch, func(tx sharedDomain.Transaction) error {
+		applyErr := applyFullSyncPage(ctx, a.uow, batch, func(tx sharedDomain.Transaction) error {
 			if resp.HasMore {
+				if err := SetKV(ctx, tx, keyFullSyncStartedAt, strconv.FormatInt(anchor.UnixMilli(), 10)); err != nil {
+					return err
+				}
 				return SetFullSyncCursor(ctx, tx, resp.NextCursor)
 			}
 			// Finalize: mark initial sync done, clear cursor, set
-			// last_pulled_at to server_now so subsequent /pull is incremental.
+			// last_pulled_at to the first page's anchor so incremental pull
+			// also catches commits made during this full download.
 			if err := ClearFullSyncCursor(ctx, tx); err != nil {
 				return err
 			}
 			if err := SetInitialSyncCompletedAt(ctx, tx, resp.ServerNow); err != nil {
 				return err
 			}
-			return SetLastPulledAt(ctx, tx, resp.ServerNow)
+			if err := SetKV(ctx, tx, keyFullSyncStartedAt, ""); err != nil {
+				return err
+			}
+			if err := SetKV(ctx, tx, keyLastPullCursor, ""); err != nil {
+				return err
+			}
+			return SetLastPulledAt(ctx, tx, anchor)
 		})
 		if applyErr != nil {
 			if isFKConstraintErr(applyErr) && resp.HasMore {
@@ -889,7 +1213,8 @@ func (a *Agent) FullSync(ctx context.Context) error {
 		if !resp.HasMore {
 			a.mu.Lock()
 			a.state.InitialSyncCompletedAt = resp.ServerNow
-			a.state.LastPulledAt = resp.ServerNow
+			a.state.LastPulledAt = anchor
+			a.state.LastPullCursor = ""
 			a.mu.Unlock()
 			return nil
 		}
@@ -926,6 +1251,7 @@ func (a *Agent) getFull(ctx context.Context, cursor string) (*FullSyncResponse, 
 	if err != nil {
 		return nil, err
 	}
+	req.Header.Set("X-Tinta-Sync-Schema", strconv.Itoa(SchemaVersion))
 	req.Header.Set("Authorization", "Bearer "+a.currentToken())
 	resp, err := a.cfg.HTTPClient.Do(req)
 	if err != nil {
@@ -1052,14 +1378,25 @@ func (a *Agent) refreshPendingCount(ctx context.Context) {
 		return
 	}
 	stx := tx.(*sharedDomain.SqlxTransaction)
+	gymID := a.currentActiveGym()
+	activeGymID := gymID.String()
+	if gymID == uuid.Nil {
+		activeGymID = ""
+	}
 	var n int
-	if err := stx.Get(ctx, &n, `SELECT COUNT(*) FROM sync_queue WHERE synced_at IS NULL`); err != nil {
+	if err := stx.Get(ctx, &n, `
+		SELECT COUNT(*) FROM sync_queue
+		 WHERE synced_at IS NULL
+		   AND (? = '' OR json_extract(payload, '$.gym_id') = ?)`,
+		activeGymID, activeGymID); err != nil {
 		return
 	}
 	var stuck int
 	_ = stx.Get(ctx, &stuck,
-		`SELECT COUNT(*) FROM sync_queue WHERE synced_at IS NULL AND retry_count >= ?`,
-		stuckPushThreshold)
+		`SELECT COUNT(*) FROM sync_queue
+		  WHERE synced_at IS NULL AND retry_count >= ?
+		    AND (? = '' OR json_extract(payload, '$.gym_id') = ?)`,
+		stuckPushThreshold, activeGymID, activeGymID)
 	items := a.loadStuckItems(ctx, stx)
 	// StuckPushError conserva su rol (muestra de la fila más castigada en
 	// el detalle del indicador) pero ahora ya viene clasificado — sin el
@@ -1083,14 +1420,20 @@ func (a *Agent) refreshPendingCount(ctx context.Context) {
 // clasifica para el status. Best-effort: un error de lectura devuelve nil y
 // el status degrada al comportamiento previo (sólo conteos).
 func (a *Agent) loadStuckItems(ctx context.Context, stx *sharedDomain.SqlxTransaction) []StuckQueueItem {
+	gymID := a.currentActiveGym()
+	activeGymID := gymID.String()
+	if gymID == uuid.Nil {
+		activeGymID = ""
+	}
 	rows, err := stx.Ext().QueryxContext(ctx, `
 		SELECT id, entity_type, entity_id, operation, retry_count,
 		       COALESCE(last_error, ''), payload
 		  FROM sync_queue
 		 WHERE synced_at IS NULL AND retry_count >= ?
+		   AND (? = '' OR json_extract(payload, '$.gym_id') = ?)
 		 ORDER BY retry_count DESC, rowid ASC
 		 LIMIT ?`,
-		stuckPushThreshold, maxStuckItemsInStatus)
+		stuckPushThreshold, activeGymID, activeGymID, maxStuckItemsInStatus)
 	if err != nil {
 		return nil
 	}
@@ -1131,6 +1474,9 @@ func (a *Agent) loadStuckItems(ctx context.Context, stx *sharedDomain.SqlxTransa
 func classifyStuckError(lastError string) (kind, message string) {
 	if rest, ok := strings.CutPrefix(lastError, StatusRejectedDuplicate+": "); ok {
 		return StuckKindDuplicate, rest
+	}
+	if rest, ok := strings.CutPrefix(lastError, StatusRejectedFinancialConflict+": "); ok {
+		return StuckKindFinancialConflict, rest
 	}
 	if strings.Contains(lastError, "SQLSTATE 23505") ||
 		strings.Contains(lastError, "duplicate key value violates unique constraint") {

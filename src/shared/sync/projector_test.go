@@ -598,3 +598,38 @@ func TestBuildProjectorUpsert_NotificationTemplates(t *testing.T) {
 		t.Errorf("args = %d, want 8", got)
 	}
 }
+
+func TestNormalizeCashSessionPayload_CoercesSQLiteBooleanIntegers(t *testing.T) {
+	gymID := uuid.New()
+	payload := mustJSON(t, map[string]any{
+		"opening_cash_known":        1,
+		"adjusted_after_withdrawal": 0,
+	})
+
+	normalized, raw, err := normalizeCashSessionPayload(gymID, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raw["opening_cash_known"] != true || raw["adjusted_after_withdrawal"] != false {
+		t.Fatalf("normalized booleans = %T(%v)/%T(%v), want bool(true)/bool(false)",
+			raw["opening_cash_known"], raw["opening_cash_known"],
+			raw["adjusted_after_withdrawal"], raw["adjusted_after_withdrawal"])
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(normalized, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if wire["opening_cash_known"] != true || wire["adjusted_after_withdrawal"] != false {
+		t.Fatalf("normalized wire = %s", normalized)
+	}
+}
+
+func TestNormalizeCashSessionPayload_RejectsInvalidSQLiteBoolean(t *testing.T) {
+	_, _, err := normalizeCashSessionPayload(uuid.New(), mustJSON(t, map[string]any{
+		"opening_cash_known":        2,
+		"adjusted_after_withdrawal": 0,
+	}))
+	if err == nil || !strings.Contains(err.Error(), "opening_cash_known") {
+		t.Fatalf("error=%v, want invalid opening_cash_known", err)
+	}
+}

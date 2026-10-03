@@ -74,6 +74,14 @@ type ExportReport struct {
 	// breakdowns, series diarias). Cuando es nil el export se rechaza
 	// con ErrUnsupportedReport.
 	Range *RangeReport
+	// CashClose genera el documento desde el mismo agregado que ve la caja,
+	// no desde una lista genérica de pagos.
+	CashClose *CashClose
+}
+
+func (uc *ExportReport) WithCashClose(cashClose *CashClose) *ExportReport {
+	uc.CashClose = cashClose
+	return uc
 }
 
 func NewExportReport(reader Reader, gyms gymRepo.GymRepository, uow sharedDomain.UnitOfWork,
@@ -84,6 +92,9 @@ func NewExportReport(reader Reader, gyms gymRepo.GymRepository, uow sharedDomain
 func (uc *ExportReport) Execute(ctx context.Context, in ExportInput) (*ExportOutput, error) {
 	if in.Format != FormatPDF && in.Format != FormatXLSX {
 		return nil, sharedDomain.NewValidationError(ErrUnsupportedFormat)
+	}
+	if in.Type == ReportTypePeriodSummary {
+		return uc.executePeriodSummary(ctx, in)
 	}
 	tx, err := uc.UoW.Query(ctx)
 	if err != nil {
@@ -135,44 +146,75 @@ func (uc *ExportReport) Execute(ctx context.Context, in ExportInput) (*ExportOut
 			func() ([]byte, error) { return renderAttentionRequiredXLSX(out) })
 
 	case ReportTypeCashClose:
-		// Cash close has its own dedicated endpoint but the export feature
-		// also offers a per-day PDF/XLSX. We delegate to the same Reader
-		// helpers (payments by date) — the operator picks the date via
-		// from=to=today. The format stays simple.
-		rows, err := uc.Reader.ListPaymentsForExport(tx, in.GymID, from, to)
-		if err != nil {
-			return nil, sharedDomain.NewUnexpectedError(err)
-		}
-		return finalize(in, gym, "Corte de caja", from, to,
-			func() []byte { return renderPaymentsPDF(gym, rows, from, to) },
-			func() ([]byte, error) { return renderPaymentsXLSX(rows) })
-
-	case ReportTypePeriodSummary:
-		if uc.Range == nil {
+		if uc.CashClose == nil {
 			return nil, sharedDomain.NewValidationError(ErrUnsupportedReport)
 		}
-		// Period summary: reuse the same use case the FE consumes so the
-		// numbers/tables match exactly. When period == "custom" the
-		// controller forwards in.From / in.To; otherwise PeriodWindow
-		// computes the right range. We then re-derive from/to from the
-		// output's strings so the filename + header reflect that window.
-		period := in.Period
-		if period == "" {
-			period = PeriodMonth
-		}
-		rangeOut, err := uc.Range.Execute(ctx, RangeReportInput{
-			GymID: in.GymID, Period: period, From: in.From, To: in.To,
-		})
+		// El corte es diario. Si llega un rango, el día objetivo es el extremo
+		// final (la misma convención del selector de caja).
+		closeOut, err := uc.CashClose.Report(ctx, CashCloseReportInput{GymID: in.GymID, Date: to})
 		if err != nil {
 			return nil, err
 		}
-		realFrom, _ := time.Parse("2006-01-02", rangeOut.From)
-		realTo, _ := time.Parse("2006-01-02", rangeOut.To)
-		return finalize(in, gym, "Resumen del período", realFrom, realTo,
-			func() []byte { return renderPeriodSummaryPDF(gym, rangeOut, realFrom, realTo) },
-			func() ([]byte, error) { return renderPeriodSummaryXLSX(rangeOut, realFrom, realTo) })
+		return finalize(in, gym, "Corte de caja", to, to,
+			func() []byte { return renderCashClosePDF(gym, closeOut) },
+			func() ([]byte, error) { return renderCashCloseXLSX(closeOut) })
+
 	}
 	return nil, sharedDomain.NewValidationError(ErrUnsupportedReport)
+}
+
+func (uc *ExportReport) executePeriodSummary(ctx context.Context, in ExportInput) (*ExportOutput, error) {
+	if uc.Range == nil {
+		return nil, sharedDomain.NewValidationError(ErrUnsupportedReport)
+	}
+	period := in.Period
+	if period == "" {
+		period = PeriodMonth
+	}
+	if err := validateReportWindow(period, in.From, in.To); err != nil {
+		return nil, sharedDomain.NewValidationError(err)
+	}
+	fixedWindow := in.From != nil || in.To != nil
+	if fixedWindow {
+		if err := validateReportWindow(PeriodCustom, in.From, in.To); err != nil {
+			return nil, sharedDomain.NewValidationError(err)
+		}
+	}
+	var out *ExportOutput
+	err := sharedDomain.ReadSnapshot(ctx, uc.UoW, func(tx sharedDomain.Transaction) error {
+		gym, err := uc.Gyms.GetByID(tx, in.GymID)
+		if err != nil {
+			return err
+		}
+		// Reuse the exact canonical aggregation in the same transaction as the
+		// gym metadata, but request every detail row for the downloadable file.
+		rangeOut, err := uc.Range.executeInSnapshot(ctx, tx, RangeReportInput{
+			GymID: in.GymID, Period: period, From: in.From, To: in.To, IncludeAllDetails: true, fixedWindow: fixedWindow,
+		})
+		if err != nil {
+			return err
+		}
+		realFrom, parseErr := time.Parse("2006-01-02", rangeOut.From)
+		if parseErr != nil {
+			return parseErr
+		}
+		realTo, parseErr := time.Parse("2006-01-02", rangeOut.To)
+		if parseErr != nil {
+			return parseErr
+		}
+		out, err = finalize(in, gym, "Resumen del período", realFrom, realTo,
+			func() []byte { return renderPeriodSummaryPDF(gym, rangeOut, realFrom, realTo) },
+			func() ([]byte, error) { return renderPeriodSummaryXLSX(rangeOut, realFrom, realTo) })
+		return err
+	})
+	if err != nil {
+		var custom sharedDomain.CustomError
+		if errors.As(err, &custom) {
+			return nil, err
+		}
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
+	return out, nil
 }
 
 func finalize(in ExportInput, gym any, title string, from, to time.Time,

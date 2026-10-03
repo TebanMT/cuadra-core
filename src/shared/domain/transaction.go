@@ -27,3 +27,23 @@ type UnitOfWork interface {
 	Command(ctx context.Context, fn func(tx Transaction) error) error
 	Query(ctx context.Context) (Transaction, error)
 }
+
+// SnapshotUnitOfWork is an optional capability for reports that compose
+// several queries. All reads inside fn observe the same database snapshot, so
+// a payment arriving halfway through a report cannot make its cards disagree.
+// Test doubles and older adapters may implement only UnitOfWork; ReadSnapshot
+// intentionally falls back to Query for them.
+type SnapshotUnitOfWork interface {
+	ReadSnapshot(ctx context.Context, fn func(tx Transaction) error) error
+}
+
+func ReadSnapshot(ctx context.Context, uow UnitOfWork, fn func(tx Transaction) error) error {
+	if snapshot, ok := uow.(SnapshotUnitOfWork); ok {
+		return snapshot.ReadSnapshot(ctx, fn)
+	}
+	tx, err := uow.Query(ctx)
+	if err != nil {
+		return err
+	}
+	return fn(tx)
+}

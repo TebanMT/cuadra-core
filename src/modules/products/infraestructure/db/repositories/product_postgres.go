@@ -3,11 +3,13 @@
 package repositories
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 
 	prodErrors "github.com/cuadra/cuadra-core/src/modules/products/domain/errors"
@@ -25,9 +27,20 @@ func NewProductPostgresRepository() *ProductPostgresRepository {
 }
 
 func (r *ProductPostgresRepository) Create(tx sharedDomain.Transaction, p *productDomain.Product) (*productDomain.Product, error) {
+	p.StockBase = p.Stock
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	row := productToModel(p)
 	if err := gormTx.Create(&row).Error; err != nil {
+		var duplicate *pgconn.PgError
+		if errors.As(err, &duplicate) && duplicate.Code == "23505" {
+			if duplicate.ConstraintName == "uq_products_gym_name" {
+				return nil, sharedDomain.NewBusinessError(prodErrors.ErrNameAlreadyExists, p.Name)
+			}
+			return nil, sharedDomain.NewBusinessError(prodErrors.ErrInvalidPurchase, "")
+		}
+		return nil, err
+	}
+	if err := emitProduct(gormTx, p); err != nil {
 		return nil, err
 	}
 	return productFromModel(&row), nil
@@ -36,19 +49,30 @@ func (r *ProductPostgresRepository) Create(tx sharedDomain.Transaction, p *produ
 func (r *ProductPostgresRepository) Update(tx sharedDomain.Transaction, p *productDomain.Product) (*productDomain.Product, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	p.UpdatedAt = time.Now().UTC()
+	if err := gormTx.Exec(`SELECT id FROM products WHERE id=? AND gym_id=? FOR UPDATE`, p.ID, p.GymID).Error; err != nil {
+		return nil, err
+	}
+	receipts, err := ReceiptStockPostgres(gormTx, p.GymID, p.ID)
+	if err != nil {
+		return nil, err
+	}
+	p.Stock = p.StockBase + receipts
 	if err := gormTx.Model(&models.ProductModel{}).Where("id = ?", p.ID).
 		Updates(map[string]any{
-			"version":       p.Version,
-			"updated_at":    p.UpdatedAt,
-			"deleted_at":    p.DeletedAt,
-			"name":          p.Name,
-			"price":         p.Price,
-			"stock":         p.Stock,
+			"version":    p.Version,
+			"updated_at": p.UpdatedAt,
+			"deleted_at": p.DeletedAt,
+			"name":       p.Name,
+			"price":      p.Price,
+			"stock":      p.Stock, "stock_base": p.StockBase,
 			"stock_minimum": p.StockMinimum,
 			"category":      p.Category,
 			"image_url":     p.ImageURL,
 			"active":        p.Active,
 		}).Error; err != nil {
+		return nil, err
+	}
+	if err := emitProduct(gormTx, p); err != nil {
 		return nil, err
 	}
 	return p, nil
@@ -131,12 +155,12 @@ func (r *ProductPostgresRepository) ListAggregates(tx sharedDomain.Transaction, 
 	if err := base.Session(&gorm.Session{}).
 		Joins("LEFT JOIN (?) AS c ON c.product_id = products.id", costSub).
 		Select(`
-		COALESCE(SUM(CASE WHEN products.active = true THEN products.price * products.stock ELSE 0 END), 0) AS total_value,
+		COALESCE(SUM(CASE WHEN products.active = true AND products.stock > 0 THEN products.price * products.stock ELSE 0 END), 0) AS total_value,
 		COALESCE(SUM(CASE WHEN products.active = true AND products.stock > 0 AND products.stock <= products.stock_minimum THEN 1 ELSE 0 END), 0) AS low_count,
-		COALESCE(SUM(CASE WHEN products.active = true AND products.stock = 0 THEN 1 ELSE 0 END), 0) AS out_count,
-		COALESCE(SUM(CASE WHEN products.active = true AND c.avg_unit_cost IS NOT NULL THEN products.stock * c.avg_unit_cost ELSE 0 END), 0) AS cost_value,
-		COALESCE(SUM(CASE WHEN products.active = true AND c.avg_unit_cost IS NOT NULL THEN products.stock * (products.price - c.avg_unit_cost) ELSE 0 END), 0) AS potential_profit,
-		COALESCE(SUM(CASE WHEN products.active = true AND c.avg_unit_cost IS NOT NULL THEN products.stock * products.price ELSE 0 END), 0) AS sale_value_with_cost,
+		COALESCE(SUM(CASE WHEN products.active = true AND products.stock <= 0 THEN 1 ELSE 0 END), 0) AS out_count,
+		COALESCE(SUM(CASE WHEN products.active = true AND products.stock > 0 AND c.avg_unit_cost IS NOT NULL THEN products.stock * c.avg_unit_cost ELSE 0 END), 0) AS cost_value,
+		COALESCE(SUM(CASE WHEN products.active = true AND products.stock > 0 AND c.avg_unit_cost IS NOT NULL THEN products.stock * (products.price - c.avg_unit_cost) ELSE 0 END), 0) AS potential_profit,
+		COALESCE(SUM(CASE WHEN products.active = true AND products.stock > 0 AND c.avg_unit_cost IS NOT NULL THEN products.stock * products.price ELSE 0 END), 0) AS sale_value_with_cost,
 		COALESCE(SUM(CASE WHEN products.active = true THEN 1 ELSE 0 END), 0) AS products_total,
 		COALESCE(SUM(CASE WHEN products.active = true AND c.avg_unit_cost IS NOT NULL THEN 1 ELSE 0 END), 0) AS products_with_cost`).
 		Scan(&row).Error; err != nil {
@@ -177,6 +201,22 @@ func (r *ProductPostgresRepository) ListUnitCosts(tx sharedDomain.Transaction, q
 		out[x.ID] = x.AvgUnitCost
 	}
 	return out, nil
+}
+
+func (r *ProductPostgresRepository) GetUnitCost(tx sharedDomain.Transaction, gymID, productID uuid.UUID) (*float64, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	var row struct {
+		AvgUnitCost *float64 `gorm:"column:avg_unit_cost"`
+	}
+	if err := gormTx.Raw(`
+		SELECT ROUND(SUM(cost * delta) / NULLIF(SUM(delta), 0), 2) AS avg_unit_cost
+		FROM stock_movements
+		WHERE gym_id = ? AND product_id = ? AND movement_type = ?
+		  AND cost IS NOT NULL AND deleted_at IS NULL`,
+		gymID, productID, stockMovementDomain.TypeRestock).Scan(&row).Error; err != nil {
+		return nil, err
+	}
+	return row.AvgUnitCost, nil
 }
 
 // avgUnitCostSubqueryPg construye la subconsulta de costo unitario
@@ -250,15 +290,15 @@ func sortClausePostgres(sort, dir string) string {
 
 func productToModel(p *productDomain.Product) models.ProductModel {
 	return models.ProductModel{
-		ID:           p.ID,
-		GymID:        p.GymID,
-		Version:      p.Version,
-		CreatedAt:    p.CreatedAt,
-		UpdatedAt:    p.UpdatedAt,
-		DeletedAt:    p.DeletedAt,
-		Name:         p.Name,
-		Price:        p.Price,
-		Stock:        p.Stock,
+		ID:        p.ID,
+		GymID:     p.GymID,
+		Version:   p.Version,
+		CreatedAt: p.CreatedAt,
+		UpdatedAt: p.UpdatedAt,
+		DeletedAt: p.DeletedAt,
+		Name:      p.Name,
+		Price:     p.Price,
+		Stock:     p.Stock, StockBase: &p.StockBase,
 		StockMinimum: p.StockMinimum,
 		Category:     p.Category,
 		ImageURL:     p.ImageURL,
@@ -268,12 +308,12 @@ func productToModel(p *productDomain.Product) models.ProductModel {
 
 func productFromModel(m *models.ProductModel) *productDomain.Product {
 	return &productDomain.Product{
-		ID:           m.ID,
-		GymID:        m.GymID,
-		Version:      m.Version,
-		Name:         m.Name,
-		Price:        m.Price,
-		Stock:        m.Stock,
+		ID:      m.ID,
+		GymID:   m.GymID,
+		Version: m.Version,
+		Name:    m.Name,
+		Price:   m.Price,
+		Stock:   m.Stock, StockBase: postgresStockBase(m.StockBase, m.Stock),
 		StockMinimum: m.StockMinimum,
 		Category:     m.Category,
 		ImageURL:     m.ImageURL,
@@ -282,4 +322,19 @@ func productFromModel(m *models.ProductModel) *productDomain.Product {
 		UpdatedAt:    m.UpdatedAt,
 		DeletedAt:    m.DeletedAt,
 	}
+}
+
+func emitProduct(g *gorm.DB, p *productDomain.Product) error {
+	payload, err := json.Marshal(map[string]any{"id": p.ID, "gym_id": p.GymID, "version": p.Version, "created_at": p.CreatedAt.UnixMilli(), "updated_at": p.UpdatedAt.UnixMilli(), "deleted_at": p.DeletedAt, "name": p.Name, "price": p.Price, "stock": p.Stock, "stock_base": p.StockBase, "stock_minimum": p.StockMinimum, "category": p.Category, "image_url": p.ImageURL, "active": p.Active})
+	if err != nil {
+		return err
+	}
+	return g.Exec(`INSERT INTO sync_entities(gym_id,entity_type,entity_id,version,payload,server_updated_at,deleted_at) VALUES(?,'products',?,?,?::jsonb,clock_timestamp(),?) ON CONFLICT(gym_id,entity_type,entity_id) DO UPDATE SET version=EXCLUDED.version,payload=EXCLUDED.payload,server_updated_at=clock_timestamp(),deleted_at=EXCLUDED.deleted_at`, p.GymID, p.ID, p.Version, string(payload), p.DeletedAt).Error
+}
+
+func postgresStockBase(base *int, stock int) int {
+	if base == nil {
+		return stock
+	}
+	return *base
 }

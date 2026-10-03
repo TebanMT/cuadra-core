@@ -212,15 +212,15 @@ func renderAttentionRequiredPDF(gym *gymDomain.Gym, out *AttentionRequiredOutput
 		}
 		inactiveRows = append(inactiveRows, []string{r.FullName, r.Phone, last, fmt.Sprintf("%dd", r.DaysAbsent)})
 	}
-	section("Inactivos involuntarios", len(out.InactiveInvoluntary), inactiveRows,
-		[]string{"Socio", "Tel.", "Último check-in", "Sin venir"}, []float64{70, 30, 35, 25})
+	section("Sin entradas registradas en 21 días", len(out.InactiveInvoluntary), inactiveRows,
+		[]string{"Socio", "Tel.", "Última asistencia", "Sin registro"}, []float64{70, 30, 35, 25})
 
 	stockRows := make([][]string, 0, len(out.LowStock))
 	for _, r := range out.LowStock {
 		stockRows = append(stockRows, []string{r.Name, fmt.Sprintf("%d", r.Stock), fmt.Sprintf("%d", r.StockMinimum)})
 	}
-	section("Stock bajo", len(out.LowStock), stockRows,
-		[]string{"Producto", "Stock", "Mínimo"}, []float64{100, 25, 25})
+	section("Existencias bajas", len(out.LowStock), stockRows,
+		[]string{"Producto", "Existencias", "Mínimo"}, []float64{100, 25, 25})
 
 	balRows := make([][]string, 0, len(out.PendingBalances))
 	for _, r := range out.PendingBalances {
@@ -228,13 +228,6 @@ func renderAttentionRequiredPDF(gym *gymDomain.Gym, out *AttentionRequiredOutput
 	}
 	section("Saldos pendientes", len(out.PendingBalances), balRows,
 		[]string{"Socio", "Tel.", "Saldo"}, []float64{90, 30, 30})
-
-	bdayRows := make([][]string, 0, len(out.BirthdaysToday))
-	for _, r := range out.BirthdaysToday {
-		bdayRows = append(bdayRows, []string{r.FullName, r.Phone})
-	}
-	section("Cumpleañeros del día", len(out.BirthdaysToday), bdayRows,
-		[]string{"Socio", "Tel."}, []float64{120, 30})
 
 	return bytesOf(pdf)
 }

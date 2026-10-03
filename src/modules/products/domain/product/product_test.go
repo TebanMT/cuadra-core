@@ -157,3 +157,24 @@ func TestDeactivate_Idempotent(t *testing.T) {
 		t.Errorf("re-deactivate bumped version")
 	}
 }
+
+func TestSellTracksMissingReceiptWithoutChangingManualCountRules(t *testing.T) {
+	p := newOK(t)
+	p.Stock = 0
+	p.StockBase = 0
+	if err := p.Sell(3, now()); err != nil {
+		t.Fatal(err)
+	}
+	if p.Stock != -3 || p.StockBase != -3 {
+		t.Fatalf("sale balance: %+v", p)
+	}
+	if err := p.IncrementStock(20, now()); err != nil {
+		t.Fatal(err)
+	}
+	if p.Stock != 17 || p.StockBase != 17 {
+		t.Fatalf("late receipt: %+v", p)
+	}
+	if _, err := p.SetStock(-1, now()); err == nil {
+		t.Fatal("negative physical count accepted")
+	}
+}

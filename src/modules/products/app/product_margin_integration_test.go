@@ -26,7 +26,7 @@ func (f *productsFixture) restockWithCost(t *testing.T, productID uuid.UUID, qty
 	c := unitCost
 	_, err := f.adjustStockUC().Execute(context.Background(), prodApp.AdjustStockInput{
 		GymID: f.gymID, ActorUserID: f.ownerID, ProductID: productID,
-		MovementType: "restock", Quantity: qty, Cost: &c,
+		MovementType: "restock", Quantity: qty, Cost: &c, IdempotencyKey: uuid.NewString(),
 	})
 	if err != nil {
 		t.Fatalf("restock: %v", err)

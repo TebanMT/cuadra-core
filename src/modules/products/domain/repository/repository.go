@@ -3,9 +3,12 @@
 package repository
 
 import (
+	"time"
+
 	"github.com/google/uuid"
 
 	productDomain "github.com/cuadra/cuadra-core/src/modules/products/domain/product"
+	purchaseDomain "github.com/cuadra/cuadra-core/src/modules/products/domain/purchase"
 	stockMovementDomain "github.com/cuadra/cuadra-core/src/modules/products/domain/stockmovement"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 )
@@ -31,6 +34,11 @@ type ProductRepository interface {
 	// Margen" de la ficha del producto. El redondeo a centavos es idéntico
 	// en SQLite y Postgres (ver impls) para que ambos binarios coincidan.
 	ListUnitCosts(tx sharedDomain.Transaction, q ListQuery) (map[uuid.UUID]float64, error)
+	// GetUnitCost returns the weighted-average unit cost known at this exact
+	// transaction boundary. Billing snapshots it on each sale line so later
+	// purchases cannot rewrite historical profitability. nil means that no
+	// reliable cost has ever been captured for the product.
+	GetUnitCost(tx sharedDomain.Transaction, gymID, productID uuid.UUID) (*float64, error)
 	ExistsByGymAndName(tx sharedDomain.Transaction, gymID uuid.UUID, name string, excludeID *uuid.UUID) (bool, error)
 }
 
@@ -114,5 +122,39 @@ type ListQuery struct {
 // StockMovementRepository — append-only history. Used by UC-024 and UC-025.
 type StockMovementRepository interface {
 	Create(tx sharedDomain.Transaction, m *stockMovementDomain.StockMovement) (*stockMovementDomain.StockMovement, error)
+	// GetByIdempotencyKey returns (nil,nil) when no manual adjustment owns key.
+	GetByIdempotencyKey(tx sharedDomain.Transaction, gymID uuid.UUID, key string) (*stockMovementDomain.StockMovement, error)
 	ListByProduct(tx sharedDomain.Transaction, productID uuid.UUID, limit int) ([]*stockMovementDomain.StockMovement, error)
+}
+
+// InventoryPurchaseRepository owns the financial event linked to a restock.
+// Implementations return (nil,nil) for idempotency misses.
+type InventoryPurchaseRepository interface {
+	LockRegistration(tx sharedDomain.Transaction, gymID, id uuid.UUID) error
+	Create(tx sharedDomain.Transaction, p *purchaseDomain.Purchase) (*purchaseDomain.Purchase, error)
+	Update(tx sharedDomain.Transaction, p *purchaseDomain.Purchase, expectedVersion int) (*purchaseDomain.Purchase, error)
+	GetByID(tx sharedDomain.Transaction, gymID, id uuid.UUID) (*purchaseDomain.Purchase, error)
+	GetByIdempotencyKey(tx sharedDomain.Transaction, gymID uuid.UUID, key string) (*purchaseDomain.Purchase, error)
+	GetByStockMovement(tx sharedDomain.Transaction, gymID, stockMovementID uuid.UUID) (*purchaseDomain.Purchase, error)
+	List(tx sharedDomain.Transaction, q InventoryPurchaseListQuery) ([]*purchaseDomain.Purchase, int, error)
+}
+
+// InventoryPurchaseListQuery filters by the date the restock/purchase was
+// recorded. Payment date is an attribute of a paid purchase, not the date of
+// the inventory receipt, and intentionally does not drive this history.
+type InventoryPurchaseListQuery struct {
+	ReceiptStatus string
+	GymID         uuid.UUID
+	Status        string     // unpaid | paid | legacy_incomplete | all
+	From          *time.Time // inclusive UTC instant, resolved from the gym's calendar
+	To            *time.Time // exclusive UTC instant at the next local midnight
+	Page          int
+	PageSize      int
+}
+
+// Creation atomically projects the physical journal and product stock, and emits
+// ONE sync event. Neither derived row is independently enqueued.
+type InventoryPurchaseReceiptRepository interface {
+	GetByPurchase(tx sharedDomain.Transaction, gymID, purchaseID uuid.UUID) (*purchaseDomain.Receipt, error)
+	Create(tx sharedDomain.Transaction, receipt *purchaseDomain.Receipt) (*purchaseDomain.Receipt, error)
 }

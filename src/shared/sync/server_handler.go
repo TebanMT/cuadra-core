@@ -4,6 +4,7 @@ package sync
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -112,9 +113,10 @@ func (h *Handler) LastUpdate(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"last_synced_at": lastAt})
 }
 
-// Push handles POST /api/v1/sync/push. Each item is processed in its own
-// transaction so a single bad item doesn't roll back the whole batch
-// (ADR-001 §3.3 — serializable per item).
+// Push handles POST /api/v1/sync/push. Ordinary items keep their historical
+// per-item transactions. Correlated refund graphs are the deliberate
+// exception: their mutable Payment snapshots, immutable Refund and line items
+// are one financial command and therefore commit or roll back together.
 func (h *Handler) Push(c *gin.Context) {
 	start := time.Now()
 	defer func() { h.Metrics.ObserveDuration("push", time.Since(start)) }()
@@ -147,19 +149,50 @@ func (h *Handler) Push(c *gin.Context) {
 		req.SchemaVersion = 1
 	}
 
+	if !h.checkReceiptSchema(c, gymID, req.SchemaVersion) {
+		return
+	}
 	clientUUID := uuid.Nil
 	if cid, err := uuid.Parse(req.ClientID); err == nil {
 		clientUUID = cid
 	}
 
-	results := make([]PushItemResult, 0, len(req.Batch))
+	results := make([]PushItemResult, len(req.Batch))
 	ctx := c.Request.Context()
 	now := time.Now().UTC()
 
-	for _, item := range req.Batch {
-		res := h.processOne(ctx, gymID, clientUUID, item)
-		h.Metrics.IncPushItem(res.Status)
-		results = append(results, res)
+	expenseGroups := make(map[int][]int)
+	if _, ok := h.Store.(*PostgresStore); ok {
+		for _, indexes := range groupExpensePushItems(req.Batch) {
+			for _, index := range indexes {
+				expenseGroups[index] = indexes
+			}
+		}
+	}
+	handledExpenses := make(map[int]bool)
+	for _, unit := range groupRefundPushItems(req.Batch) {
+		if handledExpenses[unit.indexes[0]] {
+			continue
+		}
+		if indexes, ok := expenseGroups[unit.indexes[0]]; ok {
+			for index, result := range h.processExpenseGraph(ctx, gymID, clientUUID, req.Batch, indexes, req.SchemaVersion) {
+				results[index] = result
+				handledExpenses[index] = true
+			}
+			continue
+		}
+		if len(unit.indexes) == 1 && len(unit.graphIDs) == 0 {
+			index := unit.indexes[0]
+			results[index] = h.processOne(ctx, gymID, clientUUID, req.Batch[index])
+		} else {
+			unitResults := h.processRefundGraph(ctx, gymID, clientUUID, req.Batch, unit)
+			for index, result := range unitResults {
+				results[index] = result
+			}
+		}
+	}
+	for _, result := range results {
+		h.Metrics.IncPushItem(result.Status)
 	}
 
 	h.Metrics.IncPushRequest("ok")
@@ -171,96 +204,91 @@ func (h *Handler) Push(c *gin.Context) {
 }
 
 func (h *Handler) processOne(ctx context.Context, gymID, clientID uuid.UUID, item PushItem) PushItemResult {
-	if item.QueueID == "" || item.EntityID == "" || item.EntityType == "" {
-		return PushItemResult{
-			QueueID:  item.QueueID,
-			EntityID: item.EntityID,
-			Status:   StatusRejectedInternal,
-			Error:    "missing required field (queue_id, entity_id, entity_type)",
-		}
-	}
-	if FindTable(item.EntityType) == nil {
-		return PushItemResult{
-			QueueID:  item.QueueID,
-			EntityID: item.EntityID,
-			Status:   StatusRejectedUnknownType,
-			Error:    "unknown entity_type: " + item.EntityType,
-		}
-	}
-	if item.Operation != OpUpsertStr && item.Operation != OpDeleteStr {
-		return PushItemResult{
-			QueueID:  item.QueueID,
-			EntityID: item.EntityID,
-			Status:   StatusRejectedInternal,
-			Error:    "invalid operation: " + item.Operation,
-		}
+	if invalid := validatePushItem(item); invalid != nil {
+		return *invalid
 	}
 
-	var out PushItemResult
-	out.QueueID = item.QueueID
-	out.EntityID = item.EntityID
+	out := PushItemResult{QueueID: item.QueueID, EntityID: item.EntityID}
 
 	err := h.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
-		ur, err := h.Store.UpsertOne(ctx, tx, gymID, item)
-		if err != nil {
-			return err
-		}
-		// Apply LWW & build wire response.
-		out.Status = ur.Status
-		out.Error = ur.Error
-		out.ServerVersion = ur.ServerVersion
-		if !ur.ServerUpdatedAt.IsZero() {
-			t := ur.ServerUpdatedAt
-			out.ServerUpdatedAt = &t
-		}
-		if ur.Status == StatusConflictServerWins && len(ur.ServerPayload) > 0 {
-			out.ServerPayload = ur.ServerPayload
-		}
-
-		// Conflict logging (ADR-001 §3.7) — best-effort but inside the same
-		// tx so it commits/rolls back atomically with the upsert.
-		if ur.IsConflict {
-			entityID, _ := uuid.Parse(item.EntityID)
-			resolution := "server_wins"
-			if ur.Status == StatusConflictClientWins {
-				resolution = "client_wins"
-			}
-			h.Metrics.IncConflict(resolution)
-			err := h.Conflicts.Log(ctx, tx, ConflictLogEntry{
-				GymID:         gymID,
-				EntityType:    item.EntityType,
-				EntityID:      entityID,
-				ClientID:      clientID,
-				ClientVersion: item.ClientVersion,
-				ServerVersion: ur.PreviousServerVersion,
-				ClientPayload: item.Payload,
-				ServerPayload: ur.PreviousServerPayload,
-				Resolution:    resolution,
-			})
-			if err != nil {
-				return err
-			}
-		}
-		return nil
+		return h.applyOneInTx(ctx, tx, gymID, clientID, item, &out)
 	})
 	if err != nil {
-		// Distinguish auth-style rejections (returned from UpsertOne with
-		// status=rejected_unauthorized and nil err) from real DB failures.
-		//
-		// Unique violations (23505) reciben trato aparte: son PERMANENTES
-		// (el mismo payload jamás va a entrar) y tienen salida conocida —
-		// que el operador edite/renombre su registro. Viajan como
-		// rejected_duplicate con mensaje en español en vez del error crudo
-		// de Postgres, que era indescifrable en el indicador del desktop.
-		if msg, isDup := mapUniqueViolation(err, item); isDup {
-			out.Status = StatusRejectedDuplicate
-			out.Error = msg
-		} else {
-			out.Status = StatusRejectedInternal
-			out.Error = err.Error()
-		}
+		classifyPushError(&out, err, item)
 	}
 	return out
+}
+
+func validatePushItem(item PushItem) *PushItemResult {
+	if item.QueueID == "" || item.EntityID == "" || item.EntityType == "" {
+		return &PushItemResult{QueueID: item.QueueID, EntityID: item.EntityID,
+			Status: StatusRejectedInternal, Error: "missing required field (queue_id, entity_id, entity_type)"}
+	}
+	if FindTable(item.EntityType) == nil {
+		return &PushItemResult{QueueID: item.QueueID, EntityID: item.EntityID,
+			Status: StatusRejectedUnknownType, Error: "unknown entity_type: " + item.EntityType}
+	}
+	if item.Operation != OpUpsertStr && item.Operation != OpDeleteStr {
+		return &PushItemResult{QueueID: item.QueueID, EntityID: item.EntityID,
+			Status: StatusRejectedInternal, Error: "invalid operation: " + item.Operation}
+	}
+	return nil
+}
+
+func (h *Handler) applyOneInTx(
+	ctx context.Context,
+	tx sharedDomain.Transaction,
+	gymID, clientID uuid.UUID,
+	item PushItem,
+	out *PushItemResult,
+) error {
+	ur, err := h.Store.UpsertOne(ctx, tx, gymID, item)
+	if err != nil {
+		return err
+	}
+	out.Status = ur.Status
+	out.Error = ur.Error
+	out.ServerVersion = ur.ServerVersion
+	if !ur.ServerUpdatedAt.IsZero() {
+		t := ur.ServerUpdatedAt
+		out.ServerUpdatedAt = &t
+	}
+	if ur.Status == StatusConflictServerWins && len(ur.ServerPayload) > 0 {
+		out.ServerPayload = ur.ServerPayload
+	}
+
+	// Conflict logging (ADR-001 §3.7) remains inside the caller's transaction;
+	// a graph rollback must remove its diagnostic rows too.
+	if ur.IsConflict {
+		entityID, _ := uuid.Parse(item.EntityID)
+		resolution := "server_wins"
+		if ur.Status == StatusConflictClientWins {
+			resolution = "client_wins"
+		}
+		h.Metrics.IncConflict(resolution)
+		if err := h.Conflicts.Log(ctx, tx, ConflictLogEntry{
+			GymID: gymID, EntityType: item.EntityType, EntityID: entityID, ClientID: clientID,
+			ClientVersion: item.ClientVersion, ServerVersion: ur.PreviousServerVersion,
+			ClientPayload: item.Payload, ServerPayload: ur.PreviousServerPayload, Resolution: resolution,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func classifyPushError(out *PushItemResult, err error, item PushItem) {
+	var financialConflict *financialConflictError
+	if errors.As(err, &financialConflict) {
+		out.Status = StatusRejectedFinancialConflict
+		out.Error = financialConflict.Error()
+	} else if msg, isDup := mapUniqueViolation(err, item); isDup {
+		out.Status = StatusRejectedDuplicate
+		out.Error = msg
+	} else {
+		out.Status = StatusRejectedInternal
+		out.Error = err.Error()
+	}
 }
 
 // Pull handles GET /api/v1/sync/pull?since=...&limit=...
@@ -275,7 +303,22 @@ func (h *Handler) Pull(c *gin.Context) {
 		return
 	}
 
+	version, _ := strconv.Atoi(c.GetHeader("X-Tinta-Sync-Schema"))
+	if !h.checkReceiptSchema(c, gymID, version) {
+		return
+	}
 	since := parseTime(c.Query("since"))
+	pullCursor, decodeErr := DecodeCursor(c.Query("cursor"))
+	if decodeErr != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "cursor inválido"})
+		return
+	}
+	if pullCursor.EntityID != "" {
+		if _, err := uuid.Parse(pullCursor.EntityID); err != nil {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "cursor inválido"})
+			return
+		}
+	}
 	limit := 500
 	if l := c.Query("limit"); l != "" {
 		if n, err := strconv.Atoi(l); err == nil && n > 0 {
@@ -287,7 +330,13 @@ func (h *Handler) Pull(c *gin.Context) {
 	var hasMore bool
 	err := h.UoW.Command(c.Request.Context(), func(tx sharedDomain.Transaction) error {
 		var err error
-		changes, hasMore, err = h.Store.ListSince(c.Request.Context(), tx, gymID, since, limit)
+		if store, ok := h.Store.(interface {
+			ListSinceCursor(context.Context, sharedDomain.Transaction, uuid.UUID, FullCursor, int) ([]PullChange, bool, error)
+		}); ok && c.Query("cursor") != "" {
+			changes, hasMore, err = store.ListSinceCursor(c.Request.Context(), tx, gymID, pullCursor, limit)
+		} else {
+			changes, hasMore, err = h.Store.ListSince(c.Request.Context(), tx, gymID, since, limit)
+		}
 		return err
 	})
 	if err != nil {
@@ -305,6 +354,13 @@ func (h *Handler) Pull(c *gin.Context) {
 		Changes:       changes,
 		HasMore:       hasMore,
 	}
+	if len(changes) > 0 {
+		last := changes[len(changes)-1]
+		resp.NextCursor = EncodeCursor(FullCursor{After: last.ServerUpdatedAt, EntityID: last.EntityID, EntityType: last.EntityType})
+	}
+	if !h.checkReceiptSchema(c, gymID, version) {
+		return
+	} // cover a feature activation concurrent with the read
 	c.JSON(http.StatusOK, resp)
 }
 
@@ -319,6 +375,10 @@ func (h *Handler) FullSync(c *gin.Context) {
 		return
 	}
 
+	version, _ := strconv.Atoi(c.GetHeader("X-Tinta-Sync-Schema"))
+	if !h.checkReceiptSchema(c, gymID, version) {
+		return
+	}
 	rawCursor := c.Query("cursor")
 	cursor, err := DecodeCursor(rawCursor)
 	if err != nil {
@@ -349,7 +409,7 @@ func (h *Handler) FullSync(c *gin.Context) {
 	h.Metrics.IncPullItems(len(changes))
 
 	resp := FullSyncResponse{
-		ServerNow:     time.Now().UTC(),
+		ServerNow:     start.UTC(),
 		SchemaVersion: SchemaVersion,
 		Changes:       changes,
 		HasMore:       hasMore,
@@ -357,6 +417,9 @@ func (h *Handler) FullSync(c *gin.Context) {
 	if hasMore {
 		resp.NextCursor = EncodeCursor(nextCursor)
 	}
+	if !h.checkReceiptSchema(c, gymID, version) {
+		return
+	} // cover a feature activation concurrent with the read
 	c.JSON(http.StatusOK, resp)
 }
 
@@ -382,4 +445,75 @@ func parseTime(s string) time.Time {
 		return time.UnixMilli(n).UTC()
 	}
 	return time.Time{}
+}
+
+// Gate reads too: an old desktop must not partially apply a nullable purchase
+// link and silently skip its new receipt type.
+func (h *Handler) checkReceiptSchema(c *gin.Context, gymID uuid.UUID, version int) bool {
+	if version < 6 {
+		if gate, ok := h.Store.(interface {
+			RequiresProductCreditSchema(context.Context, sharedDomain.Transaction, uuid.UUID) (bool, error)
+		}); ok {
+			var required bool
+			err := sharedDomain.ReadSnapshot(c.Request.Context(), h.UoW, func(tx sharedDomain.Transaction) error {
+				var err error
+				required, err = gate.RequiresProductCreditSchema(c.Request.Context(), tx, gymID)
+				return err
+			})
+			if err != nil {
+				c.AbortWithStatusJSON(500, gin.H{"error": "no se pudo verificar la compatibilidad de sincronización"})
+				return false
+			}
+			if required {
+				c.AbortWithStatusJSON(http.StatusUpgradeRequired, gin.H{"error": "schema_upgrade_required", "server_version": SchemaVersion, "minimum_version": 6, "message": "actualiza Tinta en recepción para sincronizar las ventas fiadas"})
+				return false
+			}
+		}
+	}
+
+	if version < 5 {
+		if gate, ok := h.Store.(interface {
+			RequiresPurchaseRegistrationSchema(context.Context, sharedDomain.Transaction, uuid.UUID) (bool, error)
+		}); ok {
+			var required bool
+			err := sharedDomain.ReadSnapshot(c.Request.Context(), h.UoW, func(tx sharedDomain.Transaction) error {
+				var e error
+				required, e = gate.RequiresPurchaseRegistrationSchema(c.Request.Context(), tx, gymID)
+				return e
+			})
+			if err != nil {
+				c.AbortWithStatusJSON(500, gin.H{"error": "no se pudo verificar la compatibilidad de sincronización"})
+				return false
+			}
+			if required {
+				c.AbortWithStatusJSON(http.StatusUpgradeRequired, gin.H{"error": "schema_upgrade_required", "server_version": SchemaVersion, "minimum_version": 5, "message": "actualiza Tinta en recepción para sincronizar las compras y existencias"})
+				return false
+			}
+		}
+	}
+
+	if version >= 3 {
+		return true
+	}
+	gate, ok := h.Store.(interface {
+		RequiresReceiptSchema(context.Context, sharedDomain.Transaction, uuid.UUID) (bool, error)
+	})
+	if !ok {
+		return true
+	}
+	var required bool
+	err := sharedDomain.ReadSnapshot(c.Request.Context(), h.UoW, func(tx sharedDomain.Transaction) error {
+		var err error
+		required, err = gate.RequiresReceiptSchema(c.Request.Context(), tx, gymID)
+		return err
+	})
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "no se pudo verificar la compatibilidad de sincronización"})
+		return false
+	}
+	if required {
+		c.AbortWithStatusJSON(http.StatusUpgradeRequired, gin.H{"error": "schema_upgrade_required", "server_version": SchemaVersion, "minimum_version": 3, "message": "actualiza Tinta en recepción para sincronizar las compras registradas en la web"})
+		return false
+	}
+	return true
 }

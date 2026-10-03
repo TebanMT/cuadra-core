@@ -122,3 +122,68 @@ func TestApplyPullChange_MembershipType_PesosConvertidosACentavos(t *testing.T) 
 		t.Errorf("price = %d centavos, want 50000 ($500 × 100). Si da 5000000, el cloud está mandando centavos.", cents)
 	}
 }
+
+// El costo de stock_movements sigue el mismo contrato: $5 en el wire debe
+// aterrizar como 500 centavos. Este es el componente COGS que reconcilia el
+// resultado operativo entre cloud y desktop.
+func TestApplyPullChange_StockMovement_CostoPesosConvertidoACentavos(t *testing.T) {
+	gymID := uuid.New()
+	db, uow := freshSidecarDBWithGym(t, gymID)
+	userID := uuid.New()
+	productID := uuid.New()
+	movementID := uuid.New()
+	now := time.Now().UTC().UnixMilli()
+
+	if _, err := db.Exec(`
+		INSERT INTO users
+		    (id, gym_id, version, created_at, updated_at, email,
+		     password_hash, full_name, role, active)
+		VALUES (?, ?, 1, ?, ?, 'owner@test.local', 'x', 'Owner', 'owner', 1)`,
+		userID, gymID, now, now); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO products
+		    (id, gym_id, version, created_at, updated_at, name,
+		     price, stock, stock_minimum, active)
+		VALUES (?, ?, 1, ?, ?, 'Agua de prueba', 1500, 24, 2, 1)`,
+		productID, gymID, now, now); err != nil {
+		t.Fatalf("seed product: %v", err)
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"id":            movementID.String(),
+		"gym_id":        gymID.String(),
+		"version":       1,
+		"created_at":    now,
+		"updated_at":    now,
+		"product_id":    productID.String(),
+		"movement_type": "restock",
+		"delta":         24,
+		"reason":        "Inventario inicial",
+		"cost":          5.0,
+		"is_purchase":   false,
+		"sale_item_id":  nil,
+		"operator_id":   userID.String(),
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	change := syncpkg.PullChange{
+		EntityType: "stock_movements", EntityID: movementID.String(), Version: 1,
+		Payload: payload, ServerUpdatedAt: time.Now().UTC(),
+	}
+	if err := uow.Command(context.Background(), func(tx sharedDomain.Transaction) error {
+		return syncpkg.ApplyPullChange(context.Background(), tx, change)
+	}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	var cents int64
+	if err := db.Get(&cents, `SELECT cost FROM stock_movements WHERE id = ?`, movementID); err != nil {
+		t.Fatalf("read cost: %v", err)
+	}
+	if cents != 500 {
+		t.Errorf("cost = %d centavos, want 500 ($5 × 100)", cents)
+	}
+}

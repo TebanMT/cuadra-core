@@ -45,3 +45,28 @@ func TestDailySeriesWireEmitsDateOnlyStrings(t *testing.T) {
 		t.Errorf("nil income series should marshal as empty array")
 	}
 }
+
+// El resumen Standard no calcula COGS: publicarlo como cero afirmaba un dato
+// que no existía y podía hacer parecer rentable una venta sin costo capturado.
+// La métrica real vive en product_profitability y sólo se expone en Plus.
+func TestRangeWireDoesNotPublishFictitiousCOGS(t *testing.T) {
+	raw, err := json.Marshal(toRangeWire(&reportsApp.RangeReportOutput{}, nil))
+	if err != nil {
+		t.Fatalf("marshal range wire: %v", err)
+	}
+
+	var payload struct {
+		Totals map[string]json.RawMessage `json:"totals"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("unmarshal range wire: %v", err)
+	}
+	for _, key := range []string{"cogs", "cogs_coverage", "coverage_warnings"} {
+		if _, exists := payload.Totals[key]; exists {
+			t.Errorf("Standard totals unexpectedly publishes %q: %s", key, raw)
+		}
+	}
+	if _, exists := payload.Totals["period_result"]; !exists {
+		t.Errorf("Standard totals must publish canonical period_result: %s", raw)
+	}
+}

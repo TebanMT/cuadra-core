@@ -9,15 +9,17 @@
 // fase 3); las preguntas van como doc-comment en cada struct.
 //
 // CONVENCIÓN DE PREDICADO: para poder viajar al pasado (churn, waterfall,
-// cohortes) la "actividad" de un socio se define por COBERTURA DE FECHAS
-// (start_date <= D AND expiry_date >= D, socio no borrado y status='active')
-// — no por el status de la membresía, que muta con el tiempo. Puede divergir
-// marginalmente del KPI de activos del dashboard (predicado canónico); es el
-// trade-off documentado de mirar hacia atrás.
+// cohortes) la "actividad" histórica de un socio se define por COBERTURA DE
+// FECHAS (start_date <= D AND expiry_date >= D, registros no borrados), sin
+// statuses actuales mutables. Puede divergir marginalmente del KPI actual
+// del dashboard, que sí exige socio y membresía en status='active'; usar ese
+// status al viajar al pasado reescribía la historia al marcar a alguien como
+// perdido.
 package analytics
 
 import (
 	"context"
+	"errors"
 	"math"
 	"sort"
 	"time"
@@ -35,9 +37,12 @@ import (
 // ---------------------------------------------------------------------------
 
 type Reader interface {
-	// ActiveMonthlyRates — un row por socio activo en la fecha dada con su
+	// CurrentMonthlyRates — snapshot canónico de hoy: socio + membresía en
+	// estado active y cobertura de fecha. Base del MRR actual.
+	CurrentMonthlyRates(tx sharedDomain.Transaction, gymID uuid.UUID, onDate time.Time) ([]MemberMonthlyRate, error)
+	// ActiveMonthlyRates — un row por socio cubierto en la fecha histórica con su
 	// tarifa MENSUAL-equivalente (price_snapshot / duration_months, fallback
-	// duration_days/30). Base de MRR, waterfall y proyección. NO es cash.
+	// duration_days/30). Ignora statuses mutables; base del waterfall. NO es cash.
 	ActiveMonthlyRates(tx sharedDomain.Transaction, gymID uuid.UUID, onDate time.Time) ([]MemberMonthlyRate, error)
 	// CountNewMembersBetween — altas (members.created_at) en [from, to],
 	// días locales del gym (tzName vía tz.DayBounds).
@@ -49,8 +54,8 @@ type Reader interface {
 	// últimos 14 días vs su propio promedio (8 semanas previas), vencimiento
 	// y deuda; el use case puntúa y filtra.
 	AtRiskCandidates(tx sharedDomain.Transaction, gymID uuid.UUID, now, today time.Time) ([]AtRiskRow, error)
-	// MonthlyPL — P&L por mes calendario (últimos N): ingresos, COGS (costo
-	// promedio all-time × unidades vendidas no reembolsadas), gastos
+	// MonthlyPL — resultado por mes calendario (últimos N): ingresos cash,
+	// COGS proporcional a cobros/abonos (refunds lo revierten), gastos
 	// generales y devoluciones. SPEC §9.6.
 	MonthlyPL(tx sharedDomain.Transaction, gymID uuid.UUID, monthsBack int, today time.Time) ([]PLMonthRow, error)
 	// RetentionSince — socios cubiertos en `since` divididos por género, con
@@ -60,6 +65,10 @@ type Reader interface {
 	// RenewalRatesByType — vencimientos de los últimos 90 días por tipo y
 	// cuántos renovaron (membresía nueva en [vencimiento−5, vencimiento+15]).
 	RenewalRatesByType(tx sharedDomain.Transaction, gymID uuid.UUID, today time.Time) ([]RenewalRateRow, error)
+	// RenewalsDueNextMonth — membresías vigentes cuyo vencimiento cae dentro
+	// del próximo mes calendario, agrupadas por tipo y con el precio COMPLETO
+	// que tocaría cobrar al renovar. Esta es la base de la proyección de cash.
+	RenewalsDueNextMonth(tx sharedDomain.Transaction, gymID uuid.UUID, today time.Time) ([]RenewalDueRow, error)
 	// ProductsDeep — top productos 30d con unidades/revenue/costo promedio +
 	// compradores distintos (attach rate).
 	ProductsDeep(tx sharedDomain.Transaction, gymID uuid.UUID, today time.Time) (ProductsDeep, error)
@@ -122,15 +131,19 @@ type AtRiskRow struct {
 	Paid90d     float64
 }
 
-// PLMonthRow — "¿cuánto quedó el mes después de mercancía, gastos y
-// devoluciones?" Net la calcula el use case.
+// PLMonthRow — "¿cuánto quedó el mes después de compras, gastos y
+// devoluciones?" Net follows the same simple cash-basis model as Reports.
 type PLMonthRow struct {
-	Month    string  `json:"month"`
-	Income   float64 `json:"income"`
-	COGS     float64 `json:"cogs"`
-	Expenses float64 `json:"expenses"`
-	Refunds  float64 `json:"refunds"`
-	Net      float64 `json:"net"`
+	Month             string   `json:"month"`
+	Income            float64  `json:"income"`
+	COGS              float64  `json:"cogs"`
+	ProductPurchases  float64  `json:"product_purchases"`
+	Expenses          float64  `json:"expenses"`
+	Refunds           float64  `json:"refunds"`
+	Net               float64  `json:"net"`
+	COGSItemsTotal    int      `json:"cogs_items_total"`
+	COGSItemsWithCost int      `json:"cogs_items_with_cost"`
+	COGSCoveragePct   *float64 `json:"cogs_coverage_pct,omitempty"`
 }
 
 type GenderRetentionRow struct {
@@ -140,9 +153,17 @@ type GenderRetentionRow struct {
 }
 
 type RenewalRateRow struct {
+	TypeID      uuid.UUID
 	TypeName    string
 	Expirations int
 	Renewed     int
+}
+
+type RenewalDueRow struct {
+	TypeID        uuid.UUID
+	TypeName      string
+	Due           int
+	RenewalAmount float64
 }
 
 type ProductsDeep struct {
@@ -156,6 +177,7 @@ type ProductDeepRow struct {
 	Stock     int
 	Units30   int
 	Revenue30 float64
+	COGS30    float64
 	AvgCost   *float64
 }
 
@@ -359,21 +381,24 @@ type TypeTransition struct {
 	MRRDelta float64 `json:"mrr_delta"`
 }
 
-// ProjectionWire — activos × prob. de renovación por tipo × mensualidad,
-// con sensibilidad de ±5 puntos en la renovación.
+// ProjectionWire — renovaciones que vencen el próximo mes × probabilidad
+// histórica por tipo × precio completo de renovación. Los totales son nil
+// si alguna fila no tiene historia: inventar 100% sería falsa precisión.
 type ProjectionWire struct {
-	Total float64         `json:"total"`
-	Low   float64         `json:"low"`
-	High  float64         `json:"high"`
-	Rows  []ProjectionRow `json:"rows"`
+	TargetMonth string          `json:"target_month"`
+	Complete    bool            `json:"complete"`
+	Total       *float64        `json:"total"`
+	Low         *float64        `json:"low"`
+	High        *float64        `json:"high"`
+	Rows        []ProjectionRow `json:"rows"`
 }
 
 type ProjectionRow struct {
-	TypeName    string   `json:"type_name"`
-	Active      int      `json:"active"`
-	RenewalPct  *float64 `json:"renewal_pct"`
-	MonthlyRate float64  `json:"monthly_rate"`
-	Projected   float64  `json:"projected"`
+	TypeName      string   `json:"type_name"`
+	Due           int      `json:"due"`
+	RenewalPct    *float64 `json:"renewal_pct"`
+	RenewalAmount float64  `json:"renewal_amount"`
+	Projected     *float64 `json:"projected"`
 }
 
 type ProductsDeepWire struct {
@@ -387,6 +412,7 @@ type ProductDeepWire struct {
 	Name        string   `json:"name"`
 	Revenue30d  float64  `json:"revenue_30d"`
 	Units30d    int      `json:"units_30d"`
+	Profit30d   *float64 `json:"profit_30d"`
 	MarginPct   *float64 `json:"margin_pct"`
 	DaysOfStock *float64 `json:"days_of_stock"`
 }
@@ -479,10 +505,23 @@ type OverviewInput struct {
 }
 
 func (uc *Overview) Execute(ctx context.Context, in OverviewInput) (*OverviewOutput, error) {
-	tx, err := uc.UoW.Query(ctx)
+	var out *OverviewOutput
+	err := sharedDomain.ReadSnapshot(ctx, uc.UoW, func(tx sharedDomain.Transaction) error {
+		var executeErr error
+		out, executeErr = uc.executeInSnapshot(tx, in)
+		return executeErr
+	})
 	if err != nil {
+		var custom sharedDomain.CustomError
+		if errors.As(err, &custom) {
+			return nil, err
+		}
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}
+	return out, nil
+}
+
+func (uc *Overview) executeInSnapshot(tx sharedDomain.Transaction, in OverviewInput) (*OverviewOutput, error) {
 	now := uc.now()
 	today, tzName := uc.localTodayAndTZ(tx, in.GymID, now)
 	prev30 := today.AddDate(0, 0, -30)
@@ -502,11 +541,16 @@ func (uc *Overview) Execute(ctx context.Context, in OverviewInput) (*OverviewOut
 	out.Projection.Rows = []ProjectionRow{}
 	out.ProductsDeep.Rows = []ProductDeepWire{}
 
-	// Snapshots de tarifa mensual — hoy y hace 30 días. Errores degradan
-	// suave a vacío (misma postura por-tarjeta que reports: una sub-query
-	// rota no debe tirar la página entera).
-	ratesNow, _ := uc.Reader.ActiveMonthlyRates(tx, in.GymID, today)
-	ratesPrev, _ := uc.Reader.ActiveMonthlyRates(tx, in.GymID, prev30)
+	// Un error financiero nunca se convierte en cero: eso parece un dato
+	// válido y puede empujar al dueño a una decisión equivocada.
+	ratesNow, err := uc.Reader.CurrentMonthlyRates(tx, in.GymID, today)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
+	ratesPrev, err := uc.Reader.ActiveMonthlyRates(tx, in.GymID, prev30)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
 
 	waterfall := buildWaterfall(ratesPrev, ratesNow)
 	mrr := waterfall.Ending
@@ -521,7 +565,10 @@ func (uc *Overview) Execute(ctx context.Context, in OverviewInput) (*OverviewOut
 
 	// Churn actual + retención por bucket de género (misma query, doble
 	// uso) y churn del mes anterior para el delta.
-	genderRows, _ := uc.Reader.RetentionSince(tx, in.GymID, prev30, today)
+	genderRows, err := uc.Reader.RetentionSince(tx, in.GymID, prev30, today)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
 	var churnBase, churnRetained int
 	retainedByBucket := map[string]*float64{}
 	for _, r := range genderRows {
@@ -540,7 +587,10 @@ func (uc *Overview) Execute(ctx context.Context, in OverviewInput) (*OverviewOut
 			out.KPIs.LTV = &ltv
 		}
 	}
-	prevRows, _ := uc.Reader.RetentionSince(tx, in.GymID, prev60, prev30)
+	prevRows, err := uc.Reader.RetentionSince(tx, in.GymID, prev60, prev30)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
 	var pBase, pRet int
 	for _, r := range prevRows {
 		pBase += r.Base
@@ -552,7 +602,10 @@ func (uc *Overview) Execute(ctx context.Context, in OverviewInput) (*OverviewOut
 	}
 
 	// Vida mediana del socio (muestra chica → nil, el FE explica).
-	tenure, tenureN, _ := uc.Reader.TenureMonths(tx, in.GymID, today)
+	tenure, tenureN, err := uc.Reader.TenureMonths(tx, in.GymID, today)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
 	out.KPIs.TenureN = tenureN
 	if tenure != nil && tenureN >= tenureMinSample {
 		t := round2(*tenure)
@@ -560,8 +613,14 @@ func (uc *Overview) Execute(ctx context.Context, in OverviewInput) (*OverviewOut
 	}
 
 	// Movimiento del mes — personas primero, pesos después.
-	newMembers, _ := uc.Reader.CountNewMembersBetween(tx, in.GymID, tzName, prev30, today)
-	reactivated, _ := uc.Reader.CountReactivations(tx, in.GymID, prev30, today)
+	newMembers, err := uc.Reader.CountNewMembersBetween(tx, in.GymID, tzName, prev30, today)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
+	reactivated, err := uc.Reader.CountReactivations(tx, in.GymID, prev30, today)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
 	out.Movement.NewMembers = newMembers
 	out.Movement.Reactivated = reactivated
 	out.Movement.Lost = lost
@@ -569,51 +628,88 @@ func (uc *Overview) Execute(ctx context.Context, in OverviewInput) (*OverviewOut
 	out.Movement.MRR = waterfall
 
 	// Cohortes + retención M1 (vive en Movimiento).
-	cohorts, _ := uc.Reader.FirstMembershipCohorts(tx, in.GymID, cohortMonthsBack, today)
+	cohorts, err := uc.Reader.FirstMembershipCohorts(tx, in.GymID, cohortMonthsBack, today)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
 	out.Cohorts = cohortsToWire(cohorts, today)
 	out.Movement.RetentionM1Pct = retentionM1(cohorts, today)
 
 	// Socios en riesgo + frecuencia de uso: MISMA pasada de candidatos
 	// (AtRiskCandidates trae a TODOS los activos con sus check-ins 14d).
-	candidates, _ := uc.Reader.AtRiskCandidates(tx, in.GymID, now, today)
+	candidates, err := uc.Reader.AtRiskCandidates(tx, in.GymID, now, today)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
 	out.AtRisk = scoreAtRisk(candidates, today)
 	out.Frequency = usageBuckets(candidates)
 
 	// Género a fondo: actividad + gasto cruzados con la retención.
-	activity, _ := uc.Reader.GenderActivity(tx, in.GymID, now, today)
+	activity, err := uc.Reader.GenderActivity(tx, in.GymID, now, today)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
 	out.GenderDeep = buildGenderDeep(activity, retainedByBucket)
 
 	// Pirámide de edad × género.
-	pyramid, noBirthdate, _ := uc.Reader.AgePyramid(tx, in.GymID, today)
+	pyramid, noBirthdate, err := uc.Reader.AgePyramid(tx, in.GymID, today)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
 	if pyramid != nil {
 		out.AgePyramid.Rows = pyramid
 	}
 	out.AgePyramid.NoBirthdate = noBirthdate
 
 	// P&L mensual (Resultado mensual en el FE).
-	pl, _ := uc.Reader.MonthlyPL(tx, in.GymID, plMonthsBack, today)
+	pl, err := uc.Reader.MonthlyPL(tx, in.GymID, plMonthsBack, today)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
 	for _, m := range pl {
-		m.Net = round2(m.Income - m.COGS - m.Expenses - m.Refunds)
+		m.Net = round2(m.Income - m.ProductPurchases - m.Expenses - m.Refunds)
+		if m.COGSItemsTotal > 0 {
+			v := round2(float64(m.COGSItemsWithCost) / float64(m.COGSItemsTotal) * 100)
+			m.COGSCoveragePct = &v
+		}
 		out.PLMonthly = append(out.PLMonthly, m)
 	}
 
 	// Efecto quincena — payment_date acumulado por día del mes, 90 días.
-	payday, _ := uc.Reader.PaydayPattern(tx, in.GymID, today.AddDate(0, 0, -(paydayWindowDays-1)), today)
+	payday, err := uc.Reader.PaydayPattern(tx, in.GymID, today.AddDate(0, 0, -(paydayWindowDays-1)), today)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
 	out.Payday = buildPayday(payday)
 
 	// Punto de equilibrio — gastos fijos ÷ mensualidad promedio.
-	fixed, months, _ := uc.Reader.FixedMonthlyCosts(tx, in.GymID, breakevenMonthsBack, today)
+	fixed, months, err := uc.Reader.FixedMonthlyCosts(tx, in.GymID, breakevenMonthsBack, today)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
 	out.Breakeven = buildBreakeven(fixed, months, out.KPIs.ARPU, activeNow)
 
 	// Ocupación semanal (día × hora local, 8 semanas).
-	if cells, err := uc.Reader.WeeklyHeatmap(tx, in.GymID, tzName, now); err == nil && cells != nil {
+	if cells, err := uc.Reader.WeeklyHeatmap(tx, in.GymID, tzName, now); err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	} else if cells != nil {
 		out.WeeklyHeatmap = cells
 	}
 
 	// Proyección explicable + productos a fondo.
-	renewals, _ := uc.Reader.RenewalRatesByType(tx, in.GymID, today)
-	out.Projection = buildProjection(ratesNow, renewals)
-	deep, _ := uc.Reader.ProductsDeep(tx, in.GymID, today)
+	renewals, err := uc.Reader.RenewalRatesByType(tx, in.GymID, today)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
+	dueNextMonth, err := uc.Reader.RenewalsDueNextMonth(tx, in.GymID, today)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
+	out.Projection = buildProjection(dueNextMonth, renewals, today)
+	deep, err := uc.Reader.ProductsDeep(tx, in.GymID, today)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
 	out.ProductsDeep = productsDeepToWire(deep, activeNow)
 
 	return out, nil
@@ -880,64 +976,57 @@ func buildBreakeven(fixed float64, months int, arpu float64, active int) Breakev
 	return w
 }
 
-// buildProjection — activos × prob. renovación (por tipo, fallback a la
-// global) × tarifa mensual promedio del tipo. Sin historial de renovaciones
-// la prob. es 1.0 y RenewalPct viaja nil ("sin historial" en el FE).
-func buildProjection(ratesNow []MemberMonthlyRate, renewals []RenewalRateRow) ProjectionWire {
-	type agg struct {
-		n    int
-		rate float64
-	}
-	byType := map[string]*agg{}
-	for _, r := range ratesNow {
-		a := byType[r.TypeName]
-		if a == nil {
-			a = &agg{}
-			byType[r.TypeName] = a
-		}
-		a.n++
-		a.rate += r.MonthlyRate
-	}
-
-	renewalBy := map[string]RenewalRateRow{}
-	var gExp, gRen int
+// buildProjection no usa MRR ni toda la base activa: sólo cobros que
+// efectivamente vencen el siguiente mes calendario. Sin historia del tipo,
+// la fila y el total quedan explícitamente incompletos.
+func buildProjection(due []RenewalDueRow, renewals []RenewalRateRow, today time.Time) ProjectionWire {
+	renewalBy := map[uuid.UUID]RenewalRateRow{}
 	for _, r := range renewals {
-		renewalBy[r.TypeName] = r
-		gExp += r.Expirations
-		gRen += r.Renewed
+		renewalBy[r.TypeID] = r
 	}
-	globalPct := pctOf(gRen, gExp)
 
-	p := ProjectionWire{Rows: []ProjectionRow{}}
-	var total, low, high float64
-	for name, a := range byType {
-		avgRate := a.rate / float64(a.n)
-		var pct *float64
-		if r, ok := renewalBy[name]; ok && r.Expirations > 0 {
-			pct = pctOf(r.Renewed, r.Expirations)
-		} else {
-			pct = globalPct
-		}
-		prob := 1.0
-		if pct != nil {
-			prob = *pct / 100
-		}
-		projected := float64(a.n) * prob * avgRate
-		total += projected
-		low += float64(a.n) * clamp01(prob-sensitivityPP/100) * avgRate
-		high += float64(a.n) * clamp01(prob+sensitivityPP/100) * avgRate
-		p.Rows = append(p.Rows, ProjectionRow{
-			TypeName:    name,
-			Active:      a.n,
-			RenewalPct:  pct,
-			MonthlyRate: round2(avgRate),
-			Projected:   round2(projected),
-		})
+	p := ProjectionWire{
+		TargetMonth: time.Date(today.Year(), today.Month(), 1, 0, 0, 0, 0, time.UTC).AddDate(0, 1, 0).Format("2006-01"),
+		Complete:    true,
+		Rows:        []ProjectionRow{},
 	}
-	sort.Slice(p.Rows, func(i, j int) bool { return p.Rows[i].Projected > p.Rows[j].Projected })
-	p.Total = round2(total)
-	p.Low = round2(low)
-	p.High = round2(high)
+	var total, low, high float64
+	for _, d := range due {
+		row := ProjectionRow{
+			TypeName:      d.TypeName,
+			Due:           d.Due,
+			RenewalAmount: round2(d.RenewalAmount),
+		}
+		r, ok := renewalBy[d.TypeID]
+		if !ok || r.Expirations == 0 {
+			p.Complete = false
+			p.Rows = append(p.Rows, row)
+			continue
+		}
+		pct := pctOf(r.Renewed, r.Expirations)
+		row.RenewalPct = pct
+		prob := *pct / 100
+		projected := float64(d.Due) * prob * d.RenewalAmount
+		projectedRounded := round2(projected)
+		row.Projected = &projectedRounded
+		total += projected
+		low += float64(d.Due) * clamp01(prob-sensitivityPP/100) * d.RenewalAmount
+		high += float64(d.Due) * clamp01(prob+sensitivityPP/100) * d.RenewalAmount
+		p.Rows = append(p.Rows, row)
+	}
+	sort.Slice(p.Rows, func(i, j int) bool {
+		if p.Rows[i].Projected == nil {
+			return false
+		}
+		if p.Rows[j].Projected == nil {
+			return true
+		}
+		return *p.Rows[i].Projected > *p.Rows[j].Projected
+	})
+	if p.Complete {
+		t, l, h := round2(total), round2(low), round2(high)
+		p.Total, p.Low, p.High = &t, &l, &h
+	}
 	return p
 }
 
@@ -954,7 +1043,9 @@ func productsDeepToWire(deep ProductsDeep, activeNow int) ProductsDeepWire {
 			Units30d:   r.Units30,
 		}
 		if r.AvgCost != nil && r.Revenue30 > 0 {
-			margin := (r.Revenue30 - float64(r.Units30)**r.AvgCost) / r.Revenue30 * 100
+			profit := round2(r.Revenue30 - r.COGS30)
+			row.Profit30d = &profit
+			margin := (r.Revenue30 - r.COGS30) / r.Revenue30 * 100
 			row.MarginPct = &margin
 		}
 		if r.Units30 > 0 {

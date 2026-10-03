@@ -14,11 +14,13 @@
 package infraestructure
 
 import (
+	"math"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/cuadra/cuadra-core/src/application/analytics"
+	reportsInfra "github.com/cuadra/cuadra-core/src/application/reports/infraestructure"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 	"github.com/cuadra/cuadra-core/src/shared/tz"
 )
@@ -29,11 +31,10 @@ type PostgresReader struct{}
 
 func NewPostgresReader() *PostgresReader { return &PostgresReader{} }
 
-// ActiveMonthlyRates — un socio activo = status='active' + membresía (no
-// borrada) cuyo rango de fechas cubre onDate. DISTINCT ON toma la de expiry
-// más lejano si hay traslape. La tarifa mensual-equivalente divide el precio
-// del snapshot entre sus meses (fallback días/30).
-func (r *PostgresReader) ActiveMonthlyRates(tx sharedDomain.Transaction, gymID uuid.UUID, onDate time.Time) ([]analytics.MemberMonthlyRate, error) {
+// CurrentMonthlyRates — snapshot canónico de hoy. A diferencia de la query
+// histórica, exige socio activo y una slot vigente (active o la replaced que
+// todavía cubre hoy durante una renovación anticipada).
+func (r *PostgresReader) CurrentMonthlyRates(tx sharedDomain.Transaction, gymID uuid.UUID, onDate time.Time) ([]analytics.MemberMonthlyRate, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	type row struct {
 		MemberID    uuid.UUID
@@ -55,6 +56,43 @@ func (r *PostgresReader) ActiveMonthlyRates(tx sharedDomain.Transaction, gymID u
 		       END AS monthly_rate
 		FROM memberships ms
 		JOIN members m ON m.id = ms.member_id AND m.deleted_at IS NULL AND m.status = 'active'
+		WHERE ms.gym_id = ? AND ms.deleted_at IS NULL AND ms.status IN ('active', 'replaced')
+		  AND ms.start_date <= ? AND ms.expiry_date >= ?
+		ORDER BY ms.member_id, ms.expiry_date DESC`, gymID, day, day).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]analytics.MemberMonthlyRate, len(rows))
+	for i, x := range rows {
+		out[i] = analytics.MemberMonthlyRate{MemberID: x.MemberID, TypeName: x.TypeName, MonthlyRate: x.MonthlyRate}
+	}
+	return out, nil
+}
+
+// ActiveMonthlyRates — cobertura histórica. DISTINCT ON toma la vigencia de
+// expiry más lejano si hay traslape; no usa statuses actuales porque hacerlo
+// reescribiría el MRR pasado al marcar un socio como perdido/inactivo.
+func (r *PostgresReader) ActiveMonthlyRates(tx sharedDomain.Transaction, gymID uuid.UUID, onDate time.Time) ([]analytics.MemberMonthlyRate, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	type row struct {
+		MemberID    uuid.UUID
+		TypeName    string
+		MonthlyRate float64
+	}
+	var rows []row
+	day := onDate.Format(dateFmt)
+	if err := gormTx.Raw(`
+		SELECT DISTINCT ON (ms.member_id)
+		       ms.member_id,
+		       COALESCE(ms.type_name_snapshot, 'Sin tipo') AS type_name,
+		       CASE
+		         WHEN ms.duration_months_snapshot IS NOT NULL AND ms.duration_months_snapshot > 0
+		           THEN ms.price_snapshot / ms.duration_months_snapshot
+		         WHEN ms.duration_days_snapshot > 0
+		           THEN ms.price_snapshot * 30.0 / ms.duration_days_snapshot
+		         ELSE 0
+		       END AS monthly_rate
+		FROM memberships ms
+		JOIN members m ON m.id = ms.member_id AND m.deleted_at IS NULL
 		WHERE ms.gym_id = ? AND ms.deleted_at IS NULL
 		  AND ms.start_date <= ? AND ms.expiry_date >= ?
 		ORDER BY ms.member_id, ms.expiry_date DESC`,
@@ -170,6 +208,7 @@ func (r *PostgresReader) AtRiskCandidates(tx sharedDomain.Transaction, gymID uui
 			FROM members m
 			JOIN memberships ms ON ms.member_id = m.id AND ms.deleted_at IS NULL
 			WHERE m.gym_id = ? AND m.status = 'active' AND m.deleted_at IS NULL
+			  AND ms.status IN ('active', 'replaced')
 			  AND ms.start_date <= ? AND ms.expiry_date >= ?
 			GROUP BY m.id
 		),
@@ -224,68 +263,48 @@ func (r *PostgresReader) AtRiskCandidates(tx sharedDomain.Transaction, gymID uui
 	return out, nil
 }
 
-// MonthlyPL — P&L por mes calendario (SPEC §9.6): ingresos brutos, COGS al
-// costo promedio all-time (mismo criterio que RealizedProductProfit de
-// Standard, ventas no reembolsadas), gastos generales y devoluciones.
+// MonthlyPL — modelo simple por mes: ingresos, compras completas de producto,
+// gastos y devoluciones. COGS remains only as coverage/advanced product data.
 func (r *PostgresReader) MonthlyPL(tx sharedDomain.Transaction, gymID uuid.UUID, monthsBack int, today time.Time) ([]analytics.PLMonthRow, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	if monthsBack <= 0 {
 		monthsBack = 6
 	}
-	day := today.Format(dateFmt)
-	type row struct {
-		Month    string
-		Income   float64
-		Refunds  float64
-		Expenses float64
-		COGS     float64
-	}
-	var rows []row
-	if err := gormTx.Raw(`
-		WITH ac AS (
-			SELECT product_id, SUM(cost * delta)::numeric / NULLIF(SUM(delta), 0) AS avg_cost
-			FROM stock_movements
-			WHERE gym_id = ? AND deleted_at IS NULL AND movement_type = 'restock'
-			  AND cost IS NOT NULL AND delta > 0
-			GROUP BY product_id
-		),
-		months AS (
-			SELECT generate_series(
-				date_trunc('month', ?::date) - (? - 1) * interval '1 month',
-				date_trunc('month', ?::date),
-				interval '1 month')::date AS mstart
-		)
-		SELECT to_char(m.mstart, 'YYYY-MM') AS month,
-		  COALESCE((SELECT SUM(p.amount) FROM payments p
-		    WHERE p.gym_id = ? AND p.deleted_at IS NULL AND p.concept <> 'refund'
-		      AND p.payment_date >= m.mstart AND p.payment_date < (m.mstart + interval '1 month')::date), 0) AS income,
-		  COALESCE((SELECT SUM(ABS(p.amount)) FROM payments p
-		    WHERE p.gym_id = ? AND p.deleted_at IS NULL AND p.concept = 'refund'
-		      AND p.payment_date >= m.mstart AND p.payment_date < (m.mstart + interval '1 month')::date), 0) AS refunds,
-		  COALESCE((SELECT SUM(e.amount) FROM expenses e
-		    WHERE e.gym_id = ? AND e.deleted_at IS NULL
-		      AND e.expense_date >= m.mstart AND e.expense_date < (m.mstart + interval '1 month')::date), 0) AS expenses,
-		  COALESCE((SELECT SUM(si.quantity * ac.avg_cost)
-		    FROM sale_items si
-		    JOIN sales s ON s.id = si.sale_id AND s.deleted_at IS NULL
-		    JOIN payments p ON p.id = s.payment_id AND p.deleted_at IS NULL
-		    JOIN ac ON ac.product_id = si.product_id
-		    WHERE si.gym_id = ? AND si.deleted_at IS NULL
-		      AND p.payment_date >= m.mstart AND p.payment_date < (m.mstart + interval '1 month')::date
-		      AND NOT EXISTS (SELECT 1 FROM payments rfd
-		        WHERE rfd.parent_payment_id = p.id AND rfd.concept = 'refund' AND rfd.deleted_at IS NULL)), 0) AS cogs
-		FROM months m
-		ORDER BY m.mstart`,
-		gymID, day, monthsBack, day,
-		gymID, gymID, gymID, gymID).Scan(&rows).Error; err != nil {
+	var timezone string
+	if err := gormTx.Raw(`SELECT COALESCE(NULLIF(timezone,''),'UTC') FROM gyms WHERE id=?`, gymID).Scan(&timezone).Error; err != nil {
 		return nil, err
 	}
-	out := make([]analytics.PLMonthRow, len(rows))
-	for i, x := range rows {
-		out[i] = analytics.PLMonthRow{
-			Month: x.Month, Income: x.Income, COGS: x.COGS,
-			Expenses: x.Expenses, Refunds: x.Refunds,
+	canonical := reportsInfra.NewPostgresReader()
+	currentMonth := time.Date(today.Year(), today.Month(), 1, 0, 0, 0, 0, time.UTC)
+	out := make([]analytics.PLMonthRow, 0, monthsBack)
+	for offset := monthsBack - 1; offset >= 0; offset-- {
+		from := currentMonth.AddDate(0, -offset, 0)
+		to := from.AddDate(0, 1, -1)
+		if to.After(today) {
+			to = today
 		}
+		snapshot, err := canonical.CanonicalFinancialBetween(tx, gymID, timezone, from, to)
+		if err != nil {
+			return nil, err
+		}
+		profitRows, err := canonical.ProductProfitabilityBetween(tx, gymID, from, to)
+		if err != nil {
+			return nil, err
+		}
+		row := analytics.PLMonthRow{
+			Month:            from.Format("2006-01"),
+			Income:           snapshot.MembershipIncome + snapshot.ProductIncome + snapshot.OtherIncome + snapshot.UnclassifiedIncome,
+			ProductPurchases: snapshot.InventoryPurchases,
+			Expenses:         snapshot.OperatingExpenses, Refunds: snapshot.Refunds,
+			COGSItemsTotal: len(profitRows),
+		}
+		for _, product := range profitRows {
+			row.COGS += product.COGS
+			if product.CostComplete {
+				row.COGSItemsWithCost++
+			}
+		}
+		out = append(out, row)
 	}
 	return out, nil
 }
@@ -327,13 +346,14 @@ func (r *PostgresReader) RetentionSince(tx sharedDomain.Transaction, gymID uuid.
 	return out, nil
 }
 
-// RenewalRatesByType — vencimientos (no reemplazados) de los últimos 90 días
+// RenewalRatesByType — vencimientos de los últimos 90 días
 // por tipo; renovado = membresía nueva arrancando en [vencimiento−5,
 // vencimiento+15] días.
 func (r *PostgresReader) RenewalRatesByType(tx sharedDomain.Transaction, gymID uuid.UUID, today time.Time) ([]analytics.RenewalRateRow, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	since := today.AddDate(0, 0, -90)
 	type row struct {
+		TypeID      uuid.UUID
 		TypeName    string
 		Expirations int
 		Renewed     int
@@ -341,90 +361,122 @@ func (r *PostgresReader) RenewalRatesByType(tx sharedDomain.Transaction, gymID u
 	var rows []row
 	if err := gormTx.Raw(`
 		WITH expired AS (
-			SELECT ms.member_id, COALESCE(ms.type_name_snapshot, 'Sin tipo') AS type_name, ms.expiry_date
+			SELECT ms.id, ms.member_id, ms.membership_type_id,
+			       COALESCE(ms.type_name_snapshot, 'Sin tipo') AS type_name, ms.expiry_date
 			FROM memberships ms
 			JOIN members m ON m.id = ms.member_id AND m.deleted_at IS NULL
-			WHERE ms.gym_id = ? AND ms.deleted_at IS NULL AND ms.replaced_by IS NULL
+			WHERE ms.gym_id = ? AND ms.deleted_at IS NULL
 			  AND ms.expiry_date >= ? AND ms.expiry_date < ?
 		)
-		SELECT e.type_name, COUNT(*) AS expirations,
+		SELECT e.membership_type_id AS type_id, MAX(e.type_name) AS type_name,
+		       COUNT(*) AS expirations,
 		       COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM memberships r
 		         WHERE r.member_id = e.member_id AND r.deleted_at IS NULL
+		           AND r.id <> e.id
 		           AND r.start_date > e.expiry_date - 5
 		           AND r.start_date <= e.expiry_date + 15)) AS renewed
 		FROM expired e
-		GROUP BY e.type_name
+		GROUP BY e.membership_type_id
 		ORDER BY expirations DESC`,
 		gymID, since.Format(dateFmt), today.Format(dateFmt)).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 	out := make([]analytics.RenewalRateRow, len(rows))
 	for i, x := range rows {
-		out[i] = analytics.RenewalRateRow{TypeName: x.TypeName, Expirations: x.Expirations, Renewed: x.Renewed}
+		out[i] = analytics.RenewalRateRow{TypeID: x.TypeID, TypeName: x.TypeName, Expirations: x.Expirations, Renewed: x.Renewed}
 	}
 	return out, nil
 }
 
-// ProductsDeep — top 10 productos activos por revenue 30d + compradores
-// distintos (para el attach rate).
+func (r *PostgresReader) RenewalsDueNextMonth(tx sharedDomain.Transaction, gymID uuid.UUID, today time.Time) ([]analytics.RenewalDueRow, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	nextMonth := time.Date(today.Year(), today.Month(), 1, 0, 0, 0, 0, time.UTC).AddDate(0, 1, 0)
+	afterNext := nextMonth.AddDate(0, 1, 0)
+	type row struct {
+		TypeID        uuid.UUID
+		TypeName      string
+		Due           int
+		RenewalAmount float64
+	}
+	var rows []row
+	if err := gormTx.Raw(`
+		SELECT ms.membership_type_id AS type_id,
+		       COALESCE(MAX(mt.name), MAX(ms.type_name_snapshot), 'Sin tipo') AS type_name,
+		       COUNT(*) AS due,
+		       AVG(COALESCE(mt.price, ms.price_snapshot)) AS renewal_amount
+		FROM memberships ms
+		JOIN members m ON m.id = ms.member_id AND m.deleted_at IS NULL AND m.status = 'active'
+		LEFT JOIN membership_types mt ON mt.id = ms.membership_type_id AND mt.deleted_at IS NULL
+		WHERE ms.gym_id = ? AND ms.deleted_at IS NULL
+		  AND ms.status = 'active'
+		  AND ms.expiry_date >= ? AND ms.expiry_date < ?
+		GROUP BY ms.membership_type_id
+		ORDER BY due DESC, type_name`, gymID, nextMonth.Format(dateFmt), afterNext.Format(dateFmt)).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]analytics.RenewalDueRow, len(rows))
+	for i, x := range rows {
+		out[i] = analytics.RenewalDueRow(x)
+	}
+	return out, nil
+}
+
+// ProductsDeep — revenue y COGS cash-based 30d por producto. Un pago se
+// reparte por el peso de la línea en la venta; abonos y refunds siguen al
+// pago padre. Las unidades siguen siendo físicas (ventas originadas 30d).
 func (r *PostgresReader) ProductsDeep(tx sharedDomain.Transaction, gymID uuid.UUID, today time.Time) (analytics.ProductsDeep, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
-	since := today.AddDate(0, 0, -30).Format(dateFmt)
+	since := today.AddDate(0, 0, -29).Format(dateFmt)
+	day := today.Format(dateFmt)
 	var out analytics.ProductsDeep
 
 	var buyers int64
 	if err := gormTx.Raw(`
 		SELECT COUNT(DISTINCT p.member_id) FROM payments p
-		WHERE p.gym_id = ? AND p.deleted_at IS NULL AND p.concept = 'product'
-		  AND p.member_id IS NOT NULL AND p.payment_date >= ?`,
-		gymID, since).Scan(&buyers).Error; err != nil {
+		WHERE p.gym_id = ? AND p.deleted_at IS NULL
+		  AND p.member_id IS NOT NULL AND p.payment_date >= ? AND p.payment_date <= ?
+		  AND (p.concept = 'product' OR (p.concept = 'balance_settlement' AND EXISTS (
+		    SELECT 1 FROM sales s WHERE s.payment_id = p.parent_payment_id AND s.deleted_at IS NULL
+		  )))`,
+		gymID, since, day).Scan(&buyers).Error; err != nil {
 		return out, err
 	}
 	out.BuyersLast30 = int(buyers)
 
-	type row struct {
-		ProductID uuid.UUID
-		Name      string
-		Stock     int
-		Units30   int
-		Revenue30 float64
-		AvgCost   *float64
-	}
-	var rows []row
-	if err := gormTx.Raw(`
-		WITH ac AS (
-			SELECT product_id, SUM(cost * delta)::numeric / NULLIF(SUM(delta), 0) AS avg_cost
-			FROM stock_movements
-			WHERE gym_id = ? AND deleted_at IS NULL AND movement_type = 'restock'
-			  AND cost IS NOT NULL AND delta > 0
-			GROUP BY product_id
-		),
-		sold AS (
-			SELECT si.product_id, SUM(si.quantity) AS units, SUM(si.line_total) AS revenue
-			FROM sale_items si
-			JOIN sales s ON s.id = si.sale_id AND s.deleted_at IS NULL
-			JOIN payments p ON p.id = s.payment_id AND p.deleted_at IS NULL AND p.concept <> 'refund'
-			WHERE si.gym_id = ? AND si.deleted_at IS NULL AND p.payment_date >= ?
-			GROUP BY si.product_id
-		)
-		SELECT pr.id AS product_id, pr.name, pr.stock,
-		       COALESCE(sold.units, 0) AS units30,
-		       COALESCE(sold.revenue, 0) AS revenue30,
-		       ac.avg_cost
-		FROM products pr
-		LEFT JOIN sold ON sold.product_id = pr.id
-		LEFT JOIN ac ON ac.product_id = pr.id
-		WHERE pr.gym_id = ? AND pr.deleted_at IS NULL AND pr.active = TRUE
-		ORDER BY COALESCE(sold.revenue, 0) DESC
-		LIMIT 10`,
-		gymID, gymID, since, gymID).Scan(&rows).Error; err != nil {
+	profitRows, err := reportsInfra.NewPostgresReader().ProductProfitabilityBetween(
+		tx, gymID, today.AddDate(0, 0, -29), today,
+	)
+	if err != nil {
 		return out, err
 	}
-	out.Rows = make([]analytics.ProductDeepRow, len(rows))
-	for i, x := range rows {
+	type stockRow struct {
+		ID    uuid.UUID
+		Stock int
+	}
+	var stocks []stockRow
+	if err := gormTx.Raw(`SELECT id,stock FROM products WHERE gym_id=?`, gymID).Scan(&stocks).Error; err != nil {
+		return out, err
+	}
+	stockByID := make(map[uuid.UUID]int, len(stocks))
+	for _, stock := range stocks {
+		stockByID[stock.ID] = stock.Stock
+	}
+	if len(profitRows) > 10 {
+		profitRows = profitRows[:10]
+	}
+	out.Rows = make([]analytics.ProductDeepRow, len(profitRows))
+	for i, product := range profitRows {
+		var costMarker *float64
+		if product.CostComplete {
+			value := 0.0
+			if product.Quantity != 0 {
+				value = math.Abs(product.COGS / float64(product.Quantity))
+			}
+			costMarker = &value
+		}
 		out.Rows[i] = analytics.ProductDeepRow{
-			ProductID: x.ProductID, Name: x.Name, Stock: x.Stock,
-			Units30: x.Units30, Revenue30: x.Revenue30, AvgCost: x.AvgCost,
+			ProductID: product.ProductID, Name: product.ProductName, Stock: stockByID[product.ProductID],
+			Units30: product.Quantity, Revenue30: product.Revenue, COGS30: product.COGS, AvgCost: costMarker,
 		}
 	}
 	return out, nil
@@ -451,6 +503,7 @@ func (r *PostgresReader) GenderActivity(tx sharedDomain.Transaction, gymID uuid.
 			FROM members m
 			JOIN memberships ms ON ms.member_id = m.id AND ms.deleted_at IS NULL
 			WHERE m.gym_id = ? AND m.status = 'active' AND m.deleted_at IS NULL
+			  AND ms.status IN ('active', 'replaced')
 			  AND ms.start_date <= ? AND ms.expiry_date >= ?
 			GROUP BY m.id
 		),
@@ -511,6 +564,7 @@ func (r *PostgresReader) AgePyramid(tx sharedDomain.Transaction, gymID uuid.UUID
 			FROM members m
 			JOIN memberships ms ON ms.member_id = m.id AND ms.deleted_at IS NULL
 			WHERE m.gym_id = ? AND m.status = 'active' AND m.deleted_at IS NULL
+			  AND ms.status IN ('active', 'replaced')
 			  AND ms.start_date <= ? AND ms.expiry_date >= ?
 			GROUP BY m.id
 		),
@@ -582,33 +636,27 @@ func (r *PostgresReader) PaydayPattern(tx sharedDomain.Transaction, gymID uuid.U
 	return out, nil
 }
 
-// FixedMonthlyCosts — promedio mensual de gastos generales de los últimos
-// N meses COMPLETOS, excluyendo mercadería (eso es costo de producto). El
-// promedio es sobre los meses CON captura, no entre N — un gym que apenas
-// empieza a capturar no diluye su único mes real.
+// FixedMonthlyCosts uses committed active fixed templates, normalized to a
+// monthly equivalent. Variable marketing/maintenance never enter break-even.
 func (r *PostgresReader) FixedMonthlyCosts(tx sharedDomain.Transaction, gymID uuid.UUID, monthsBack int, today time.Time) (float64, int, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	if monthsBack <= 0 {
 		monthsBack = 3
 	}
-	monthStart := time.Date(today.Year(), today.Month(), 1, 0, 0, 0, 0, time.UTC)
-	from := monthStart.AddDate(0, -monthsBack, 0)
 	var out struct {
 		Avg    float64
 		Months int
 	}
 	err := gormTx.Raw(`
-		WITH m AS (
-			SELECT date_trunc('month', e.expense_date)::date AS mstart,
-			       SUM(e.amount) AS total
-			FROM expenses e
-			WHERE e.gym_id = ? AND e.deleted_at IS NULL
-			  AND e.category <> 'mercaderia_externa'
-			  AND e.expense_date >= ? AND e.expense_date < ?
-			GROUP BY 1
-		)
-		SELECT COALESCE(AVG(total), 0) AS avg, COUNT(*) AS months FROM m`,
-		gymID, from.Format(dateFmt), monthStart.Format(dateFmt)).Scan(&out).Error
+		SELECT COALESCE(SUM(expected_amount * CASE frequency
+		 WHEN 'weekly' THEN 52.0/12 WHEN 'every_14_days' THEN 26.0/12
+		 WHEN 'semimonthly' THEN 2 WHEN 'monthly' THEN 1 WHEN 'bimonthly' THEN .5
+		 WHEN 'quarterly' THEN 1.0/3 WHEN 'semiannual' THEN 1.0/6 WHEN 'annual' THEN 1.0/12 ELSE 0 END),0) AS avg,
+		 (SELECT COUNT(DISTINCT date_trunc('month',expense_date)) FROM expenses
+		  WHERE gym_id=? AND deleted_at IS NULL
+		    AND expense_date>=date_trunc('month',?::date)-(? * interval '1 month')) AS months
+		FROM recurring_expense_templates
+		WHERE gym_id=? AND deleted_at IS NULL AND active=true AND classification='fixed'`, gymID, today.Format(dateFmt), monthsBack, gymID).Scan(&out).Error
 	return out.Avg, out.Months, err
 }
 

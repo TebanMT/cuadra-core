@@ -98,6 +98,7 @@ func (s *StatusController) Trigger(c *gin.Context) {
 // agent.
 func buildStatusResponse(snap AgentSnapshot, now time.Time) StatusResponse {
 	r := StatusResponse{
+		SyncInProgress:        snap.SyncInProgress,
 		QueuePendingCount:     snap.PendingCount,
 		LastError:             snap.LastError,
 		ConsecutiveFailures:   snap.ConsecutiveFailures,

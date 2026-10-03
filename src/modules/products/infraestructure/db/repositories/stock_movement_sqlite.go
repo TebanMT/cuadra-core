@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,21 +22,24 @@ func NewStockMovementSQLiteRepository() *StockMovementSQLiteRepository {
 }
 
 type sqliteStockMovementRow struct {
-	ID           string         `db:"id"`
-	GymID        string         `db:"gym_id"`
-	Version      int            `db:"version"`
-	CreatedAt    int64          `db:"created_at"`
-	UpdatedAt    int64          `db:"updated_at"`
-	DeletedAt    sql.NullInt64  `db:"deleted_at"`
-	SyncedAt     sql.NullInt64  `db:"synced_at"`
-	ProductID    string         `db:"product_id"`
-	MovementType string         `db:"movement_type"`
-	Delta        int            `db:"delta"`
-	Reason       sql.NullString `db:"reason"`
-	Cost         sql.NullInt64  `db:"cost"`
-	IsPurchase   int            `db:"is_purchase"`
-	SaleItemID   sql.NullString `db:"sale_item_id"`
-	OperatorID   string         `db:"operator_id"`
+	ID                     string         `db:"id"`
+	GymID                  string         `db:"gym_id"`
+	Version                int            `db:"version"`
+	CreatedAt              int64          `db:"created_at"`
+	UpdatedAt              int64          `db:"updated_at"`
+	DeletedAt              sql.NullInt64  `db:"deleted_at"`
+	SyncedAt               sql.NullInt64  `db:"synced_at"`
+	ProductID              string         `db:"product_id"`
+	MovementType           string         `db:"movement_type"`
+	Delta                  int            `db:"delta"`
+	Reason                 sql.NullString `db:"reason"`
+	Cost                   sql.NullInt64  `db:"cost"`
+	IsPurchase             int            `db:"is_purchase"`
+	SaleItemID             sql.NullString `db:"sale_item_id"`
+	OperatorID             string         `db:"operator_id"`
+	IdempotencyKey         sql.NullString `db:"idempotency_key"`
+	IdempotencyFingerprint sql.NullString `db:"idempotency_fingerprint"`
+	IdempotencyResult      sql.NullString `db:"idempotency_result"`
 }
 
 func (r *StockMovementSQLiteRepository) Create(tx sharedDomain.Transaction, m *stockMovementDomain.StockMovement) (*stockMovementDomain.StockMovement, error) {
@@ -44,10 +48,12 @@ func (r *StockMovementSQLiteRepository) Create(tx sharedDomain.Transaction, m *s
 	const stmt = `
 		INSERT INTO stock_movements (
 		    id, gym_id, version, created_at, updated_at, deleted_at,
-		    product_id, movement_type, delta, reason, cost, is_purchase, sale_item_id, operator_id
+		    product_id, movement_type, delta, reason, cost, is_purchase, sale_item_id, operator_id,
+		    idempotency_key, idempotency_fingerprint, idempotency_result
 		) VALUES (
 		    :id, :gym_id, :version, :created_at, :updated_at, :deleted_at,
-		    :product_id, :movement_type, :delta, :reason, :cost, :is_purchase, :sale_item_id, :operator_id
+		    :product_id, :movement_type, :delta, :reason, :cost, :is_purchase, :sale_item_id, :operator_id,
+		    :idempotency_key, :idempotency_fingerprint, :idempotency_result
 		)`
 	if _, err := stx.NamedExec(context.Background(), stmt, row); err != nil {
 		return nil, err
@@ -56,6 +62,19 @@ func (r *StockMovementSQLiteRepository) Create(tx sharedDomain.Transaction, m *s
 		return nil, err
 	}
 	return m, nil
+}
+
+func (r *StockMovementSQLiteRepository) GetByIdempotencyKey(tx sharedDomain.Transaction, gymID uuid.UUID, key string) (*stockMovementDomain.StockMovement, error) {
+	var row sqliteStockMovementRow
+	err := tx.(*sharedDomain.SqlxTransaction).Get(context.Background(), &row,
+		`SELECT * FROM stock_movements WHERE gym_id=? AND idempotency_key=? AND deleted_at IS NULL`, gymID.String(), key)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return stockMovementFromRow(&row), nil
 }
 
 func (r *StockMovementSQLiteRepository) ListByProduct(tx sharedDomain.Transaction, productID uuid.UUID, limit int) ([]*stockMovementDomain.StockMovement, error) {
@@ -103,6 +122,15 @@ func stockMovementToRow(m *stockMovementDomain.StockMovement) sqliteStockMovemen
 	if m.SaleItemID != nil {
 		row.SaleItemID = sql.NullString{String: m.SaleItemID.String(), Valid: true}
 	}
+	if m.IdempotencyKey != "" {
+		row.IdempotencyKey = sql.NullString{String: m.IdempotencyKey, Valid: true}
+	}
+	if m.IdempotencyFingerprint != "" {
+		row.IdempotencyFingerprint = sql.NullString{String: m.IdempotencyFingerprint, Valid: true}
+	}
+	if len(m.IdempotencyResult) > 0 {
+		row.IdempotencyResult = sql.NullString{String: string(m.IdempotencyResult), Valid: true}
+	}
 	return row
 }
 
@@ -139,6 +167,15 @@ func stockMovementFromRow(r *sqliteStockMovementRow) *stockMovementDomain.StockM
 		sid, _ := uuid.Parse(r.SaleItemID.String)
 		m.SaleItemID = &sid
 	}
+	if r.IdempotencyKey.Valid {
+		m.IdempotencyKey = r.IdempotencyKey.String
+	}
+	if r.IdempotencyFingerprint.Valid {
+		m.IdempotencyFingerprint = r.IdempotencyFingerprint.String
+	}
+	if r.IdempotencyResult.Valid {
+		m.IdempotencyResult = append(json.RawMessage(nil), r.IdempotencyResult.String...)
+	}
 	return m
 }
 
@@ -154,22 +191,39 @@ func enqueueStockMovement(stx *sharedDomain.SqlxTransaction, m *stockMovementDom
 		cost = *m.Cost
 	}
 	payload, err := json.Marshal(map[string]any{
-		"id":            m.ID.String(),
-		"gym_id":        m.GymID.String(),
-		"version":       m.Version,
-		"created_at":    m.CreatedAt.UnixMilli(),
-		"updated_at":    m.UpdatedAt.UnixMilli(),
-		"product_id":    m.ProductID.String(),
-		"movement_type": m.MovementType,
-		"delta":         m.Delta,
-		"reason":        strPtrOrNil(m.Reason),
-		"cost":          cost,
-		"is_purchase":   m.IsPurchase,
-		"sale_item_id":  uuidPtrOrNil(m.SaleItemID),
-		"operator_id":   m.OperatorID.String(),
+		"id":                      m.ID.String(),
+		"gym_id":                  m.GymID.String(),
+		"version":                 m.Version,
+		"created_at":              m.CreatedAt.UnixMilli(),
+		"updated_at":              m.UpdatedAt.UnixMilli(),
+		"product_id":              m.ProductID.String(),
+		"movement_type":           m.MovementType,
+		"delta":                   m.Delta,
+		"reason":                  strPtrOrNil(m.Reason),
+		"cost":                    cost,
+		"is_purchase":             m.IsPurchase,
+		"sale_item_id":            uuidPtrOrNil(m.SaleItemID),
+		"operator_id":             m.OperatorID.String(),
+		"idempotency_key":         nullableStockMovementString(m.IdempotencyKey),
+		"idempotency_fingerprint": nullableStockMovementString(m.IdempotencyFingerprint),
+		"idempotency_result":      nullableStockMovementJSON(m.IdempotencyResult),
 	})
 	if err != nil {
 		return err
 	}
 	return stx.EnqueueSync(context.Background(), "stock_movements", m.ID.String(), "upsert", payload, m.Version)
+}
+
+func nullableStockMovementString(v string) any {
+	if v == "" {
+		return nil
+	}
+	return v
+}
+
+func nullableStockMovementJSON(v json.RawMessage) any {
+	if len(v) == 0 {
+		return nil
+	}
+	return json.RawMessage(v)
 }

@@ -23,8 +23,10 @@ type SettlePendingBalanceInput struct {
 	ParentPaymentID uuid.UUID
 	Amount          float64
 	Method          string
+	CashDrawerID    *uuid.UUID
 	PaymentDate     time.Time
 	Notes           *string
+	IdempotencyKey  string
 }
 
 type SettlePendingBalanceOutput struct {
@@ -40,7 +42,13 @@ type SettlePendingBalance struct {
 	Audit    audit.Recorder
 	// Gyms (opcional) → default de PaymentDate en el día LOCAL del gym
 	// (ver gymLocalPaymentDate). Nil = día UTC (tests viejos).
-	Gyms gymRepo.GymRepository
+	Gyms        gymRepo.GymRepository
+	CashDrawers CashDrawerValidator
+}
+
+func (uc *SettlePendingBalance) WithCashDrawers(v CashDrawerValidator) *SettlePendingBalance {
+	uc.CashDrawers = v
+	return uc
 }
 
 // WithGyms cablea el repo de gyms para anclar el default de PaymentDate
@@ -56,13 +64,31 @@ func NewSettlePendingBalance(payments billingRepo.PaymentRepository, folios *fol
 }
 
 func (uc *SettlePendingBalance) Execute(ctx context.Context, in SettlePendingBalanceInput) (*SettlePendingBalanceOutput, error) {
+	key, err := validatePaymentCommandKey(in.IdempotencyKey)
+	if err != nil {
+		return nil, err
+	}
+	in.IdempotencyKey = key
+	fingerprint, err := paymentCommandFingerprint(in)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
 	now := time.Now().UTC()
 	var out SettlePendingBalanceOutput
-	err := uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
-		// Default de fecha: día LOCAL del gym — un abono nocturno pertenece
-		// a la caja del día en curso (mismo criterio que el cobro).
-		if in.PaymentDate.IsZero() {
-			in.PaymentDate = gymLocalPaymentDate(tx, uc.Gyms, in.GymID, now)
+	err = uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
+		paymentDay, dateErr := resolveMonetaryDate(tx, uc.Gyms, in.GymID, in.PaymentDate, now)
+		if dateErr != nil {
+			return dateErr
+		}
+		in.PaymentDate = paymentDay
+		if replayed, err := replayPaymentCommand(tx, uc.Payments, in.GymID, key, fingerprint,
+			paymentDomain.ConceptBalanceSettlement, &out); err != nil {
+			return err
+		} else if replayed {
+			return nil
+		}
+		if err := validateRequestedCashDrawer(uc.CashDrawers, tx, in.GymID, in.Method, in.CashDrawerID); err != nil {
+			return err
 		}
 		parent, err := uc.Payments.GetByID(tx, in.ParentPaymentID)
 		if err != nil {
@@ -70,6 +96,9 @@ func (uc *SettlePendingBalance) Execute(ctx context.Context, in SettlePendingBal
 		}
 		if parent.GymID != in.GymID {
 			return sharedDomain.NewBusinessError(billingErrors.ErrCrossGym, "")
+		}
+		if err := validateMonetaryChronology(in.PaymentDate, parent.PaymentDate); err != nil {
+			return err
 		}
 
 		folio, err := uc.Folios.Next(tx, in.GymID, paymentDomain.ConceptBalanceSettlement)
@@ -96,6 +125,12 @@ func (uc *SettlePendingBalance) Execute(ctx context.Context, in SettlePendingBal
 				return sharedDomain.NewBusinessError(err, "")
 			}
 			return sharedDomain.NewValidationError(err)
+		}
+		if in.CashDrawerID != nil {
+			settlement.WithCashDrawer(*in.CashDrawerID)
+		}
+		if err := beginPaymentCommand(settlement, key, fingerprint); err != nil {
+			return err
 		}
 
 		// 1) Decremento + persistencia del parent (enqueue UPSERT a rowid M).
@@ -134,6 +169,9 @@ func (uc *SettlePendingBalance) Execute(ctx context.Context, in SettlePendingBal
 			SettlementID:      settlement.ID,
 			SettlementFolio:   settlement.Folio,
 			NewBalancePending: newBalance,
+		}
+		if err := finalizePaymentCommand(tx, uc.Payments, settlement, out, now); err != nil {
+			return err
 		}
 		return nil
 	})

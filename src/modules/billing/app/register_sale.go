@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"fmt"
+	"math"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -30,22 +32,25 @@ import (
 // Payment y se liquida después por el flujo estándar de abonos
 // (POST /payments/:id/settle). Si es nil, se cobra el total — caso default.
 // Reglas adicionales: requiere MemberID (no se fía a walk-ins), y el valor
-// debe ser > 0.
+// puede ser cero: se registra la venta y toda la deuda.
 type RegisterSaleInput struct {
-	GymID       uuid.UUID
-	ActorUserID uuid.UUID
-	Method      string
-	MemberID    *uuid.UUID
-	Discount    float64 // optional, MVP usually 0
-	Paid        *float64
-	PaymentDate time.Time
-	Notes       *string
-	Items       []SaleLineInput
+	GymID         uuid.UUID
+	ActorUserID   uuid.UUID
+	Method        string
+	CashDrawerID  *uuid.UUID
+	MemberID      *uuid.UUID
+	Discount      float64 // optional, MVP usually 0
+	Paid          *float64
+	ExpectedTotal *float64 `json:",omitempty"`
+	PaymentDate   time.Time
+	Notes         *string
+	Items         []SaleLineInput
 	// Promotion opcional. En ventas sólo aplican percent / fixed_amount.
 	// extra_days y companion_memberships son no-op silencioso (su efecto
 	// no tiene sentido en una venta de producto). free_enrollment también
 	// es no-op (no hay enrollment en ventas).
-	Promotion *PromotionApply
+	Promotion      *PromotionApply
+	IdempotencyKey string
 }
 
 type SaleLineInput struct {
@@ -84,7 +89,7 @@ type SaleItemOutput struct {
 //
 //  1. Validate carrito non-empty + sane qty.
 //  2. For each item: ProductService.DecrementForSale (reads product, checks
-//     stock, decrements + writes 'sale' stock_movement). Cross-BC seam.
+//     active product, decrements + writes 'sale' stock_movement). Cross-BC seam.
 //  3. Compute subtotal/total from snapshots.
 //  4. Mint PRD-NNNNNN folio.
 //  5. Create Payment(concept='product').
@@ -107,7 +112,13 @@ type RegisterSale struct {
 	Promotions *promoApp.ApplyPromotion // opcional; nil → no se aplican promos
 	// Gyms (opcional) → default de PaymentDate en el día LOCAL del gym
 	// (ver gymLocalPaymentDate). Nil = día UTC (tests viejos).
-	Gyms gymRepo.GymRepository
+	Gyms        gymRepo.GymRepository
+	CashDrawers CashDrawerValidator
+}
+
+func (uc *RegisterSale) WithCashDrawers(v CashDrawerValidator) *RegisterSale {
+	uc.CashDrawers = v
+	return uc
 }
 
 // WithPromotions engancha el use case de promociones.
@@ -145,6 +156,15 @@ func NewRegisterSale(
 }
 
 func (uc *RegisterSale) Execute(ctx context.Context, in RegisterSaleInput) (*RegisterSaleOutput, error) {
+	key, err := validatePaymentCommandKey(in.IdempotencyKey)
+	if err != nil {
+		return nil, err
+	}
+	in.IdempotencyKey = key
+	fingerprint, err := paymentCommandFingerprint(in)
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
 	if len(in.Items) == 0 {
 		return nil, sharedDomain.NewValidationError(billingErrors.ErrSaleEmpty)
 	}
@@ -162,14 +182,22 @@ func (uc *RegisterSale) Execute(ctx context.Context, in RegisterSaleInput) (*Reg
 	}
 
 	var (
-		out RegisterSaleOutput
-		evt PaymentCompletedEvent
+		out       RegisterSaleOutput
+		evt       PaymentCompletedEvent
+		wasReplay bool
 	)
-	err := uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
-		// Default de fecha: el día LOCAL del gym, no el día UTC — una venta
-		// a las 10 PM pertenece a la caja del día en curso.
-		if in.PaymentDate.IsZero() {
-			in.PaymentDate = gymLocalPaymentDate(tx, uc.Gyms, in.GymID, now)
+	err = uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
+		paymentDay, dateErr := resolveMonetaryDate(tx, uc.Gyms, in.GymID, in.PaymentDate, now)
+		if dateErr != nil {
+			return dateErr
+		}
+		in.PaymentDate = paymentDay
+		if replayed, err := replayPaymentCommand(tx, uc.Payments, in.GymID, key, fingerprint,
+			paymentDomain.ConceptProduct, &out); err != nil {
+			return err
+		} else if replayed {
+			wasReplay = true
+			return nil
 		}
 
 		// Optional member sanity check.
@@ -204,6 +232,7 @@ func (uc *RegisterSale) Execute(ctx context.Context, in RegisterSaleInput) (*Reg
 				ProductID:           res.Product.ID,
 				ProductNameSnapshot: res.Product.Name,
 				UnitPriceSnapshot:   res.Product.Price,
+				UnitCostSnapshot:    res.UnitCost,
 				Quantity:            item.Quantity,
 			})
 			stockAfter = append(stockAfter, res.Product.Stock)
@@ -268,6 +297,9 @@ func (uc *RegisterSale) Execute(ctx context.Context, in RegisterSaleInput) (*Reg
 		if err != nil {
 			return sharedDomain.NewValidationError(err)
 		}
+		if in.ExpectedTotal != nil && (math.IsNaN(*in.ExpectedTotal) || math.IsInf(*in.ExpectedTotal, 0) || math.Round(*in.ExpectedTotal*100) != math.Round(s.Total*100)) {
+			return sharedDomain.NewBusinessError(billingErrors.ErrSaleTotalChanged, "")
+		}
 		for i := range s.Items {
 			s.Items[i].ID = saleItemIDs[i]
 		}
@@ -279,10 +311,10 @@ func (uc *RegisterSale) Execute(ctx context.Context, in RegisterSaleInput) (*Reg
 		// member_id no hay a quién cobrarle el saldo después.
 		paid := s.Total
 		if in.Paid != nil {
-			if in.MemberID == nil {
+			paid = *in.Paid
+			if paid < s.Total && in.MemberID == nil {
 				return sharedDomain.NewBusinessError(billingErrors.ErrCreditRequiresMember, "")
 			}
-			paid = *in.Paid
 		}
 		p, err := paymentDomain.NewProductSalePayment(
 			paymentIDReserved, in.GymID, in.ActorUserID, in.MemberID, folio,
@@ -291,12 +323,30 @@ func (uc *RegisterSale) Execute(ctx context.Context, in RegisterSaleInput) (*Reg
 		if err != nil {
 			return sharedDomain.NewValidationError(err)
 		}
+		if p.Amount > 0 {
+			if err := validateRequestedCashDrawer(uc.CashDrawers, tx, in.GymID, in.Method, in.CashDrawerID); err != nil {
+				return err
+			}
+			if in.CashDrawerID != nil {
+				p.WithCashDrawer(*in.CashDrawerID)
+			}
+		}
+		var saleDiscountReason *string
+		if promoResult != nil && strings.TrimSpace(promoResult.DiscountReason) != "" {
+			reason := promoResult.DiscountReason
+			saleDiscountReason = &reason
+		}
+		p.WithProductSaleDiscount(s.Discount, saleDiscountReason)
+		if err := beginPaymentCommand(p, key, fingerprint); err != nil {
+			return err
+		}
 		// Desglose por producto vendido. Cuando hay cantidad > 1 lo
 		// reflejamos en el label ("Proteína 1kg ×2"); el amount es el
 		// line total (qty × unit_price), que ya viene calculado en el
 		// SaleItem. Si hay descuento global se anota como línea negativa
-		// al final para que el subtotal cuadre con p.Amount.
-		breakdown := make([]paymentDomain.BreakdownLine, 0, len(s.Items)+1)
+		// global se conserva en Payment.DiscountAmount, igual que en cobros de
+		// membresía, para que recibos y exportaciones tengan una sola semántica.
+		breakdown := make([]paymentDomain.BreakdownLine, 0, len(s.Items))
 		for _, si := range s.Items {
 			label := si.ProductNameSnapshot
 			if si.Quantity > 1 {
@@ -304,11 +354,6 @@ func (uc *RegisterSale) Execute(ctx context.Context, in RegisterSaleInput) (*Reg
 			}
 			breakdown = append(breakdown, paymentDomain.BreakdownLine{
 				Label: label, Amount: si.LineTotal,
-			})
-		}
-		if s.Discount > 0 {
-			breakdown = append(breakdown, paymentDomain.BreakdownLine{
-				Label: "Descuento", Amount: -s.Discount,
 			})
 		}
 		p.SetBreakdown(breakdown)
@@ -394,11 +439,16 @@ func (uc *RegisterSale) Execute(ctx context.Context, in RegisterSaleInput) (*Reg
 			out.PromotionName = promoResult.Promotion.Name
 			out.PromotionKind = promoResult.Promotion.Kind
 		}
+		if err := finalizePaymentCommand(tx, uc.Payments, p, out, now); err != nil {
+			return err
+		}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	uc.Publisher.PublishPaymentCompleted(ctx, evt)
+	if !wasReplay && out.Paid > 0 {
+		uc.Publisher.PublishPaymentCompleted(ctx, evt)
+	}
 	return &out, nil
 }

@@ -57,7 +57,9 @@ type Definition struct {
 // expansion. Cuadra refuses anything longer (UC-038 update_template).
 const MaxBodyLen = 1024
 
-// DefaultLibrary returns the read-only set of templates approved at Cuadra
+// DefaultLibrary returns the default text used for freeform and fallback delivery.
+// Provider-approved WhatsApp templates keep their own body and positional variables.
+// DefaultLibrary also defines the stable variable contracts used at Tinta
 // boot. Adding a new template here is a code change + (for WhatsApp) a
 // re-approval flow with Twilio. Order is stable for tests and UI.
 func DefaultLibrary() []Definition {
@@ -67,21 +69,21 @@ func DefaultLibrary() []Definition {
 			Channel:   ChannelWhatsApp,
 			Category:  CategoryUtility,
 			Variables: []string{"member_first_name", "gym_name", "expiry_date"},
-			Body:      "Hola {member_first_name} 👋 Soy {gym_name}. Te aviso que tu mensualidad vence el {expiry_date}. ¿Te esperamos para renovar?",
+			Body:      "Hola {member_first_name}. Tu membresía en {gym_name} vence el {expiry_date}. Puedes renovar en recepción.",
 		},
 		{
 			Key:       "expiry_reminder_today",
 			Channel:   ChannelWhatsApp,
 			Category:  CategoryUtility,
 			Variables: []string{"member_first_name", "gym_name"},
-			Body:      "Hola {member_first_name}, hoy vence tu mensualidad en {gym_name}. ¡Pásate cuando puedas!",
+			Body:      "Hola {member_first_name}. Tu membresía en {gym_name} vence hoy. Puedes renovar en recepción.",
 		},
 		{
 			Key:       "expiry_reminder_5d_post",
 			Channel:   ChannelWhatsApp,
 			Category:  CategoryUtility,
 			Variables: []string{"member_first_name", "gym_name"},
-			Body:      "Hola {member_first_name}, te extrañamos en {gym_name}. Te dejamos esta nota por si quieres regresar.",
+			Body:      "Hola {member_first_name}. Tu membresía en {gym_name} está vencida. Puedes renovar en recepción.",
 		},
 		{
 			// El template aprobado en Twilio tiene 6 vars; la 6ª es la URL del
@@ -92,7 +94,7 @@ func DefaultLibrary() []Definition {
 			Channel:   ChannelWhatsApp,
 			Category:  CategoryUtility,
 			Variables: []string{"member_first_name", "amount", "membership_type", "expiry_date", "gym_name", "receipt_url"},
-			Body:      "¡Listo, {member_first_name}! Recibimos tu pago de ${amount} por {membership_type}. Tu nueva vigencia es hasta el {expiry_date}. Descarga tu comprobante: {receipt_url} — {gym_name}. ¡A seguir entrenando!",
+			Body:      "Hola {member_first_name}. Recibimos tu pago de ${amount} por {membership_type} en {gym_name}. Vigencia hasta el {expiry_date}. Comprobante: {receipt_url}",
 		},
 		{
 			// 4 vars; la 4ª es la URL del comprobante.
@@ -100,42 +102,42 @@ func DefaultLibrary() []Definition {
 			Channel:   ChannelWhatsApp,
 			Category:  CategoryUtility,
 			Variables: []string{"member_first_name", "amount", "gym_name", "receipt_url"},
-			Body:      "¡Listo, {member_first_name}! Tu compra de ${amount} en {gym_name} fue registrada. Tu comprobante: {receipt_url} ✅",
+			Body:      "Hola {member_first_name}. Registramos tu compra de ${amount} en {gym_name}. Comprobante: {receipt_url}",
 		},
 		{
 			Key:       "owner_alert_low_stock",
 			Channel:   ChannelWhatsApp,
 			Category:  CategoryUtility,
 			Variables: []string{"gym_name", "product_name", "stock"},
-			Body:      "⚠️ Alerta de {gym_name}: el producto {product_name} tiene stock bajo con solo {stock} unidades disponibles. Te recomendamos reabastecer pronto desde tu panel en Tinta.",
+			Body:      "{gym_name}: quedan {stock} unidades de {product_name}. Revisa las existencias en Tinta.",
 		},
 		{
 			Key:       "owner_alert_expired_batch",
 			Channel:   ChannelWhatsApp,
 			Category:  CategoryUtility,
 			Variables: []string{"gym_name", "count"},
-			Body:      "Alerta de {gym_name}: {count} socios vencidos sin contacto. Persíguelos en Cuadra.",
+			Body:      "{gym_name}: hay {count} socios con membresía vencida sin contacto reciente. Revísalos en Socios.",
 		},
 		{
 			Key:       "owner_alert_cash_close_diff",
 			Channel:   ChannelWhatsApp,
 			Category:  CategoryUtility,
 			Variables: []string{"gym_name", "diff_amount"},
-			Body:      "Alerta de {gym_name}: cierre de caja con diferencia de ${diff_amount}. Revisa en Cuadra.",
+			Body:      "{gym_name}: el corte de caja tiene una diferencia de ${diff_amount}. Revísalo en Caja.",
 		},
 		{
 			Key:       "owner_alert_vip_no_visit",
 			Channel:   ChannelWhatsApp,
 			Category:  CategoryUtility,
 			Variables: []string{"gym_name", "member_name", "days_inactive"},
-			Body:      "⚠️ Alerta de {gym_name}: el socio VIP {member_name} no ha visitado el gym en {days_inactive} días. Te recomendamos contactarlo pronto para que no pierda el ritmo.",
+			Body:      "{gym_name}: {member_name}, socio VIP, lleva {days_inactive} días sin asistir.",
 		},
 		{
 			Key:       "owner_alert_no_payments_today",
 			Channel:   ChannelWhatsApp,
 			Category:  CategoryUtility,
 			Variables: []string{"gym_name", "date"},
-			Body:      "Alerta de {gym_name}: no se registraron cobros el {date}. Revisa con tu operador.",
+			Body:      "{gym_name}: no se registraron cobros el {date}. Consulta con recepción.",
 		},
 		{
 			Key:       "broadcast_freeform",
@@ -162,7 +164,7 @@ func DefaultLibrary() []Definition {
 			// El Body de abajo NO se manda por WhatsApp — es sólo fallback de
 			// email/mock y se renderiza con el payload (que aún trae el PIN).
 			Variables: []string{"welcome_image_url", "full_name", "gym_name"},
-			Body:      "Hola {full_name}, {gym_name} te dio de alta en Tinta. Tu PIN de acceso es *{pin}*. Lo usas en el sistema del gym para iniciar sesión.",
+			Body:      "Hola {full_name}. Tu PIN para entrar a Tinta en {gym_name} es *{pin}*.",
 		},
 		{
 			// member_welcome_number: se envía al socio al inscribirse y cuando
@@ -182,7 +184,7 @@ func DefaultLibrary() []Definition {
 			// aprobado (HXd072…): {{1}}=nombre socio, {{2}}=gym, {{3}}=URL
 			// imagen. El Body es sólo fallback email/mock.
 			Variables: []string{"member_first_name", "gym_name", "welcome_image_url"},
-			Body:      "Hola {member_first_name}, soy {gym_name}. Tu número de socio es *{member_number}*. Es tu acceso al gym; úsalo si tu biométrico no está disponible. ¡Bienvenido!",
+			Body:      "Hola {member_first_name}. Tu número de socio en {gym_name} es *{member_number}*. Úsalo para registrar tu entrada.",
 		},
 		{
 			// owner_welcome: se envía al DUEÑO cuando vincula el primer
@@ -201,7 +203,7 @@ func DefaultLibrary() []Definition {
 			// sólo fallback email/mock. La clave indexa el Content SID en
 			// TWILIO_CONTENT_SIDS.
 			Variables: []string{"welcome_image_url", "full_name", "gym_name"},
-			Body:      "Hola {full_name}, ¡tu sistema Tinta ya está vivo! Tu código de acceso es *{pin}*. Úsalo para entrar rápido a recepción.",
+			Body:      "Hola {full_name}. Tinta está listo en {gym_name}. Tu PIN para entrar en recepción es *{pin}*.",
 		},
 		{
 			// UC-037 connect-step OTP. Sent from Cuadra's master WhatsApp
@@ -211,7 +213,7 @@ func DefaultLibrary() []Definition {
 			Channel:   ChannelWhatsApp,
 			Category:  CategoryAuthentication,
 			Variables: []string{"code"},
-			Body:      "Tu código de verificación de Cuadra es {code}. Vence en 10 minutos.",
+			Body:      "Tu código de verificación de Tinta es {code}. Vence en 10 minutos.",
 		},
 		// ── Renovación OXXO anual ────────────────────────────────────────
 		// Cuatro variantes (30/14/3/día-0) porque Meta aprueba el cuerpo
@@ -225,28 +227,28 @@ func DefaultLibrary() []Definition {
 			Channel:   ChannelWhatsApp,
 			Category:  CategoryUtility,
 			Variables: []string{"gym_name", "voucher_url", "expires_on"},
-			Body:      "Hola {gym_name} 👋 Tu plan anual de Tinta vence el {expires_on}. Te dejamos tu link para pagar la próxima ficha en OXXO cuando puedas: {voucher_url} 🏪",
+			Body:      "{gym_name}: tu plan anual de Tinta vence el {expires_on}. Genera tu ficha para pagar en OXXO: {voucher_url}",
 		},
 		{
 			Key:       "oxxo_renewal_reminder_14d",
 			Channel:   ChannelWhatsApp,
 			Category:  CategoryUtility,
 			Variables: []string{"gym_name", "voucher_url", "expires_on"},
-			Body:      "Hola {gym_name}, recordatorio: tu plan anual de Tinta vence el {expires_on}. Aquí tu ficha para pagar en OXXO: {voucher_url} 🏪",
+			Body:      "{gym_name}: tu plan anual de Tinta vence el {expires_on}. Genera tu ficha para pagar en OXXO: {voucher_url}",
 		},
 		{
 			Key:       "oxxo_renewal_reminder_3d",
 			Channel:   ChannelWhatsApp,
 			Category:  CategoryUtility,
 			Variables: []string{"gym_name", "voucher_url", "expires_on"},
-			Body:      "Hola {gym_name}, tu plan vence el {expires_on} (en 3 días). Paga tu ficha en OXXO para no interrumpir el servicio: {voucher_url} ⏳",
+			Body:      "{gym_name}: tu plan anual de Tinta vence el {expires_on}, en 3 días. Genera tu ficha para renovar en OXXO: {voucher_url}",
 		},
 		{
 			Key:       "oxxo_renewal_reminder_today",
 			Channel:   ChannelWhatsApp,
 			Category:  CategoryUtility,
 			Variables: []string{"gym_name", "voucher_url"},
-			Body:      "Hola {gym_name}, tu plan vence HOY. Paga tu ficha en OXXO cuanto antes para no perder el servicio: {voucher_url} 🚨",
+			Body:      "{gym_name}: tu plan anual de Tinta vence hoy. Genera tu ficha para renovar en OXXO: {voucher_url}",
 		},
 	}
 }

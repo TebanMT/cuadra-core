@@ -23,6 +23,7 @@ type Product struct {
 	Name         string
 	Price        float64
 	Stock        int
+	StockBase    int // stock excluding remote receipts; may be negative until missing receipts arrive
 	StockMinimum int
 	Category     *string
 	ImageURL     *string
@@ -51,6 +52,7 @@ func New(id, gymID uuid.UUID, name string, price float64, initialStock, stockMin
 		return nil, prodErrors.ErrInvalidStock
 	}
 	p.Stock = initialStock
+	p.StockBase = initialStock
 	return p, nil
 }
 
@@ -87,9 +89,22 @@ func (p *Product) Reactivate(now time.Time) {
 	p.UpdatedAt = now
 }
 
-// DecrementStock removes `qty` units. DA-25.2: NO over-sell. Returns
+// DecrementStock is the guarded path for manual inventory reductions. Returns
 // ErrInsufficientStock when stock - qty < 0. Caller (billing/UC-025) is
 // expected to also write a StockMovement of type 'sale'.
+// Sell records units physically handed to a customer, even when receipts or
+// counts have not caught up. A negative balance must remain visible.
+func (p *Product) Sell(qty int, now time.Time) error {
+	if qty <= 0 || qty > 2147483647 || int64(p.Stock)-int64(qty) < -2147483648 || int64(p.StockBase)-int64(qty) < -2147483648 {
+		return prodErrors.ErrInvalidAdjustment
+	}
+	p.Stock -= qty
+	p.StockBase -= qty
+	p.Version++
+	p.UpdatedAt = now
+	return nil
+}
+
 func (p *Product) DecrementStock(qty int, now time.Time) error {
 	if qty <= 0 {
 		return prodErrors.ErrInvalidAdjustment
@@ -98,6 +113,7 @@ func (p *Product) DecrementStock(qty int, now time.Time) error {
 		return prodErrors.ErrInsufficientStock
 	}
 	p.Stock -= qty
+	p.StockBase -= qty
 	p.Version++
 	p.UpdatedAt = now
 	return nil
@@ -111,6 +127,7 @@ func (p *Product) IncrementStock(qty int, now time.Time) error {
 		return prodErrors.ErrInvalidAdjustment
 	}
 	p.Stock += qty
+	p.StockBase += qty
 	p.Version++
 	p.UpdatedAt = now
 	return nil
@@ -128,6 +145,7 @@ func (p *Product) SetStock(newStock int, now time.Time) (delta int, err error) {
 		return 0, prodErrors.ErrAdjustmentNoChange
 	}
 	p.Stock = newStock
+	p.StockBase += delta
 	p.Version++
 	p.UpdatedAt = now
 	return delta, nil
@@ -209,9 +227,6 @@ func (v *priceValidator) Validate(p *Product) error {
 type stockValidator struct{ Next Validator }
 
 func (v *stockValidator) Validate(p *Product) error {
-	if p.Stock < 0 {
-		return prodErrors.ErrInvalidStock
-	}
 	if p.StockMinimum < 0 {
 		return prodErrors.ErrInvalidStockMin
 	}
