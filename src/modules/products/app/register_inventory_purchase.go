@@ -72,7 +72,7 @@ func (uc *RegisterInventoryPurchase) Execute(ctx context.Context, in RegisterInv
 	if !in.Paid && (!in.PaidOn.IsZero() || in.PaymentMethod != "" || in.PaidFrom != "" || in.CashDrawerID != nil) {
 		return nil, shared.NewValidationError(prodErrors.ErrIncompletePurchasePayment)
 	}
-	if in.Paid && (in.PaidOn.IsZero() || (uc.Origin == "cloud" && in.PaidFrom == purchase.PaidFromCashDrawer) || (in.PaidFrom != purchase.PaidFromCashDrawer && in.CashDrawerID != nil)) {
+	if in.Paid && (in.PaidOn.IsZero() || (in.PaidFrom != purchase.PaidFromCashDrawer && in.CashDrawerID != nil)) {
 		return nil, shared.NewValidationError(prodErrors.ErrInvalidPurchaseSource)
 	}
 	seen := map[uuid.UUID]bool{}

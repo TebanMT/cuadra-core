@@ -31,7 +31,9 @@ func TestPurchaseRegistrationPaymentPermissions(t *testing.T) {
 		{"cloud_reception_pending_denied", "cloud", "operator", "", "", false, false},
 		{"unknown_role_denied", "desktop", "visitor", "cash", "cash_drawer", true, false},
 		{"owner_cash", "desktop", "owner", "cash", "cash_drawer", true, true},
-		{"cloud_owner_cash_denied", "cloud", "owner", "cash", "cash_drawer", true, false},
+		{"cloud_owner_cash", "cloud", "owner", "cash", "cash_drawer", true, true},
+		{"cloud_owner_card_from_drawer_denied", "cloud", "owner", "card", "cash_drawer", true, false},
+		{"cloud_owner_transfer_from_drawer_denied", "cloud", "owner", "transfer", "cash_drawer", true, false},
 		{"cloud_owner_transfer", "cloud", "owner", "transfer", "gym_fund", true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
