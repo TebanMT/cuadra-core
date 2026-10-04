@@ -193,6 +193,13 @@ func applyPullChange(ctx context.Context, tx sharedDomain.Transaction, change Pu
 		return err
 	}
 
+	// Historical movements used zero for an unknown cost. Cost corrections
+	// live in inventory_purchases and do not rewrite the physical movement.
+	// Accept the legacy representation from older servers without inventing a
+	// cost or weakening the positive-cost constraint for other values.
+	if change.EntityType == "stock_movements" && pl["cost"] == float64(0) {
+		pl["cost"] = nil
+	}
 	if change.EntityType == "inventory_purchases" && pl["origin"] == nil {
 		pl["origin"] = "desktop"
 		if pl["stock_movement_id"] == nil || pl["stock_movement_id"] == "00000000-0000-0000-0000-000000000000" {

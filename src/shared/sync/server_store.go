@@ -456,6 +456,9 @@ func (s *PostgresStore) updateRow(
 // dejó `cost` en centavos dentro del journal aunque el row canónico de
 // Postgres estaba en pesos; al materializarlo, SQLite multiplicaba otra vez
 // por 100. El resultado era un COGS ×100 en desktop y distinto al dashboard.
+// El cero histórico representa costo desconocido y viaja como NULL para
+// que los desktops existentes puedan aplicar la fila. El costo completado
+// de una compra vive en inventory_purchases, sin reescribir el movimiento.
 //
 // Para las demás filas, o cuando el JOIN canónico no encuentra el row, el
 // CASE devuelve el payload original sin tocar.
@@ -506,7 +509,7 @@ const canonicalAugmentExpr = `
 	            'movement_type', sm.movement_type,
 	            'delta',         sm.delta,
 	            'reason',        sm.reason,
-	            'cost',          sm.cost,
+	            'cost',          NULLIF(sm.cost, 0),
 	            'is_purchase',   sm.is_purchase,
 	            'sale_item_id',  sm.sale_item_id,
 	            'operator_id',   sm.operator_id,

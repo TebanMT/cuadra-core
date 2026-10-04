@@ -748,30 +748,56 @@ func TestPullAndFullSyncAugmentMembershipTypeFromCanonicalRow(t *testing.T) {
 // must send the canonical $5, never the stale 500 that SQLite would multiply
 // into 50,000 cents ($500).
 func TestPullAndFullSyncAugmentStockMovementCostFromCanonicalRow(t *testing.T) {
-	db := projectorTestDB(t)
-	gymID, userID := seedGymAndOwner(t, db)
-	r, tokens := newRealHandler(t, db)
-	tok, _ := tokens.GenerateAccessToken(userID, gymID, "owner")
-	productID := uuid.New()
-	movementID := uuid.New()
+	for _, tc := range []struct {
+		name       string
+		storedCost any
+		wireCost   any
+	}{
+		{"positive", 5, float64(5)},
+		{"unknown", nil, nil},
+		{"legacy_zero", 0, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := projectorTestDB(t)
+			gymID, userID := seedGymAndOwner(t, db)
+			r, tokens := newRealHandler(t, db)
+			tok, _ := tokens.GenerateAccessToken(userID, gymID, "owner")
+			productID := uuid.New()
+			movementID := uuid.New()
 
-	if err := db.Exec(`
+			if err := db.Exec(`
 		INSERT INTO products
 		    (id, gym_id, version, created_at, updated_at, name, price, stock, stock_minimum, active)
 		VALUES (?, ?, 1, NOW(), NOW(), 'Agua de prueba', 15, 24, 2, TRUE)`,
-		productID, gymID).Error; err != nil {
-		t.Fatalf("seed product: %v", err)
-	}
-	if err := db.Exec(`
+				productID, gymID).Error; err != nil {
+				t.Fatalf("seed product: %v", err)
+			}
+			// Reproduce a row predating migration 039, then restore the exact
+			// NOT VALID constraint before either HTTP request. DDL is transactional:
+			// any fixture failure rolls back both the row and the schema change.
+			if err := db.Transaction(func(tx *gorm.DB) error {
+				if tc.name == "legacy_zero" {
+					if err := tx.Exec(`ALTER TABLE stock_movements DROP CONSTRAINT chk_stock_movements_positive_cost`).Error; err != nil {
+						return err
+					}
+				}
+				if err := tx.Exec(`
 		INSERT INTO stock_movements
 		    (id, gym_id, version, created_at, updated_at, product_id,
 		     movement_type, delta, reason, cost, is_purchase, operator_id)
 		VALUES (?, ?, 1, NOW(), NOW(), ?, 'restock', 24,
-		        'Inventario inicial', 5, FALSE, ?)`,
-		movementID, gymID, productID, userID).Error; err != nil {
-		t.Fatalf("seed canonical stock movement: %v", err)
-	}
-	if err := db.Exec(`
+		        'Inventario inicial', ?, FALSE, ?)`,
+					movementID, gymID, productID, tc.storedCost, userID).Error; err != nil {
+					return err
+				}
+				if tc.name == "legacy_zero" {
+					return tx.Exec(`ALTER TABLE stock_movements ADD CONSTRAINT chk_stock_movements_positive_cost CHECK (cost IS NULL OR cost > 0) NOT VALID`).Error
+				}
+				return nil
+			}); err != nil {
+				t.Fatalf("seed canonical stock movement: %v", err)
+			}
+			if err := db.Exec(`
 		INSERT INTO sync_entities
 		    (gym_id, entity_type, entity_id, version, payload, server_updated_at)
 		VALUES (?, 'stock_movements', ?, 1,
@@ -783,41 +809,43 @@ func TestPullAndFullSyncAugmentStockMovementCostFromCanonicalRow(t *testing.T) {
 		            'sale_item_id', NULL, 'operator_id', ?::text,
 		            'created_at', 1, 'updated_at', 1
 		        ), NOW())`,
-		gymID, movementID, movementID, gymID, productID, userID).Error; err != nil {
-		t.Fatalf("seed stale stock movement journal: %v", err)
-	}
+				gymID, movementID, movementID, gymID, productID, userID).Error; err != nil {
+				t.Fatalf("seed stale stock movement journal: %v", err)
+			}
 
-	assertCanonical := func(path string) {
-		t.Helper()
-		rec := doJSONReq(t, r, "GET", path, tok, nil)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("GET %s status %d: %s", path, rec.Code, rec.Body.String())
-		}
-		var resp PullResponse
-		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-			t.Fatalf("decode %s: %v", path, err)
-		}
-		for _, ch := range resp.Changes {
-			if ch.EntityType != "stock_movements" || ch.EntityID != movementID.String() {
-				continue
+			assertCanonical := func(path string) {
+				t.Helper()
+				rec := doJSONReq(t, r, "GET", path, tok, nil)
+				if rec.Code != http.StatusOK {
+					t.Fatalf("GET %s status %d: %s", path, rec.Code, rec.Body.String())
+				}
+				var resp PullResponse
+				if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+					t.Fatalf("decode %s: %v", path, err)
+				}
+				for _, ch := range resp.Changes {
+					if ch.EntityType != "stock_movements" || ch.EntityID != movementID.String() {
+						continue
+					}
+					var pl map[string]any
+					if err := json.Unmarshal(ch.Payload, &pl); err != nil {
+						t.Fatalf("decode stock movement payload: %v", err)
+					}
+					if cost, exists := pl["cost"]; !exists || cost != tc.wireCost {
+						t.Fatalf("GET %s cost=%v (present=%v), want %v", path, cost, exists, tc.wireCost)
+					}
+					if pl["is_purchase"] != false {
+						t.Fatalf("GET %s is_purchase=%v, want false", path, pl["is_purchase"])
+					}
+					return
+				}
+				t.Fatalf("GET %s did not return stock movement %s", path, movementID)
 			}
-			var pl map[string]any
-			if err := json.Unmarshal(ch.Payload, &pl); err != nil {
-				t.Fatalf("decode stock movement payload: %v", err)
-			}
-			if pl["cost"] != float64(5) {
-				t.Fatalf("GET %s cost=%v, want canonical pesos 5", path, pl["cost"])
-			}
-			if pl["is_purchase"] != false {
-				t.Fatalf("GET %s is_purchase=%v, want false", path, pl["is_purchase"])
-			}
-			return
-		}
-		t.Fatalf("GET %s did not return stock movement %s", path, movementID)
-	}
 
-	assertCanonical("/api/v1/sync/pull?since=" + url.QueryEscape("1970-01-01T00:00:00Z") + "&limit=500")
-	assertCanonical("/api/v1/sync/full?limit=5000")
+			assertCanonical("/api/v1/sync/pull?since=" + url.QueryEscape("1970-01-01T00:00:00Z") + "&limit=500")
+			assertCanonical("/api/v1/sync/full?limit=5000")
+		})
+	}
 }
 
 // TestPullAugmentationLeavesNonGymRowsUntouched — salvo los tipos con
