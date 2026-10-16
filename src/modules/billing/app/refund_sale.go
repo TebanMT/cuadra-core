@@ -49,6 +49,7 @@ func (uc *RefundSale) Execute(ctx context.Context, in RefundSaleInput) (*RefundS
 	// Resolve Sale → root Payment, then execute the complete refund command.
 	// Stock returns only for items explicitly marked returned_to_stock.
 	tx, err := uc.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}
@@ -59,6 +60,7 @@ func (uc *RefundSale) Execute(ctx context.Context, in RefundSaleInput) (*RefundS
 	if s.GymID != in.GymID {
 		return nil, sharedDomain.NewBusinessError(billingErrors.ErrCrossGym, "")
 	}
+	sharedDomain.CloseQuery(tx)
 	out, err := uc.Refund.Execute(ctx, RefundPaymentInput{
 		GymID:           in.GymID,
 		ActorUserID:     in.ActorUserID,

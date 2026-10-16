@@ -18,6 +18,7 @@ import (
 	expenseDomain "github.com/cuadra/cuadra-core/src/modules/expenses/domain/expense"
 	expRepo "github.com/cuadra/cuadra-core/src/modules/expenses/domain/repository"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
+	"github.com/cuadra/cuadra-core/src/shared/textsearch"
 )
 
 // SQLite guarda money en cents (ADR-002 §2). Convierte al edge.
@@ -284,9 +285,9 @@ func buildExpenseWhereSqlite(q expRepo.ListQuery) (string, []any) {
 		where = append(where, "classification = ?")
 		args = append(args, q.Classification)
 	}
-	if s := normalizeExpenseSearch(q.Search); s != "" {
-		pattern := "%" + escapeLike(s) + "%"
-		where = append(where, "("+sqliteNormalizedSearchColumn("payee_name")+" LIKE ? ESCAPE '!' OR "+sqliteNormalizedSearchColumn("description")+" LIKE ? ESCAPE '!' OR "+sqliteNormalizedSearchColumn("reference")+" LIKE ? ESCAPE '!')")
+	if s := textsearch.Normalize(q.Search); s != "" {
+		pattern := "%" + textsearch.EscapeLike(s) + "%"
+		where = append(where, "("+textsearch.SQLiteColumn("payee_name")+" LIKE ? ESCAPE '!' OR "+textsearch.SQLiteColumn("description")+" LIKE ? ESCAPE '!' OR "+textsearch.SQLiteColumn("reference")+" LIKE ? ESCAPE '!')")
 		args = append(args, pattern, pattern, pattern)
 	}
 	return strings.Join(where, " AND "), args

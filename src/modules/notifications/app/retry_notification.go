@@ -64,6 +64,9 @@ func (uc *RetryNotification) Execute(ctx context.Context, in RetryNotificationIn
 		if n.GymID != in.GymID {
 			return sharedDomain.NewBusinessError(errors.New("cross-gym"), "")
 		}
+		if n.RecoveryAttemptedAt != nil {
+			return sharedDomain.NewBusinessError(ErrNotificationNotFailed, "Revisa el resultado con soporte antes de volver a enviarlo.")
+		}
 		if n.Status != notification.StatusFailed {
 			return sharedDomain.NewBusinessError(ErrNotificationNotFailed, "Solo puedes reintentar mensajes que fallaron.")
 		}

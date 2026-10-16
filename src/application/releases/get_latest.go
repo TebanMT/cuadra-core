@@ -44,6 +44,7 @@ func NewGetLatest(reader Reader, uow sharedDomain.UnitOfWork) *GetLatest {
 
 func (u *GetLatest) Execute(ctx context.Context, in GetLatestInput) (*GetLatestOutput, error) {
 	tx, err := u.uow.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return nil, err
 	}

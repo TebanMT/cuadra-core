@@ -12,8 +12,8 @@
 #                versión (-X main.version=<tag>) y la sube como artifact.
 #   3. deploy  — baja el artifact, scp atómico al server, rsync de las
 #                migraciones a /opt/tinta/migrations, restart de systemd
-#                (el binario aplica las migraciones nuevas al boot,
-#                version-aware) y smoke test a /health.
+#                (migrador separado antes del reinicio de API)
+#                y smoke test a /health.
 #
 # Así puedes subir todos los commits que quieras a main sin tocar prod;
 # el tag es la única puerta a producción y te da semantic versioning real
@@ -107,13 +107,16 @@ jobs:
           go build -tags server -trimpath \
             -ldflags="-s -w -X main.version=${{ steps.ver.outputs.version }}" \
             -o bin/tinta-server-linux-amd64 ./cmd/server
+          go build -tags server -trimpath -ldflags="-s -w" -o bin/tinta-migrate-linux-amd64 ./cmd/migrate
           ls -lh bin/tinta-server-linux-amd64
 
       - name: Subir artefacto (tinta-server linux/amd64)
         uses: actions/upload-artifact@v4
         with:
           name: tinta-server-linux-amd64
-          path: bin/tinta-server-linux-amd64
+          path: |
+            bin/tinta-server-linux-amd64
+            bin/tinta-migrate-linux-amd64
           retention-days: 7
           if-no-files-found: error
 
@@ -214,6 +217,10 @@ jobs:
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
         run: |
+          # Fail before replacing files if the one-time RLS setup is missing.
+          ssh tinta@${DEPLOY_HOST} '/bin/systemctl cat tinta-migrate >/dev/null'
+          scp bin/tinta-migrate-linux-amd64 tinta@${DEPLOY_HOST}:/opt/tinta/bin/tinta-migrate.new
+          ssh tinta@${DEPLOY_HOST} 'chmod +x /opt/tinta/bin/tinta-migrate.new && mv /opt/tinta/bin/tinta-migrate.new /opt/tinta/bin/tinta-migrate'
           REMOTE_BIN=/opt/tinta/bin/tinta-server
           scp bin/tinta-server-linux-amd64 \
             tinta@${DEPLOY_HOST}:${REMOTE_BIN}.new
@@ -224,16 +231,7 @@ jobs:
           "
 
       - name: Sincronizar migraciones SQL
-        # Solo COPIAMOS los .sql a /opt/tinta/migrations — NO los aplicamos
-        # acá. El binario corre ApplyPostgresMigrations al arrancar
-        # (cmd/server/main.go:108), que es VERSION-AWARE: consulta la tabla
-        # _migrations y aplica únicamente las versiones nuevas. El loop
-        # `psql` que antes vivía acá re-aplicaba TODO desde 001 y se rompía
-        # cuando una migración posterior evolucionaba el esquema (p.ej. 020
-        # dropeó uq_member_fingerprints_member para permitir multi-huella, y
-        # re-correr 001 intentaba recrear ese índice único sobre datos ya
-        # válidos → "Key is duplicated"). El rsync deja los archivos listos
-        # para que el migrador del boot los lea en el restart de abajo.
+        # Migration owner and runtime are separate roles.
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
         run: |
@@ -241,17 +239,18 @@ jobs:
             db_migrations/postgres/ \
             tinta@${DEPLOY_HOST}:/opt/tinta/migrations/
 
-      - name: Reiniciar tinta-server (aplica migraciones nuevas al boot)
+      - name: Aplicar migraciones con rol separado
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: ssh tinta@${DEPLOY_HOST} 'sudo /bin/systemctl start tinta-migrate'
+
+      - name: Reiniciar tinta-server (RLS obligatorio)
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
         run: |
           ssh tinta@${DEPLOY_HOST} 'sudo /bin/systemctl restart tinta-server'
 
-          # Al arrancar, el binario aplica las migraciones nuevas
-          # (version-aware). Si alguna falla, ApplyPostgresMigrations hace
-          # log.Fatalf → el server no levanta → este poll lo detecta y falla
-          # el deploy. Esperamos a que systemd reporte active; si en 30s no
-          # está corriendo, falla y nos avisa.
+          # Startup verifies that the runtime role cannot bypass tenant policies.
           for i in $(seq 1 15); do
             status=$(ssh tinta@${DEPLOY_HOST} 'sudo /bin/systemctl is-active tinta-server' || true)
             if [ "$status" = "active" ]; then

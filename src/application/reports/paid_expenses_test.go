@@ -79,3 +79,17 @@ func TestPaidExpensesRejectsReversedDates(t *testing.T) {
 		t.Fatal("expected date validation error")
 	}
 }
+
+func TestPaidExpenseSearchMatchesSpanishCaseAndAccents(t *testing.T) {
+	in := paidRange()
+	label := "NÓMINA recepción"
+	r := &fakeReader{expenseRows: []reports.ExpenseRow{{ID: uuid.New(), ExpenseDate: in.From, Amount: 100, Description: &label}}}
+	uc := reports.NewPaidExpenses(r, &snapshotSpyUoW{}, nil)
+	for _, term := range []string{"NÓMINA", "nómina", "nomina", " NoMiNa ", "RECEPCIÓN", "recepcion"} {
+		in.Query = term
+		out, err := uc.Execute(context.Background(), in)
+		if err != nil || out.Total != 1 || out.TotalAmount != 100 || out.Items[0].Description != label {
+			t.Fatalf("query %q: out=%+v err=%v", term, out, err)
+		}
+	}
+}

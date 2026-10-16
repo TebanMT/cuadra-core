@@ -83,6 +83,7 @@ func (uc *ListGymPayments) WithSales(s billingRepo.SaleItemRepository) *ListGymP
 
 func (uc *ListGymPayments) Execute(ctx context.Context, in ListGymPaymentsInput) (*ListGymPaymentsOutput, error) {
 	tx, err := uc.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}

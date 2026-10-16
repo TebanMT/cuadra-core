@@ -698,7 +698,7 @@ func (uc *RangeReport) canAccessPlus(tx sharedDomain.Transaction, gymID uuid.UUI
 		return false
 	}
 	g, err := uc.Gyms.GetByID(tx, gymID)
-	return err == nil && g != nil && gymDomain.CanAccessPlusFeatures(g.SubscriptionPlan)
+	return err == nil && g != nil && g.CanAccessFeature(gymDomain.FeatureProductMargins)
 }
 
 func canonicalFallback(income, other, product, expenses, purchases, refunds float64) CanonicalFinancialSnapshot {

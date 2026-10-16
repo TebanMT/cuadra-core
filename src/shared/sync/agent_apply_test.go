@@ -450,3 +450,84 @@ func TestApplyPullChange_Gym_TouchSuscripcion_LWWPorVersion(t *testing.T) {
 		t.Errorf("version local = %d, want 4", version)
 	}
 }
+
+func TestLaunchAccessPullCompatibility(t *testing.T) {
+	gymID := uuid.New()
+	db, uow := freshSidecarDBWithGym(t, gymID)
+	ctx := context.Background()
+	for _, step := range []struct {
+		version int
+		grant   any
+		want    bool
+	}{{2, true, true}, {3, nil, true}, {4, false, false}, {5, true, true}} {
+		var pl map[string]any
+		if err := json.Unmarshal(realisticGymPullPayload(t, gymID, step.version, false), &pl); err != nil {
+			t.Fatal(err)
+		}
+		if step.grant != nil {
+			pl["all_features_access"] = step.grant
+		}
+		payload, err := json.Marshal(pl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		change := syncpkg.PullChange{EntityType: "gyms", EntityID: gymID.String(), Version: step.version, Payload: payload, ServerUpdatedAt: time.Now().UTC()}
+		if err := uow.Command(ctx, func(tx sharedDomain.Transaction) error { return syncpkg.ApplyPullChange(ctx, tx, change) }); err != nil {
+			t.Fatal(err)
+		}
+		var grant bool
+		if err := db.Get(&grant, `SELECT all_features_access FROM gyms WHERE id = ?`, gymID); err != nil {
+			t.Fatal(err)
+		}
+		if grant != step.want {
+			t.Fatalf("version %d: grant=%v want=%v", step.version, grant, step.want)
+		}
+	}
+}
+
+func TestLaunchAccessArrivesDespitePendingLocalProfile(t *testing.T) {
+	gymID := uuid.New()
+	db, uow := freshSidecarDBWithGym(t, gymID)
+	if _, err := db.Exec(`UPDATE gyms SET version=100,name='Offline name' WHERE id=?`, gymID); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	apply := func(version int, grant bool, at time.Time) {
+		t.Helper()
+		var pl map[string]any
+		if err := json.Unmarshal(realisticGymPullPayload(t, gymID, version, false), &pl); err != nil {
+			t.Fatal(err)
+		}
+		pl["all_features_access"] = grant
+		payload, err := json.Marshal(pl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		change := syncpkg.PullChange{EntityType: "gyms", EntityID: gymID.String(), Version: version, Payload: payload, ServerUpdatedAt: at}
+		if err := uow.Command(context.Background(), func(tx sharedDomain.Transaction) error {
+			return syncpkg.ApplyPullChange(context.Background(), tx, change)
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	apply(2, true, now)
+	apply(3, false, now.Add(-time.Second)) // delayed older snapshot
+	var grant bool
+	var name string
+	if err := db.Get(&grant, `SELECT all_features_access FROM gyms WHERE id=?`, gymID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Get(&name, `SELECT name FROM gyms WHERE id=?`, gymID); err != nil {
+		t.Fatal(err)
+	}
+	if !grant || name != "Offline name" {
+		t.Fatalf("grant=%v name=%s", grant, name)
+	}
+	apply(4, false, now.Add(time.Second)) // explicit newer cloud decision
+	if err := db.Get(&grant, `SELECT all_features_access FROM gyms WHERE id=?`, gymID); err != nil {
+		t.Fatal(err)
+	}
+	if grant {
+		t.Fatal("newer cloud decision was skipped")
+	}
+}

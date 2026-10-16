@@ -221,7 +221,7 @@ var projectors = func() map[string]Projector {
 	// the queue first. Guard it too: rejecting only the later refunds row would
 	// leave an orphan negative ledger entry that still changes reports.
 	m["payments"] = func(g *gorm.DB, gymID, entityID uuid.UUID, payload []byte) error {
-		return projectPayment(g, paymentsTable, gymID, entityID, payload)
+		return projectPaymentWithFolio(g, paymentsTable, gymID, entityID, payload)
 	}
 	// A Sale is the mutable half of the correction aggregate. Once an
 	// immutable correction has claimed a revision, a late LWW payload from a
@@ -2436,7 +2436,14 @@ func projectGeneric(
 	if err != nil {
 		return err
 	}
-	return g.Exec(q, args...).Error
+	result := g.Exec(q, args...)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return errCrossTenant
+	}
+	return nil
 }
 
 // buildProjectorUpsert produces the SQL + args for projectGeneric without
@@ -2450,6 +2457,13 @@ func buildProjectorUpsert(
 	var raw map[string]any
 	if err := json.Unmarshal(payload, &raw); err != nil {
 		return "", nil, fmt.Errorf("projector %s: payload not a JSON object: %w", table.Type, err)
+	}
+
+	// Client payloads cannot grant access or rewrite cloud-owned billing.
+	if table.Type == "gyms" {
+		for _, key := range []string{"all_features_access", "subscription_plan", "subscription_status", "subscription_ends_at", "trial_ends_at", "stripe_customer_id"} {
+			delete(raw, key)
+		}
 	}
 
 	// Apply payload-key aliases (e.g. deleted_at_ms → deleted_at).
@@ -2535,19 +2549,20 @@ func buildProjectorUpsert(
 	for _, c := range cols {
 		// Don't update the conflict-key columns themselves on update —
 		// they're the dedupe identity.
-		if _, isKey := conflictSet[c]; isKey {
+		if _, isKey := conflictSet[c]; isKey || c == "gym_id" {
 			continue
 		}
 		setClauses = append(setClauses, fmt.Sprintf("%s = EXCLUDED.%s", c, c))
 	}
 
 	q := fmt.Sprintf(
-		`INSERT INTO %s (%s) VALUES (%s) ON CONFLICT (%s) DO UPDATE SET %s`,
+		`INSERT INTO %s (%s) VALUES (%s) ON CONFLICT (%s) DO UPDATE SET %s WHERE %s.gym_id = EXCLUDED.gym_id`,
 		table.Table,
 		strings.Join(cols, ", "),
 		strings.Join(placeholders, ", "),
 		strings.Join(conflictCols, ", "),
 		strings.Join(setClauses, ", "),
+		table.Table,
 	)
 	return q, args, nil
 }

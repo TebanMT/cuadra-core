@@ -4,6 +4,9 @@ package sidecartoken
 
 import (
 	"context"
+	"encoding/hex"
+	"errors"
+	shared "github.com/cuadra/cuadra-core/src/shared/domain"
 	"time"
 
 	"github.com/google/uuid"
@@ -20,7 +23,7 @@ type PostgresStore struct {
 
 func NewPostgresStore(db *gorm.DB) *PostgresStore { return &PostgresStore{db: db} }
 
-func (s *PostgresStore) LookupActiveByHash(ctx context.Context, hash []byte) (Credential, error) {
+func (s *PostgresStore) lookupActiveByHashScoped(ctx context.Context, hash []byte) (Credential, error) {
 	var rec struct {
 		ID          uuid.UUID
 		GymID       uuid.UUID `gorm:"column:gym_id"`
@@ -48,14 +51,14 @@ func (s *PostgresStore) LookupActiveByHash(ctx context.Context, hash []byte) (Cr
 	}, nil
 }
 
-func (s *PostgresStore) TouchLastSeen(ctx context.Context, credentialID uuid.UUID) error {
+func (s *PostgresStore) touchLastSeenScoped(ctx context.Context, credentialID uuid.UUID) error {
 	return s.db.WithContext(ctx).Exec(
 		`UPDATE sidecar_credentials SET last_seen_at = NOW() WHERE id = ?`,
 		credentialID,
 	).Error
 }
 
-func (s *PostgresStore) FindActive(ctx context.Context, gymID, clientID uuid.UUID) (Credential, error) {
+func (s *PostgresStore) findActiveScoped(ctx context.Context, gymID, clientID uuid.UUID) (Credential, error) {
 	var rec struct {
 		ID          uuid.UUID
 		GymID       uuid.UUID `gorm:"column:gym_id"`
@@ -83,7 +86,7 @@ func (s *PostgresStore) FindActive(ctx context.Context, gymID, clientID uuid.UUI
 	}, nil
 }
 
-func (s *PostgresStore) ListActiveByGym(ctx context.Context, gymID uuid.UUID) ([]Credential, error) {
+func (s *PostgresStore) listActiveByGymScoped(ctx context.Context, gymID uuid.UUID) ([]Credential, error) {
 	var rows []struct {
 		ID          uuid.UUID
 		GymID       uuid.UUID `gorm:"column:gym_id"`
@@ -111,7 +114,7 @@ func (s *PostgresStore) ListActiveByGym(ctx context.Context, gymID uuid.UUID) ([
 	return out, nil
 }
 
-func (s *PostgresStore) Insert(ctx context.Context, gymID, clientID, userID uuid.UUID, hash []byte, deviceLabel string) (Credential, error) {
+func (s *PostgresStore) insertScoped(ctx context.Context, gymID, clientID, userID uuid.UUID, hash []byte, deviceLabel string) (Credential, error) {
 	id := uuid.New()
 	now := time.Now().UTC()
 	var label any
@@ -132,7 +135,7 @@ func (s *PostgresStore) Insert(ctx context.Context, gymID, clientID, userID uuid
 	}, nil
 }
 
-func (s *PostgresStore) RevokeActive(ctx context.Context, gymID, clientID uuid.UUID) error {
+func (s *PostgresStore) revokeActiveScoped(ctx context.Context, gymID, clientID uuid.UUID) error {
 	return s.db.WithContext(ctx).Exec(`
 		UPDATE sidecar_credentials
 		SET revoked_at = NOW()
@@ -141,19 +144,109 @@ func (s *PostgresStore) RevokeActive(ctx context.Context, gymID, clientID uuid.U
 	).Error
 }
 
-func (s *PostgresStore) RevokeIdle(ctx context.Context, threshold time.Time) (int64, error) {
-	res := s.db.WithContext(ctx).Exec(`
-		UPDATE sidecar_credentials
-		SET revoked_at = NOW()
-		WHERE revoked_at IS NULL AND last_seen_at < ?`,
-		threshold,
-	)
-	return res.RowsAffected, res.Error
-}
-
 func derefString(p *string) string {
 	if p == nil {
 		return ""
 	}
 	return *p
+}
+
+func (s *PostgresStore) LookupActiveByHash(ctx context.Context, hash []byte) (out Credential, err error) {
+	ctx, err = shared.ResolveDBTenant(ctx, s.db, "sidecar", hex.EncodeToString(hash))
+	if err != nil {
+		if errors.Is(err, shared.ErrTenantScope) {
+			err = ErrNotFound
+		}
+		return
+	}
+	tx, err := shared.TenantDB(ctx, s.db)
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	out, err = (&PostgresStore{db: tx}).lookupActiveByHashScoped(ctx, hash)
+	if err != nil {
+		return
+	}
+	err = tx.Commit().Error
+	return
+}
+
+func (s *PostgresStore) TouchLastSeen(ctx context.Context, credentialID uuid.UUID) (err error) {
+	tx, err := shared.TenantDB(ctx, s.db)
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	err = (&PostgresStore{db: tx}).touchLastSeenScoped(ctx, credentialID)
+	if err != nil {
+		return
+	}
+	err = tx.Commit().Error
+	return
+}
+
+func (s *PostgresStore) FindActive(ctx context.Context, gymID, clientID uuid.UUID) (out Credential, err error) {
+	ctx = shared.WithTenant(ctx, gymID)
+	tx, err := shared.TenantDB(ctx, s.db)
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	out, err = (&PostgresStore{db: tx}).findActiveScoped(ctx, gymID, clientID)
+	if err != nil {
+		return
+	}
+	err = tx.Commit().Error
+	return
+}
+
+func (s *PostgresStore) ListActiveByGym(ctx context.Context, gymID uuid.UUID) (out []Credential, err error) {
+	ctx = shared.WithTenant(ctx, gymID)
+	tx, err := shared.TenantDB(ctx, s.db)
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	out, err = (&PostgresStore{db: tx}).listActiveByGymScoped(ctx, gymID)
+	if err != nil {
+		return
+	}
+	err = tx.Commit().Error
+	return
+}
+
+func (s *PostgresStore) Insert(ctx context.Context, gymID, clientID, userID uuid.UUID, hash []byte, deviceLabel string) (out Credential, err error) {
+	ctx = shared.WithTenant(ctx, gymID)
+	tx, err := shared.TenantDB(ctx, s.db)
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	out, err = (&PostgresStore{db: tx}).insertScoped(ctx, gymID, clientID, userID, hash, deviceLabel)
+	if err != nil {
+		return
+	}
+	err = tx.Commit().Error
+	return
+}
+
+func (s *PostgresStore) RevokeActive(ctx context.Context, gymID, clientID uuid.UUID) (err error) {
+	ctx = shared.WithTenant(ctx, gymID)
+	tx, err := shared.TenantDB(ctx, s.db)
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	err = (&PostgresStore{db: tx}).revokeActiveScoped(ctx, gymID, clientID)
+	if err != nil {
+		return
+	}
+	err = tx.Commit().Error
+	return
+}
+
+func (s *PostgresStore) RevokeIdle(ctx context.Context, threshold time.Time) (out int64, err error) {
+	err = s.db.WithContext(ctx).Raw(`SELECT tinta_private.revoke_idle(?)`, threshold).Scan(&out).Error
+	return
 }

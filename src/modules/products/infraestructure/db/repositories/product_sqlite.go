@@ -18,6 +18,7 @@ import (
 	productDomain "github.com/cuadra/cuadra-core/src/modules/products/domain/product"
 	prodRepo "github.com/cuadra/cuadra-core/src/modules/products/domain/repository"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
+	"github.com/cuadra/cuadra-core/src/shared/textsearch"
 )
 
 // SQLite stores money in cents (ADR-002 §2). Convert at the edge.
@@ -295,13 +296,13 @@ func buildProductWhereSqlite(q prodRepo.ListQuery) (string, []any) {
 		where = append(where, "category = ?")
 		args = append(args, q.Category)
 	}
-	if s := strings.TrimSpace(q.Search); s != "" {
+	if s := textsearch.Normalize(q.Search); s != "" {
 		// Substring match (%s%) — antes era prefix (s%), lo que dejaba
 		// fuera resultados como "Agua mineral" al buscar "mineral". El
 		// catálogo típico de un gym tiene <200 SKUs así que el full
 		// scan que esto implica no es problema.
-		where = append(where, "name LIKE ? COLLATE NOCASE")
-		args = append(args, "%"+s+"%")
+		where = append(where, textsearch.SQLiteColumn("name")+" LIKE ? ESCAPE '!'")
+		args = append(args, "%"+textsearch.EscapeLike(s)+"%")
 	}
 	if q.LowStockOnly {
 		where = append(where, "stock <= stock_minimum")

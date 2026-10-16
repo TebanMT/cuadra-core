@@ -14,6 +14,9 @@ import (
 // Finalize runs before committing the business transaction. All financial
 // rows written by an expense command get a durable completeness manifest.
 func (q *SqliteQueue) Finalize(ctx context.Context, tx shared.Transaction) error {
+	if err := finalizeFinancialGraph(ctx, tx); err != nil {
+		return err
+	}
 	stx := tx.(*shared.SqlxTransaction)
 	hasExpense := false
 	members := []string{}

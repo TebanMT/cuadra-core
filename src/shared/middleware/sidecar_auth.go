@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/cuadra/cuadra-core/src/shared/auth"
+	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 	"github.com/cuadra/cuadra-core/src/shared/sidecartoken"
 	"github.com/cuadra/cuadra-core/src/shared/utils"
 )
@@ -61,6 +62,7 @@ func SidecarOrJWTMiddleware(tokens auth.TokenService, store sidecartoken.Store) 
 			return
 		}
 		c.Set(GymIDKey, cred.GymID)
+		c.Request = c.Request.WithContext(sharedDomain.WithTenant(c.Request.Context(), cred.GymID))
 		// User context comes from the credential's emitter for audit
 		// breadcrumbs — sync writes don't have a "current user" since the
 		// sidecar runs 24/7 detached from any session, but the bootstrapper
@@ -76,7 +78,7 @@ func SidecarOrJWTMiddleware(tokens auth.TokenService, store sidecartoken.Store) 
 		go func() {
 			ctx, cancel := detachedContext()
 			defer cancel()
-			_ = store.TouchLastSeen(ctx, credID)
+			_ = store.TouchLastSeen(sharedDomain.WithTenant(ctx, cred.GymID), credID)
 		}()
 		c.Next()
 	}

@@ -31,6 +31,7 @@ var (
 
 // ProductController bundles UC-023 + UC-024.
 type ProductController struct {
+	Count                *prodApp.StockCount
 	RegisterPurchase     *prodApp.RegisterInventoryPurchase
 	MissingCosts         *prodApp.ListMissingPurchaseCosts
 	CompleteCost         *prodApp.CompleteLegacyPurchaseCost
@@ -95,6 +96,9 @@ func (ctrl *ProductController) RegisterRoutes(r *gin.Engine) {
 		api.DELETE("/products/:id", ctrl.handleDeactivate)
 		api.POST("/products/:id/reactivate", ctrl.handleReactivate)
 		api.GET("/products", ctrl.handleList)
+		if ctrl.Count != nil {
+			api.POST("/product-counts", ctrl.handleCount)
+		}
 		api.POST("/products/:id/adjust-stock", ctrl.handleAdjust)
 		if ctrl.ReceivePurchase != nil {
 			api.GET("/inventory-purchase-deliveries", ctrl.handlePurchaseDeliveries)
@@ -184,15 +188,16 @@ type correctInventoryPurchaseReq struct {
 }
 
 type productResp struct {
-	ID           uuid.UUID `json:"id"`
-	Name         string    `json:"name"`
-	Price        float64   `json:"price"`
-	Stock        int       `json:"stock"`
-	StockMinimum int       `json:"stock_minimum"`
-	Category     *string   `json:"category,omitempty"`
-	ImageURL     *string   `json:"image_url,omitempty"`
-	Active       bool      `json:"active"`
-	LowStock     bool      `json:"low_stock"`
+	CountRevision string    `json:"count_revision"`
+	ID            uuid.UUID `json:"id"`
+	Name          string    `json:"name"`
+	Price         float64   `json:"price"`
+	Stock         int       `json:"stock"`
+	StockMinimum  int       `json:"stock_minimum"`
+	Category      *string   `json:"category,omitempty"`
+	ImageURL      *string   `json:"image_url,omitempty"`
+	Active        bool      `json:"active"`
+	LowStock      bool      `json:"low_stock"`
 	// AvgUnitCost — costo unitario promedio ponderado (pesos), o ausente
 	// cuando el producto no tiene costo capturado. La ficha lo usa para
 	// "Costo prom · Precio · Margen". Nullable a propósito: el costo es
@@ -696,15 +701,16 @@ func parseUUIDParam(c *gin.Context, name string) (uuid.UUID, bool) {
 
 func toProductResp(p *productDomain.Product) productResp {
 	return productResp{
-		ID:           p.ID,
-		Name:         p.Name,
-		Price:        p.Price,
-		Stock:        p.Stock,
-		StockMinimum: p.StockMinimum,
-		Category:     p.Category,
-		ImageURL:     p.ImageURL,
-		Active:       p.Active,
-		LowStock:     p.IsLowStock(),
+		CountRevision: prodApp.CountSnapshot(p).Revision,
+		ID:            p.ID,
+		Name:          p.Name,
+		Price:         p.Price,
+		Stock:         p.Stock,
+		StockMinimum:  p.StockMinimum,
+		Category:      p.Category,
+		ImageURL:      p.ImageURL,
+		Active:        p.Active,
+		LowStock:      p.IsLowStock(),
 	}
 }
 
@@ -876,4 +882,26 @@ func (ctrl *ProductController) handleRegisterPurchase(c *gin.Context) {
 		items = append(items, inventoryPurchaseToWire(v))
 	}
 	utils.JsonResponse(c, 201, gin.H{"items": items})
+}
+
+func (ctrl *ProductController) handleCount(c *gin.Context) {
+	var in prodApp.CountInput
+	if err := c.ShouldBindJSON(&in); err != nil {
+		utils.ErrorResponse(c, 400, err)
+		return
+	}
+	in.GymID, _ = middleware.GetGymID(c)
+	in.ActorID, _ = middleware.GetUserID(c)
+	in.ActorRole, _ = middleware.GetRole(c)
+	out, err := ctrl.Count.Execute(c.Request.Context(), in)
+	if err != nil {
+		var conflict *prodApp.CountConflict
+		if errors.As(err, &conflict) {
+			c.JSON(409, gin.H{"status_code": 409, "message": conflict.Error(), "exception": conflict.Error(), "data": conflict})
+			return
+		}
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	utils.JsonResponse(c, 200, out)
 }

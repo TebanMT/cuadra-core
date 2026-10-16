@@ -1818,10 +1818,11 @@ func importAll(tx *gorm.DB, src sourceData, gymID, ownerID uuid.UUID, version in
 	log.Printf("import: stock_movements (restock)=%d", movCount)
 
 	// 8. recompute products.stock = SUM(stock_movements.delta) per product,
+	// Activate the stock ledger only after the imported history is complete;
 	// then re-emit each product's sync_entity with the right stock so sidecar
 	// pulls land the correct value (the initial emission used 0).
 	if err := tx.Exec(`
-		UPDATE products p SET stock = COALESCE((
+		UPDATE products p SET stock_origin = 0, stock = COALESCE((
 			SELECT SUM(delta) FROM stock_movements m
 			WHERE m.product_id = p.id AND m.deleted_at IS NULL
 		), 0)

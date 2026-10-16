@@ -50,6 +50,11 @@ func TestTakeBatch_ExpandsConnectedRefundGraphsAndQuarantinesTogether(t *testing
 				return err
 			}
 		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := uow.Command(ctx, func(tx sharedDomain.Transaction) error {
 		unrelatedID := uuid.NewString()
 		unrelated, err := json.Marshal(map[string]any{
 			"id": unrelatedID, "gym_id": gymID.String(), "version": 1,

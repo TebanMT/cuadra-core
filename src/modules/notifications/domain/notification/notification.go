@@ -43,26 +43,30 @@ const (
 // append-only after creation except for the lifecycle fields (Status,
 // SentAt, FailedAt, ErrorMessage, RetryCount, ProviderMessageID).
 type Notification struct {
-	ID                uuid.UUID
-	GymID             uuid.UUID
-	Version           int
-	Channel           string
-	TemplateKey       string
-	RecipientType     string
-	RecipientID       uuid.UUID
-	RecipientAddress  string
-	Payload           map[string]string
-	Status            string
-	SentAt            *time.Time
-	FailedAt          *time.Time
-	ErrorMessage      *string
-	RetryCount        int
-	ScheduledFor      time.Time
-	IdempotencyKey    *string
-	ProviderMessageID *string
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
-	DeletedAt         *time.Time
+	RecoveryVersion     int
+	RecoveryAction      string
+	RecoveryAt          *time.Time
+	RecoveryAttemptedAt *time.Time
+	ID                  uuid.UUID
+	GymID               uuid.UUID
+	Version             int
+	Channel             string
+	TemplateKey         string
+	RecipientType       string
+	RecipientID         uuid.UUID
+	RecipientAddress    string
+	Payload             map[string]string
+	Status              string
+	SentAt              *time.Time
+	FailedAt            *time.Time
+	ErrorMessage        *string
+	RetryCount          int
+	ScheduledFor        time.Time
+	IdempotencyKey      *string
+	ProviderMessageID   *string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+	DeletedAt           *time.Time
 }
 
 // New builds a pending Notification. `payload` is the ready-to-substitute
@@ -229,6 +233,10 @@ func (n *Notification) MarkHeld(reason string, now time.Time) {
 //
 // RetryCount se conserva como señal histórica, igual que en el retry.
 func (n *Notification) RearmForResend(recipientAddress string, payload map[string]string, now time.Time) {
+	n.RecoveryVersion = 0
+	n.RecoveryAction = ""
+	n.RecoveryAt = nil
+	n.RecoveryAttemptedAt = nil
 	n.Status = StatusPending
 	n.ScheduledFor = now
 	n.CreatedAt = now
@@ -259,4 +267,22 @@ func validRecipientType(t string) bool {
 		return true
 	}
 	return false
+}
+
+// ResolveHeld preserves event time and gives an explicit recovery its own freshness window.
+func (n *Notification) ResolveHeld(version int, action string, now time.Time) {
+	n.RecoveryVersion = version
+	n.RecoveryAction = action
+	n.RecoveryAt = &now
+	n.RecoveryAttemptedAt = nil
+	n.Status = StatusCancelled
+	if action == "send" {
+		n.Status = StatusPending
+		n.ScheduledFor = now
+		n.ErrorMessage = nil
+		n.FailedAt = nil
+		n.ProviderMessageID = nil
+	}
+	n.Version++
+	n.UpdatedAt = now
 }

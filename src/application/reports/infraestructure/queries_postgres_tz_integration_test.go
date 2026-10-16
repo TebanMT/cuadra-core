@@ -95,7 +95,7 @@ func (f *tzFixture) seedCheckin(t *testing.T, iso string) {
 	}
 }
 
-func day(t *testing.T, ymd string) time.Time {
+func postgresDay(t *testing.T, ymd string) time.Time {
 	t.Helper()
 	d, err := time.Parse("2006-01-02", ymd)
 	if err != nil {
@@ -114,7 +114,7 @@ func TestPG_CountCheckins_NocheLocalCuentaEnSuDia(t *testing.T) {
 	}
 	reader := reportsInfra.NewPostgresReader()
 
-	n, err := reader.CountCheckinsBetween(tx, f.gymID, cdmxTZ, day(t, "2026-07-27"), day(t, "2026-07-27"))
+	n, err := reader.CountCheckinsBetween(tx, f.gymID, cdmxTZ, postgresDay(t, "2026-07-27"), postgresDay(t, "2026-07-27"))
 	if err != nil {
 		t.Fatalf("CountCheckinsBetween: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestPG_CountCheckins_NocheLocalCuentaEnSuDia(t *testing.T) {
 		t.Errorf("check-ins del 27 (día local) = %d, want 1", n)
 	}
 
-	n, err = reader.CountCheckinsBetween(tx, f.gymID, cdmxTZ, day(t, "2026-07-28"), day(t, "2026-07-28"))
+	n, err = reader.CountCheckinsBetween(tx, f.gymID, cdmxTZ, postgresDay(t, "2026-07-28"), postgresDay(t, "2026-07-28"))
 	if err != nil {
 		t.Fatalf("CountCheckinsBetween: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestPG_CheckinsDailySeries_AgrupaPorDiaLocal(t *testing.T) {
 		t.Fatalf("query tx: %v", err)
 	}
 	rows, err := reportsInfra.NewPostgresReader().
-		CheckinsDailySeries(tx, f.gymID, cdmxTZ, day(t, "2026-07-27"), day(t, "2026-07-27"))
+		CheckinsDailySeries(tx, f.gymID, cdmxTZ, postgresDay(t, "2026-07-27"), postgresDay(t, "2026-07-27"))
 	if err != nil {
 		t.Fatalf("CheckinsDailySeries: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestPG_ZonaInvalidaNoRevientaElQuery(t *testing.T) {
 		t.Fatalf("query tx: %v", err)
 	}
 	rows, err := reportsInfra.NewPostgresReader().
-		CheckinsDailySeries(tx, f.gymID, "No/Existe", day(t, "2026-07-27"), day(t, "2026-07-27"))
+		CheckinsDailySeries(tx, f.gymID, "No/Existe", postgresDay(t, "2026-07-27"), postgresDay(t, "2026-07-27"))
 	if err != nil {
 		t.Fatalf("una zona inválida no debe romper el query: %v", err)
 	}
@@ -220,7 +220,7 @@ func TestPG_ExpensesDailySeries_UsaLaFechaDePagoDeLaCompra(t *testing.T) {
 		t.Fatalf("query tx: %v", err)
 	}
 	rows, err := reportsInfra.NewPostgresReader().
-		ExpensesDailySeries(tx, f.gymID, cdmxTZ, day(t, "2026-07-27"), day(t, "2026-07-27"))
+		ExpensesDailySeries(tx, f.gymID, cdmxTZ, postgresDay(t, "2026-07-27"), postgresDay(t, "2026-07-27"))
 	if err != nil {
 		t.Fatalf("ExpensesDailySeries: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestPG_ExpensesDailySeries_UsaLaFechaDePagoDeLaCompra(t *testing.T) {
 
 func TestPG_CanonicalFinancialEquationIsCentSafe(t *testing.T) {
 	f := setupTZFixture(t)
-	day := day(t, "2026-08-24")
+	day := postgresDay(t, "2026-08-24")
 	for i, amount := range []string{"0.10", "0.20"} {
 		id := uuid.New()
 		if err := f.db.Exec(`INSERT INTO payments
@@ -294,7 +294,7 @@ func TestPG_CanonicalFinancialEquationIsCentSafe(t *testing.T) {
 // one visible home in the canonical equation.
 func TestPG_CanonicalFinancialEquationMatchesThe415Scenario(t *testing.T) {
 	f := setupTZFixture(t)
-	reportDay := day(t, "2026-08-23")
+	reportDay := postgresDay(t, "2026-08-23")
 
 	for _, payment := range []struct {
 		amount  string
@@ -408,7 +408,7 @@ func TestPG_LegacyPurchaseWithKnownCostIsCompleteAndCounted(t *testing.T) {
 		t.Fatal(err)
 	}
 	reader := reportsInfra.NewPostgresReader()
-	reportDay := day(t, "2026-08-22")
+	reportDay := postgresDay(t, "2026-08-22")
 	total, err := reader.SumInventoryCostBetween(tx, f.gymID, cdmxTZ, reportDay, reportDay)
 	if err != nil {
 		t.Fatal(err)
@@ -441,7 +441,7 @@ func TestPG_LegacyPurchaseWithKnownCostIsCompleteAndCounted(t *testing.T) {
 
 func TestPG_LegacyCashExpenseIsVisibleButNeverAssumedPhysical(t *testing.T) {
 	f := setupTZFixture(t)
-	reportDay := day(t, "2026-08-24")
+	reportDay := postgresDay(t, "2026-08-24")
 	expenseID := uuid.New()
 	if err := f.db.Exec(`INSERT INTO expenses
 		(id,gym_id,version,created_at,updated_at,expense_date,amount,category,payment_method,paid_from,created_by)
@@ -564,7 +564,7 @@ func TestPG_ProductProfitabilityIsCentExactAcrossDiscountInstallmentAndReturnDis
 	reader := reportsInfra.NewPostgresReader()
 	read := func(from, to string) (revenue, cogs float64, quantity int) {
 		t.Helper()
-		rows, readErr := reader.ProductProfitabilityBetween(tx, f.gymID, day(t, from), day(t, to))
+		rows, readErr := reader.ProductProfitabilityBetween(tx, f.gymID, postgresDay(t, from), postgresDay(t, to))
 		if readErr != nil {
 			t.Fatal(readErr)
 		}
@@ -592,7 +592,7 @@ func TestPG_ProductProfitabilityIsCentExactAcrossDiscountInstallmentAndReturnDis
 		t.Fatalf("net period = revenue %.2f, cogs %.2f, qty %d; want .02/.02/1", revenue, cogs, quantity)
 	}
 	canonical, err := reader.CanonicalFinancialBetween(
-		tx, f.gymID, cdmxTZ, day(t, "2026-08-20"), day(t, "2026-08-22"),
+		tx, f.gymID, cdmxTZ, postgresDay(t, "2026-08-20"), postgresDay(t, "2026-08-22"),
 	)
 	if err != nil {
 		t.Fatal(err)

@@ -808,7 +808,7 @@ func TestPullAndFullSyncAugmentStockMovementCostFromCanonicalRow(t *testing.T) {
 		            'cost', 500, 'is_purchase', FALSE,
 		            'sale_item_id', NULL, 'operator_id', ?::text,
 		            'created_at', 1, 'updated_at', 1
-		        ), NOW())`,
+		        ), NOW()) ON CONFLICT(gym_id,entity_type,entity_id) DO UPDATE SET payload=EXCLUDED.payload`,
 				gymID, movementID, movementID, gymID, productID, userID).Error; err != nil {
 				t.Fatalf("seed stale stock movement journal: %v", err)
 			}
@@ -1639,6 +1639,13 @@ func TestSaleCorrectionAndOvercollectionRefund_CommitAsOneGraph(t *testing.T) {
 		VALUES (?, ?, 1, ?, ?, ?, 100, 0, 100, 0)`, saleID, gymID, now, now, rootID).Error; err != nil {
 		t.Fatal(err)
 	}
+	productID := uuid.New()
+	if err := db.Exec(`INSERT INTO products(id,gym_id,name,price,stock) VALUES(?,?,'Corrección',100,0)`, productID, gymID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(`INSERT INTO sale_items(id,gym_id,sale_id,product_id,product_name_snapshot,unit_price_snapshot,unit_cost_snapshot,quantity,line_total) VALUES(?,?,?,?, 'Corrección',100,1,1,100)`, uuid.New(), gymID, saleID, productID).Error; err != nil {
+		t.Fatal(err)
+	}
 	graphIDs := []string{refundID.String()}
 	encode := func(entityType string, id uuid.UUID, payload map[string]any) PushItem {
 		payload[refundGraphIDsKey] = graphIDs
@@ -1773,25 +1780,25 @@ func TestTwoSidecars_ConcurrentDebtCancellationsShareOnePendingBalance(t *testin
 		"payment_id": paymentID.String(), "member_id": nil,
 		"subtotal": 100.0, "discount": 0, "total": 100.0, "correction_version": 0,
 	}
-	seed := PushRequest{ClientID: uuid.NewString(), ClientNow: now, SchemaVersion: SchemaVersion,
-		Batch: []PushItem{encodeItem("payments", paymentID, 1, payment), encodeItem("sales", saleID, 1, sale)}}
-	seedResponse, status, err := performSyncPush(router, token, seed)
-	if err != nil || status != http.StatusOK || len(seedResponse.Results) != 2 ||
-		seedResponse.Results[0].Status != StatusAccepted || seedResponse.Results[1].Status != StatusAccepted {
-		t.Fatalf("seed graph status=%d err=%v response=%+v", status, err, seedResponse)
-	}
 	if err := db.Exec(`INSERT INTO products(
 		id,gym_id,version,created_at,updated_at,name,price,stock,stock_minimum,active)
 		VALUES (?, ?, 1, ?, ?, 'Producto deuda sync', 20, 5, 0, TRUE)`,
 		productID, gymID, now, now).Error; err != nil {
 		t.Fatalf("seed debt product: %v", err)
 	}
-	if err := db.Exec(`INSERT INTO sale_items(
-		id,gym_id,version,created_at,updated_at,sale_id,product_id,product_name_snapshot,
-		unit_price_snapshot,unit_cost_snapshot,quantity,line_total)
-		VALUES (?, ?, 1, ?, ?, ?, ?, 'Producto deuda sync', 20, 10, 5, 100)`,
-		saleItemID, gymID, now, now, saleID, productID).Error; err != nil {
-		t.Fatalf("seed debt sale item: %v", err)
+	seed := PushRequest{ClientID: uuid.NewString(), ClientNow: now, SchemaVersion: SchemaVersion,
+		Batch: []PushItem{encodeItem("payments", paymentID, 1, payment), encodeItem("sales", saleID, 1, sale)}}
+	seed.Batch = append(seed.Batch,
+		encodeItem("sale_items", saleItemID, 1, map[string]any{"id": saleItemID, "gym_id": gymID, "version": 1, "created_at": now.UnixMilli(), "updated_at": now.UnixMilli(), "sale_id": saleID, "product_id": productID, "product_name_snapshot": "Producto deuda sync", "unit_price_snapshot": 20, "unit_cost_snapshot": 10, "quantity": 5, "line_total": 100}),
+		encodeItem("stock_movements", uuid.New(), 1, map[string]any{"gym_id": gymID, "version": 1, "created_at": now.UnixMilli(), "updated_at": now.UnixMilli(), "product_id": productID, "movement_type": "sale", "delta": -5, "sale_item_id": saleItemID, "operator_id": userID}))
+	last := &seed.Batch[len(seed.Batch)-1]
+	rawMove := decodePushPayload(last.Payload)
+	rawMove["id"] = last.EntityID
+	last.Payload, _ = json.Marshal(rawMove)
+	seedResponse, status, err := performSyncPush(router, token, seed)
+	if err != nil || status != http.StatusOK || len(seedResponse.Results) != 4 ||
+		seedResponse.Results[0].Status != StatusAccepted || seedResponse.Results[1].Status != StatusAccepted {
+		t.Fatalf("seed graph status=%d err=%v response=%+v", status, err, seedResponse)
 	}
 
 	makeRequest := func(label string) PushRequest {

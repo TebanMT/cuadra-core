@@ -94,6 +94,13 @@ func NewProcessWebhook(
 }
 
 func (uc *ProcessWebhook) Execute(ctx context.Context, in ProcessWebhookInput) (*ProcessWebhookOutput, error) {
+	// The controller has already verified the provider signature. Identity
+	// lookup exposes only the tenant of this exact provider message ID.
+	if in.ProviderMessageID != "" {
+		if scoped, err := sharedDomain.ResolveTenant(ctx, uc.UoW, "notification", in.ProviderMessageID); err == nil {
+			ctx = scoped
+		}
+	}
 	now := time.Now().UTC()
 	out := ProcessWebhookOutput{}
 

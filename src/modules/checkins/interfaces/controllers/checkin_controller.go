@@ -331,6 +331,7 @@ func (c *CheckinController) handleListRecent(ctx *gin.Context) {
 		return
 	}
 	tx, err := c.UoW.Query(ctx.Request.Context())
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		utils.ErrorResponse(ctx, http.StatusInternalServerError, err)
 		return
@@ -385,6 +386,7 @@ func (c *CheckinController) handleCountToday(ctx *gin.Context) {
 		return
 	}
 	tx, err := c.UoW.Query(ctx.Request.Context())
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		utils.ErrorResponse(ctx, http.StatusInternalServerError, err)
 		return
@@ -416,6 +418,7 @@ func (c *CheckinController) handleListByMember(ctx *gin.Context) {
 		return
 	}
 	tx, err := c.UoW.Query(ctx.Request.Context())
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		utils.ErrorResponse(ctx, http.StatusInternalServerError, err)
 		return

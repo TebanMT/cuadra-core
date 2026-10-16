@@ -46,6 +46,7 @@ func (uc *ListPromotions) WithGyms(g gymRepo.GymRepository) *ListPromotions {
 
 func (uc *ListPromotions) Execute(ctx context.Context, in ListPromotionsInput) ([]*promoDomain.Promotion, error) {
 	tx, err := uc.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}

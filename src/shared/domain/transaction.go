@@ -18,8 +18,8 @@ type Transaction interface {
 //   - Command: write path. Auto begin / commit / rollback. Use this for any
 //     mutation. The fn runs inside a single transaction; returning an error
 //     rolls back, panicking does the same and re-panics.
-//   - Query: read path. Returns a non-transactional handle (still satisfies
-//     Transaction so repos work uniformly).
+//   - Query: read path. Call CloseQuery after use; PostgreSQL runtime pins
+//     a scoped read transaction, while SQLite keeps a lightweight handle.
 type UnitOfWork interface {
 	Begin(ctx context.Context) (Transaction, error)
 	Commit(tx Transaction) error
@@ -42,6 +42,7 @@ func ReadSnapshot(ctx context.Context, uow UnitOfWork, fn func(tx Transaction) e
 		return snapshot.ReadSnapshot(ctx, fn)
 	}
 	tx, err := uow.Query(ctx)
+	defer CloseQuery(tx)
 	if err != nil {
 		return err
 	}

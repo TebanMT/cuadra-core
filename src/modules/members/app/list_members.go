@@ -56,6 +56,7 @@ func (uc *ListMembers) WithGyms(gyms gymRepo.GymRepository) *ListMembers { uc.Gy
 
 func (uc *ListMembers) Execute(ctx context.Context, in ListMembersInput) (*ListMembersOutput, error) {
 	tx, err := uc.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}

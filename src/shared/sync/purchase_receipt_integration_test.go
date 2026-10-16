@@ -17,7 +17,7 @@ import (
 	reportsInfra "github.com/cuadra/cuadra-core/src/application/reports/infraestructure"
 	gymRepos "github.com/cuadra/cuadra-core/src/modules/gyms/infraestructure/db/repositories"
 	prodApp "github.com/cuadra/cuadra-core/src/modules/products/app"
-	product "github.com/cuadra/cuadra-core/src/modules/products/domain/product"
+
 	purchase "github.com/cuadra/cuadra-core/src/modules/products/domain/purchase"
 	repos "github.com/cuadra/cuadra-core/src/modules/products/infraestructure/db/repositories"
 	"github.com/cuadra/cuadra-core/src/shared/audit"
@@ -37,17 +37,11 @@ func newRemotePG(t *testing.T) *remotePG {
 	gym, user := seedGymAndOwner(t, db)
 	f := &remotePG{db: db, uow: shared.NewPostgresUnitOfWork(db), gym: gym, user: user, product: uuid.New(), order: uuid.New()}
 	t.Cleanup(func() { db.Exec(`DELETE FROM inventory_purchase_receipts WHERE gym_id=?`, gym) })
-	err := f.uow.Command(context.Background(), func(tx shared.Transaction) error {
-		p, e := product.New(f.product, gym, "Agua", 40, 5, 0, nil, nil, time.Now().UTC())
-		if e != nil {
-			return e
-		}
-		_, e = repos.NewProductPostgresRepository().Create(tx, p)
-		return e
-	})
+	created, err := prodApp.NewCreateProduct(repos.NewProductPostgresRepository(), repos.NewStockMovementPostgresRepository(), f.uow, audit.NewPostgresRecorder()).Execute(context.Background(), prodApp.CreateProductInput{GymID: gym, ActorUserID: user, Name: "Agua", Price: 40, InitialStock: 5})
 	if err != nil {
 		t.Fatal(err)
 	}
+	f.product = created.ProductID
 	uc := prodApp.NewCreateRemoteInventoryPurchase(repos.NewInventoryPurchasePostgresRepository(), repos.NewProductPostgresRepository(), gymRepos.NewGymPostgresRepository(), f.uow, audit.NewPostgresRecorder())
 	day, _ := time.Parse("2006-01-02", "2026-09-01")
 	in := prodApp.CreateRemoteInventoryPurchaseInput{ID: f.order, GymID: gym, ProductID: f.product, ActorUserID: user, ActorRole: "owner", Quantity: 10, UnitCost: 23.45, PaidOn: day, PaymentMethod: "transfer", PaidFrom: "gym_fund"}
@@ -126,11 +120,11 @@ func TestRemotePurchase_LateCommitRemainsVisibleAfterCursorAdvances(t *testing.T
 		t.Fatal(err)
 	}
 	changes, _, err := store.ListSinceCursor(ctx, query, f.gym, FullCursor{After: last.ServerUpdatedAt, EntityID: last.EntityID, EntityType: last.EntityType}, 1000)
-	if err != nil || len(changes) != 1 || changes[0].EntityType != "inventory_purchase_receipts" {
+	if err != nil || !containsReceipt(changes, f.order.String()) {
 		t.Fatalf("late commit lost after incremental cursor: changes=%v err=%v", changes, err)
 	}
 	changes, _, err = store.ListSince(ctx, query, f.gym, fullAnchor, 1000)
-	if err != nil || len(changes) != 1 || changes[0].EntityType != "inventory_purchase_receipts" {
+	if err != nil || !containsReceipt(changes, f.order.String()) {
 		t.Fatalf("late commit lost after full download: changes=%v err=%v", changes, err)
 	}
 }
@@ -160,7 +154,7 @@ func TestRemotePurchase_ConcurrentReceiptRetriesDoNotDuplicateStockOrPayment(t *
 	f.assertStock(t, 15)
 	var receipts, movements int64
 	f.db.Table("inventory_purchase_receipts").Where("gym_id=?", f.gym).Count(&receipts)
-	f.db.Table("stock_movements").Where("gym_id=?", f.gym).Count(&movements)
+	f.db.Table("stock_movements").Where("gym_id=? AND idempotency_key LIKE ?", f.gym, "purchase-receipt:%").Count(&movements)
 	if receipts != 1 || movements != 1 {
 		t.Fatalf("receipts/movements=%d/%d", receipts, movements)
 	}
@@ -235,6 +229,11 @@ func TestRemotePurchase_ConcurrentReceiptRetriesDoNotDuplicateStockOrPayment(t *
 func TestRemotePurchase_SnapshotReceiptRaceAndTenantGuard(t *testing.T) {
 	f := newRemotePG(t)
 	item := f.receiptItem(t)
+	// The offline stock snapshot represents 13 units sold. Preserve the
+	// independent physical event; a snapshot alone no longer changes stock.
+	if err := f.db.Exec(`INSERT INTO stock_movements(id,gym_id,product_id,movement_type,delta,operator_id) VALUES(?,?,?,'count_correction',-13,?)`, uuid.New(), f.gym, f.product, f.user).Error; err != nil {
+		t.Fatal(err)
+	}
 	raw := map[string]any{"id": f.product, "gym_id": f.gym, "version": 2, "created_at": time.Now().UnixMilli(), "updated_at": time.Now().UnixMilli(), "name": "Agua nueva", "price": 40, "stock": 2, "stock_base": -8, "stock_minimum": 0, "active": true}
 	payload, _ := json.Marshal(raw)
 	var wg sync.WaitGroup
@@ -438,4 +437,13 @@ func TestRemotePurchase_TwoTerminalsWithDifferentCostSnapshotsShareReceipt(t *te
 		t.Fatal(err)
 	}
 	f.assertStock(t, 15)
+}
+
+func containsReceipt(changes []PullChange, id string) bool {
+	for _, change := range changes {
+		if change.EntityType == "inventory_purchase_receipts" && change.EntityID == id {
+			return true
+		}
+	}
+	return false
 }

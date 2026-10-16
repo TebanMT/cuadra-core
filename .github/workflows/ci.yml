@@ -79,6 +79,7 @@ jobs:
       # etc). Apuntan al mismo Postgres del service container.
       DB_URL: postgresql://tinta:tinta_dev@localhost:5432/tinta?sslmode=disable
       DATABASE_URL: postgresql://tinta:tinta_dev@localhost:5432/tinta?sslmode=disable
+      TINTA_MODE: test
 
     steps:
       - uses: actions/checkout@v4
@@ -95,4 +96,4 @@ jobs:
         # El sidecar usa CGO via mattn/go-sqlite3; ubuntu-latest trae gcc.
         env:
           CGO_ENABLED: "1"
-        run: go test -tags "server sidecar" -race -count=1 ./...
+        run: go test -tags "server sidecar integration" -race -count=1 -timeout 5m ./...

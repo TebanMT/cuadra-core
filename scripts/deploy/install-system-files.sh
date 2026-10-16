@@ -24,6 +24,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 echo "→ Subiendo archivos a /tmp/..."
 scp "${REPO_ROOT}/scripts/systemd/tinta-server.service" \
     "${SSH_USER}@${SERVER}:/tmp/tinta-server.service"
+scp "${REPO_ROOT}/scripts/systemd/tinta-migrate.service" \
+    "${SSH_USER}@${SERVER}:/tmp/tinta-migrate.service"
 scp "${REPO_ROOT}/scripts/deploy/Caddyfile" \
     "${SSH_USER}@${SERVER}:/tmp/Caddyfile"
 
@@ -48,6 +50,14 @@ if ! command -v caddy >/dev/null 2>&1 || [ ! -d /etc/caddy ]; then
   echo "✓ Caddy instalado: $(caddy version)"
 fi
 
+# Dedicated migration process; its credential is never read by the API.
+id tinta-migrator >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin tinta-migrator
+install -d -o root -g root -m 700 /etc/tinta
+install -o root -g root -m 644 /tmp/tinta-migrate.service /etc/systemd/system/tinta-migrate.service
+rm /tmp/tinta-migrate.service
+printf '%s\n' 'tinta ALL=(root) NOPASSWD: /bin/systemctl start tinta-migrate' > /etc/sudoers.d/tinta-migrate
+chmod 440 /etc/sudoers.d/tinta-migrate
+visudo -cf /etc/sudoers.d/tinta-migrate
 # systemd unit.
 install -o root -g root -m 644 /tmp/tinta-server.service /etc/systemd/system/tinta-server.service
 rm /tmp/tinta-server.service

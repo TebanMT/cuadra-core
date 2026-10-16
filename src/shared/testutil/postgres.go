@@ -37,8 +37,8 @@ var (
 // OpenPostgres opens the integration Postgres handle (DATABASE_URL, falling
 // back to the local default) and guarantees the schema is current by running
 // ApplyPostgresMigrations before returning. Skips the test when Postgres is
-// unreachable so CI on machines without Postgres stays green; fails it when
-// Postgres is up but the migrations themselves error.
+// unreachable only for an unconfigured local run. An explicit DATABASE_URL
+// or CI makes an unavailable database a failure, never a silent green skip.
 //
 // Migrations run once per test binary (sync.Once) and under a Postgres
 // advisory lock so concurrent packages don't stampede an empty database —
@@ -51,8 +51,16 @@ func OpenPostgres(t *testing.T) *gorm.DB {
 	}
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
-		t.Skipf("integration test skipped — cannot reach Postgres at %s: %v", dsn, err)
+		if os.Getenv("DATABASE_URL") != "" || os.Getenv("CI") != "" {
+			t.Fatal("required integration PostgreSQL is unavailable")
+		}
+		t.Skip("integration test skipped — local PostgreSQL is unavailable")
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
 	migrateOnce.Do(func() { migrateErr = applyMigrations(db) })
 	if migrateErr != nil {
 		t.Fatalf("apply postgres migrations: %v", migrateErr)

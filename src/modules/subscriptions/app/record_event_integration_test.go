@@ -68,6 +68,7 @@ func seedTrialGymWithSyncRow(t *testing.T, db *gorm.DB) uuid.UUID {
 	t.Cleanup(func() {
 		db.Exec(`DELETE FROM subscription_events WHERE gym_id = ?`, gymID)
 		db.Exec(`DELETE FROM sync_entities WHERE gym_id = ?`, gymID)
+		db.Exec(`DELETE FROM cash_drawers WHERE gym_id = ?`, gymID)
 		db.Exec(`DELETE FROM gyms WHERE id = ?`, gymID)
 	})
 	return gymID

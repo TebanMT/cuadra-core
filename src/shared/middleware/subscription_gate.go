@@ -111,11 +111,13 @@ func EnforceActiveSubscription(tokens auth.TokenService, gyms gymRepo.GymReposit
 		// hasta que alguien debug-ee. Mejor un riesgo de "operó 1 hora más
 		// de lo debido" que "no pudo cobrar nada por un bug del lookup".
 		tx, err := uow.Query(c.Request.Context())
+		defer sharedDomain.CloseQuery(tx)
 		if err != nil {
 			c.Next()
 			return
 		}
 		g, err := gyms.GetByID(tx, claims.GymID)
+		sharedDomain.CloseQuery(tx)
 		if err != nil || g == nil {
 			c.Next()
 			return

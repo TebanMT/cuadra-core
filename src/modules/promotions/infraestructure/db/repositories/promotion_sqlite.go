@@ -17,6 +17,7 @@ import (
 	promoDomain "github.com/cuadra/cuadra-core/src/modules/promotions/domain/promotion"
 	promoRepo "github.com/cuadra/cuadra-core/src/modules/promotions/domain/repository"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
+	"github.com/cuadra/cuadra-core/src/shared/textsearch"
 )
 
 // SQLite usa cents para fixed_amount.value y discount_amount; percent y
@@ -126,17 +127,21 @@ func (r *PromotionSQLiteRepository) GetByID(tx sharedDomain.Transaction, id uuid
 
 func (r *PromotionSQLiteRepository) GetByCode(tx sharedDomain.Transaction, gymID uuid.UUID, codeLower string) (*promoDomain.Promotion, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
-	var row sqlitePromotionRow
-	err := stx.Get(context.Background(), &row,
-		`SELECT * FROM promotions WHERE gym_id = ? AND code = ? COLLATE NOCASE AND deleted_at IS NULL`,
-		gymID.String(), codeLower)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, sharedDomain.NewBusinessError(promoErrors.ErrPromotionCodeNotFound, "")
-	}
-	if err != nil {
+	var rows []sqlitePromotionRow
+	if err := stx.Select(context.Background(), &rows,
+		`SELECT * FROM promotions WHERE gym_id = ? AND `+textsearch.SQLiteLowerColumn("code")+` = ? AND deleted_at IS NULL LIMIT 2`,
+		gymID.String(), strings.ToLower(strings.TrimSpace(codeLower))); err != nil {
 		return nil, err
 	}
-	return promoFromRow(&row), nil
+	if len(rows) == 0 {
+		return nil, sharedDomain.NewBusinessError(promoErrors.ErrPromotionCodeNotFound, "")
+	}
+	// Older NOCASE indexes allowed accented case variants. Never choose a
+	// discount arbitrarily when such historical duplicates exist.
+	if len(rows) > 1 {
+		return nil, sharedDomain.NewBusinessError(promoErrors.ErrPromotionCodeAmbiguous, "")
+	}
+	return promoFromRow(&rows[0]), nil
 }
 
 func (r *PromotionSQLiteRepository) List(tx sharedDomain.Transaction, f promoRepo.ListFilter) ([]*promoDomain.Promotion, error) {
@@ -170,7 +175,7 @@ func (r *PromotionSQLiteRepository) List(tx sharedDomain.Transaction, f promoRep
 
 func (r *PromotionSQLiteRepository) ExistsByCode(tx sharedDomain.Transaction, gymID uuid.UUID, codeLower string, excludeID *uuid.UUID) (bool, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
-	q := `SELECT COUNT(1) FROM promotions WHERE gym_id = ? AND code = ? COLLATE NOCASE AND deleted_at IS NULL`
+	q := `SELECT COUNT(1) FROM promotions WHERE gym_id = ? AND ` + textsearch.SQLiteLowerColumn("code") + ` = ? AND deleted_at IS NULL`
 	args := []any{gymID.String(), strings.ToLower(strings.TrimSpace(codeLower))}
 	if excludeID != nil {
 		q += ` AND id <> ?`

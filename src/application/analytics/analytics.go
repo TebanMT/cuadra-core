@@ -723,6 +723,7 @@ type PromotionsROIQuery struct {
 // candado), no en la pestaña Análisis.
 func (uc *Overview) PromotionsROIReport(ctx context.Context, in PromotionsROIQuery) (*PromotionsROIOutput, error) {
 	tx, err := uc.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}

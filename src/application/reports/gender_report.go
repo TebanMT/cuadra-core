@@ -62,6 +62,7 @@ const defaultGenderReportDaysBack = 30
 
 func (uc *GenderReport) Execute(ctx context.Context, in GenderReportInput) (*GenderReportOutput, error) {
 	tx, err := uc.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}

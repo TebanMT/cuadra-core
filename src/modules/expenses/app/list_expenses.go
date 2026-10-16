@@ -51,6 +51,7 @@ func NewGetExpense(r expRepo.ExpenseRepository, u sharedDomain.UnitOfWork) *GetE
 }
 func (uc *GetExpense) Execute(ctx context.Context, gym, id uuid.UUID) (*expenseDomain.Expense, error) {
 	tx, err := uc.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}
@@ -72,6 +73,7 @@ func (uc *ListExpenses) Execute(ctx context.Context, in ListExpensesInput) (*Lis
 		}
 	}
 	tx, err := uc.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}

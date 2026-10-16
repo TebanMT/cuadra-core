@@ -145,7 +145,7 @@ func (uc *CreateOperator) Execute(ctx context.Context, in CreateOperatorInput) (
 		standardCap := false
 		if uc.Gyms != nil {
 			g, gerr := uc.Gyms.GetByID(tx, in.GymID)
-			if gerr == nil && g != nil && !gymDomain.CanAccessPlusFeatures(g.SubscriptionPlan) {
+			if gerr == nil && g != nil && !g.CanAccessFeature(gymDomain.FeatureExtraOperators) {
 				cap = userDomain.MaxOperatorsStandard - 1
 				standardCap = true
 			}

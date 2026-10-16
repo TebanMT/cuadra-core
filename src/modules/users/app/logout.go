@@ -44,6 +44,7 @@ func (uc *Logout) Execute(ctx context.Context, in LogoutInput) error {
 	if err != nil {
 		return sharedDomain.NewUnexpectedError(err)
 	}
+	ctx = sharedDomain.WithTenant(ctx, claims.GymID)
 	exp := claims.ExpiresAt
 	if exp.IsZero() {
 		exp = time.Now().UTC().Add(auth.RefreshTokenDuration)

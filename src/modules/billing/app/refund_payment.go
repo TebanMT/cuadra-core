@@ -127,6 +127,7 @@ func NewRefundPayment(payments billingRepo.PaymentRepository, folios *folioSvc.G
 // settlements when the owner clicked the original collection.
 func (uc *RefundPayment) Preview(ctx context.Context, gymID, selectedPaymentID uuid.UUID) (*RefundPreviewOutput, error) {
 	tx, err := uc.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}

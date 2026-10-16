@@ -56,6 +56,7 @@ func (uc *AttentionRequired) WithGyms(g gymRepo.GymRepository) *AttentionRequire
 
 func (uc *AttentionRequired) Execute(ctx context.Context, in AttentionRequiredInput) (*AttentionRequiredOutput, error) {
 	tx, err := uc.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}

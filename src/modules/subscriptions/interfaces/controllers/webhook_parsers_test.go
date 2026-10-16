@@ -251,10 +251,8 @@ func TestParseStripe_InvoicePaidRenewal_LegacyAPI(t *testing.T) {
 	}
 }
 
-func TestParseStripe_InvoiceFirstChargeIgnored(t *testing.T) {
-	// billing_reason=subscription_create es el cobro inicial del checkout —
-	// customer.subscription.created ya registra la activación; procesar
-	// también su invoice duplicaría la fila en la historia.
+func TestParseStripe_InvoiceFirstChargeConfirmsPayment(t *testing.T) {
+	// The first paid invoice is the evidence needed for a launch grant.
 	obj := stripeRenewalInvoice(uuid.New(), 1756080000)
 	obj["billing_reason"] = "subscription_create"
 	body := mpEnvelopeJSON(t, map[string]any{
@@ -266,8 +264,8 @@ func TestParseStripe_InvoiceFirstChargeIgnored(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if in != nil {
-		t.Fatalf("expected nil (first charge handled by subscription.created), got %+v", in)
+	if in == nil || !in.ConfirmedPayment || in.Type != subDomain.EventActivated {
+		t.Fatalf("first paid invoice missing confirmation: %+v", in)
 	}
 }
 
@@ -745,5 +743,22 @@ func TestVerifier_StripeEmptySecretRejectsInProduction(t *testing.T) {
 	v := NewWebhookVerifier("", "", true)
 	if err := v.VerifyStripe([]byte("body"), "sig"); err == nil {
 		t.Fatal("empty Stripe secret in production should reject")
+	}
+}
+
+func TestLaunchStripeInvoiceMetadataAndUnpaidSubscription(t *testing.T) {
+	gym := uuid.New()
+	for _, kind := range []string{"invoice.paid", "customer.subscription.created"} {
+		obj := stripeRenewalInvoice(gym, 1756080000)
+		obj["metadata"] = map[string]any{"gym_id": gym.String(), "plan": "standard_annual"}
+		obj["billing_reason"] = "subscription_create"
+		body := mpEnvelopeJSON(t, map[string]any{"id": "evt_launch", "type": kind, "data": map[string]any{"object": obj}})
+		in, err := parseStripeEvent(body)
+		if err != nil || in == nil {
+			t.Fatal(err)
+		}
+		if in.Plan != "standard_annual" || in.ConfirmedPayment != (kind == "invoice.paid") {
+			t.Fatalf("wrong evidence: %+v", in)
+		}
 	}
 }

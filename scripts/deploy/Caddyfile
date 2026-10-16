@@ -14,6 +14,10 @@
 #   journalctl -u caddy -f
 
 api.entinta.app {
+	# Internal metrics stay available only through the loopback listener.
+	@internal path /_internal/*
+	respond @internal 404
+
 	# Subir el límite de body — los uploads de fotos de socios pueden pesar.
 	# Cuadra valida tamaño en aplicación; esto solo evita el 413 del proxy.
 	request_body {

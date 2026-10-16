@@ -15,6 +15,7 @@ import (
 	expRepo "github.com/cuadra/cuadra-core/src/modules/expenses/domain/repository"
 	"github.com/cuadra/cuadra-core/src/modules/expenses/infraestructure/db/models"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
+	"github.com/cuadra/cuadra-core/src/shared/textsearch"
 )
 
 type ExpensePostgresRepository struct{}
@@ -249,9 +250,9 @@ func buildExpenseFilterPg(base *gorm.DB, q expRepo.ListQuery) *gorm.DB {
 	if q.Classification != "" {
 		base = base.Where("classification = ?", q.Classification)
 	}
-	if s := normalizeExpenseSearch(q.Search); s != "" {
-		pattern := "%" + escapeLike(s) + "%"
-		clause := "(" + postgresNormalizedSearchColumn("payee_name") + " LIKE ? ESCAPE '!' OR " + postgresNormalizedSearchColumn("description") + " LIKE ? ESCAPE '!' OR " + postgresNormalizedSearchColumn("reference") + " LIKE ? ESCAPE '!')"
+	if s := textsearch.Normalize(q.Search); s != "" {
+		pattern := "%" + textsearch.EscapeLike(s) + "%"
+		clause := "(" + textsearch.PostgresColumn("payee_name") + " LIKE ? ESCAPE '!' OR " + textsearch.PostgresColumn("description") + " LIKE ? ESCAPE '!' OR " + textsearch.PostgresColumn("reference") + " LIKE ? ESCAPE '!')"
 		base = base.Where(clause, pattern, pattern, pattern)
 	}
 	return base

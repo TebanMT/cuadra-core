@@ -223,3 +223,17 @@ func TestStartCheckout_RejectsInvalidPlan(t *testing.T) {
 		t.Fatal("expected validation error for invalid plan")
 	}
 }
+
+func TestLaunchCheckoutKeepsStandardTariffAfterOfferCloses(t *testing.T) {
+	uc, gateway, gymID, userID := newStartCheckoutFixture(t)
+	uc.Gyms.(*fakeGyms).byID[gymID].AllFeaturesAccess = true
+	for _, plan := range []string{gymDomain.PlanPlusMonthly, gymDomain.PlanPlusAnnual} {
+		_, err := uc.Execute(context.Background(), StartCheckoutInput{GymID: gymID, UserID: userID, Provider: subDomain.ProviderStripe, Plan: plan})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !gateway.last.LaunchPricing || gymDomain.IsPlusPlan(gateway.last.Plan) {
+			t.Fatalf("launch paid Plus price: %+v", gateway.last)
+		}
+	}
+}

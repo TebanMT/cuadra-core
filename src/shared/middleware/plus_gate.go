@@ -21,15 +21,14 @@ type PlanGateResponse struct {
 	Message      string `json:"message"`
 }
 
-// RequirePlusPlan corre DESPUÉS de AuthMiddleware (lee gym_id de las claims
-// stash-eadas) y aborta con 402 si el gym no está en Plus. Trial y Standard
-// NO pasan mientras Plus no se libere (ver gymDomain.CanAccessPlusFeatures
-// para el WHY y cuándo revertir).
-//
-// Fail-closed: si no podemos comprobar el plan, la función no se ejecuta.
-// Un fallo de infraestructura se distingue del 402 para que el FE muestre
-// "no pudimos verificar" y permita reintentar, nunca un falso upsell.
+// RequirePlusPlan retains the bundle gate for callers that expose several Plus
+// features together. New feature-specific routes should use RequireFeature.
 func RequirePlusPlan(gyms gymRepo.GymRepository, uow sharedDomain.UnitOfWork) gin.HandlerFunc {
+	return RequireFeature(gyms, uow, gymDomain.FeatureAnalytics)
+}
+
+// RequireFeature uses the formal feature catalog, including launch grants.
+func RequireFeature(gyms gymRepo.GymRepository, uow sharedDomain.UnitOfWork, feature gymDomain.Feature) gin.HandlerFunc {
 	if gyms == nil || uow == nil {
 		return func(c *gin.Context) { abortPlanCheckUnavailable(c) }
 	}
@@ -42,16 +41,18 @@ func RequirePlusPlan(gyms gymRepo.GymRepository, uow sharedDomain.UnitOfWork) gi
 			return
 		}
 		tx, err := uow.Query(c.Request.Context())
+		defer sharedDomain.CloseQuery(tx)
 		if err != nil {
 			abortPlanCheckUnavailable(c)
 			return
 		}
 		g, err := gyms.GetByID(tx, gymID)
+		sharedDomain.CloseQuery(tx)
 		if err != nil || g == nil {
 			abortPlanCheckUnavailable(c)
 			return
 		}
-		if gymDomain.CanAccessPlusFeatures(g.SubscriptionPlan) {
+		if g.CanAccessFeature(feature) {
 			c.Next()
 			return
 		}
@@ -80,6 +81,7 @@ func EnforcePlusInline(c *gin.Context, gyms gymRepo.GymRepository, uow sharedDom
 		return true
 	}
 	tx, err := uow.Query(c.Request.Context())
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		abortPlanCheckUnavailable(c)
 		return false
@@ -89,7 +91,7 @@ func EnforcePlusInline(c *gin.Context, gyms gymRepo.GymRepository, uow sharedDom
 		abortPlanCheckUnavailable(c)
 		return false
 	}
-	if gymDomain.CanAccessPlusFeatures(g.SubscriptionPlan) {
+	if gymDomain.CanAccessPlusFeatures(g.SubscriptionPlan, g.AllFeaturesAccess) {
 		return true
 	}
 	c.AbortWithStatusJSON(http.StatusPaymentRequired, PlanGateResponse{

@@ -43,6 +43,8 @@ func (r *NotificationPostgresRepository) Update(tx sharedDomain.Transaction, n *
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	n.UpdatedAt = time.Now().UTC()
 	updates := map[string]any{
+		"deleted_at":       n.DeletedAt,
+		"recovery_version": n.RecoveryVersion, "recovery_action": n.RecoveryAction, "recovery_at": n.RecoveryAt, "recovery_attempted_at": n.RecoveryAttemptedAt,
 		"version":             n.Version,
 		"updated_at":          n.UpdatedAt,
 		"status":              n.Status,
@@ -210,7 +212,7 @@ func (r *NotificationPostgresRepository) ListByGym(tx sharedDomain.Transaction, 
 		return nil, 0, err
 	}
 	var rows []models.NotificationModel
-	if err := base.Order("created_at DESC").Limit(pageSize).Offset((page - 1) * pageSize).Find(&rows).Error; err != nil {
+	if err := base.Order("created_at DESC, id DESC").Limit(pageSize).Offset((page - 1) * pageSize).Find(&rows).Error; err != nil {
 		return nil, 0, err
 	}
 	out := make([]*notiDomain.Notification, 0, len(rows))
@@ -227,9 +229,11 @@ func (r *NotificationPostgresRepository) ListByGym(tx sharedDomain.Transaction, 
 func notificationToModel(n *notiDomain.Notification) (models.NotificationModel, error) {
 	payload, err := json.Marshal(n.Payload)
 	if err != nil {
-		return models.NotificationModel{}, err
+		return models.NotificationModel{
+			RecoveryVersion: n.RecoveryVersion, RecoveryAction: n.RecoveryAction, RecoveryAt: n.RecoveryAt, RecoveryAttemptedAt: n.RecoveryAttemptedAt}, err
 	}
 	return models.NotificationModel{
+		RecoveryVersion: n.RecoveryVersion, RecoveryAction: n.RecoveryAction, RecoveryAt: n.RecoveryAt, RecoveryAttemptedAt: n.RecoveryAttemptedAt,
 		ID:                n.ID,
 		GymID:             n.GymID,
 		Version:           n.Version,
@@ -324,6 +328,7 @@ func notificationFromModel(m *models.NotificationModel) (*notiDomain.Notificatio
 		}
 	}
 	return &notiDomain.Notification{
+		RecoveryVersion: m.RecoveryVersion, RecoveryAction: m.RecoveryAction, RecoveryAt: m.RecoveryAt, RecoveryAttemptedAt: m.RecoveryAttemptedAt,
 		ID:                m.ID,
 		GymID:             m.GymID,
 		Version:           m.Version,

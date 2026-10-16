@@ -423,13 +423,26 @@ func TestMetricsEndpoint(t *testing.T) {
 	r, _, gymID, tok, _ := newTestHandler(t)
 	doJSON(t, r, "POST", "/api/v1/sync/push", tok,
 		pushBody(gymID, []PushItem{newMemberItem(gymID, uuid.New(), 1, time.Now())}))
-	resp := doJSON(t, r, "GET", "/_internal/metrics", "", nil)
+	req := httptest.NewRequest("GET", "/_internal/metrics", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	resp := httptest.NewRecorder()
+	r.ServeHTTP(resp, req)
 	if resp.Code != 200 {
 		t.Errorf("metrics status %d", resp.Code)
 	}
 	body := resp.Body.String()
 	if !contains(body, "sync_push_requests_total") || !contains(body, "sync_request_duration_seconds") {
 		t.Errorf("missing expected metric series:\n%s", body)
+	}
+	for _, address := range []string{"203.0.113.4:12345", "127.0.0.1:12345"} {
+		req := httptest.NewRequest("GET", "/_internal/metrics", nil)
+		req.RemoteAddr = address
+		req.Header.Set("X-Forwarded-For", "127.0.0.1")
+		resp := httptest.NewRecorder()
+		r.ServeHTTP(resp, req)
+		if resp.Code != http.StatusNotFound {
+			t.Errorf("external/proxied metrics exposed: %s => %d", address, resp.Code)
+		}
 	}
 }
 

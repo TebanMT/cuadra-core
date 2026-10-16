@@ -30,17 +30,18 @@ type LoginPINInput struct {
 }
 
 type LoginPINOutput struct {
-	UserID           uuid.UUID
-	GymID            uuid.UUID
-	FullName         string
-	Email            string
-	Role             string
-	GymName          *string
-	AccessToken      string
-	RefreshToken     string
-	SetupCompleted   bool
-	TrialEndsAt      *time.Time
-	SubscriptionPlan string
+	UserID            uuid.UUID
+	GymID             uuid.UUID
+	FullName          string
+	Email             string
+	Role              string
+	GymName           *string
+	AccessToken       string
+	RefreshToken      string
+	SetupCompleted    bool
+	TrialEndsAt       *time.Time
+	AllFeaturesAccess bool
+	SubscriptionPlan  string
 }
 
 type LoginPIN struct {
@@ -111,6 +112,7 @@ func (uc *LoginPIN) Execute(ctx context.Context, in LoginPINInput) (LoginPINOutp
 		out.SetupCompleted = gym.IsSetupComplete()
 		out.TrialEndsAt = gym.TrialEndsAt
 		out.SubscriptionPlan = gym.SubscriptionPlan
+		out.AllFeaturesAccess = gym.AllFeaturesAccess
 		return nil
 	})
 	if err != nil {

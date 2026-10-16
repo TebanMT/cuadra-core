@@ -152,7 +152,7 @@ func (uc *Broadcast) Execute(ctx context.Context, in BroadcastInput) (*Broadcast
 		//
 		// Límites por plan (2C): en Standard el costo de cada mensaje lo absorbe
 		// Tinta (número maestro), así que acotamos. Plus levanta ambos topes.
-		isPlus := gymDomain.CanAccessPlusFeatures(gym.SubscriptionPlan)
+		isPlus := gym.CanAccessFeature(gymDomain.FeatureBroadcasts)
 		out.IsPlus = isPlus
 		out.AudienceCap = standardAudienceCap
 		out.MonthlyLimit = standardMonthlyLimit

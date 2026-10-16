@@ -277,6 +277,7 @@ func (uc *RegisterFingerprint) checkCollision(ctx context.Context, in RegisterFi
 	// modal ("Esta huella ya está registrada para X"). A separate Query tx
 	// is fine — we're already outside the write path.
 	nameTx, err := uc.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(nameTx)
 	if err != nil {
 		return sharedDomain.NewUnexpectedError(err)
 	}

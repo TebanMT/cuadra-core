@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"log"
 	"time"
@@ -51,6 +52,10 @@ func NewRequestPasswordReset(users userRepo.UserRepository, resets userRepo.Pass
 func (uc *RequestPasswordReset) Execute(ctx context.Context, emailAddr string) error {
 	if !userDomain.ValidateEmail(emailAddr) {
 		return sharedDomain.NewValidationError(userErrors.ErrInvalidEmail)
+	}
+	ctx, scopeErr := sharedDomain.ResolveTenant(ctx, uc.UoW, "email", emailAddr)
+	if scopeErr != nil {
+		return nil
 	}
 	now := uc.NowFunc()
 	plain, err := generateResetToken()
@@ -139,6 +144,12 @@ func NewConfirmPasswordReset(users userRepo.UserRepository, resets userRepo.Pass
 }
 
 func (uc *ConfirmPasswordReset) Execute(ctx context.Context, token, newPassword string) error {
+	tokenHash := sha256.Sum256([]byte(token))
+	ctx, scopeErr := sharedDomain.ResolveTenant(ctx, uc.UoW, "reset", hex.EncodeToString(tokenHash[:]))
+	if scopeErr != nil {
+		return sharedDomain.NewBusinessError(userErrors.ErrInvalidResetToken, "")
+	}
+
 	if err := userDomain.ValidatePassword(newPassword); err != nil {
 		return sharedDomain.NewValidationError(err)
 	}

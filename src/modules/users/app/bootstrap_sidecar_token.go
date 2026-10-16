@@ -52,7 +52,8 @@ func (uc *BootstrapSidecarToken) Execute(ctx context.Context, in BootstrapSideca
 	if in.GymID == uuid.Nil || in.UserID == uuid.Nil || in.ClientID == uuid.Nil {
 		return "", fmt.Errorf("bootstrap: missing required ids")
 	}
-	// First check (no transaction needed for the read).
+	ctx = sharedDomain.WithTenant(ctx, in.GymID)
+	// First check in a scoped read transaction.
 	if _, err := uc.Store.FindActive(ctx, in.GymID, in.ClientID); err == nil {
 		return "", nil
 	} else if !errors.Is(err, sidecartoken.ErrNotFound) {

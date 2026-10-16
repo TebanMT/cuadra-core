@@ -45,6 +45,7 @@ func NewGenerateReceipt(payments billingRepo.PaymentRepository, gyms gymRepo.Gym
 
 func (uc *GenerateReceipt) Execute(ctx context.Context, in GenerateReceiptInput) (*GenerateReceiptOutput, error) {
 	tx, err := uc.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}
@@ -128,6 +129,7 @@ func (uc *SendReceipt) WithResender(r ReceiptResender) *SendReceipt {
 
 func (uc *SendReceipt) Execute(ctx context.Context, in SendReceiptInput) (*SendReceiptOutput, error) {
 	tx, err := uc.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}

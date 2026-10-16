@@ -335,6 +335,9 @@ func (r *PaymentPostgresRepository) refundBalance(gormTx *gorm.DB, gymID, rootPa
 // UPDATE so concurrent INSERTs queue behind us.
 func (r *PaymentPostgresRepository) MaxFolioForConcept(tx sharedDomain.Transaction, gymID uuid.UUID, concept string) (string, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	if err := gormTx.Exec(`SELECT pg_advisory_xact_lock(hashtextextended(?,0))`, "tinta:payment-folio:"+gymID.String()).Error; err != nil {
+		return "", err
+	}
 	var max struct {
 		Max *string
 	}

@@ -98,16 +98,20 @@ type preapprovalResponse struct {
 
 func (g *MercadoPagoGateway) StartCheckout(ctx context.Context, in subDomain.CheckoutRequest) (subDomain.CheckoutResult, error) {
 	amount, ok := g.amounts[in.Plan]
+	if in.LaunchPricing && in.Plan == gymDomain.PlanStandardMonthly {
+		amount = float64(subDomain.LaunchMonthlyCents) / 100
+		ok = true
+	}
 	if !ok {
 		return subDomain.CheckoutResult{}, fmt.Errorf("mercadopago: %w (plan=%s)", subDomain.ErrUnsupportedPlan, in.Plan)
 	}
-	reason := "Cuadra — suscripción mensual"
+	reason := "Tinta — suscripción mensual"
 	if in.GymName != "" {
-		reason = fmt.Sprintf("Cuadra — %s", in.GymName)
+		reason = fmt.Sprintf("Tinta — %s", in.GymName)
 	}
 	body := preapprovalRequest{
 		Reason:            reason,
-		ExternalReference: in.GymID.String(),
+		ExternalReference: in.GymID.String() + ":" + in.Plan,
 		PayerEmail:        in.CustomerEmail,
 		BackURL:           backOrFallback(g.cfg.BackURL, in.SuccessURL),
 		Status:            "pending",

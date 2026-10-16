@@ -144,11 +144,14 @@ func (s *PostgresStore) TouchEntity(
 // al conflict path (LWW por updated_at) en vez de aceptarse limpio. Es la
 // semántica documentada, y el client-wins es seguro para billing: enqueueGym
 // no emite subscription_* y el projector sólo escribe llaves presentes.
+// Use the write time: a payment transaction can wait for a lock while a
+// desktop advances its cursor. NOW() would retain the transaction start time
+// and make the committed entitlement invisible to that incremental cursor.
 func (s *PostgresStore) TouchGym(ctx context.Context, tx sharedDomain.Transaction, gymID uuid.UUID) error {
 	g := gormTx(tx)
 	return g.WithContext(ctx).Exec(`
 		UPDATE sync_entities se
-		   SET server_updated_at = NOW(),
+		   SET server_updated_at = clock_timestamp(),
 		       version = GREATEST(se.version + 1, gy.version)
 		  FROM gyms gy
 		 WHERE gy.id = se.entity_id
@@ -164,8 +167,32 @@ func (s *PostgresStore) UpsertOne(
 	tx sharedDomain.Transaction,
 	gymID uuid.UUID,
 	item PushItem,
-) (UpsertResult, error) {
+) (result UpsertResult, returnErr error) {
 	g := gormTx(tx)
+	defer func() {
+		if returnErr != nil || item.EntityType != "payments" || (result.Status != StatusAccepted && result.Status != StatusConflictClientWins) {
+			return
+		}
+		var row struct {
+			Version         int
+			Payload         json.RawMessage
+			ServerUpdatedAt time.Time
+		}
+		if err := g.Raw(`SELECT version,payload,server_updated_at FROM sync_entities WHERE gym_id=? AND entity_type='payments' AND entity_id=?`, gymID, item.EntityID).Scan(&row).Error; err != nil {
+			returnErr = err
+			return
+		}
+		incoming, canonical := decodePushPayload(item.Payload), decodePushPayload(row.Payload)
+		if incoming["folio"] != canonical["folio"] {
+			result.Status = StatusConflictServerWins
+			result.ServerPayload = row.Payload
+			result.ServerVersion = row.Version
+			result.ServerUpdatedAt = row.ServerUpdatedAt
+			result.IsConflict = true
+			result.PreviousServerPayload = item.Payload
+			result.PreviousServerVersion = item.ClientVersion
+		}
+	}()
 	entityID, err := uuid.Parse(item.EntityID)
 	if err != nil {
 		return UpsertResult{}, fmt.Errorf("invalid entity_id: %w", err)
@@ -214,6 +241,37 @@ func (s *PostgresStore) UpsertOne(
 		}
 	}
 
+	// Recovery decisions are cloud-owned. An old laptop must not undo a
+	// discard/release merely by arriving later with a larger local version.
+	// Lock in the same order as recovery: notification, then sync journal.
+	if item.EntityType == "notification_queue" {
+		var recovered struct {
+			RecoveryVersion int
+			RecoveryAt      *time.Time
+			TemplateKey     string
+		}
+		if err := g.Raw(`SELECT recovery_version,recovery_at,template_key FROM notification_queue WHERE gym_id=? AND id=? FOR UPDATE`, gymID, entityID).Scan(&recovered).Error; err != nil {
+			return UpsertResult{}, err
+		}
+		if recovered.RecoveryVersion > 0 {
+			created := extractUpdatedAt(map[string]any{"updated_at": pl["created_at"]})
+			newReceipt := strings.HasPrefix(recovered.TemplateKey, "receipt_") && recovered.RecoveryAt != nil && created.After(*recovered.RecoveryAt) && pl["status"] == "pending"
+			if !newReceipt {
+				row, exists, err := s.lockRow(ctx, g, gymID, item.EntityType, entityID)
+				if err != nil {
+					return UpsertResult{}, err
+				}
+				if !exists {
+					return UpsertResult{}, fmt.Errorf("recovered notification has no journal")
+				}
+				return UpsertResult{Status: StatusConflictServerWins, ServerVersion: row.Version, ServerPayload: row.Payload, ServerUpdatedAt: row.ServerUpdatedAt, IsConflict: true, PreviousServerVersion: row.Version, PreviousServerPayload: row.Payload}, nil
+			}
+			// UC-020 is a distinct, explicit new receipt request, dated now.
+			if err := g.Exec(`UPDATE notification_queue SET recovery_version=0,recovery_action='',recovery_at=NULL,recovery_attempted_at=NULL WHERE gym_id=? AND id=?`, gymID, entityID).Error; err != nil {
+				return UpsertResult{}, err
+			}
+		}
+	}
 	if item.EntityType == "inventory_purchase_receipts" {
 		return s.upsertReceipt(ctx, tx, gymID, entityID, item)
 	}
@@ -466,6 +524,7 @@ const canonicalAugmentExpr = `
 	CASE
 	    WHEN se.entity_type = 'gyms' AND g.id IS NOT NULL THEN
 	        se.payload || jsonb_build_object(
+	            'all_features_access',  g.all_features_access,
 	            'subscription_plan',    g.subscription_plan,
 	            'subscription_status',  g.subscription_status,
 	            'stripe_customer_id',   g.stripe_customer_id,
@@ -484,6 +543,8 @@ const canonicalAugmentExpr = `
 	            'whatsapp_business_token_enc',
 	                translate(encode(g.whatsapp_business_token_enc, 'base64'), E'\n', '')
 	        )
+	    WHEN se.entity_type = 'products' AND pr.id IS NOT NULL THEN
+        se.payload || jsonb_build_object('stock',pr.stock,'stock_base',pr.stock_base)
 	    WHEN se.entity_type = 'membership_types' AND mt.id IS NOT NULL THEN
 	        se.payload || jsonb_build_object(
 	            'id',                    mt.id,
@@ -543,7 +604,8 @@ func (s *PostgresStore) ListSinceCursor(ctx context.Context, tx sharedDomain.Tra
 		       ` + canonicalAugmentExpr + ` AS payload,
 		       se.server_updated_at, se.deleted_at
 		  FROM sync_entities se
-		  LEFT JOIN gyms g ON se.entity_type = 'gyms' AND se.entity_id = g.id
+		  LEFT JOIN products pr ON se.entity_type = 'products' AND se.entity_id = pr.id AND se.gym_id=pr.gym_id
+	  LEFT JOIN gyms g ON se.entity_type = 'gyms' AND se.entity_id = g.id
 		  LEFT JOIN membership_types mt ON se.entity_type = 'membership_types' AND se.entity_id = mt.id
 		  LEFT JOIN stock_movements sm ON se.entity_type = 'stock_movements' AND se.entity_id = sm.id
 		 WHERE se.gym_id = ? AND (se.server_updated_at > ? OR (se.server_updated_at = ? AND (se.entity_id > ? OR (se.entity_id = ? AND se.entity_type > ?))))
@@ -621,7 +683,8 @@ func (s *PostgresStore) ListForFullSync(
 			       ` + canonicalAugmentExpr + ` AS payload,
 			       se.server_updated_at, se.deleted_at
 			  FROM sync_entities se
-			  LEFT JOIN gyms g ON se.entity_type = 'gyms' AND se.entity_id = g.id
+			  LEFT JOIN products pr ON se.entity_type = 'products' AND se.entity_id = pr.id AND se.gym_id=pr.gym_id
+	  LEFT JOIN gyms g ON se.entity_type = 'gyms' AND se.entity_id = g.id
 			  LEFT JOIN membership_types mt ON se.entity_type = 'membership_types' AND se.entity_id = mt.id
 			  LEFT JOIN stock_movements sm ON se.entity_type = 'stock_movements' AND se.entity_id = sm.id
 			 WHERE se.gym_id = ?

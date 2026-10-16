@@ -215,7 +215,9 @@ func (h *Handler) processRefundGraph(
 	if err == nil {
 		return results
 	}
-	status, message := StatusRejectedInternal, err.Error()
+	var classified PushItemResult
+	classifyPushError(&classified, err, batch[unit.indexes[0]])
+	status, message := classified.Status, classified.Error
 	var statusErr *pushStatusError
 	var financialConflict *financialConflictError
 	switch {

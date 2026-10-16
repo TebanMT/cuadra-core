@@ -84,7 +84,7 @@ func (h *Handler) EnsureGMK(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "no_gmk"})
 		return
 	case err != nil:
-		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "sync_key_unavailable"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{

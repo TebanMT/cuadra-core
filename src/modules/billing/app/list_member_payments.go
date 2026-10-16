@@ -58,6 +58,7 @@ func NewListMemberPayments(payments billingRepo.PaymentRepository, members memRe
 
 func (uc *ListMemberPayments) Execute(ctx context.Context, in ListMemberPaymentsInput) (*ListMemberPaymentsOutput, error) {
 	tx, err := uc.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}

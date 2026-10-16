@@ -36,6 +36,7 @@ func InitPostgres(dsn string) *gorm.DB {
 					SlowThreshold:             200 * time.Millisecond,
 					LogLevel:                  logger.Warn,
 					IgnoreRecordNotFoundError: true,
+					ParameterizedQueries:      true,
 				},
 			),
 		}

@@ -19,6 +19,7 @@ import (
 	notiApp "github.com/cuadra/cuadra-core/src/modules/notifications/app"
 	notifications "github.com/cuadra/cuadra-core/src/modules/notifications/domain"
 	alertDomain "github.com/cuadra/cuadra-core/src/modules/notifications/domain/alertconfig"
+	notiErrors "github.com/cuadra/cuadra-core/src/modules/notifications/domain/errors"
 	notiDomain "github.com/cuadra/cuadra-core/src/modules/notifications/domain/notification"
 	"github.com/cuadra/cuadra-core/src/shared/auth"
 	"github.com/cuadra/cuadra-core/src/shared/middleware"
@@ -38,6 +39,8 @@ var (
 // memory because the OTP TTL is 10 min — losing it on restart only means
 // the owner re-runs /start. Production should swap for a Redis/SQL impl.
 type Controller struct {
+	Held             *notiApp.HeldNotifications
+	HeldGate         gin.HandlerFunc
 	Connect          *notiApp.ConnectWhatsApp
 	Disconnect       *notiApp.DisconnectWhatsApp
 	Status           *notiApp.GetWhatsAppStatus
@@ -114,6 +117,16 @@ func (ctrl *Controller) RegisterRoutes(r *gin.Engine) {
 		ceremony.POST("/gyms/me/whatsapp/start", ctrl.handleWhatsappStart)
 		ceremony.POST("/gyms/me/whatsapp/connect", ctrl.handleConnect)
 		ceremony.DELETE("/gyms/me/whatsapp", ctrl.handleDisconnect)
+	}
+
+	if ctrl.Held != nil && ctrl.HeldGate != nil {
+		auth := middleware.AuthMiddleware(ctrl.Tokens)
+		if ctrl.SidecarTokens != nil {
+			auth = middleware.SidecarOrJWTMiddleware(ctrl.Tokens, ctrl.SidecarTokens)
+		}
+		held := r.Group("/api/v1/held-notifications", auth, requireOwnerOrSidecarToken(), ctrl.HeldGate)
+		held.GET("", ctrl.handleHeldList)
+		held.POST("/:id", ctrl.handleHeldAction)
 	}
 
 	api := r.Group("/api/v1")
@@ -739,4 +752,45 @@ func (ctrl *Controller) handleUpdateAlert(c *gin.Context) {
 		return
 	}
 	utils.JsonResponse(c, http.StatusOK, toAlertWire(*saved))
+}
+
+func (ctrl *Controller) handleHeldList(c *gin.Context) {
+	gym, _ := middleware.GetGymID(c)
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	if page < 1 {
+		page = 1
+	}
+	items, total, err := ctrl.Held.List(c.Request.Context(), gym, page)
+	if err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	utils.JsonResponse(c, 200, gin.H{"items": items, "total": total, "page": page, "page_size": 20})
+}
+func (ctrl *Controller) handleHeldAction(c *gin.Context) {
+	gym, _ := middleware.GetGymID(c)
+	actor, _ := middleware.GetUserID(c)
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		utils.ErrorResponse(c, 400, err)
+		return
+	}
+	var req struct {
+		Version int    `json:"version"`
+		Action  string `json:"action"`
+	}
+	if err = c.ShouldBindJSON(&req); err != nil {
+		utils.ErrorResponse(c, 400, err)
+		return
+	}
+	result, err := ctrl.Held.Execute(c.Request.Context(), notiApp.HeldInput{GymID: gym, ID: id, ActorID: actor, Version: req.Version, Action: req.Action})
+	if err != nil {
+		status := utils.DomainErrorToHttpCode(err)
+		if errors.Is(err, notiErrors.ErrHeldConflict) {
+			status = 409
+		}
+		utils.ErrorResponse(c, status, err)
+		return
+	}
+	utils.JsonResponse(c, 200, gin.H{"status": result})
 }

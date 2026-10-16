@@ -419,6 +419,7 @@ func (uc *CorrectSale) Execute(ctx context.Context, in CorrectSaleInput) (*Corre
 
 func (uc *CorrectSale) replayCommittedCorrection(ctx context.Context, gymID uuid.UUID, key, fingerprint string) (*CorrectSaleOutput, error) {
 	tx, err := uc.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return nil, nil // preserve the original command error
 	}

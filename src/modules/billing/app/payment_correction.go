@@ -303,6 +303,7 @@ func (uc *CorrectPayment) History(ctx context.Context, gymID, paymentID uuid.UUI
 
 func (uc *CorrectPayment) replayCommitted(ctx context.Context, gymID uuid.UUID, key, fingerprint string) (*CorrectPaymentOutput, error) {
 	tx, err := uc.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return nil, nil
 	}

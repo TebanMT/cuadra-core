@@ -355,6 +355,7 @@ type loginResp struct {
 	RefreshToken       string     `json:"refresh_token"`
 	SetupCompleted     bool       `json:"setup_completed"`
 	TrialEndsAt        *time.Time `json:"trial_ends_at,omitempty"`
+	AllFeaturesAccess  bool       `json:"all_features_access"`
 	SubscriptionPlan   string     `json:"subscription_plan"`
 	MustChangePassword bool       `json:"must_change_password"`
 	SidecarToken       string     `json:"sidecar_token,omitempty"`
@@ -490,21 +491,22 @@ type verifyEmailReq struct {
 // possession of the one-time emailed token already grants the ability
 // to set a new password.
 type verifyEmailResp struct {
-	OK               bool       `json:"ok"`
-	UserID           uuid.UUID  `json:"user_id"`
-	GymID            uuid.UUID  `json:"gym_id"`
-	FullName         string     `json:"full_name"`
-	Email            string     `json:"email"`
-	Phone            string     `json:"phone,omitempty"`
-	Role             string     `json:"role"`
-	GymName          *string    `json:"gym_name"`
-	AccessToken      string     `json:"access_token"`
-	RefreshToken     string     `json:"refresh_token"`
-	SetupCompleted   bool       `json:"setup_completed"`
-	TrialEndsAt      *time.Time `json:"trial_ends_at,omitempty"`
-	SubscriptionPlan string     `json:"subscription_plan"`
-	HasPIN           bool       `json:"has_pin"`
-	EmailVerifiedAt  *time.Time `json:"email_verified_at"`
+	OK                bool       `json:"ok"`
+	UserID            uuid.UUID  `json:"user_id"`
+	GymID             uuid.UUID  `json:"gym_id"`
+	FullName          string     `json:"full_name"`
+	Email             string     `json:"email"`
+	Phone             string     `json:"phone,omitempty"`
+	Role              string     `json:"role"`
+	GymName           *string    `json:"gym_name"`
+	AccessToken       string     `json:"access_token"`
+	RefreshToken      string     `json:"refresh_token"`
+	SetupCompleted    bool       `json:"setup_completed"`
+	TrialEndsAt       *time.Time `json:"trial_ends_at,omitempty"`
+	AllFeaturesAccess bool       `json:"all_features_access"`
+	SubscriptionPlan  string     `json:"subscription_plan"`
+	HasPIN            bool       `json:"has_pin"`
+	EmailVerifiedAt   *time.Time `json:"email_verified_at"`
 }
 
 type assignPinReq struct {
@@ -519,21 +521,22 @@ type pinResp struct {
 }
 
 type redeemInstallerResp struct {
-	UserID           uuid.UUID  `json:"user_id"`
-	GymID            uuid.UUID  `json:"gym_id"`
-	FullName         string     `json:"full_name"`
-	Email            string     `json:"email"`
-	Phone            string     `json:"phone,omitempty"`
-	Role             string     `json:"role"`
-	GymName          *string    `json:"gym_name"`
-	AccessToken      string     `json:"access_token"`
-	RefreshToken     string     `json:"refresh_token"`
-	SetupCompleted   bool       `json:"setup_completed"`
-	TrialEndsAt      *time.Time `json:"trial_ends_at,omitempty"`
-	SubscriptionPlan string     `json:"subscription_plan"`
-	SidecarToken     string     `json:"sidecar_token,omitempty"`
-	HasPIN           bool       `json:"has_pin"`
-	PinHash          string     `json:"pin_hash,omitempty"`
+	UserID            uuid.UUID  `json:"user_id"`
+	GymID             uuid.UUID  `json:"gym_id"`
+	FullName          string     `json:"full_name"`
+	Email             string     `json:"email"`
+	Phone             string     `json:"phone,omitempty"`
+	Role              string     `json:"role"`
+	GymName           *string    `json:"gym_name"`
+	AccessToken       string     `json:"access_token"`
+	RefreshToken      string     `json:"refresh_token"`
+	SetupCompleted    bool       `json:"setup_completed"`
+	TrialEndsAt       *time.Time `json:"trial_ends_at,omitempty"`
+	AllFeaturesAccess bool       `json:"all_features_access"`
+	SubscriptionPlan  string     `json:"subscription_plan"`
+	SidecarToken      string     `json:"sidecar_token,omitempty"`
+	HasPIN            bool       `json:"has_pin"`
+	PinHash           string     `json:"pin_hash,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -602,6 +605,7 @@ func (ctrl *AuthController) handleLogin(c *gin.Context) {
 		RefreshToken:       out.RefreshToken,
 		SetupCompleted:     out.SetupCompleted,
 		TrialEndsAt:        out.TrialEndsAt,
+		AllFeaturesAccess:  out.AllFeaturesAccess,
 		SubscriptionPlan:   out.SubscriptionPlan,
 		MustChangePassword: out.MustChangePassword,
 		SidecarToken:       ctrl.maybeMintSidecarToken(c, out.UserID, out.GymID),
@@ -751,21 +755,22 @@ func (ctrl *AuthController) handleRedeemInstaller(c *gin.Context) {
 		return
 	}
 	utils.JsonResponse(c, http.StatusOK, redeemInstallerResp{
-		UserID:           out.UserID,
-		GymID:            out.GymID,
-		FullName:         out.FullName,
-		Email:            out.Email,
-		Phone:            out.Phone,
-		Role:             out.Role,
-		GymName:          out.GymName,
-		AccessToken:      out.AccessToken,
-		RefreshToken:     out.RefreshToken,
-		SetupCompleted:   out.SetupCompleted,
-		TrialEndsAt:      out.TrialEndsAt,
-		SubscriptionPlan: out.SubscriptionPlan,
-		SidecarToken:     out.SidecarToken,
-		HasPIN:           out.HasPIN,
-		PinHash:          out.PinHash,
+		UserID:            out.UserID,
+		GymID:             out.GymID,
+		FullName:          out.FullName,
+		Email:             out.Email,
+		Phone:             out.Phone,
+		Role:              out.Role,
+		GymName:           out.GymName,
+		AccessToken:       out.AccessToken,
+		RefreshToken:      out.RefreshToken,
+		SetupCompleted:    out.SetupCompleted,
+		TrialEndsAt:       out.TrialEndsAt,
+		AllFeaturesAccess: out.AllFeaturesAccess,
+		SubscriptionPlan:  out.SubscriptionPlan,
+		SidecarToken:      out.SidecarToken,
+		HasPIN:            out.HasPIN,
+		PinHash:           out.PinHash,
 	})
 }
 
@@ -1129,7 +1134,13 @@ func (ctrl *AuthController) handleVerifyEmail(c *gin.Context) {
 		utils.JsonResponse(c, http.StatusOK, gin.H{"ok": true})
 		return
 	}
-	tx, err := ctrl.UoW.Query(c.Request.Context())
+	scoped, scopeErr := sharedDomain.ResolveTenant(c.Request.Context(), ctrl.UoW, "user", userID.String())
+	if scopeErr != nil {
+		utils.JsonResponse(c, http.StatusOK, gin.H{"ok": true})
+		return
+	}
+	tx, err := ctrl.UoW.Query(scoped)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		utils.JsonResponse(c, http.StatusOK, gin.H{"ok": true})
 		return
@@ -1157,21 +1168,22 @@ func (ctrl *AuthController) handleVerifyEmail(c *gin.Context) {
 		phone = *user.Phone
 	}
 	utils.JsonResponse(c, http.StatusOK, verifyEmailResp{
-		OK:               true,
-		UserID:           user.ID,
-		GymID:            user.GymID,
-		FullName:         user.FullName,
-		Email:            user.Email,
-		Phone:            phone,
-		Role:             user.Role,
-		GymName:          gym.Name,
-		AccessToken:      access,
-		RefreshToken:     refresh,
-		SetupCompleted:   gym.IsSetupComplete(),
-		TrialEndsAt:      gym.TrialEndsAt,
-		SubscriptionPlan: gym.SubscriptionPlan,
-		HasPIN:           user.HasPIN(),
-		EmailVerifiedAt:  user.EmailVerifiedAt,
+		OK:                true,
+		UserID:            user.ID,
+		GymID:             user.GymID,
+		FullName:          user.FullName,
+		Email:             user.Email,
+		Phone:             phone,
+		Role:              user.Role,
+		GymName:           gym.Name,
+		AccessToken:       access,
+		RefreshToken:      refresh,
+		SetupCompleted:    gym.IsSetupComplete(),
+		TrialEndsAt:       gym.TrialEndsAt,
+		AllFeaturesAccess: gym.AllFeaturesAccess,
+		SubscriptionPlan:  gym.SubscriptionPlan,
+		HasPIN:            user.HasPIN(),
+		EmailVerifiedAt:   user.EmailVerifiedAt,
 	})
 }
 
@@ -1291,6 +1303,7 @@ func (ctrl *AuthController) handleListOperators(c *gin.Context) {
 	}
 	includeInactive := c.DefaultQuery("include_inactive", "true") == "true"
 	tx, err := ctrl.UoW.Query(c.Request.Context())
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, err)
 		return

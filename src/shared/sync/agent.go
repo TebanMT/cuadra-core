@@ -90,7 +90,8 @@ type Agent struct {
 	trigger chan struct{}
 	// Local UI activity only, guarded by mu. Includes a queued manual nudge
 	// so accepting /sync/trigger never looks like a completed cycle.
-	syncInProgress bool
+	syncInProgress    bool
+	recoverQuarantine bool
 }
 
 // SetToken stores the credential the agent uses for /sync/* requests. Empty
@@ -287,6 +288,16 @@ func (a *Agent) TriggerNow() {
 	}
 }
 
+// RetryNow is an explicit operator recovery request. It also revisits rows
+// skipped by a prior pull after a local dependency/name was corrected.
+func (a *Agent) RetryNow() {
+	a.mu.Lock()
+	a.recoverQuarantine = true
+	a.state.NextRetryAt = time.Time{}
+	a.mu.Unlock()
+	a.TriggerNow()
+}
+
 // Snapshot returns the current in-memory state for /sync/status.
 func (a *Agent) Snapshot() AgentSnapshot {
 	a.mu.RLock()
@@ -425,6 +436,20 @@ func (a *Agent) RunOnce(ctx context.Context) {
 	if err := a.Push(ctx); err != nil {
 		a.recordFailure(ctx, "push", err)
 		return
+	}
+	a.mu.Lock()
+	recoverSkipped := a.recoverQuarantine && a.state.QuarantinedCount > 0
+	a.recoverQuarantine = false
+	a.mu.Unlock()
+	if recoverSkipped {
+		if err := a.FullSync(ctx); err != nil {
+			a.mu.Lock()
+			a.recoverQuarantine = true
+			a.mu.Unlock()
+			a.recordFailure(ctx, "recovery", err)
+			return
+		}
+		a.refreshQuarantinedCount(ctx)
 	}
 	if err := a.Pull(ctx); err != nil {
 		a.recordFailure(ctx, "pull", err)
@@ -565,6 +590,7 @@ func (a *Agent) Push(ctx context.Context) error {
 
 func (a *Agent) takeBatch(ctx context.Context) ([]PushItem, error) {
 	tx, err := a.uow.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return nil, err
 	}
@@ -636,7 +662,11 @@ func (a *Agent) takeBatch(ctx context.Context) ([]PushItem, error) {
 	if err != nil {
 		return nil, err
 	}
-	return expandExpenseGraphBatch(ctx, stx, out, activeGymID)
+	out, err = expandExpenseGraphBatch(ctx, stx, out, activeGymID)
+	if err != nil {
+		return nil, err
+	}
+	return expandFinancialBatch(ctx, stx, out, activeGymID)
 }
 
 // expandRefundGraphBatch intentionally overrides BatchSize/MaxBatchBytes for
@@ -1149,6 +1179,7 @@ func (a *Agent) FullSync(ctx context.Context) error {
 		return err
 	}
 	tx, err := a.uow.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return err
 	}
@@ -1174,6 +1205,9 @@ func (a *Agent) FullSync(ctx context.Context) error {
 		pending = append(pending, resp.Changes...)
 		batch := pending
 		applyErr := applyFullSyncPage(ctx, a.uow, batch, func(tx sharedDomain.Transaction) error {
+			if err := clearQuarantineForApplied(ctx, tx.(*sharedDomain.SqlxTransaction), batch); err != nil {
+				return err
+			}
 			if resp.HasMore {
 				if err := SetKV(ctx, tx, keyFullSyncStartedAt, strconv.FormatInt(anchor.UnixMilli(), 10)); err != nil {
 					return err
@@ -1224,6 +1258,7 @@ func (a *Agent) FullSync(ctx context.Context) error {
 
 func (a *Agent) loadFullCursor(ctx context.Context) (string, error) {
 	tx, err := a.uow.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return "", err
 	}
@@ -1374,6 +1409,7 @@ const maxStuckItemsInStatus = 20
 
 func (a *Agent) refreshPendingCount(ctx context.Context) {
 	tx, err := a.uow.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return
 	}

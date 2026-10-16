@@ -25,6 +25,15 @@ func projectProductWithReceipts(g *gorm.DB, gymID, entityID uuid.UUID, payload [
 	if err := g.Exec(`SELECT id FROM products WHERE id=? AND gym_id=? FOR UPDATE`, entityID, gymID).Error; err != nil {
 		return err
 	}
+	// A new desktop product carries its initial movement in the same local
+	// transaction. Existing cloud rows retain the migration's historical offset.
+	var exists bool
+	if err := g.Raw(`SELECT EXISTS(SELECT 1 FROM products WHERE gym_id=? AND id=?)`, gymID, entityID).Scan(&exists).Error; err != nil {
+		return err
+	}
+	if !exists {
+		raw["stock_origin"] = 0
+	}
 	if stock, exists := raw["stock"]; exists {
 		n, ok := projectorIntegralInt64(stock)
 		if !ok {
@@ -47,7 +56,13 @@ func projectProductWithReceipts(g *gorm.DB, gymID, entityID uuid.UUID, payload [
 	if err != nil {
 		return err
 	}
-	return projectGeneric(g, *FindTable("products"), gymID, entityID, normalized)
+	table := *FindTable("products")
+	table.Columns = append(append([]string(nil), table.Columns...), "stock_origin")
+	if err := projectGeneric(g, table, gymID, entityID, normalized); err != nil {
+		return err
+	}
+	// Keep retries/server-wins canonical too, not just the augmented pull.
+	return g.Exec(`UPDATE sync_entities se SET payload=se.payload || jsonb_build_object('stock',p.stock,'stock_base',p.stock_base) FROM products p WHERE se.gym_id=? AND se.entity_type='products' AND se.entity_id=? AND p.id=se.entity_id AND p.gym_id=se.gym_id`, gymID, entityID).Error
 }
 func (s *PostgresStore) upsertReceipt(ctx context.Context, tx shared.Transaction, gymID, id uuid.UUID, item PushItem) (UpsertResult, error) {
 	receipt, err := prodRepos.ReceiptFromPayload(item.Payload)

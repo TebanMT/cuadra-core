@@ -243,6 +243,7 @@ func (h *BiometricHub) RefreshGallery(ctx context.Context) error {
 	refMap := map[string]uuid.UUID{}
 	if gymID != uuid.Nil {
 		tx, err := h.UoW.Query(ctx)
+		defer sharedDomain.CloseQuery(tx)
 		if err != nil {
 			return err
 		}
@@ -517,6 +518,7 @@ func (h *BiometricHub) StartEnroll(ctx context.Context, in StartEnrollInput) (*S
 	// Fail fast on member problems — mejor un 4xx aquí que 3 dedazos y un
 	// evento de error. RegisterFingerprint re-valida todo dentro de su tx.
 	tx, err := h.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}

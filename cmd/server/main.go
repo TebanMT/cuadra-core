@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	gymDomain "github.com/cuadra/cuadra-core/src/modules/gyms/domain/gym"
 	"log"
 	"net/http"
 	"os"
@@ -108,11 +109,11 @@ func main() {
 	db := infraDB.InitPostgres(dsn)
 	defer infraDB.ClosePostgres()
 
-	if err := infraDB.ApplyPostgresMigrations(db, envOrDefault("MIGRATIONS_DIR", "db_migrations/postgres")); err != nil {
-		log.Fatalf("apply migrations: %v", err)
+	// Schema changes use cmd/migrate and a separate migration role.
+	uow, err := sharedDomain.NewTenantPostgresUnitOfWork(db)
+	if err != nil {
+		log.Fatalf("tenant isolation: %v", err)
 	}
-
-	uow := sharedDomain.NewPostgresUnitOfWork(db)
 
 	// ── Repositories ───────────────────────────────────────────────────────
 	gymRepo := gymRepoPg.NewGymPostgresRepository()
@@ -318,6 +319,13 @@ func main() {
 	dispatchNoti := notiApp.NewDispatchNotification(notificationRepo, templateRepo, gymRepo, whatsappProvider, notiEmailProvider, uow)
 	// Opt-out de marketing: el dispatcher omite broadcasts a quien dijo STOP.
 	dispatchNoti.OptOut = optOutRepo
+	heldNotifications := notiApp.NewHeldNotifications(notificationRepo, notificationRepo, templateRepo, optOutRepo, uow, recorder)
+	heldNotifications.Gyms = gymRepo
+	// Opt-in pending acceptance of the retention policy; never hard-delete.
+	if os.Getenv("TINTA_HELD_RETENTION_DAYS") == "90" {
+		heldNotifications.RetentionDays = 90
+	}
+	dispatchNoti.Held = heldNotifications
 	// ADR-009: media welcome banners (PIN horneado en imagen). El renderer es
 	// puro; el uploader necesita R2 + el bucket público configurado.
 	dispatchNoti.Banner = welcomeBannerRenderer{}
@@ -342,6 +350,7 @@ func main() {
 	// error de lookup (mismo criterio que RequirePlusPlan).
 	canEditTemplateBody := func(ctx context.Context, gymID uuid.UUID) bool {
 		tx, err := uow.Query(ctx)
+		defer sharedDomain.CloseQuery(tx)
 		if err != nil {
 			return true
 		}
@@ -509,7 +518,9 @@ func main() {
 	// PlanGate corre después de AuthMiddleware en módulos / rutas Plus. Lee
 	// el SKU del gym desde el repo local; trial/plus_* pasan, Standard cae
 	// con 402. Sin el gate, todas las features Plus quedan abiertas.
-	plusGate := middleware.RequirePlusPlan(gymRepo, uow)
+	featureGate := func(feature gymDomain.Feature) gin.HandlerFunc {
+		return middleware.RequireFeature(gymRepo, uow, feature)
+	}
 
 	mtCtrl := memCtrl.NewMembershipTypeController(createMT, updateMT, deactivateMT, listMT, tokens)
 	promotionsCtrl := promoCtrl.NewPromotionController(createPromo, updatePromo, deactivatePromo, reactivatePromo, listPromos, getPromoByCode, listAppliedByMonth, tokens)
@@ -527,31 +538,42 @@ func main() {
 	expenseController := expCtrl.NewExpenseController(createExpense, updateExpense, deleteExpense, listExpenses, tokens).
 		WithPlusOperations(getExpense, createCashMovement, updateCashMovement, deleteCashMovement, listCashMovements, classifyCashMovement, createExpenseTemplate, updateExpenseTemplate, setExpenseTemplateActive, listExpenseTemplates, materializeExpenseOccurrences, listExpenseOccurrences, payExpenseOccurrence, skipExpenseOccurrence).
 		WithCorrectionOperations(unclassifyCashMovement, reopenExpenseOccurrence)
-	expenseController.PlanGate = plusGate
+	expenseController.PlanGate = featureGate(gymDomain.FeatureRecurringExpenses)
 	// Cloud has no biometric reader — fingerprint flows live on the sidecar.
 	checkinCtrl := chkCtrl.NewCheckinController(checkinManual, checkinNumber, checkinOverride, checkinRepo, uow, nil, tokens).WithGyms(gymRepo)
 	reportsController := reportsCtrl.NewReportsController(dashboard, attentionRequired, rangeReport, exportReport, markContacted, markLost, tokens).
 		WithGenderReport(genderReport).
 		WithPaidExpenses(reportsApp.NewPaidExpenses(reportsReader, uow, gymRepo))
-	reportsController.PlanGate = plusGate
+	reportsController.PlanGate = featureGate(gymDomain.FeatureReportExports)
 	// Analytics Plus (plan Reports-improve fase 3) — SOLO cloud: la pestaña
 	// Análisis vive en el dashboard, el sidecar no registra estas rutas y
 	// no existe reader SQLite.
 	analyticsOverview := analyticsApp.NewOverview(analyticsInfra.NewPostgresReader(), uow).WithGyms(gymRepo)
 	analyticsController := analyticsCtrl.NewAnalyticsController(analyticsOverview, tokens)
-	analyticsController.PlanGate = plusGate
+	analyticsController.PlanGate = featureGate(gymDomain.FeatureAnalytics)
 	notificationsCtrl := notiCtrl.NewController(connectWhatsApp, disconnectWhatsApp, whatsappStatus, listTemplates, updateTemplate, broadcast, listNotifications, retryNotification, listOwnerAlerts, updateOwnerAlert, whatsappProvider, tokens)
-	notificationsCtrl.PlanGate = plusGate
+	notificationsCtrl.PlanGate = featureGate(gymDomain.FeatureOwnWhatsApp)
 	// El ceremony de UC-037 acepta sk_live_* además de JWT owner: el desktop
 	// conecta WhatsApp a través del WhatsAppSidecarProxy del sidecar, cuyos
 	// JWTs de operador están firmados con el secret local y no validan aquí.
 	notificationsCtrl.SidecarTokens = sidecarStore
+	notificationsCtrl.Held = heldNotifications
+	notificationsCtrl.HeldGate = featureGate(gymDomain.FeatureHeldMessages)
 
 	// ── Subscriptions (Fase 1: cobranza al dueño) ─────────────────────────
 	subEventRepo := subDB.NewEventPostgresRepository()
 	oxxoRenewalReader := subDB.NewOXXORenewalPostgresReader()
 	recordSubEvent := subApp.NewRecordEvent(subEventRepo, gymRepo, uow, recorder)
+	launchRepo := subDB.NewLaunchPostgresRepository()
+	launchOfferSetting := os.Getenv("TINTA_LAUNCH_OFFER_ENABLED")
+	launchOfferEnabled := launchOfferSetting == "" || launchOfferSetting == "true"
+	if launchOfferEnabled {
+		recordSubEvent.Launch = launchRepo
+	}
 	getSubscription := subApp.NewGetSubscription(subEventRepo, gymRepo, uow)
+	if launchOfferEnabled {
+		getSubscription.Launch = launchRepo
+	}
 	subVerifier := subCtrl.NewWebhookVerifier(
 		envOrDefault("STRIPE_WEBHOOK_SECRET", ""),
 		envOrDefault("MERCADOPAGO_WEBHOOK_SECRET", ""),
@@ -567,6 +589,9 @@ func main() {
 	billingSuccessURL := envOrDefault("BILLING_SUCCESS_URL", dashboardURL+"/settings/subscription?status=success")
 	billingCancelURL := envOrDefault("BILLING_CANCEL_URL", dashboardURL+"/settings/subscription?status=cancelled")
 	startCheckout := subApp.NewStartCheckout(subGateways, gymRepo, userRepo, uow, billingSuccessURL, billingCancelURL)
+	if launchOfferEnabled {
+		startCheckout.Launch = launchRepo
+	}
 	// Billing portal: sólo Stripe lo expone. Si MP es el único gateway
 	// configurado (MP_ACCESS_TOKEN set + STRIPE_SECRET_KEY ausente), el
 	// portal sigue siendo nil y el endpoint devuelve 503. Aceptable en
@@ -578,6 +603,9 @@ func main() {
 	billingPortalReturnURL := envOrDefault("BILLING_PORTAL_RETURN_URL", dashboardURL+"/settings/subscription")
 	startBillingPortal := subApp.NewStartBillingPortal(billingPortalGateway, gymRepo, uow, billingPortalReturnURL)
 	subscriptionsCtrl := subCtrl.NewSubscriptionController(recordSubEvent, getSubscription, startCheckout, startBillingPortal, subVerifier, tokens)
+	if mpEvents := subPay.NewMercadoPagoEvents(os.Getenv("MP_ACCESS_TOKEN")); mpEvents != nil {
+		subscriptionsCtrl.MPEvents = mpEvents
+	}
 	twilioWebhookURL := envOrDefault("TWILIO_WEBHOOK_URL", baseURL+"/api/v1/webhooks/twilio")
 	notiWebhookCtrl := notiCtrl.NewWebhookController(processWebhook, envOrDefault("TWILIO_AUTH_TOKEN", ""), twilioWebhookURL)
 
@@ -600,6 +628,7 @@ func main() {
 	fingerprintCtrl.RegisterRoutes(r)
 	paymentCtrl.RegisterRoutes(r)
 	cashDrawerCtrl.RegisterRoutes(r)
+	productCtrl.Count = prodApp.NewStockCount(productRepo, productRepo, stockMovementRepo, uow, recorder)
 	productCtrl.RegisterRoutes(r)
 	expenseController.RegisterRoutes(r)
 	checkinCtrl.RegisterRoutes(r)
@@ -612,7 +641,7 @@ func main() {
 	// Bitácora cloud (item 9) — owner-only, lee de Postgres. El sidecar
 	// monta su propio controller con SQLiteReader para ver el log local.
 	auditCtrl := audithttp.NewController(audit.NewPostgresReader(), userRepo, uow, tokens)
-	auditCtrl.PlanGate = plusGate
+	auditCtrl.PlanGate = featureGate(gymDomain.FeatureAuditLog)
 	auditCtrl.RegisterRoutes(r)
 
 	// Sync protocol (Sesión 8 / ADR-001) — push/pull/full + Prometheus

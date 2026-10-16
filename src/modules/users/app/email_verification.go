@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"log"
 	"strings"
@@ -64,6 +65,11 @@ func NewRequestEmailVerification(
 }
 
 func (uc *RequestEmailVerification) Execute(ctx context.Context, userID uuid.UUID) error {
+	ctx, scopeErr := sharedDomain.ResolveTenant(ctx, uc.UoW, "user", userID.String())
+	if scopeErr != nil {
+		return scopeErr
+	}
+
 	now := uc.NowFunc()
 	plain, err := generateVerifyToken()
 	if err != nil {
@@ -178,6 +184,12 @@ func NewConfirmEmailVerification(
 // returned alongside a nil error — a successful verify always yields
 // an ID, including the idempotent already-verified branch.
 func (uc *ConfirmEmailVerification) Execute(ctx context.Context, token string) (uuid.UUID, error) {
+	tokenHash := sha256.Sum256([]byte(token))
+	ctx, scopeErr := sharedDomain.ResolveTenant(ctx, uc.UoW, "verify", hex.EncodeToString(tokenHash[:]))
+	if scopeErr != nil {
+		return uuid.Nil, sharedDomain.NewBusinessError(userErrors.ErrInvalidVerifyToken, "")
+	}
+
 	if strings.TrimSpace(token) == "" {
 		return uuid.Nil, sharedDomain.NewBusinessError(userErrors.ErrInvalidVerifyToken, "")
 	}

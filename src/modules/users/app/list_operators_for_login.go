@@ -40,6 +40,7 @@ func NewListOperatorsForLogin(users userRepo.UserRepository, uow sharedDomain.Un
 
 func (uc *ListOperatorsForLogin) Execute(ctx context.Context, gymID uuid.UUID) ([]OperatorForLogin, error) {
 	tx, err := uc.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return nil, err
 	}

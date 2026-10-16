@@ -42,6 +42,10 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
   -ldflags="-s -w -X main.version=${VERSION}" \
   -o bin/tinta-server-linux-amd64 ./cmd/server
 
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -tags server -trimpath -ldflags="-s -w" -o bin/tinta-migrate-linux-amd64 ./cmd/migrate
+# Check the migration service before replacing a running API binary.
+ssh "${SSH_USER}@${SERVER}" "/bin/systemctl cat tinta-migrate >/dev/null"
+
 # Tamaño para sanity check.
 ls -lh bin/tinta-server-linux-amd64
 
@@ -57,14 +61,12 @@ ssh "${SSH_USER}@${SERVER}" "
 
 if [ "${SKIP_MIGRATE:-0}" != "1" ]; then
   echo "→ Subiendo migraciones SQL a ${REMOTE_MIGRATIONS}..."
-  # Solo copiamos los .sql. El binario los aplica al arrancar
-  # (ApplyPostgresMigrations, version-aware) en el restart de abajo — NO los
-  # corremos con psql acá. Re-aplicar todo desde 001 se rompía cuando una
-  # migración posterior evolucionaba el esquema (p.ej. 020 dropeó el índice
-  # único de huellas y re-correr 001 lo recreaba sobre datos multi-huella).
+  # Apply new versions with the separate migration owner before API restart.
   rsync -avz --delete \
     db_migrations/postgres/ \
     "${SSH_USER}@${SERVER}:${REMOTE_MIGRATIONS}/"
+  scp bin/tinta-migrate-linux-amd64 "${SSH_USER}@${SERVER}:/opt/tinta/bin/tinta-migrate.new"
+  ssh "${SSH_USER}@${SERVER}" "chmod +x /opt/tinta/bin/tinta-migrate.new && mv /opt/tinta/bin/tinta-migrate.new /opt/tinta/bin/tinta-migrate && sudo /bin/systemctl start tinta-migrate"
 fi
 
 if [ "${SKIP_RESTART:-0}" != "1" ]; then

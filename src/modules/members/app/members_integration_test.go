@@ -850,3 +850,32 @@ func TestUC012_CreateMember_NoFirstPayment_NoReceipt(t *testing.T) {
 		t.Errorf("receipt notifier llamado %d veces sin primer pago, want 0", len(receipt.calls))
 	}
 }
+
+func TestMemberSearchIgnoresCaseAndSpanishAccents(t *testing.T) {
+	f := setupMembersFixture(t)
+	typeID := f.createMembershipType(t, "Mensual")
+	create := memApp.NewCreateMember(f.memberRepo, f.membershipR, f.mtRepo, f.uow, f.recorder)
+	for i, name := range []string{"ÁNGEL ÑÚÑEZ", "ángel Pérez", "Bruno Ramos"} {
+		if _, err := create.Execute(context.Background(), memApp.CreateMemberInput{GymID: f.gymID, ActorUserID: f.ownerID, FullName: name, Phone: phoneFor(i), MembershipTypeID: typeID, StartDate: time.Now().UTC()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	uc := memApp.NewListMembers(f.memberRepo, f.uow)
+	for _, tc := range []struct {
+		term string
+		want int
+	}{
+		{"ángel", 2}, {"ÁNGEL", 2}, {"ÁnGeL", 2}, {" angel ", 2}, {"A\u0301NGEL", 2},
+		{"ángel ñúñez", 1}, {"ANGEL NUNEZ", 1}, {"%", 0}, {"_", 0}, {phoneFor(0), 1},
+	} {
+		t.Run(tc.term, func(t *testing.T) {
+			out, err := uc.Execute(context.Background(), memApp.ListMembersInput{GymID: f.gymID, Search: tc.term, PageSize: 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if out.Total != tc.want || len(out.Items) != min(tc.want, 1) {
+				t.Fatalf("query %q: total=%d items=%d want=%d", tc.term, out.Total, len(out.Items), tc.want)
+			}
+		})
+	}
+}

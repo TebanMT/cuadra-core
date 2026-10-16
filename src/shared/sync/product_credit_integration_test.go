@@ -35,10 +35,16 @@ func TestProductCreditSync_ZeroAmountReplayAndLegacyGate(t *testing.T) {
 	now := time.Now().UTC()
 	raw := map[string]any{"id": payment, "gym_id": gym, "version": 1, "created_at": now.UnixMilli(), "updated_at": now.UnixMilli(), "folio": "PRD-CREDIT", "member_id": member, "amount": 0, "recognized_amount": 0, "payment_method": "cash", "concept": "product", "balance_pending": 40.25, "payment_date": now.Format("2006-01-02"), "operator_id": user, "discount_amount": 0}
 	payload, _ := json.Marshal(raw)
-	push := PushRequest{ClientID: uuid.NewString(), SchemaVersion: SchemaVersion, ClientNow: now, Batch: []PushItem{{QueueID: uuid.NewString(), EntityType: "payments", EntityID: payment.String(), ClientVersion: 1, Operation: OpUpsertStr, Payload: payload}}}
+	batch := completeSaleFixture(t, db, gym, user, 40.25)
+	batch[0].EntityID = payment.String()
+	batch[0].Payload = payload
+	saleRaw := decodePushPayload(batch[1].Payload)
+	saleRaw["payment_id"] = payment.String()
+	batch[1].Payload, _ = json.Marshal(saleRaw)
+	push := PushRequest{ClientID: uuid.NewString(), SchemaVersion: SchemaVersion, ClientNow: now, Batch: batch}
 	for i := 0; i < 2; i++ {
 		result, code, err := performSyncPush(router, token, push)
-		if err != nil || code != 200 || len(result.Results) != 1 || result.Results[0].Error != "" {
+		if err != nil || code != 200 || len(result.Results) != 4 || result.Results[0].Error != "" {
 			t.Fatalf("push %d: code=%d err=%v result=%+v", i, code, err, result)
 		}
 	}

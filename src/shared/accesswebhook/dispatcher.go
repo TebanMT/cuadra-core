@@ -128,6 +128,7 @@ func (d *HTTPDispatcher) deliver(ev Event) {
 // silently drop — never block kiosk on a misconfigured webhook.
 func (d *HTTPDispatcher) lookupSettings(gymID uuid.UUID) (string, string) {
 	tx, err := d.UoW.Query(context.Background())
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return "", ""
 	}

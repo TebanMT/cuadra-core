@@ -19,7 +19,7 @@ func TestPurchaseRegistrationRequiresCompatibleReadersAndWriters(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			f := newRemotePG(t)
 			if kind == "negative_stock" {
-				if err := f.db.Exec("UPDATE products SET stock=-1,stock_base=-1 WHERE id=?", f.product).Error; err != nil {
+				if err := f.db.Exec(`INSERT INTO stock_movements(id,gym_id,product_id,movement_type,delta,operator_id) VALUES(?,?,?,'count_correction',-6,?)`, uuid.New(), f.gym, f.product, f.user).Error; err != nil {
 					t.Fatal(err)
 				}
 			} else {

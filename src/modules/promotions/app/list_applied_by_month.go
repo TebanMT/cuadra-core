@@ -41,6 +41,7 @@ func (uc *ListAppliedByMonth) WithGyms(g gymRepo.GymRepository) *ListAppliedByMo
 
 func (uc *ListAppliedByMonth) Execute(ctx context.Context, in ListAppliedByMonthInput) ([]promoRepo.AppliedSummary, error) {
 	tx, err := uc.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}

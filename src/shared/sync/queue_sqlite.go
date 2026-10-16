@@ -45,6 +45,7 @@ func (q *SqliteQueue) Enqueue(
 	if err == nil {
 		payload = mergeRefundGraphMetadata(json.RawMessage(existing.Payload), payload)
 		payload = mergeExpenseGraphMetadata(json.RawMessage(existing.Payload), payload)
+		payload = mergeFinancialMetadata(json.RawMessage(existing.Payload), payload)
 		_, err = stx.Exec(ctx, `UPDATE sync_queue
 			SET payload=?,operation=?,client_version=?,enqueued_at=? WHERE id=? AND synced_at IS NULL`,
 			string(payload), operation, clientVersion, nowMs, existing.ID)

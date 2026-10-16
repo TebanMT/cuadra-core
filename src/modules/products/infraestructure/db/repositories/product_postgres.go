@@ -18,6 +18,7 @@ import (
 	stockMovementDomain "github.com/cuadra/cuadra-core/src/modules/products/domain/stockmovement"
 	"github.com/cuadra/cuadra-core/src/modules/products/infraestructure/db/models"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
+	"github.com/cuadra/cuadra-core/src/shared/textsearch"
 )
 
 type ProductPostgresRepository struct{}
@@ -30,6 +31,8 @@ func (r *ProductPostgresRepository) Create(tx sharedDomain.Transaction, p *produ
 	p.StockBase = p.Stock
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	row := productToModel(p)
+	origin := int64(0)
+	row.StockOrigin = &origin
 	if err := gormTx.Create(&row).Error; err != nil {
 		var duplicate *pgconn.PgError
 		if errors.As(err, &duplicate) && duplicate.Code == "23505" {
@@ -250,10 +253,10 @@ func buildProductFilterPg(base *gorm.DB, q prodRepo.ListQuery) *gorm.DB {
 	if q.Category != "" {
 		base = base.Where("category = ?", q.Category)
 	}
-	if s := strings.TrimSpace(q.Search); s != "" {
+	if s := textsearch.Normalize(q.Search); s != "" {
 		// Substring (%s%) — antes era prefix; el FE buscaba "mineral"
 		// y no encontraba "Agua mineral". Mismo cambio en SQLite.
-		base = base.Where("LOWER(name) LIKE ?", "%"+strings.ToLower(s)+"%")
+		base = base.Where(textsearch.PostgresColumn("name")+" LIKE ? ESCAPE '!'", "%"+textsearch.EscapeLike(s)+"%")
 	}
 	if q.LowStockOnly {
 		base = base.Where("stock <= stock_minimum")

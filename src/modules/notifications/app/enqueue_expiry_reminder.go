@@ -69,6 +69,9 @@ func defaultExpiryStages() []expiryStage {
 // `return` temprano hacía que un error determinista en la etapa -3 callara
 // también a "vence hoy" y a la persecución +5 en CADA tick.
 func (uc *EnqueueExpiryReminder) Tick(ctx context.Context, now time.Time) (int, error) {
+	if handled, n, err := sharedDomain.TenantWorker(ctx, uc.UoW, func(scoped context.Context) (int, error) { return uc.Tick(scoped, now) }); handled {
+		return n, err
+	}
 	inserted := 0
 	var firstErr error
 	for _, stage := range defaultExpiryStages() {

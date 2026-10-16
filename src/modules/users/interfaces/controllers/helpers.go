@@ -61,6 +61,7 @@ type gymResponse struct {
 	PaymentMethods     []string   `json:"payment_methods"`
 	OpenTime           *string    `json:"open_time"`
 	CloseTime          *string    `json:"close_time"`
+	AllFeaturesAccess  bool       `json:"all_features_access"`
 	SubscriptionPlan   string     `json:"subscription_plan"`
 	SubscriptionStatus string     `json:"subscription_status"`
 	TrialEndsAt        *time.Time `json:"trial_ends_at,omitempty"`
@@ -89,6 +90,7 @@ func toGymResponse(g *gymDomain.Gym) gymResponse {
 		PaymentMethods:     g.PaymentMethods,
 		OpenTime:           g.OpenTime,
 		CloseTime:          g.CloseTime,
+		AllFeaturesAccess:  g.AllFeaturesAccess,
 		SubscriptionPlan:   g.SubscriptionPlan,
 		SubscriptionStatus: g.SubscriptionStatus,
 		TrialEndsAt:        g.TrialEndsAt,

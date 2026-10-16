@@ -145,6 +145,7 @@ func (uc *SignupOwner) Execute(ctx context.Context, in SignupOwnerInput) (Signup
 
 	now := uc.NowFunc()
 	gymID := uuid.New()
+	ctx = sharedDomain.WithTenant(ctx, gymID)
 	userID := uuid.New()
 
 	gym := gymDomain.NewTrialGym(gymID, uc.TrialDays, now)

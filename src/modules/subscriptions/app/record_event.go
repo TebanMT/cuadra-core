@@ -21,14 +21,15 @@ import (
 // into. The handler is responsible for verifying the signature *before*
 // calling here — this layer trusts the input.
 type RecordEventInput struct {
-	GymID        uuid.UUID
-	Provider     subDomain.Provider
-	Type         subDomain.EventType
-	ExternalID   string
-	Plan         string // "standard_monthly" / "standard_annual" / "plus_monthly" / "plus_annual" — required for activated/renewed
-	Amount       *float64
-	Currency     *string
-	PeriodEndsAt *time.Time
+	ConfirmedPayment bool // Set only from a verified successful charge, never subscription creation.
+	GymID            uuid.UUID
+	Provider         subDomain.Provider
+	Type             subDomain.EventType
+	ExternalID       string
+	Plan             string // "standard_monthly" / "standard_annual" / "plus_monthly" / "plus_annual" — required for activated/renewed
+	Amount           *float64
+	Currency         *string
+	PeriodEndsAt     *time.Time
 	// StripeCustomerID — capturado del webhook Stripe (customer.subscription.*,
 	// invoice.*, checkout.session.completed). El use case lo asigna al gym
 	// SÓLO si está vacío; no pisamos un id existente (defense contra
@@ -73,6 +74,7 @@ type RecordEvent struct {
 	NowFunc func() time.Time
 	// SyncTouch (opcional; se cablea sólo en cmd/server). Ver GymSyncToucher.
 	SyncTouch GymSyncToucher
+	Launch    subDomain.LaunchRepository // cloud only; nil disables new grants, never existing entitlements.
 }
 
 func NewRecordEvent(events subDomain.EventRepository, gyms gymRepo.GymRepository,
@@ -101,7 +103,15 @@ func (uc *RecordEvent) Execute(ctx context.Context, in RecordEventInput) (Record
 	}
 
 	out := RecordEventOutput{}
+	ctx = sharedDomain.WithTenant(ctx, in.GymID)
 	err := uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
+		if locker, ok := uc.Events.(interface {
+			LockGym(sharedDomain.Transaction, uuid.UUID) error
+		}); ok {
+			if err := locker.LockGym(tx, in.GymID); err != nil {
+				return err
+			}
+		}
 		exists, err := uc.Events.ExistsByExternalID(tx, in.Provider, in.ExternalID)
 		if err != nil {
 			return sharedDomain.NewUnexpectedError(err)
@@ -129,7 +139,21 @@ func (uc *RecordEvent) Execute(ctx context.Context, in RecordEventInput) (Record
 		if err != nil {
 			return sharedDomain.NewUnexpectedError(err)
 		}
-		if latest != nil && in.OccurredAt.Before(*latest) {
+		stale := latest != nil && in.OccurredAt.Before(*latest)
+		confirmedPayment := (in.ConfirmedPayment || in.Provider == subDomain.ProviderManual) && in.Amount != nil && *in.Amount > 0 && (in.Type == subDomain.EventActivated || in.Type == subDomain.EventRenewed)
+		eventPlan := in.Plan
+		if eventPlan == "" {
+			eventPlan = gym.SubscriptionPlan
+		}
+		// Old Mercado Pago references contain only the gym UUID. Its legacy
+		// checkout was monthly; retain a paid SKU, or use Standard for a first charge.
+		if confirmedPayment && in.Provider == subDomain.ProviderMercadoPago && in.Plan == "" && eventPlan == gymDomain.PlanTrial {
+			eventPlan = gymDomain.PlanStandardMonthly
+		}
+		if confirmedPayment && !gymDomain.IsPaidPlan(eventPlan) {
+			return sharedDomain.NewValidationError(errors.New("payment requires a paid plan"))
+		}
+		if stale && !confirmedPayment {
 			out.Applied = false
 			return nil
 		}
@@ -139,52 +163,51 @@ func (uc *RecordEvent) Execute(ctx context.Context, in RecordEventInput) (Record
 		// a los sidecars vía el touch de sync_entities. Los eventos
 		// voucher_* NO cambian nada del gym a propósito y no bumpean.
 		subscriptionChanged := false
-		switch in.Type {
-		case subDomain.EventActivated, subDomain.EventRenewed:
-			plan := in.Plan
-			if plan == "" {
-				plan = gym.SubscriptionPlan
-			}
-			if plan == gymDomain.PlanTrial {
-				return sharedDomain.NewValidationError(errors.New("activated event requires a paid plan"))
-			}
-			if err := gym.ActivateSubscription(plan, in.PeriodEndsAt, now); err != nil {
-				return err
-			}
-			subscriptionChanged = true
-		case subDomain.EventPastDue:
-			gym.MarkPastDue(now)
-			subscriptionChanged = true
-		case subDomain.EventCancelled:
-			gym.Cancel(now)
-			subscriptionChanged = true
-		case subDomain.EventTrialExtended:
-			// Plan field doubles as days-to-extend (string-typed because the
-			// canonical Plan slot here would be empty). Webhook never emits
-			// this; admin tool does.
-			days := 0
-			if v, ok := in.RawPayload["days"]; ok {
-				if n, ok := v.(float64); ok {
-					days = int(n)
+		if !stale {
+			switch in.Type {
+			case subDomain.EventActivated, subDomain.EventRenewed:
+				plan := eventPlan
+				if plan == gymDomain.PlanTrial {
+					return sharedDomain.NewValidationError(errors.New("activated event requires a paid plan"))
 				}
+				if err := gym.ActivateSubscription(plan, in.PeriodEndsAt, now); err != nil {
+					return err
+				}
+				subscriptionChanged = true
+			case subDomain.EventPastDue:
+				gym.MarkPastDue(now)
+				subscriptionChanged = true
+			case subDomain.EventCancelled:
+				gym.Cancel(now)
+				subscriptionChanged = true
+			case subDomain.EventTrialExtended:
+				// Plan field doubles as days-to-extend (string-typed because the
+				// canonical Plan slot here would be empty). Webhook never emits
+				// this; admin tool does.
+				days := 0
+				if v, ok := in.RawPayload["days"]; ok {
+					if n, ok := v.(float64); ok {
+						days = int(n)
+					}
+				}
+				gym.ExtendTrial(days, now)
+				subscriptionChanged = true
+			case subDomain.EventVoucherEmitted, subDomain.EventVoucherExpired:
+				// No-op sobre el gym a propósito. Estos eventos sólo dejan
+				// rastro en subscription_events para que el dashboard pueda
+				// derivar "tienes ficha pendiente" / "tu ficha venció".
+				//   - voucher_emitted: el dueño todavía no paga. No cambiamos
+				//     status — si estaba trial, sigue trial; si estaba active,
+				//     sigue active hasta SubscriptionEndsAt natural.
+				//   - voucher_expired: tampoco regresamos a past_due. Past_due
+				//     fue diseñado para "tarjeta falló N veces"; un voucher
+				//     vencido es un signal distinto (cliente nunca fue a OXXO).
+				//     Si el voucher era para renovar un anual activo, el cron
+				//     que vigila SubscriptionEndsAt decidirá cancelar cuando
+				//     la fecha pase, no este branch.
+			default:
+				return sharedDomain.NewValidationError(errors.New("unknown event type"))
 			}
-			gym.ExtendTrial(days, now)
-			subscriptionChanged = true
-		case subDomain.EventVoucherEmitted, subDomain.EventVoucherExpired:
-			// No-op sobre el gym a propósito. Estos eventos sólo dejan
-			// rastro en subscription_events para que el dashboard pueda
-			// derivar "tienes ficha pendiente" / "tu ficha venció".
-			//   - voucher_emitted: el dueño todavía no paga. No cambiamos
-			//     status — si estaba trial, sigue trial; si estaba active,
-			//     sigue active hasta SubscriptionEndsAt natural.
-			//   - voucher_expired: tampoco regresamos a past_due. Past_due
-			//     fue diseñado para "tarjeta falló N veces"; un voucher
-			//     vencido es un signal distinto (cliente nunca fue a OXXO).
-			//     Si el voucher era para renovar un anual activo, el cron
-			//     que vigila SubscriptionEndsAt decidirá cancelar cuando
-			//     la fecha pase, no este branch.
-		default:
-			return sharedDomain.NewValidationError(errors.New("unknown event type"))
 		}
 		// Captura del customer Stripe en el primer evento que lo trae. Sólo
 		// asignamos si no había uno previo — re-key manual en Stripe dashboard
@@ -196,14 +219,6 @@ func (uc *RecordEvent) Execute(ctx context.Context, in RecordEventInput) (Record
 		if _, err := uc.Gyms.Update(tx, gym); err != nil {
 			return sharedDomain.NewUnexpectedError(err)
 		}
-		// Mismo tx que el Update: si el touch falla, todo rollbackea y el
-		// provider reintenta el webhook — nunca un gym activo en la tabla
-		// con un journal que no lo propaga.
-		if subscriptionChanged && uc.SyncTouch != nil {
-			if err := uc.SyncTouch.TouchGym(ctx, tx, gym.ID); err != nil {
-				return sharedDomain.NewUnexpectedError(err)
-			}
-		}
 
 		eventID := uuid.New()
 		ev := &subDomain.Event{
@@ -212,7 +227,7 @@ func (uc *RecordEvent) Execute(ctx context.Context, in RecordEventInput) (Record
 			Provider:     in.Provider,
 			Type:         in.Type,
 			ExternalID:   in.ExternalID,
-			Plan:         gym.SubscriptionPlan,
+			Plan:         eventPlan,
 			Amount:       in.Amount,
 			Currency:     in.Currency,
 			PeriodEndsAt: in.PeriodEndsAt,
@@ -228,6 +243,25 @@ func (uc *RecordEvent) Execute(ctx context.Context, in RecordEventInput) (Record
 			}
 			return sharedDomain.NewUnexpectedError(err)
 		}
+		if confirmedPayment && uc.Launch != nil {
+			granted, err := uc.Launch.Claim(tx, gym.ID, in.OccurredAt)
+			if err != nil {
+				return sharedDomain.NewUnexpectedError(err)
+			}
+			if granted && !gym.AllFeaturesAccess {
+				gym.AllFeaturesAccess = true
+				subscriptionChanged = true
+			}
+		}
+		// Mismo tx que el Update: si el touch falla, todo rollbackea y el
+		// provider reintenta el webhook — nunca un gym activo en la tabla
+		// con un journal que no lo propaga.
+		if subscriptionChanged && uc.SyncTouch != nil {
+			if err := uc.SyncTouch.TouchGym(ctx, tx, gym.ID); err != nil {
+				return sharedDomain.NewUnexpectedError(err)
+			}
+		}
+
 		out.EventID = eventID
 		out.Applied = true
 
@@ -237,10 +271,11 @@ func (uc *RecordEvent) Execute(ctx context.Context, in RecordEventInput) (Record
 			EntityID:   in.GymID,
 			Action:     "subscription_" + string(in.Type),
 			Changes: map[string]any{
-				"provider":    in.Provider,
-				"external_id": in.ExternalID,
-				"plan":        gym.SubscriptionPlan,
-				"status":      gym.SubscriptionStatus,
+				"provider":            in.Provider,
+				"external_id":         in.ExternalID,
+				"plan":                gym.SubscriptionPlan,
+				"status":              gym.SubscriptionStatus,
+				"all_features_access": gym.AllFeaturesAccess,
 			},
 			At: now,
 		})

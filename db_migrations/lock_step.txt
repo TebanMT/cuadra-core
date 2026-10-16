@@ -101,3 +101,12 @@ pair: pg=048_payment_cash_destination.sql sqlite=043_payment_cash_destination.sq
 pair: pg=049_remote_inventory_purchases.sql sqlite=044_remote_inventory_purchases.sql
 pair: pg=050_purchase_registration.sql sqlite=045_purchase_registration.sql
 pair: pg=051_product_credit_sales.sql sqlite=046_product_credit_sales.sql
+
+pair: pg=052_launch_access.sql sqlite=047_launch_access.sql
+cloud_only: pg=053_launch_benefits.sql reason="asignación cloud del beneficio de lanzamiento"
+cloud_only: pg=054_launch_limit_55.sql reason="cupo de lanzamiento cloud"
+cloud_only: pg=055_tenant_integrity.sql reason="identidad y referencias entre tenants en PostgreSQL"
+cloud_only: pg=056_stock_ledger.sql reason="reconciliación de existencias desde movimientos, compatible con wire existente"
+cloud_only: pg=057_tenant_rls.sql reason="aislamiento PostgreSQL por contexto transaccional y accesos iniciales acotados"
+
+cloud_only: pg=058_held_recovery.sql reason="acciones y control de envío de mensajes retenidos, autoridad cloud"

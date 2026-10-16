@@ -43,6 +43,7 @@ import (
 	subDB "github.com/cuadra/cuadra-core/src/modules/subscriptions/infraestructure/db"
 	"github.com/cuadra/cuadra-core/src/shared/audit"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
+	syncpkg "github.com/cuadra/cuadra-core/src/shared/sync"
 )
 
 var validPlans = map[string]struct{}{
@@ -57,7 +58,7 @@ func main() {
 		gymIDFlag    = flag.String("gym-id", "", "destination gym UUID")
 		planFlag     = flag.String("plan", "standard_monthly", "plan to activate (standard_monthly | standard_annual | plus_monthly | plus_annual)")
 		paidUntilStr = flag.String("paid-until", "", "fecha cuándo expira este pago (YYYY-MM-DD)")
-		amountFlag   = flag.Float64("amount", 0, "monto recibido en MXN (opcional, info para historial)")
+		amountFlag   = flag.Float64("amount", 0, "monto recibido en MXN (necesario para asignar el beneficio de lanzamiento)")
 		noteFlag     = flag.String("note", "", "texto libre para audit (ej: 'Transferencia BBVA folio 12345')")
 		renewalFlag  = flag.Bool("renewal", false, "marca el evento como 'renewed' en vez de 'activated' (default: activated)")
 		dryRun       = flag.Bool("dry-run", false, "valida sin escribir")
@@ -103,6 +104,8 @@ func main() {
 	var amount *float64
 	if *amountFlag > 0 {
 		amount = amountFlag
+	} else {
+		log.Printf("Sin monto confirmado: esta activación no asignará un lugar de lanzamiento.")
 	}
 
 	eventType := subDomain.EventActivated
@@ -130,6 +133,11 @@ func main() {
 	events := subDB.NewEventPostgresRepository()
 
 	uc := subApp.NewRecordEvent(events, gyms, uow, recorder)
+	uc.SyncTouch = syncpkg.NewPostgresStore()
+	launchSetting := os.Getenv("TINTA_LAUNCH_OFFER_ENABLED")
+	if launchSetting == "" || launchSetting == "true" {
+		uc.Launch = subDB.NewLaunchPostgresRepository()
+	}
 	out, err := uc.Execute(context.Background(), subApp.RecordEventInput{
 		GymID:        gymID,
 		Provider:     subDomain.ProviderManual,

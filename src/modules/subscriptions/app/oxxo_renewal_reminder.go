@@ -93,6 +93,9 @@ func NewRunOXXORenewalReminders(
 // state). Errors at the reader / DB level surface; per-gym failures log
 // and continue so one bad gym doesn't stall the whole batch.
 func (uc *RunOXXORenewalReminders) Tick(ctx context.Context, now time.Time) (int, error) {
+	if handled, n, err := sharedDomain.TenantWorker(ctx, uc.UoW, func(scoped context.Context) (int, error) { return uc.Tick(scoped, now) }); handled {
+		return n, err
+	}
 	enqueued := 0
 	for _, stage := range renewalStages() {
 		n, err := uc.tickStage(ctx, now, stage)
@@ -308,6 +311,9 @@ func NewCancelExpiredOXXO(
 // Tick busca gyms anuales OXXO con SubscriptionEndsAt + grace en el pasado
 // y registra EventCancelled. Devuelve el número aplicado.
 func (uc *CancelExpiredOXXO) Tick(ctx context.Context, now time.Time) (int, error) {
+	if handled, n, err := sharedDomain.TenantWorker(ctx, uc.UoW, func(scoped context.Context) (int, error) { return uc.Tick(scoped, now) }); handled {
+		return n, err
+	}
 	cutoff := now.Add(-uc.Grace)
 	var candidates []OXXORenewalCandidate
 	err := uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {

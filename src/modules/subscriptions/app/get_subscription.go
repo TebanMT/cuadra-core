@@ -16,17 +16,21 @@ import (
 // flattens the gym aggregate's billing fields and tacks on a recent event
 // history.
 type GetSubscriptionOutput struct {
-	GymID          uuid.UUID
-	Plan           string
-	Status         string
-	TrialEndsAt    *time.Time
-	PeriodEndsAt   *time.Time
-	HasActiveAcc   bool
-	IsTrialExpired bool
-	History        []*subDomain.Event
+	GymID                uuid.UUID
+	LaunchOfferAvailable bool
+	LaunchSlotsRemaining int
+	AllFeaturesAccess    bool
+	Plan                 string
+	Status               string
+	TrialEndsAt          *time.Time
+	PeriodEndsAt         *time.Time
+	HasActiveAcc         bool
+	IsTrialExpired       bool
+	History              []*subDomain.Event
 }
 
 type GetSubscription struct {
+	Launch  subDomain.LaunchRepository
 	Events  subDomain.EventRepository
 	Gyms    gymRepo.GymRepository
 	UoW     sharedDomain.UnitOfWork
@@ -44,6 +48,7 @@ func NewGetSubscription(events subDomain.EventRepository, gyms gymRepo.GymReposi
 
 func (uc *GetSubscription) Execute(ctx context.Context, gymID uuid.UUID) (*GetSubscriptionOutput, error) {
 	tx, err := uc.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}
@@ -55,16 +60,26 @@ func (uc *GetSubscription) Execute(ctx context.Context, gymID uuid.UUID) (*GetSu
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}
+	remaining := 0
+	if uc.Launch != nil {
+		remaining, err = uc.Launch.Remaining(tx)
+		if err != nil {
+			return nil, sharedDomain.NewUnexpectedError(err)
+		}
+	}
 	now := uc.NowFunc()
 	return &GetSubscriptionOutput{
-		GymID:          gym.ID,
-		Plan:           gym.SubscriptionPlan,
-		Status:         gym.SubscriptionStatus,
-		TrialEndsAt:    gym.TrialEndsAt,
-		PeriodEndsAt:   gym.SubscriptionEndsAt,
-		HasActiveAcc:   gym.HasActiveAccess(now),
-		IsTrialExpired: gym.IsTrialExpired(now),
-		History:        hist,
+		GymID:                gym.ID,
+		LaunchOfferAvailable: remaining > 0,
+		LaunchSlotsRemaining: remaining,
+		AllFeaturesAccess:    gym.AllFeaturesAccess,
+		Plan:                 gym.SubscriptionPlan,
+		Status:               gym.SubscriptionStatus,
+		TrialEndsAt:          gym.TrialEndsAt,
+		PeriodEndsAt:         gym.SubscriptionEndsAt,
+		HasActiveAcc:         gym.HasActiveAccess(now),
+		IsTrialExpired:       gym.IsTrialExpired(now),
+		History:              hist,
 	}, nil
 }
 

@@ -68,6 +68,7 @@ func (uc *StartBillingPortal) Execute(ctx context.Context, in StartBillingPortal
 	}
 
 	tx, err := uc.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return StartBillingPortalOutput{}, sharedDomain.NewUnexpectedError(err)
 	}
@@ -79,9 +80,11 @@ func (uc *StartBillingPortal) Execute(ctx context.Context, in StartBillingPortal
 		return StartBillingPortalOutput{}, sharedDomain.NewBusinessError(ErrNoStripeCustomer, "Todavía no tienes método de pago activo. Activa tu plan primero.")
 	}
 
+	sharedDomain.CloseQuery(tx)
 	res, err := uc.Stripe.StartBillingPortal(ctx, subDomain.BillingPortalRequest{
-		CustomerID: *gym.StripeCustomerID,
-		ReturnURL:  uc.ReturnURL,
+		LaunchPricing: gym.AllFeaturesAccess,
+		CustomerID:    *gym.StripeCustomerID,
+		ReturnURL:     uc.ReturnURL,
 	})
 	if err != nil {
 		return StartBillingPortalOutput{}, sharedDomain.NewUnexpectedError(err)

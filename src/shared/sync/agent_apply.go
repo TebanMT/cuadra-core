@@ -150,6 +150,12 @@ func applyPullChange(ctx context.Context, tx sharedDomain.Transaction, change Pu
 	// lo necesita.
 	whereClause, whereArgs := localKeyPredicate(table, change.EntityID, pl)
 
+	if change.EntityType == "gyms" {
+		if err := applyCloudFeatureAccess(ctx, stx, change, pl); err != nil {
+			return err
+		}
+	}
+
 	// LWW idempotency check.
 	var localVer sql.NullInt64
 	err := stx.Get(ctx, &localVer,
@@ -947,4 +953,39 @@ func extractColumnValue(pl map[string]any, table, col string) any {
 		return string(b)
 	}
 	return v
+}
+
+// The cloud grant is independent of local profile versions. A pending offline
+// rename must not hide a grant whose gym version is equal/lower. Its own server
+// watermark also prevents a delayed snapshot from restoring an older value.
+func applyCloudFeatureAccess(ctx context.Context, stx *sharedDomain.SqlxTransaction, change PullChange, pl map[string]any) error {
+	var current bool
+	err := stx.Get(ctx, &current, `SELECT all_features_access FROM gyms WHERE id = ?`, change.EntityID)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	value, present := pl["all_features_access"]
+	if !present || value == nil {
+		pl["all_features_access"] = current
+		return nil
+	}
+	grant, ok := value.(bool)
+	if !ok {
+		return fmt.Errorf("invalid all_features_access")
+	}
+	key := "gym_feature_access_received_at:" + change.EntityID
+	var previous int64
+	if err := stx.Get(ctx, &previous, `SELECT CAST(value AS INTEGER) FROM sync_state WHERE key = ?`, key); err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	receivedAt := change.ServerUpdatedAt.UnixNano()
+	if receivedAt < previous {
+		pl["all_features_access"] = current
+		return nil
+	}
+	if _, err := stx.Exec(ctx, `UPDATE gyms SET all_features_access = ? WHERE id = ?`, grant, change.EntityID); err != nil {
+		return err
+	}
+	_, err = stx.Exec(ctx, `INSERT INTO sync_state (key,value,updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, key, fmt.Sprint(receivedAt), change.ServerUpdatedAt.UnixMilli())
+	return err
 }

@@ -593,3 +593,32 @@ func TestAdjustStock_OperatorCannotAssertPaidInventoryPurchase(t *testing.T) {
 		t.Fatalf("rejected operator payment mutated stock/movements=%d/%d", stock, movements)
 	}
 }
+
+func TestProductSearchIgnoresCaseAndSpanishAccents(t *testing.T) {
+	f := setupProducts(t)
+	for _, name := range []string{"PROTEÍNA sabor PIÑA", "proteína vainilla", "Bebida 100%", "Combo_A!", "Agua"} {
+		if _, err := f.createProductUC().Execute(context.Background(), prodApp.CreateProductInput{GymID: f.gymID, ActorUserID: f.ownerID, Name: name, Price: 20}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		term string
+		want int
+	}{
+		{"proteína", 2}, {"PROTEÍNA", 2}, {"pRoTeÍnA", 2}, {" proteina ", 2}, {"protei\u0301na", 2},
+		{"piña", 1}, {"PIÑA", 1}, {"pina", 1}, {"%", 1}, {"_", 1}, {"!", 1}, {"no existe", 0},
+	} {
+		t.Run(tc.term, func(t *testing.T) {
+			out, err := f.listUC().Execute(context.Background(), prodApp.ListProductsInput{GymID: f.gymID, Search: tc.term, PageSize: 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if out.Total != tc.want || out.Aggregates.ProductsTotal != tc.want {
+				t.Fatalf("query %q: total=%d aggregate=%d want=%d", tc.term, out.Total, out.Aggregates.ProductsTotal, tc.want)
+			}
+			if len(out.Items) != min(tc.want, 1) {
+				t.Fatalf("pagination: got %d items", len(out.Items))
+			}
+		})
+	}
+}

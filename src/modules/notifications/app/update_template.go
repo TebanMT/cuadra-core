@@ -131,6 +131,7 @@ type TemplateView struct {
 
 func (uc *ListTemplates) Execute(ctx context.Context, gymID uuid.UUID) ([]TemplateView, error) {
 	tx, err := uc.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	gymDomain "github.com/cuadra/cuadra-core/src/modules/gyms/domain/gym"
 	"io"
 	"log"
 	"net"
@@ -237,6 +238,7 @@ func main() {
 	} else {
 		escrowClient := bcrypto.NewEscrowHTTPClient(gmkCloudURL, func(ctx context.Context) (string, error) {
 			tx, err := uow.Query(ctx)
+			defer sharedDomain.CloseQuery(tx)
 			if err != nil {
 				return "", err
 			}
@@ -386,6 +388,7 @@ func main() {
 	// on/off. Este es el path real de edición — la recepción pega al sidecar.
 	canEditTemplateBody := func(ctx context.Context, gymID uuid.UUID) bool {
 		tx, err := uow.Query(ctx)
+		defer sharedDomain.CloseQuery(tx)
 		if err != nil {
 			return true
 		}
@@ -537,7 +540,9 @@ func main() {
 	// PlanGate aplica en el sidecar igual que en cloud: el SKU del gym
 	// vive en el mirror local (sync agent lo mantiene fresco), así que el
 	// gate funciona offline.
-	plusGate := middleware.RequirePlusPlan(gymRepo, uow)
+	featureGate := func(feature gymDomain.Feature) gin.HandlerFunc {
+		return middleware.RequireFeature(gymRepo, uow, feature)
+	}
 
 	memberCtrl := memCtrl.NewMemberController(createMember, updateMember, listMembers, memberDetail, toggleMember, lockExpiry, assignNumber, tokens).
 		WithUploadsDir(uploadsDir).
@@ -560,7 +565,7 @@ func main() {
 	expenseController := expCtrl.NewExpenseController(createExpense, updateExpense, deleteExpense, listExpenses, tokens).
 		WithPlusOperations(getExpense, createCashMovement, updateCashMovement, deleteCashMovement, listCashMovements, classifyCashMovement, createExpenseTemplate, updateExpenseTemplate, setExpenseTemplateActive, listExpenseTemplates, materializeExpenseOccurrences, listExpenseOccurrences, payExpenseOccurrence, skipExpenseOccurrence).
 		WithCorrectionOperations(unclassifyCashMovement, reopenExpenseOccurrence)
-	expenseController.PlanGate = plusGate
+	expenseController.PlanGate = featureGate(gymDomain.FeatureRecurringExpenses)
 	fingerprintAvailable := bioHub.Available
 	checkinCtrl := chkCtrl.NewCheckinController(checkinManual, checkinNumber, checkinOverride, checkinRepo, uow, fingerprintAvailable, tokens).
 		WithWebhook(accessWebhook).
@@ -573,7 +578,7 @@ func main() {
 	// Connect/Disconnect nil → el controller compartido NO registra las
 	// rutas del ceremony; las cubre el WhatsAppSidecarProxy (proxy al cloud).
 	notificationsCtrl := notiCtrl.NewController(nil, nil, whatsappStatus, listTemplates, updateTemplate, broadcast, listNotifications, retryNotification, listOwnerAlerts, updateOwnerAlert, whatsappMock, tokens)
-	notificationsCtrl.PlanGate = plusGate
+	notificationsCtrl.PlanGate = featureGate(gymDomain.FeatureOwnWhatsApp)
 
 	// Suscripción — sidecar sólo expone el GET. El historial ahora SÍ vive
 	// local: subscription_events es una SyncedTable pull-only (cloud → sidecar)
@@ -589,11 +594,11 @@ func main() {
 	// (recordado por cada use case en cada gym). El reader concreto lo
 	// elige el build tag (NewSQLiteReader sólo compila bajo //go:build sidecar).
 	auditCtrl := audithttp.NewController(audit.NewSQLiteReader(), userRepo, uow, tokens)
-	auditCtrl.PlanGate = plusGate
+	auditCtrl.PlanGate = featureGate(gymDomain.FeatureAuditLog)
 	reportsController := reportsCtrl.NewReportsController(dashboard, attentionRequired, rangeReport, exportReport, markContacted, markLost, tokens).
 		WithGenderReport(genderReport).
 		WithPaidExpenses(reportsApp.NewPaidExpenses(reportsReader, uow, gymRepo))
-	reportsController.PlanGate = plusGate
+	reportsController.PlanGate = featureGate(gymDomain.FeatureReportExports)
 	if os.Getenv("ENVIRONMENT") == "production" {
 		gin.SetMode(gin.ReleaseMode)
 	}
@@ -669,6 +674,7 @@ func main() {
 	fingerprintCtrl.RegisterRoutes(r)
 	paymentCtrl.RegisterRoutes(r)
 	cashDrawerCtrl.RegisterRoutes(r)
+	productCtrl.Count = prodApp.NewStockCount(productRepo, productRepo, stockMovementRepo, uow, recorder)
 	productCtrl.RegisterRoutes(r)
 	expenseController.RegisterRoutes(r)
 	checkinCtrl.RegisterRoutes(r)

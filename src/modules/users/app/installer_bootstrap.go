@@ -110,19 +110,20 @@ type RedeemInstallerBootstrapInput struct {
 }
 
 type RedeemInstallerBootstrapOutput struct {
-	UserID           uuid.UUID
-	GymID            uuid.UUID
-	FullName         string
-	Email            string
-	Phone            string
-	Role             string
-	GymName          *string
-	AccessToken      string
-	RefreshToken     string
-	SetupCompleted   bool
-	TrialEndsAt      *time.Time
-	SubscriptionPlan string
-	SidecarToken     string
+	UserID            uuid.UUID
+	GymID             uuid.UUID
+	FullName          string
+	Email             string
+	Phone             string
+	Role              string
+	GymName           *string
+	AccessToken       string
+	RefreshToken      string
+	SetupCompleted    bool
+	TrialEndsAt       *time.Time
+	AllFeaturesAccess bool
+	SubscriptionPlan  string
+	SidecarToken      string
 	// HasPIN: el bootstrap se redime POSTERIOR al signup en cloud (donde
 	// el dueño ya recibió un PIN auto-asignado). Sin esto, el desktop
 	// arrancaba con has_pin=false y pintaba "Crear PIN" en perfil para
@@ -150,12 +151,14 @@ func (uc *RedeemInstallerBootstrap) Execute(ctx context.Context, in RedeemInstal
 
 	var (
 		fullName, email, phone, role, plan string
+		allFeaturesAccess                  bool
 		setupDone                          bool
 		trialEnd                           *time.Time
 		gymName                            *string
 		hasPIN                             bool
 		pinHash                            string
 	)
+	ctx = sharedDomain.WithTenant(ctx, bs.GymID)
 	err = uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
 		user, err := uc.Users.GetByID(tx, bs.UserID)
 		if err != nil {
@@ -174,6 +177,7 @@ func (uc *RedeemInstallerBootstrap) Execute(ctx context.Context, in RedeemInstal
 		setupDone = gym.IsSetupComplete()
 		trialEnd = gym.TrialEndsAt
 		plan = gym.SubscriptionPlan
+		allFeaturesAccess = gym.AllFeaturesAccess
 		gymName = gym.Name
 		hasPIN = user.HasPIN()
 		if user.PinHash != nil {
@@ -197,20 +201,21 @@ func (uc *RedeemInstallerBootstrap) Execute(ctx context.Context, in RedeemInstal
 	}
 
 	out := RedeemInstallerBootstrapOutput{
-		UserID:           bs.UserID,
-		GymID:            bs.GymID,
-		FullName:         fullName,
-		Email:            email,
-		Phone:            phone,
-		Role:             role,
-		GymName:          gymName,
-		AccessToken:      access,
-		RefreshToken:     refresh,
-		SetupCompleted:   setupDone,
-		TrialEndsAt:      trialEnd,
-		SubscriptionPlan: plan,
-		HasPIN:           hasPIN,
-		PinHash:          pinHash,
+		UserID:            bs.UserID,
+		GymID:             bs.GymID,
+		FullName:          fullName,
+		Email:             email,
+		Phone:             phone,
+		Role:              role,
+		GymName:           gymName,
+		AccessToken:       access,
+		RefreshToken:      refresh,
+		SetupCompleted:    setupDone,
+		TrialEndsAt:       trialEnd,
+		AllFeaturesAccess: allFeaturesAccess,
+		SubscriptionPlan:  plan,
+		HasPIN:            hasPIN,
+		PinHash:           pinHash,
 	}
 	if uc.SidecarBoot != nil && in.ClientID != uuid.Nil {
 		tok, err := uc.SidecarBoot.Execute(ctx, BootstrapSidecarTokenInput{

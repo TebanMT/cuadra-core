@@ -43,11 +43,13 @@ func RequireEmailVerified(users userRepo.UserRepository, uow sharedDomain.UnitOf
 			return
 		}
 		tx, err := uow.Query(c.Request.Context())
+		defer sharedDomain.CloseQuery(tx)
 		if err != nil {
 			c.Next()
 			return
 		}
 		u, err := users.GetByID(tx, userID)
+		sharedDomain.CloseQuery(tx)
 		if err != nil || u == nil {
 			c.Next()
 			return

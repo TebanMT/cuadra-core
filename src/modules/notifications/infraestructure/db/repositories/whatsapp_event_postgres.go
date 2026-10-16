@@ -3,6 +3,7 @@
 package repositories
 
 import (
+	"encoding/json"
 	"github.com/google/uuid"
 
 	eventDomain "github.com/cuadra/cuadra-core/src/modules/notifications/domain/event"
@@ -29,6 +30,16 @@ func (r *WhatsAppEventPostgresRepository) Create(tx sharedDomain.Transaction, e 
 		ErrorMessage:      e.ErrorMessage,
 		RawPayload:        e.RawPayload,
 		ReceivedAt:        e.ReceivedAt,
+	}
+	if e.GymID == nil {
+		encoded, err := json.Marshal(map[string]any{"ID": e.ID, "ProviderMessageID": e.ProviderMessageID, "EventType": e.EventType, "Status": e.Status, "ErrorCode": e.ErrorCode, "ErrorMessage": e.ErrorMessage, "RawPayload": json.RawMessage(e.RawPayload), "ReceivedAt": e.ReceivedAt})
+		if err != nil {
+			return nil, err
+		}
+		if err = gormTx.Exec(`SELECT tinta_private.log_unscoped_whatsapp(?::jsonb)`, string(encoded)).Error; err != nil {
+			return nil, err
+		}
+		return e, nil
 	}
 	if err := gormTx.Create(&row).Error; err != nil {
 		return nil, err

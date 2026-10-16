@@ -43,6 +43,7 @@ type sqliteGymRow struct {
 	PaymentMethods           string         `db:"payment_methods"`
 	OpenTime                 sql.NullString `db:"open_time"`
 	CloseTime                sql.NullString `db:"close_time"`
+	AllFeaturesAccess        bool           `db:"all_features_access"`
 	SubscriptionPlan         string         `db:"subscription_plan"`
 	TrialEndsAt              sql.NullInt64  `db:"trial_ends_at"`
 	SubscriptionEndsAt       sql.NullInt64  `db:"subscription_ends_at"`
@@ -86,6 +87,7 @@ func gymToRow(g *gymDomain.Gym) sqliteGymRow {
 		PaymentMethods:           string(pm),
 		OpenTime:                 nullableString(g.OpenTime),
 		CloseTime:                nullableString(g.CloseTime),
+		AllFeaturesAccess:        g.AllFeaturesAccess,
 		SubscriptionPlan:         g.SubscriptionPlan,
 		TrialEndsAt:              nullableMs(g.TrialEndsAt),
 		SubscriptionEndsAt:       nullableMs(g.SubscriptionEndsAt),
@@ -122,6 +124,7 @@ func gymFromRow(r *sqliteGymRow) *gymDomain.Gym {
 		Country:                  r.Country,
 		Timezone:                 r.Timezone,
 		PaymentMethods:           pm,
+		AllFeaturesAccess:        r.AllFeaturesAccess,
 		SubscriptionPlan:         r.SubscriptionPlan,
 		SubscriptionStatus:       r.SubscriptionStatus,
 		WhatsAppBusinessTokenEnc: r.WhatsAppBusinessTokenEnc,
@@ -162,7 +165,7 @@ func (r *GymSQLiteRepository) Create(tx sharedDomain.Transaction, g *gymDomain.G
 		    rfc, razon_social, codigo_postal, regimen_fiscal,
 		    logo_url, primary_color, secondary_color,
 		    payment_methods, open_time, close_time,
-		    subscription_plan, trial_ends_at, subscription_ends_at, subscription_status, stripe_customer_id, setup_completed_at,
+		    all_features_access, subscription_plan, trial_ends_at, subscription_ends_at, subscription_status, stripe_customer_id, setup_completed_at,
 		    whatsapp_business_phone, whatsapp_business_token_enc, whatsapp_connected_at,
 		    kiosk_settings, charge_settings
 		) VALUES (
@@ -171,7 +174,7 @@ func (r *GymSQLiteRepository) Create(tx sharedDomain.Transaction, g *gymDomain.G
 		    :rfc, :razon_social, :codigo_postal, :regimen_fiscal,
 		    :logo_url, :primary_color, :secondary_color,
 		    :payment_methods, :open_time, :close_time,
-		    :subscription_plan, :trial_ends_at, :subscription_ends_at, :subscription_status, :stripe_customer_id, :setup_completed_at,
+		    :all_features_access, :subscription_plan, :trial_ends_at, :subscription_ends_at, :subscription_status, :stripe_customer_id, :setup_completed_at,
 		    :whatsapp_business_phone, :whatsapp_business_token_enc, :whatsapp_connected_at,
 		    :kiosk_settings, :charge_settings
 		)`

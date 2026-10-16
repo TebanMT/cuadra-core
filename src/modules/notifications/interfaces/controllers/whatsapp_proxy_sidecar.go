@@ -61,6 +61,17 @@ func NewWhatsAppSidecarProxy(cfg WhatsAppSidecarProxy) *WhatsAppSidecarProxy {
 
 func (p *WhatsAppSidecarProxy) RegisterRoutes(r *gin.Engine) {
 	g := r.Group("/api/v1", middleware.AuthMiddleware(p.Tokens), middleware.RequireOwner())
+	g.GET("/held-notifications", func(c *gin.Context) {
+		p.forwardCeremony(c, http.MethodGet, "/api/v1/held-notifications?"+c.Request.URL.RawQuery, nil)
+	})
+	g.POST("/held-notifications/:id", func(c *gin.Context) {
+		id, err := uuid.Parse(c.Param("id"))
+		if err != nil {
+			c.AbortWithStatus(400)
+			return
+		}
+		p.forwardCeremony(c, http.MethodPost, "/api/v1/held-notifications/"+id.String(), nil)
+	})
 	g.POST("/gyms/me/whatsapp/start", p.handleStart)
 	g.POST("/gyms/me/whatsapp/connect", p.handleConnect)
 	g.DELETE("/gyms/me/whatsapp", p.handleDisconnect)
@@ -135,7 +146,7 @@ func (p *WhatsAppSidecarProxy) forwardCeremony(c *gin.Context, method, path stri
 		// en la nube); no hay fallback local que ofrecer.
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
 			"status_code": http.StatusServiceUnavailable,
-			"message":     "Necesitas internet para conectar o desconectar WhatsApp. Revisa tu conexión e intenta de nuevo.",
+			"message":     "Necesitas internet para consultar o cambiar mensajes en la nube. Revisa tu conexión e intenta de nuevo.",
 		})
 		return
 	}
@@ -226,6 +237,7 @@ func (p *WhatsAppSidecarProxy) mirrorDisconnected(ctx context.Context, gymID uui
 // pareo dejó y que el sync agent usa en cada tick. Vacío = sidecar sin parear.
 func (p *WhatsAppSidecarProxy) loadSidecarToken(ctx context.Context) string {
 	tx, err := p.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return ""
 	}

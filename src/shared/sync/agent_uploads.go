@@ -192,6 +192,7 @@ func (a *Agent) findPendingPhotos(ctx context.Context, e photoEntity) ([]pending
 		PhotoURL string `db:"photo_url"`
 	}{}
 	tx, err := a.uow.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return nil, err
 	}
@@ -622,6 +623,7 @@ func (a *Agent) findPhotosNeedingDownload(ctx context.Context, e photoEntity) ([
 		PhotoURL string `db:"photo_url"`
 	}{}
 	tx, err := a.uow.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return nil, err
 	}

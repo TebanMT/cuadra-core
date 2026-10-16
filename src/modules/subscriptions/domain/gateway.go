@@ -21,6 +21,7 @@ import (
 //     en tienda. Stripe NO soporta OXXO en mode=subscription, por eso el
 //     gateway diverge en este caso.
 type CheckoutRequest struct {
+	LaunchPricing bool // trusted server decision: fixed Standard launch tariff, never client-supplied.
 	GymID         uuid.UUID
 	Plan          string // gym domain plan code: "standard_monthly" / "standard_annual" / "plus_monthly" / "plus_annual"
 	GymName       string
@@ -52,8 +53,9 @@ type CheckoutGateway interface {
 // provider-side id (Stripe: cus_*, MP: not supported today — MP returns
 // ErrBillingPortalUnsupported).
 type BillingPortalRequest struct {
-	CustomerID string
-	ReturnURL  string
+	LaunchPricing bool // Prevent switching an earned launch tariff to a public price.
+	CustomerID    string
+	ReturnURL     string
 }
 
 // BillingPortalResult is the hosted URL the FE redirects the browser to.

@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	stripe "github.com/stripe/stripe-go/v82"
 
@@ -49,6 +50,8 @@ type StripeConfig struct {
 // the OXXO branch switches to mode=payment with a one-time price (Stripe
 // limitation, not ours).
 type StripeGateway struct {
+	portalMu          sync.Mutex
+	launchPortalID    string
 	client            *stripe.Client
 	prices            map[string]string // gym plan code → Stripe price_id (recurring)
 	oxxoAnnualPriceID string            // one-time price for OXXO annual
@@ -94,7 +97,7 @@ func (g *StripeGateway) StartCheckout(ctx context.Context, in subDomain.Checkout
 		return g.startCheckoutOXXO(ctx, in)
 	}
 	priceID, ok := g.prices[in.Plan]
-	if !ok || priceID == "" {
+	if (!ok || priceID == "") && !in.LaunchPricing {
 		return subDomain.CheckoutResult{}, fmt.Errorf("stripe: %w (plan=%s)", subDomain.ErrUnsupportedPlan, in.Plan)
 	}
 	gymRef := in.GymID.String()
@@ -117,10 +120,17 @@ func (g *StripeGateway) StartCheckout(ctx context.Context, in subDomain.Checkout
 		// subscription_details.metadata (legacy); el parser la lee de ahí
 		// (extractStripeInvoiceGymID).
 		SubscriptionData: &stripe.CheckoutSessionCreateSubscriptionDataParams{
-			Metadata: map[string]string{"gym_id": gymRef},
+			Metadata: map[string]string{"gym_id": gymRef, "plan": in.Plan},
 		},
-		Metadata:            map[string]string{"gym_id": gymRef},
+		Metadata:            map[string]string{"gym_id": gymRef, "plan": in.Plan},
 		AllowPromotionCodes: stripe.Bool(true),
+	}
+	if in.LaunchPricing {
+		line, err := launchStripeLine(in.Plan, in.PaymentMethod == "oxxo")
+		if err != nil {
+			return subDomain.CheckoutResult{}, err
+		}
+		params.LineItems = []*stripe.CheckoutSessionCreateLineItemParams{line}
 	}
 	if in.CustomerEmail != "" {
 		params.CustomerEmail = stripe.String(in.CustomerEmail)
@@ -147,7 +157,7 @@ func (g *StripeGateway) StartCheckout(ctx context.Context, in subDomain.Checkout
 // de "voy mañana al OXXO" sin dejar fichas eternamente abiertas. Stripe deja
 // configurar hasta 7; 3 es suficiente y reduce la incertidumbre del dueño.
 func (g *StripeGateway) startCheckoutOXXO(ctx context.Context, in subDomain.CheckoutRequest) (subDomain.CheckoutResult, error) {
-	if g.oxxoAnnualPriceID == "" {
+	if g.oxxoAnnualPriceID == "" && !in.LaunchPricing {
 		return subDomain.CheckoutResult{}, fmt.Errorf("stripe: %w (oxxo annual price not configured)", subDomain.ErrUnsupportedPlan)
 	}
 	gymRef := in.GymID.String()
@@ -178,6 +188,13 @@ func (g *StripeGateway) startCheckoutOXXO(ctx context.Context, in subDomain.Chec
 			"payment_method": "oxxo",
 		},
 	}
+	if in.LaunchPricing {
+		line, err := launchStripeLine(in.Plan, in.PaymentMethod == "oxxo")
+		if err != nil {
+			return subDomain.CheckoutResult{}, err
+		}
+		params.LineItems = []*stripe.CheckoutSessionCreateLineItemParams{line}
+	}
 	if in.CustomerEmail != "" {
 		params.CustomerEmail = stripe.String(in.CustomerEmail)
 	}
@@ -204,6 +221,13 @@ func (g *StripeGateway) StartBillingPortal(ctx context.Context, in subDomain.Bil
 		Customer:  stripe.String(in.CustomerID),
 		ReturnURL: stripe.String(in.ReturnURL),
 	}
+	if in.LaunchPricing {
+		id, err := g.launchPortalConfiguration(ctx)
+		if err != nil {
+			return subDomain.BillingPortalResult{}, err
+		}
+		params.Configuration = stripe.String(id)
+	}
 	sess, err := g.client.V1BillingPortalSessions.Create(ctx, params)
 	if err != nil {
 		return subDomain.BillingPortalResult{}, fmt.Errorf("stripe: create billing portal session: %w", err)
@@ -212,4 +236,60 @@ func (g *StripeGateway) StartBillingPortal(ctx context.Context, in subDomain.Bil
 		return subDomain.BillingPortalResult{}, errors.New("stripe: empty portal session url")
 	}
 	return subDomain.BillingPortalResult{URL: sess.URL}, nil
+}
+
+// Inline immutable prices protect launch customers even if public price IDs
+// change later. Existing subscriptions continue renewing their original price.
+func launchStripeLine(plan string, oneTime bool) (*stripe.CheckoutSessionCreateLineItemParams, error) {
+	var amount int64
+	interval := "month"
+	switch plan {
+	case gymDomain.PlanStandardMonthly:
+		amount = subDomain.LaunchMonthlyCents
+	case gymDomain.PlanStandardAnnual:
+		amount = subDomain.LaunchAnnualCents
+		interval = "year"
+	default:
+		return nil, subDomain.ErrUnsupportedPlan
+	}
+	if oneTime && plan != gymDomain.PlanStandardAnnual {
+		return nil, subDomain.ErrUnsupportedPlan
+	}
+	data := &stripe.CheckoutSessionCreateLineItemPriceDataParams{
+		Currency: stripe.String("mxn"), UnitAmount: stripe.Int64(amount),
+		ProductData: &stripe.CheckoutSessionCreateLineItemPriceDataProductDataParams{Name: stripe.String("Tinta"), Metadata: map[string]string{"plan": plan, "tariff": "launch_standard"}},
+	}
+	if !oneTime {
+		data.Recurring = &stripe.CheckoutSessionCreateLineItemPriceDataRecurringParams{Interval: stripe.String(interval)}
+	}
+	return &stripe.CheckoutSessionCreateLineItemParams{PriceData: data, Quantity: stripe.Int64(1)}, nil
+}
+
+// Launch members can update payment details and cancel without accidentally
+// exchanging their protected price for one configured for future public plans.
+func (g *StripeGateway) launchPortalConfiguration(ctx context.Context) (string, error) {
+	g.portalMu.Lock()
+	defer g.portalMu.Unlock()
+	if g.launchPortalID != "" {
+		return g.launchPortalID, nil
+	}
+	params := &stripe.BillingPortalConfigurationCreateParams{
+		Features: &stripe.BillingPortalConfigurationCreateFeaturesParams{
+			InvoiceHistory:      &stripe.BillingPortalConfigurationCreateFeaturesInvoiceHistoryParams{Enabled: stripe.Bool(true)},
+			PaymentMethodUpdate: &stripe.BillingPortalConfigurationCreateFeaturesPaymentMethodUpdateParams{Enabled: stripe.Bool(true)},
+			SubscriptionCancel:  &stripe.BillingPortalConfigurationCreateFeaturesSubscriptionCancelParams{Enabled: stripe.Bool(true), Mode: stripe.String("at_period_end")},
+			SubscriptionUpdate:  &stripe.BillingPortalConfigurationCreateFeaturesSubscriptionUpdateParams{Enabled: stripe.Bool(false)},
+		},
+		Metadata: map[string]string{"tariff": "launch_standard"},
+	}
+	params.SetIdempotencyKey("tinta-launch-portal-v1")
+	cfg, err := g.client.V1BillingPortalConfigurations.Create(ctx, params)
+	if err != nil {
+		return "", fmt.Errorf("stripe: launch portal configuration: %w", err)
+	}
+	if cfg == nil || cfg.ID == "" {
+		return "", errors.New("stripe: empty portal configuration")
+	}
+	g.launchPortalID = cfg.ID
+	return cfg.ID, nil
 }

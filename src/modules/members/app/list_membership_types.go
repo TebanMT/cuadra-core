@@ -26,6 +26,7 @@ func NewListMembershipTypes(repo memRepo.MembershipTypeRepository, uow sharedDom
 
 func (uc *ListMembershipTypes) Execute(ctx context.Context, in ListMembershipTypesInput) ([]*mtDomain.MembershipType, error) {
 	tx, err := uc.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}

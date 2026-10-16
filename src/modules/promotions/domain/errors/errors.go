@@ -8,6 +8,7 @@ var (
 	// CRUD / lookup
 	ErrPromotionNotFound      = errors.New("promoción no encontrada")
 	ErrPromotionCodeNotFound  = errors.New("no encontramos una promoción con ese código")
+	ErrPromotionCodeAmbiguous = errors.New("este código está repetido; elige la promoción de la lista")
 	ErrPromotionCodeDuplicate = errors.New("ya tienes una promoción con ese código")
 	ErrCrossGym               = errors.New("esa promoción no pertenece a tu gimnasio")
 

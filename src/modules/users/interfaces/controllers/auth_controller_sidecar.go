@@ -32,18 +32,19 @@ const keyCachedLogin = "cached_login"
 // after a successful online login. It carries enough to mint a local JWT
 // and rebuild the loginResp shape from cache when the cloud is offline.
 type cachedLoginRow struct {
-	Email           string     `json:"email"`
-	PasswordHash    string     `json:"password_hash"`
-	UserID          string     `json:"user_id"`
-	GymID           string     `json:"gym_id"`
-	Role            string     `json:"role"`
-	FullName        string     `json:"full_name,omitempty"`
-	Phone           string     `json:"phone,omitempty"`
-	GymName         string     `json:"gym_name,omitempty"`
-	SetupCompleted  bool       `json:"setup_completed"`
-	TrialEndsAt     *time.Time `json:"trial_ends_at,omitempty"`
-	SubscriptionPln string     `json:"subscription_plan,omitempty"`
-	UpdatedAtMs     int64      `json:"updated_at_ms"`
+	AllFeaturesAccess *bool      `json:"all_features_access,omitempty"`
+	Email             string     `json:"email"`
+	PasswordHash      string     `json:"password_hash"`
+	UserID            string     `json:"user_id"`
+	GymID             string     `json:"gym_id"`
+	Role              string     `json:"role"`
+	FullName          string     `json:"full_name,omitempty"`
+	Phone             string     `json:"phone,omitempty"`
+	GymName           string     `json:"gym_name,omitempty"`
+	SetupCompleted    bool       `json:"setup_completed"`
+	TrialEndsAt       *time.Time `json:"trial_ends_at,omitempty"`
+	SubscriptionPln   string     `json:"subscription_plan,omitempty"`
+	UpdatedAtMs       int64      `json:"updated_at_ms"`
 	// PinHash bcrypt del PIN del user. Viene del cloud (loginResp /
 	// redeemInstallerResp) y se mirrorea al sqlite local para que el
 	// flujo login-pin offline funcione sin esperar el primer sync pull.
@@ -244,6 +245,12 @@ func (p *SidecarAuthProxy) handleLogin(c *gin.Context) {
 	//     cached_login eventually catches up and the next login pulls
 	//     the bool into the local row.
 	_ = p.UoW.Command(c.Request.Context(), func(tx sharedDomain.Transaction) error {
+		// The last online login can predate a grant delivered by sync.
+		var grant bool
+		stx := tx.(*sharedDomain.SqlxTransaction)
+		if err := stx.Get(c.Request.Context(), &grant, `SELECT all_features_access FROM gyms WHERE id = ?`, cached.GymID); err == nil {
+			cached.AllFeaturesAccess = &grant
+		}
 		return mirrorCloudIdentity(c.Request.Context(), tx, cached, []byte(cached.PasswordHash))
 	})
 
@@ -265,15 +272,16 @@ func (p *SidecarAuthProxy) handleLogin(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"status_code": http.StatusOK,
 		"data": gin.H{
-			"user_id":           cached.UserID,
-			"gym_id":            cached.GymID,
-			"role":              cached.Role,
-			"access_token":      access,
-			"refresh_token":     refresh,
-			"setup_completed":   cached.SetupCompleted,
-			"trial_ends_at":     cached.TrialEndsAt,
-			"subscription_plan": cached.SubscriptionPln,
-			"gyms":              []gin.H{{"id": cached.GymID, "name": cached.GymName}},
+			"user_id":             cached.UserID,
+			"gym_id":              cached.GymID,
+			"role":                cached.Role,
+			"access_token":        access,
+			"refresh_token":       refresh,
+			"setup_completed":     cached.SetupCompleted,
+			"trial_ends_at":       cached.TrialEndsAt,
+			"subscription_plan":   cached.SubscriptionPln,
+			"all_features_access": cached.AllFeaturesAccess,
+			"gyms":                []gin.H{{"id": cached.GymID, "name": cached.GymName}},
 			// sidecar_token deliberately omitted — offline path can't
 			// rotate it; the existing one stays valid.
 		},
@@ -371,6 +379,7 @@ func (p *SidecarAuthProxy) handleRefreshIdentity(c *gin.Context) {
 	// dueño al wizard de instalación.
 	var sidecarToken string
 	if tx, err := p.UoW.Query(c.Request.Context()); err == nil {
+		defer sharedDomain.CloseQuery(tx)
 		if st, err := syncShared.ReadState(c.Request.Context(), tx); err == nil {
 			sidecarToken = st.SidecarToken
 		}
@@ -408,11 +417,12 @@ func (p *SidecarAuthProxy) handleRefreshIdentity(c *gin.Context) {
 				Role     string  `json:"role"`
 			} `json:"user"`
 			Gym struct {
-				GymID            string     `json:"gym_id"`
-				Name             string     `json:"name"`
-				SetupCompleted   bool       `json:"setup_completed"`
-				TrialEndsAt      *time.Time `json:"trial_ends_at"`
-				SubscriptionPlan string     `json:"subscription_plan"`
+				GymID             string     `json:"gym_id"`
+				Name              string     `json:"name"`
+				SetupCompleted    bool       `json:"setup_completed"`
+				TrialEndsAt       *time.Time `json:"trial_ends_at"`
+				SubscriptionPlan  string     `json:"subscription_plan"`
+				AllFeaturesAccess *bool      `json:"all_features_access"`
 			} `json:"gym"`
 		} `json:"data"`
 	}
@@ -448,6 +458,7 @@ func (p *SidecarAuthProxy) handleRefreshIdentity(c *gin.Context) {
 	updated.SetupCompleted = env.Data.Gym.SetupCompleted
 	updated.TrialEndsAt = env.Data.Gym.TrialEndsAt
 	updated.SubscriptionPln = env.Data.Gym.SubscriptionPlan
+	updated.AllFeaturesAccess = env.Data.Gym.AllFeaturesAccess
 	updated.UpdatedAtMs = time.Now().UTC().UnixMilli()
 
 	// Persist + re-mirror.
@@ -766,6 +777,9 @@ func (p *SidecarAuthProxy) absorbAuthResponse(ctx context.Context, email, passwo
 	if v, ok := d["setup_completed"].(bool); ok {
 		cached.SetupCompleted = v
 	}
+	if v, ok := d["all_features_access"].(bool); ok {
+		cached.AllFeaturesAccess = &v
+	}
 	if v, ok := d["subscription_plan"].(string); ok {
 		cached.SubscriptionPln = v
 	}
@@ -868,16 +882,17 @@ func mirrorCloudIdentity(ctx context.Context, tx sharedDomain.Transaction, cache
 	if _, err := stx.Exec(ctx, `
 		INSERT INTO gyms (id, gym_id, version, created_at, updated_at,
 		                   name, setup_completed_at, subscription_plan,
-		                   trial_ends_at, synced_at)
-		VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
+		                   trial_ends_at, synced_at, all_features_access)
+		VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 0))
 		ON CONFLICT(id) DO UPDATE SET
 			name = COALESCE(gyms.name, excluded.name),
 			setup_completed_at = COALESCE(gyms.setup_completed_at, excluded.setup_completed_at),
 			subscription_plan = excluded.subscription_plan,
+			all_features_access = COALESCE(?, gyms.all_features_access),
 			trial_ends_at = COALESCE(excluded.trial_ends_at, gyms.trial_ends_at),
 			synced_at = excluded.synced_at`,
 		cached.GymID, cached.GymID, now, now, nilIfEmpty(cached.GymName),
-		setupCompletedAt, subPlan, trialEndsAtMs, now,
+		setupCompletedAt, subPlan, trialEndsAtMs, now, cached.AllFeaturesAccess, cached.AllFeaturesAccess,
 	); err != nil {
 		return fmt.Errorf("mirror gym: %w", err)
 	}
@@ -1045,17 +1060,18 @@ func (p *SidecarAuthProxy) handleLoginPIN(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"status_code": http.StatusOK,
 		"data": gin.H{
-			"user_id":           out.UserID,
-			"gym_id":            out.GymID,
-			"role":              out.Role,
-			"full_name":         out.FullName,
-			"email":             out.Email,
-			"gym_name":          out.GymName,
-			"access_token":      out.AccessToken,
-			"refresh_token":     out.RefreshToken,
-			"setup_completed":   out.SetupCompleted,
-			"trial_ends_at":     out.TrialEndsAt,
-			"subscription_plan": out.SubscriptionPlan,
+			"user_id":             out.UserID,
+			"gym_id":              out.GymID,
+			"role":                out.Role,
+			"full_name":           out.FullName,
+			"email":               out.Email,
+			"gym_name":            out.GymName,
+			"access_token":        out.AccessToken,
+			"refresh_token":       out.RefreshToken,
+			"setup_completed":     out.SetupCompleted,
+			"trial_ends_at":       out.TrialEndsAt,
+			"subscription_plan":   out.SubscriptionPlan,
+			"all_features_access": out.AllFeaturesAccess,
 		},
 	})
 }

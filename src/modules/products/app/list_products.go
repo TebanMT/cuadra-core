@@ -47,6 +47,7 @@ func NewListProducts(products prodRepo.ProductRepository, uow sharedDomain.UnitO
 
 func (uc *ListProducts) Execute(ctx context.Context, in ListProductsInput) (*ListProductsOutput, error) {
 	tx, err := uc.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}

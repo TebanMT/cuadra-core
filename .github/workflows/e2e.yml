@@ -1,0 +1,116 @@
+name: E2E real y compatibilidad
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      browser:
+        description: 'Incluir React desktop/dashboard (requiere TINTA_E2E_READ_TOKEN para repos privados)'
+        type: boolean
+        default: true
+      desktop_ref:
+        description: 'Ref exacta de desktop para navegador'
+        default: main
+      dashboard_ref:
+        description: 'Ref exacta de dashboard para navegador'
+        default: main
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        sidecar: [current, v1.2.2, v1.2.1]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: tinta
+          POSTGRES_PASSWORD: isolated_e2e
+          POSTGRES_DB: postgres
+        ports: ['55439:5432']
+        options: >-
+          --health-cmd 'pg_isready -U tinta -d postgres'
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          path: core
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.3'
+          cache-dependency-path: core/go.sum
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Instalar cliente PostgreSQL
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Comprobar acceso a las interfaces privadas
+        if: matrix.sidecar == 'current' && (github.event_name != 'workflow_dispatch' || inputs.browser)
+        env:
+          READ_TOKEN: ${{ secrets.TINTA_E2E_READ_TOKEN }}
+        run: |
+          if [ -z "$READ_TOKEN" ]; then
+            echo '::error::Configura TINTA_E2E_READ_TOKEN con lectura de desktop y dashboard. La cobertura de navegador no se omite silenciosamente.'
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+        if: matrix.sidecar == 'current' && (github.event_name != 'workflow_dispatch' || inputs.browser)
+        with:
+          repository: TebanMT/cuadra-desktop
+          ref: ${{ inputs.desktop_ref || 'main' }}
+          token: ${{ secrets.TINTA_E2E_READ_TOKEN }}
+          path: desktop
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        if: matrix.sidecar == 'current' && (github.event_name != 'workflow_dispatch' || inputs.browser)
+        with:
+          repository: TebanMT/cuadra-dashboard
+          ref: ${{ inputs.dashboard_ref || 'main' }}
+          token: ${{ secrets.TINTA_E2E_READ_TOKEN }}
+          path: dashboard
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        if: matrix.sidecar == 'current' && (github.event_name != 'workflow_dispatch' || inputs.browser)
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        if: matrix.sidecar == 'current' && (github.event_name != 'workflow_dispatch' || inputs.browser)
+        with:
+          node-version: 22
+      - name: Preparar navegador y frontends
+        if: matrix.sidecar == 'current' && (github.event_name != 'workflow_dispatch' || inputs.browser)
+        run: |
+          pnpm -C desktop install --frozen-lockfile
+          pnpm -C dashboard install --frozen-lockfile
+          python -m pip install -r core/tests/e2e/requirements.txt
+          python -m playwright install --with-deps chromium
+      - name: PostgreSQL, dos SQLite, fallos HTTP, upgrade y restauración
+        env:
+          SIDECAR_REF: ${{ matrix.sidecar }}
+          BROWSER: ${{ matrix.sidecar == 'current' && (github.event_name != 'workflow_dispatch' || inputs.browser) }}
+        run: |
+          args=()
+          if [ "$SIDECAR_REF" != current ]; then args+=(--sidecar-ref "$SIDECAR_REF"); fi
+          if [ "$BROWSER" = true ]; then args+=(--browser --desktop "$GITHUB_WORKSPACE/desktop" --dashboard "$GITHUB_WORKSPACE/dashboard"); fi
+          python core/tests/e2e/run.py --admin-dsn 'postgresql://tinta:isolated_e2e@127.0.0.1:55439/postgres?sslmode=disable' --artifacts "$RUNNER_TEMP/tinta-e2e" "${args[@]}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-${{ matrix.sidecar }}
+          retention-days: 7
+          # Synthetic summaries only. Do not upload keys, DBs, tokens or traces.
+          path: |
+            ${{ runner.temp }}/tinta-e2e/versions.json
+            ${{ runner.temp }}/tinta-e2e/complete.json
+            ${{ runner.temp }}/tinta-e2e/runtime/results.json
+            ${{ runner.temp }}/tinta-e2e/runtime/browser-*.png

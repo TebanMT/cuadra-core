@@ -116,6 +116,7 @@ func (c *Controller) handleList(ctx *gin.Context) {
 	}
 
 	tx, err := c.UoW.Query(ctx.Request.Context())
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		utils.ErrorResponse(ctx, http.StatusInternalServerError, err)
 		return

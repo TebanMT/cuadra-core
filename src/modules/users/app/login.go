@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -35,6 +34,7 @@ type LoginOutput struct {
 	RefreshToken       string
 	SetupCompleted     bool
 	TrialEndsAt        *time.Time
+	AllFeaturesAccess  bool
 	SubscriptionPlan   string
 	MustChangePassword bool
 	// HasPIN — el FE lo lee para pintar "Cambiar PIN" vs. "Crear PIN" en
@@ -75,22 +75,27 @@ func NewLogin(users userRepo.UserRepository, gyms gymRepo.GymRepository,
 }
 
 func (uc *Login) Execute(ctx context.Context, in LoginInput) (LoginOutput, error) {
+	ctx, scopeErr := sharedDomain.ResolveTenant(ctx, uc.UoW, "email", in.Email)
+	if scopeErr != nil {
+		return LoginOutput{}, sharedDomain.NewBusinessError(userErrors.ErrInvalidCredentials, "")
+	}
 	now := uc.NowFunc()
 	var (
-		userID     uuid.UUID
-		gymID      uuid.UUID
-		fullName   string
-		email      string
-		phone      string
-		role       string
-		gymName    *string
-		setupDone  bool
-		trialEnd   *time.Time
-		plan       string
-		mustChange bool
-		hasPIN     bool
-		pinHash    string
-		verifiedAt *time.Time
+		userID            uuid.UUID
+		gymID             uuid.UUID
+		fullName          string
+		email             string
+		phone             string
+		role              string
+		gymName           *string
+		setupDone         bool
+		trialEnd          *time.Time
+		plan              string
+		allFeaturesAccess bool
+		mustChange        bool
+		hasPIN            bool
+		pinHash           string
+		verifiedAt        *time.Time
 	)
 	err := uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
 		user, err := uc.Users.GetByEmail(tx, in.Email)
@@ -101,9 +106,7 @@ func (uc *Login) Execute(ctx context.Context, in LoginInput) (LoginOutput, error
 		if !user.Active {
 			return sharedDomain.NewBusinessError(userErrors.ErrAccountInactive, "")
 		}
-		log.Printf("user hash=%q len=%d input=%q len=%d bytes=%v", user.PasswordHash, len(user.PasswordHash), in.Password, len(in.Password), []byte(in.Password))
 		if err := auth.VerifyPassword(user.PasswordHash, in.Password); err != nil {
-			log.Println("err", err)
 			return sharedDomain.NewBusinessError(userErrors.ErrInvalidCredentials, "")
 		}
 		gym, err := uc.Gyms.GetByID(tx, user.GymID)
@@ -137,6 +140,7 @@ func (uc *Login) Execute(ctx context.Context, in LoginInput) (LoginOutput, error
 		setupDone = gym.IsSetupComplete()
 		trialEnd = gym.TrialEndsAt
 		plan = gym.SubscriptionPlan
+		allFeaturesAccess = gym.AllFeaturesAccess
 		mustChange = user.MustChangePassword
 		hasPIN = user.HasPIN()
 		if user.PinHash != nil {
@@ -170,6 +174,7 @@ func (uc *Login) Execute(ctx context.Context, in LoginInput) (LoginOutput, error
 		RefreshToken:       refresh,
 		SetupCompleted:     setupDone,
 		TrialEndsAt:        trialEnd,
+		AllFeaturesAccess:  allFeaturesAccess,
 		SubscriptionPlan:   plan,
 		MustChangePassword: mustChange,
 		HasPIN:             hasPIN,

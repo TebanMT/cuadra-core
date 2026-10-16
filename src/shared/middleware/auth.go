@@ -10,6 +10,7 @@ import (
 
 	"github.com/cuadra/cuadra-core/src/shared/audit"
 	"github.com/cuadra/cuadra-core/src/shared/auth"
+	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 	"github.com/cuadra/cuadra-core/src/shared/utils"
 )
 
@@ -45,7 +46,7 @@ func AuthMiddleware(tokens auth.TokenService) gin.HandlerFunc {
 		c.Set(GymIDKey, claims.GymID)
 		c.Set(RoleKey, claims.Role)
 
-		ctx := c.Request.Context()
+		ctx := sharedDomain.WithTenant(c.Request.Context(), claims.GymID)
 		ctx = audit.WithIP(ctx, c.ClientIP())
 		ctx = audit.WithUA(ctx, c.Request.UserAgent())
 		c.Request = c.Request.WithContext(ctx)

@@ -18,6 +18,7 @@ import (
 	memRepo "github.com/cuadra/cuadra-core/src/modules/members/domain/repository"
 	"github.com/cuadra/cuadra-core/src/modules/members/infraestructure/db/models"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
+	"github.com/cuadra/cuadra-core/src/shared/textsearch"
 )
 
 type MemberPostgresRepository struct{}
@@ -190,17 +191,17 @@ func (r *MemberPostgresRepository) List(tx sharedDomain.Transaction, q memRepo.L
 			AND ms.deleted_at IS NULL`).
 		Where("m.gym_id = ? AND m.deleted_at IS NULL", q.GymID)
 
-	if s := strings.TrimSpace(q.Search); s != "" {
+	if s := textsearch.Normalize(q.Search); s != "" {
 		// Nombre: prefix match. Teléfono: substring match sobre la
 		// versión solo-dígitos del término (los teléfonos en BD están
 		// normalizados sin espacios ni guiones). Antes era sufijo y los
 		// primeros dígitos no matcheaban nada.
-		like := strings.ToLower(s) + "%"
+		like := textsearch.EscapeLike(s) + "%"
 		phoneDigits := stripPhoneSeparators(s)
 		if phoneDigits != "" {
-			base = base.Where("LOWER(m.full_name) LIKE ? OR m.phone LIKE ?", like, "%"+phoneDigits+"%")
+			base = base.Where(textsearch.PostgresColumn("m.full_name")+" LIKE ? ESCAPE '!' OR m.phone LIKE ?", like, "%"+phoneDigits+"%")
 		} else {
-			base = base.Where("LOWER(m.full_name) LIKE ?", like)
+			base = base.Where(textsearch.PostgresColumn("m.full_name")+" LIKE ? ESCAPE '!'", like)
 		}
 	}
 	switch q.StatusFilter {

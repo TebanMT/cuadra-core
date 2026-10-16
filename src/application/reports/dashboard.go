@@ -400,7 +400,7 @@ func (uc *Dashboard) canAccessPlus(tx sharedDomain.Transaction, gymID uuid.UUID)
 		return false
 	}
 	g, err := uc.Gyms.GetByID(tx, gymID)
-	return err == nil && g != nil && gymDomain.CanAccessPlusFeatures(g.SubscriptionPlan)
+	return err == nil && g != nil && g.CanAccessFeature(gymDomain.FeatureRecurringExpenses)
 }
 
 func previousMonthMTDEnd(today time.Time) time.Time {

@@ -19,6 +19,7 @@ import (
 func SyncProbe(uow sharedDomain.UnitOfWork) func(ctx context.Context, gymID uuid.UUID) (*time.Time, error) {
 	return func(ctx context.Context, gymID uuid.UUID) (*time.Time, error) {
 		tx, err := uow.Query(ctx)
+		defer sharedDomain.CloseQuery(tx)
 		if err != nil {
 			return nil, err
 		}

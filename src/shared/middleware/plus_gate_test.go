@@ -96,3 +96,22 @@ func contains(s, sub string) bool {
 	}
 	return false
 }
+
+func TestLaunchAccessGatesByFeature(t *testing.T) {
+	t.Setenv("TINTA_MODE", "test")
+	gym := &gymDomain.Gym{SubscriptionPlan: gymDomain.PlanStandardMonthly, AllFeaturesAccess: true}
+	repo := plusGateGymRepo{gym: gym}
+	if w := plusGateRequest(t, RequireFeature(repo, plusGateUoW{}, gymDomain.FeatureRecurringExpenses)); w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	if w := plusGateRequest(t, RequireFeature(repo, plusGateUoW{}, "unknown")); w.Code != 402 {
+		t.Fatal("unknown feature allowed")
+	}
+	if w := plusGateRequest(t, func(c *gin.Context) {
+		if EnforcePlusInline(c, repo, plusGateUoW{}) {
+			c.Next()
+		}
+	}); w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+}

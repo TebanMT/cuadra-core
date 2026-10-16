@@ -47,7 +47,7 @@ func (r *GymPostgresRepository) Update(tx sharedDomain.Transaction, g *gymDomain
 	m := toModel(g)
 	// Omit id + created_at so we don't move them by accident.
 	if err := gormTx.Where("id = ?", g.ID).
-		Omit("id", "created_at", "gym_id").
+		Omit("id", "created_at", "gym_id", "all_features_access").
 		Save(&m).Error; err != nil {
 		return nil, err
 	}

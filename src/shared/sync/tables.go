@@ -44,7 +44,7 @@ var SyncedTables = []EntityTable{
 			"rfc", "razon_social", "codigo_postal", "regimen_fiscal",
 			"logo_url", "primary_color", "secondary_color",
 			"payment_methods", "open_time", "close_time",
-			"subscription_plan", "trial_ends_at", "subscription_ends_at",
+			"all_features_access", "subscription_plan", "trial_ends_at", "subscription_ends_at",
 			"subscription_status", "stripe_customer_id", "setup_completed_at",
 			"whatsapp_business_phone", "whatsapp_business_token_enc", "whatsapp_connected_at",
 			"kiosk_settings", "charge_settings",

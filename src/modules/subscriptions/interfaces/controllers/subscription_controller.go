@@ -32,6 +32,7 @@ import (
 )
 
 type SubscriptionController struct {
+	MPEvents subDomain.PaymentEventResolver
 	Record   *subApp.RecordEvent
 	Get      *subApp.GetSubscription
 	Checkout *subApp.StartCheckout
@@ -85,13 +86,16 @@ func (ctrl *SubscriptionController) RegisterReadOnlyRoutes(r *gin.Engine) {
 // ---------------------------------------------------------------------------
 
 type subscriptionWire struct {
-	Plan           string             `json:"plan"`
-	Status         string             `json:"status"`
-	TrialEndsAt    *time.Time         `json:"trial_ends_at,omitempty"`
-	PeriodEndsAt   *time.Time         `json:"period_ends_at,omitempty"`
-	HasActiveAcc   bool               `json:"has_active_access"`
-	IsTrialExpired bool               `json:"is_trial_expired"`
-	History        []subscriptionEvWi `json:"history"`
+	LaunchOfferAvailable bool               `json:"launch_offer_available"`
+	LaunchSlotsRemaining int                `json:"launch_slots_remaining"`
+	AllFeaturesAccess    bool               `json:"all_features_access"`
+	Plan                 string             `json:"plan"`
+	Status               string             `json:"status"`
+	TrialEndsAt          *time.Time         `json:"trial_ends_at,omitempty"`
+	PeriodEndsAt         *time.Time         `json:"period_ends_at,omitempty"`
+	HasActiveAcc         bool               `json:"has_active_access"`
+	IsTrialExpired       bool               `json:"is_trial_expired"`
+	History              []subscriptionEvWi `json:"history"`
 }
 
 type subscriptionEvWi struct {
@@ -141,13 +145,16 @@ func (ctrl *SubscriptionController) handleGetMine(c *gin.Context) {
 		})
 	}
 	utils.JsonResponse(c, http.StatusOK, subscriptionWire{
-		Plan:           out.Plan,
-		Status:         out.Status,
-		TrialEndsAt:    out.TrialEndsAt,
-		PeriodEndsAt:   out.PeriodEndsAt,
-		HasActiveAcc:   out.HasActiveAcc,
-		IsTrialExpired: out.IsTrialExpired,
-		History:        hist,
+		LaunchOfferAvailable: out.LaunchOfferAvailable,
+		LaunchSlotsRemaining: out.LaunchSlotsRemaining,
+		AllFeaturesAccess:    out.AllFeaturesAccess,
+		Plan:                 out.Plan,
+		Status:               out.Status,
+		TrialEndsAt:          out.TrialEndsAt,
+		PeriodEndsAt:         out.PeriodEndsAt,
+		HasActiveAcc:         out.HasActiveAcc,
+		IsTrialExpired:       out.IsTrialExpired,
+		History:              hist,
 	})
 }
 
@@ -340,15 +347,35 @@ func (ctrl *SubscriptionController) handleMercadoPago(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusUnauthorized, err)
 		return
 	}
-	in, err := parseMercadoPagoEvent(body)
-	if err != nil {
-		utils.ErrorResponse(c, http.StatusBadRequest, err)
+	var notification struct {
+		Type string `json:"type"`
+		Data struct {
+			ID json.RawMessage `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &notification); err != nil {
+		utils.ErrorResponse(c, 400, err)
 		return
 	}
-	if in == nil {
+	id := strings.Trim(string(notification.Data.ID), "\"")
+	if signedID := c.Query("data.id"); signedID != "" && signedID != id {
+		utils.ErrorResponse(c, 400, errors.New("resource id mismatch"))
+		return
+	}
+	if ctrl.MPEvents == nil {
+		utils.ErrorResponse(c, 503, errors.New("payment verification unavailable"))
+		return
+	}
+	event, err := ctrl.MPEvents.Resolve(c.Request.Context(), notification.Type, id)
+	if err != nil {
+		utils.ErrorResponse(c, 502, err)
+		return
+	}
+	if event == nil {
 		c.Status(http.StatusOK)
 		return
 	}
+	in := &subApp.RecordEventInput{GymID: event.GymID, Provider: event.Provider, Type: event.Type, ExternalID: event.ExternalID, Plan: event.Plan, Amount: event.Amount, Currency: event.Currency, PeriodEndsAt: event.PeriodEndsAt, OccurredAt: event.OccurredAt, RawPayload: event.RawPayload, ConfirmedPayment: event.Amount != nil && *event.Amount > 0}
 	out, err := ctrl.Record.Execute(c.Request.Context(), *in)
 	if err != nil {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
@@ -410,6 +437,7 @@ func parseStripeEvent(body []byte) (*subApp.RecordEventInput, error) {
 		occurred = time.Now().UTC()
 	}
 	var typ subDomain.EventType
+	confirmedPayment := false
 	externalID := env.ID
 	rawPayload := map[string]any{"event": env.Type, "data": env.Data}
 	switch env.Type {
@@ -419,16 +447,16 @@ func parseStripeEvent(body []byte) (*subApp.RecordEventInput, error) {
 		// Ambos eventos disparan por el MISMO cobro (payment_succeeded = el
 		// intento de pago funcionó, paid = la invoice quedó saldada). Para no
 		// duplicar filas en la historia:
-		//   - el primer cobro del checkout (billing_reason=subscription_create)
-		//     se ignora — customer.subscription.created ya registra la
-		//     activación con plan + period end;
+		//   - the initial paid invoice also qualifies for launch access;
+		//     subscription.created alone does not prove payment;
 		//   - external id = la invoice (in_...), no el event (evt_...): la
 		//     idempotencia por (provider, external_id) colapsa paid +
 		//     payment_succeeded del mismo cobro en UNA sola fila.
-		if extractStripeInvoiceBillingReason(env.Data) == "subscription_create" {
-			return nil, nil
-		}
 		typ = subDomain.EventRenewed
+		if extractStripeInvoiceBillingReason(env.Data) == "subscription_create" {
+			typ = subDomain.EventActivated
+		}
+		confirmedPayment = amount != nil && *amount > 0
 		if invID := extractStripeObjectID(env.Data); invID != "" {
 			externalID = invID
 		}
@@ -478,6 +506,7 @@ func parseStripeEvent(body []byte) (*subApp.RecordEventInput, error) {
 		// activamos directo; si dejó la ficha pendiente, status="unpaid"
 		// y registramos el voucher.
 		if paymentStatus == "paid" {
+			confirmedPayment = amount != nil && *amount > 0
 			typ = subDomain.EventActivated
 			plan = inferPlanForOXXO(env.Data, plan)
 			periodEnd = oneYearFrom(occurred)
@@ -499,6 +528,7 @@ func parseStripeEvent(body []byte) (*subApp.RecordEventInput, error) {
 		// rompe.
 		rawPayload["payment_method"] = "oxxo"
 	case "payment_intent.succeeded":
+		confirmedPayment = amount != nil && *amount > 0
 		// Sólo nos interesa si trae metadata.gym_id — ese es el marker que
 		// pusimos en startCheckoutOXXO. Otros payment intents (futuros
 		// flows tipo tap-to-sell) los ignoramos.
@@ -520,6 +550,7 @@ func parseStripeEvent(body []byte) (*subApp.RecordEventInput, error) {
 		return nil, nil
 	}
 	return &subApp.RecordEventInput{
+		ConfirmedPayment: confirmedPayment,
 		GymID:            gymID,
 		Provider:         subDomain.ProviderStripe,
 		Type:             typ,
@@ -781,6 +812,12 @@ func extractStripeInvoicePeriodEnd(data map[string]any) *time.Time {
 // Basil+ la línea trae `pricing` sin nickname → devolvemos "" y RecordEvent
 // conserva el plan actual del gym.
 func extractStripeInvoicePlan(data map[string]any) string {
+	obj := digMap(data, "object")
+	for _, md := range []map[string]any{digMap(obj, "metadata"), digMap(digMap(digMap(obj, "parent"), "subscription_details"), "metadata"), digMap(digMap(obj, "subscription_details"), "metadata")} {
+		if plan, ok := md["plan"].(string); ok && plan != "" {
+			return plan
+		}
+	}
 	line := firstStripeInvoiceLine(data)
 	for _, key := range []string{"plan", "price"} {
 		if nick, ok := digMap(line, key)["nickname"].(string); ok && nick != "" {
@@ -857,7 +894,7 @@ func extractStripeFields(data map[string]any) (uuid.UUID, string, *time.Time, *f
 			}
 		}
 	}
-	plan := ""
+	plan, _ := digMap(obj, "metadata")["plan"].(string)
 	// firstItem captura el primer subscription item — tanto para extraer el
 	// plan.nickname como para leer current_period_end en la API moderna
 	// (2026-04-22.dahlia+) donde Stripe movió ese campo del subscription
@@ -868,7 +905,7 @@ func extractStripeFields(data map[string]any) (uuid.UUID, string, *time.Time, *f
 			if first, ok := datas[0].(map[string]any); ok {
 				firstItem = first
 				if p, ok := first["plan"].(map[string]any); ok {
-					if nick, ok := p["nickname"].(string); ok {
+					if nick, ok := p["nickname"].(string); ok && nick != "" && plan == "" {
 						plan = nick
 					}
 				}
@@ -896,6 +933,9 @@ func extractStripeFields(data map[string]any) (uuid.UUID, string, *time.Time, *f
 	}
 	var amount *float64
 	if v, ok := obj["amount_paid"].(float64); ok {
+		val := v / 100.0
+		amount = &val
+	} else if v, ok := obj["amount_total"].(float64); ok {
 		val := v / 100.0
 		amount = &val
 	} else if v, ok := obj["amount"].(float64); ok {

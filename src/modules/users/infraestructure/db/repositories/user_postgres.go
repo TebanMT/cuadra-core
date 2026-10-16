@@ -66,14 +66,12 @@ func (r *UserPostgresRepository) ExistsByEmail(tx sharedDomain.Transaction, emai
 	if clean == "" {
 		return false, nil
 	}
-	var n int64
-	err := gormTx.Model(&models.UserModel{}).
-		Where("LOWER(email) = ? AND deleted_at IS NULL", clean).
-		Count(&n).Error
+	var exists bool
+	err := gormTx.Raw(`SELECT tinta_private.email_exists(?)`, clean).Scan(&exists).Error
 	if err != nil {
 		return false, err
 	}
-	return n > 0, nil
+	return exists, nil
 }
 
 func (r *UserPostgresRepository) ExistsByPhoneInGym(tx sharedDomain.Transaction, gymID uuid.UUID, phone string, excludeUserID *uuid.UUID) (bool, error) {

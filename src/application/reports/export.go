@@ -97,6 +97,7 @@ func (uc *ExportReport) Execute(ctx context.Context, in ExportInput) (*ExportOut
 		return uc.executePeriodSummary(ctx, in)
 	}
 	tx, err := uc.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}
@@ -137,6 +138,7 @@ func (uc *ExportReport) Execute(ctx context.Context, in ExportInput) (*ExportOut
 			func() ([]byte, error) { return renderSalesXLSX(rows) })
 
 	case ReportTypeAttentionRequired:
+		sharedDomain.CloseQuery(tx)
 		out, err := uc.AttentionRequired.Execute(ctx, AttentionRequiredInput{GymID: in.GymID})
 		if err != nil {
 			return nil, err
@@ -146,6 +148,7 @@ func (uc *ExportReport) Execute(ctx context.Context, in ExportInput) (*ExportOut
 			func() ([]byte, error) { return renderAttentionRequiredXLSX(out) })
 
 	case ReportTypeCashClose:
+		sharedDomain.CloseQuery(tx)
 		if uc.CashClose == nil {
 			return nil, sharedDomain.NewValidationError(ErrUnsupportedReport)
 		}

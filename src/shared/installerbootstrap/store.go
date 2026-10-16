@@ -4,7 +4,9 @@ package installerbootstrap
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
+	shared "github.com/cuadra/cuadra-core/src/shared/domain"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,7 +24,7 @@ func NewPostgresStore(db *gorm.DB) *PostgresStore { return &PostgresStore{db: db
 // en la tabla preserva la auditoría ("¿cuántos códigos pidió este
 // dueño antes de instalar?"). Quedan rechazados en Redeem por el
 // filtro `expires_at > now`.
-func (s *PostgresStore) ExpirePriorActive(ctx context.Context, gymID, userID uuid.UUID, now time.Time) (int64, error) {
+func (s *PostgresStore) expirePriorActiveScoped(ctx context.Context, gymID, userID uuid.UUID, now time.Time) (int64, error) {
 	res := s.db.WithContext(ctx).Exec(`
 		UPDATE installer_bootstraps
 		SET expires_at = ?
@@ -35,7 +37,7 @@ func (s *PostgresStore) ExpirePriorActive(ctx context.Context, gymID, userID uui
 	return res.RowsAffected, res.Error
 }
 
-func (s *PostgresStore) Insert(ctx context.Context, gymID, userID uuid.UUID, hash []byte, expiresAt time.Time) (Bootstrap, error) {
+func (s *PostgresStore) insertScoped(ctx context.Context, gymID, userID uuid.UUID, hash []byte, expiresAt time.Time) (Bootstrap, error) {
 	id := uuid.New()
 	now := time.Now().UTC()
 	if err := s.db.WithContext(ctx).Exec(`
@@ -52,7 +54,7 @@ func (s *PostgresStore) Insert(ctx context.Context, gymID, userID uuid.UUID, has
 // UPDATE … RETURNING pattern means concurrent redeem attempts either both
 // succeed exactly once (one wins, one returns ErrAlreadyRedeemed) or both
 // see ErrNotFound.
-func (s *PostgresStore) Redeem(ctx context.Context, hash []byte, now time.Time) (Bootstrap, error) {
+func (s *PostgresStore) redeemScoped(ctx context.Context, hash []byte, now time.Time) (Bootstrap, error) {
 	var rec struct {
 		ID              uuid.UUID
 		GymID           uuid.UUID  `gorm:"column:gym_id"`
@@ -115,3 +117,54 @@ func (s *PostgresStore) Redeem(ctx context.Context, hash []byte, now time.Time) 
 // Sentinel guard so an unhandled error inside Redeem never leaks `nil` as a
 // success.
 var _ = errors.New
+
+func (s *PostgresStore) ExpirePriorActive(ctx context.Context, gymID, userID uuid.UUID, now time.Time) (out int64, err error) {
+	ctx = shared.WithTenant(ctx, gymID)
+	tx, err := shared.TenantDB(ctx, s.db)
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	out, err = (&PostgresStore{db: tx}).expirePriorActiveScoped(ctx, gymID, userID, now)
+	if err != nil {
+		return
+	}
+	err = tx.Commit().Error
+	return
+}
+
+func (s *PostgresStore) Insert(ctx context.Context, gymID, userID uuid.UUID, hash []byte, expiresAt time.Time) (out Bootstrap, err error) {
+	ctx = shared.WithTenant(ctx, gymID)
+	tx, err := shared.TenantDB(ctx, s.db)
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	out, err = (&PostgresStore{db: tx}).insertScoped(ctx, gymID, userID, hash, expiresAt)
+	if err != nil {
+		return
+	}
+	err = tx.Commit().Error
+	return
+}
+
+func (s *PostgresStore) Redeem(ctx context.Context, hash []byte, now time.Time) (out Bootstrap, err error) {
+	ctx, err = shared.ResolveDBTenant(ctx, s.db, "bootstrap", hex.EncodeToString(hash))
+	if err != nil {
+		if errors.Is(err, shared.ErrTenantScope) {
+			err = ErrNotFound
+		}
+		return
+	}
+	tx, err := shared.TenantDB(ctx, s.db)
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	out, err = (&PostgresStore{db: tx}).redeemScoped(ctx, hash, now)
+	if err != nil {
+		return
+	}
+	err = tx.Commit().Error
+	return
+}

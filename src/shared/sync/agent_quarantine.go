@@ -215,6 +215,7 @@ func quarantineErrFor(hits []poisonHit, ch PullChange) string {
 // de sync). Best-effort.
 func (a *Agent) refreshQuarantinedCount(ctx context.Context) {
 	tx, err := a.uow.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return
 	}

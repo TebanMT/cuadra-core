@@ -11,6 +11,7 @@ package controllers
 import (
 	"errors"
 	"fmt"
+	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 	"io"
 	"net/http"
 	"os"
@@ -70,6 +71,7 @@ type meGymWire struct {
 	Name               string     `json:"name"`
 	SetupCompleted     bool       `json:"setup_completed"`
 	TrialEndsAt        *time.Time `json:"trial_ends_at,omitempty"`
+	AllFeaturesAccess  bool       `json:"all_features_access"`
 	SubscriptionPlan   string     `json:"subscription_plan"`
 	SubscriptionStatus string     `json:"subscription_status"`
 	SubscriptionEndsAt *time.Time `json:"subscription_ends_at,omitempty"`
@@ -169,6 +171,7 @@ func (ctrl *AuthController) handleGetMe(c *gin.Context) {
 		return
 	}
 	tx, err := ctrl.UoW.Query(c.Request.Context())
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, err)
 		return
@@ -203,6 +206,7 @@ func (ctrl *AuthController) handleGetMe(c *gin.Context) {
 			Name:               gymName,
 			SetupCompleted:     gym.IsSetupComplete(),
 			TrialEndsAt:        gym.TrialEndsAt,
+			AllFeaturesAccess:  gym.AllFeaturesAccess,
 			SubscriptionPlan:   gym.SubscriptionPlan,
 			SubscriptionStatus: gym.SubscriptionStatus,
 			SubscriptionEndsAt: gym.SubscriptionEndsAt,
@@ -267,6 +271,7 @@ func (ctrl *AuthController) handleGetGymProfile(c *gin.Context) {
 		return
 	}
 	tx, err := ctrl.UoW.Query(c.Request.Context())
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, err)
 		return
@@ -381,6 +386,7 @@ func (ctrl *AuthController) handleGetChargeSettings(c *gin.Context) {
 		return
 	}
 	tx, err := ctrl.UoW.Query(c.Request.Context())
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, err)
 		return
@@ -432,6 +438,7 @@ func (ctrl *AuthController) handleSetupStatus(c *gin.Context) {
 		return
 	}
 	tx, err := ctrl.UoW.Query(c.Request.Context())
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, err)
 		return

@@ -340,6 +340,7 @@ func NewListCashMovementsByDate(r expRepo.CashMovementRepository, u shared.UnitO
 }
 func (uc *ListCashMovementsByDate) Execute(ctx context.Context, gym uuid.UUID, day *time.Time, unclassified bool) ([]*cashDomain.CashMovement, error) {
 	tx, err := uc.UoW.Query(ctx)
+	defer shared.CloseQuery(tx)
 	if err != nil {
 		return nil, shared.NewUnexpectedError(err)
 	}
@@ -378,6 +379,7 @@ func (uc *ListCashMovementsByDate) ExecuteList(ctx context.Context, in ListCashM
 		pageSize = 50
 	}
 	tx, err := uc.UoW.Query(ctx)
+	defer shared.CloseQuery(tx)
 	if err != nil {
 		return nil, shared.NewUnexpectedError(err)
 	}

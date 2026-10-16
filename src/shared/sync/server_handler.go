@@ -5,12 +5,16 @@ package sync
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/cuadra/cuadra-core/src/shared/auth"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
@@ -58,6 +62,15 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	} else {
 		api.Use(middleware.AuthMiddleware(h.Tokens))
 	}
+	// Shared by credentials/devices of the same gym; no payload-supplied key.
+	// Bursts accommodate initial downloads and catch-up after offline operation.
+	api.Use(middleware.NewRateLimit(120, 20, func(c *gin.Context) string {
+		id, ok := middleware.GetGymID(c)
+		if !ok {
+			return ""
+		}
+		return id.String()
+	}).Handler())
 	api.POST("/push", h.Push)
 	api.GET("/pull", h.Pull)
 	api.GET("/full", h.FullSync)
@@ -94,7 +107,7 @@ func (h *Handler) LastUpdate(c *gin.Context) {
 	}
 	creds, err := h.SidecarStore.ListActiveByGym(c.Request.Context(), gymID)
 	if err != nil {
-		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "sync_status_unavailable"})
 		return
 	}
 	var lastAt *time.Time
@@ -128,10 +141,20 @@ func (h *Handler) Push(c *gin.Context) {
 		return
 	}
 
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 8<<20)
 	var req PushRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		h.Metrics.IncPushRequest("malformed")
-		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid body: " + err.Error()})
+		status := http.StatusBadRequest
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		c.AbortWithStatusJSON(status, gin.H{"error": "invalid_sync_body"})
+		return
+	}
+	if len(req.Batch) > 2000 {
+		c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{"error": "sync_batch_too_large"})
 		return
 	}
 
@@ -170,8 +193,23 @@ func (h *Handler) Push(c *gin.Context) {
 		}
 	}
 	handledExpenses := make(map[int]bool)
+	financialGroups := map[int][]int{}
+	if _, ok := h.Store.(*PostgresStore); ok {
+		for _, indexes := range groupFinancialItems(req.Batch) {
+			for _, index := range indexes {
+				financialGroups[index] = indexes
+			}
+		}
+	}
 	for _, unit := range groupRefundPushItems(req.Batch) {
 		if handledExpenses[unit.indexes[0]] {
+			continue
+		}
+		if indexes, ok := financialGroups[unit.indexes[0]]; ok {
+			for index, result := range h.processFinancialGraph(ctx, gymID, clientUUID, req.Batch, indexes) {
+				results[index] = result
+				handledExpenses[index] = true
+			}
 			continue
 		}
 		if indexes, ok := expenseGroups[unit.indexes[0]]; ok {
@@ -277,9 +315,26 @@ func (h *Handler) applyOneInTx(
 	return nil
 }
 
+var errCrossTenant = errors.New("el registro o su referencia no pertenece al gimnasio")
+
 func classifyPushError(out *PushItemResult, err error, item PushItem) {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "42501" {
+		out.Status = StatusRejectedUnauthorized
+		out.Error = "el registro no pertenece al gimnasio autenticado"
+		return
+	}
+
+	if errors.Is(err, errCrossTenant) || (errors.As(err, &pgErr) && strings.HasPrefix(pgErr.ConstraintName, "tenant_")) {
+		out.Status = StatusRejectedUnauthorized
+		out.Error = errCrossTenant.Error()
+		return
+	}
 	var financialConflict *financialConflictError
-	if errors.As(err, &financialConflict) {
+	if errors.As(err, &pgErr) && pgErr.ConstraintName == "stock_event_immutable" {
+		out.Status = StatusRejectedFinancialConflict
+		out.Error = "El movimiento de inventario se conserva; registra una corrección con un movimiento nuevo."
+	} else if errors.As(err, &financialConflict) {
 		out.Status = StatusRejectedFinancialConflict
 		out.Error = financialConflict.Error()
 	} else if msg, isDup := mapUniqueViolation(err, item); isDup {
@@ -287,7 +342,10 @@ func classifyPushError(out *PushItemResult, err error, item PushItem) {
 		out.Error = msg
 	} else {
 		out.Status = StatusRejectedInternal
-		out.Error = err.Error()
+		out.Error = "No se pudo guardar el cambio; se conservará para reintentar."
+		if errors.As(err, &pgErr) {
+			out.Error += fmt.Sprintf(" Código: %s.", pgErr.Code)
+		}
 	}
 }
 
@@ -341,7 +399,7 @@ func (h *Handler) Pull(c *gin.Context) {
 	})
 	if err != nil {
 		h.Metrics.IncPullRequest("error")
-		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "sync_pull_unavailable"})
 		return
 	}
 
@@ -401,7 +459,7 @@ func (h *Handler) FullSync(c *gin.Context) {
 		return e
 	})
 	if cerr != nil {
-		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": cerr.Error()})
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "sync_full_unavailable"})
 		return
 	}
 
@@ -424,9 +482,15 @@ func (h *Handler) FullSync(c *gin.Context) {
 }
 
 // MetricsHandler exposes Prometheus text format at /_internal/metrics.
-// It deliberately has no auth — this is meant to be scraped from a
-// trusted Prom exporter on the same host (see ADR-001 §4.5).
+// Only direct loopback scrapers are allowed. Do not trust ClientIP or
+// forwarded headers for this boundary: a public reverse proxy is also local.
 func (h *Handler) MetricsHandler(c *gin.Context) {
+	host, _, err := net.SplitHostPort(c.Request.RemoteAddr)
+	ip := net.ParseIP(host)
+	if err != nil || ip == nil || !ip.IsLoopback() || c.GetHeader("X-Forwarded-For") != "" || c.GetHeader("Forwarded") != "" || c.GetHeader("X-Real-IP") != "" {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
 	c.Data(http.StatusOK, "text/plain; version=0.0.4", []byte(h.Metrics.Render()))
 }
 

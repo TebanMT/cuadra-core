@@ -37,6 +37,7 @@ func NewListNotifications(notifications notiRepo.NotificationRepository, uow sha
 
 func (uc *ListNotifications) Execute(ctx context.Context, in ListNotificationsInput) (*ListNotificationsOutput, error) {
 	tx, err := uc.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}

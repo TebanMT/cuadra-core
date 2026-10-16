@@ -50,6 +50,7 @@ func (uc *GetPromotionByCode) Execute(ctx context.Context, in GetPromotionByCode
 		return nil, sharedDomain.NewValidationError(promoErrors.ErrPromotionCodeNotFound)
 	}
 	tx, err := uc.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}

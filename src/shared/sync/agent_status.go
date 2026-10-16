@@ -62,7 +62,7 @@ func (s *StatusController) Get(c *gin.Context) {
 // the "sync now" button in the connection dropdown).
 func (s *StatusController) Trigger(c *gin.Context) {
 	if s.Agent != nil {
-		s.Agent.TriggerNow()
+		s.Agent.RetryNow()
 	}
 	c.JSON(http.StatusAccepted, gin.H{"triggered": true})
 }

@@ -18,6 +18,7 @@ import (
 	membershipDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/membership"
 	memRepo "github.com/cuadra/cuadra-core/src/modules/members/domain/repository"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
+	"github.com/cuadra/cuadra-core/src/shared/textsearch"
 )
 
 const dateLayout = "2006-01-02"
@@ -278,7 +279,7 @@ func (r *MemberSQLiteRepository) List(tx sharedDomain.Transaction, q memRepo.Lis
 
 	where := []string{`m.gym_id = ? AND m.deleted_at IS NULL`}
 	args := []any{q.GymID.String()}
-	if s := strings.TrimSpace(q.Search); s != "" {
+	if s := textsearch.Normalize(q.Search); s != "" {
 		// Nombre: prefix match para mantener el ordenamiento por relevancia
 		// del operador ("Juan…" matchea "Juan García" pero no "García Juan").
 		// Teléfono: substring match sobre la versión solo-dígitos del
@@ -287,11 +288,11 @@ func (r *MemberSQLiteRepository) List(tx sharedDomain.Transaction, q memRepo.Lis
 		// dígitos no encontraba nada.
 		phoneDigits := stripPhoneSeparators(s)
 		if phoneDigits != "" {
-			where = append(where, `(m.full_name LIKE ? COLLATE NOCASE OR m.phone LIKE ?)`)
-			args = append(args, s+"%", "%"+phoneDigits+"%")
+			where = append(where, "("+textsearch.SQLiteColumn("m.full_name")+" LIKE ? ESCAPE '!' OR m.phone LIKE ?)")
+			args = append(args, textsearch.EscapeLike(s)+"%", "%"+phoneDigits+"%")
 		} else {
-			where = append(where, `m.full_name LIKE ? COLLATE NOCASE`)
-			args = append(args, s+"%")
+			where = append(where, textsearch.SQLiteColumn("m.full_name")+" LIKE ? ESCAPE '!'")
+			args = append(args, textsearch.EscapeLike(s)+"%")
 		}
 	}
 	switch q.StatusFilter {

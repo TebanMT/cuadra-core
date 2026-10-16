@@ -46,35 +46,10 @@ func IsPlusPlan(plan string) bool {
 	return plan == PlanPlusMonthly || plan == PlanPlusAnnual
 }
 
-// CanAccessPlusFeatures decide si un gym debe ver las features Plus.
-//
-// HOY (Plus aún no se vende — landing dice "Próximamente"): trial NO pasa.
-// Mientras el bundle Plus no esté completo (faltan rutinas + app del socio
-// según el roadmap), enseñarle al dueño en trial features que no se venden
-// es prometer algo que no existe. Trial opera como Standard hasta que se
-// libere Plus.
-//
-// CUANDO PLUS SE LIBERE (rutinas + app del socio + tap-to-sell + broadcast
-// completo en prod), añadir `plan == PlanTrial` aquí. El trial debe poder
-// probar Plus para evaluar el upgrade — ese era el plan original del ADR-009.
-// Buscar este comentario al hacer el cambio.
-//
-// Usa IsPlusPlan SOLO cuando el punto de la decisión es el SKU comprado
-// (facturación, reporting interno) — esa función nunca incluyó trial.
-//
-// DEV-MODE BYPASS: cuando TINTA_MODE=dev, este helper devuelve true para
-// cualquier plan, desbloqueando todas las features Plus localmente sin
-// tocar la BD. La dep del domain layer sobre shared/runtime es deliberada
-// y excepcional: runtime es un paquete sin estado, sólo lee env vars
-// (equivalente a llamar os.Getenv inline), y centralizar el switch acá
-// hace cascade automático a todos los call-sites (sidebar, middleware,
-// inline gates, deep-link locks) sin duplicar la condición. IsPlusPlan
-// e IsPaidPlan NO se tocan — el SKU real sigue siendo honesto.
-func CanAccessPlusFeatures(plan string) bool {
-	if runtime.IsDev() {
-		return true
-	}
-	return plan == PlanPlusMonthly || plan == PlanPlusAnnual
+// CanAccessPlusFeatures is the shared Plus bundle gate. The override changes
+// entitlements only; subscription status, SKU and billing stay independent.
+func CanAccessPlusFeatures(plan string, allFeatures ...bool) bool {
+	return runtime.IsDev() || IsPlusPlan(plan) || (len(allFeatures) > 0 && allFeatures[0])
 }
 
 // IsPaidPlan reports whether the gym is on any paid SKU (Standard or Plus,
@@ -107,6 +82,7 @@ type Gym struct {
 	PaymentMethods     []string
 	OpenTime           *string // "HH:MM:SS"
 	CloseTime          *string
+	AllFeaturesAccess  bool // Cloud-owned launch entitlement; never writable through sync push.
 	SubscriptionPlan   string
 	TrialEndsAt        *time.Time
 	SubscriptionEndsAt *time.Time
@@ -705,7 +681,7 @@ func (g *Gym) IsWhatsAppConnected() bool {
 // this to resolve the `from`; the gym name already rides in the template
 // variables so the socio keeps the gym context either way.
 func (g *Gym) UsesOwnWhatsAppNumber() bool {
-	return IsPlusPlan(g.SubscriptionPlan) && g.IsWhatsAppConnected()
+	return g.CanAccessFeature(FeatureOwnWhatsApp) && g.IsWhatsAppConnected()
 }
 
 // DisconnectWhatsApp limpia los campos de WhatsApp del gym (UC-037 desconectar).

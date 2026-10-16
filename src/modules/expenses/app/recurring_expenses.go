@@ -223,6 +223,7 @@ func NewListRecurringExpenseTemplates(r expRepo.RecurringTemplateRepository, u s
 }
 func (uc *ListRecurringExpenseTemplates) Execute(ctx context.Context, gym uuid.UUID, include bool) ([]*recurring.Template, error) {
 	tx, err := uc.UoW.Query(ctx)
+	defer shared.CloseQuery(tx)
 	if err != nil {
 		return nil, shared.NewUnexpectedError(err)
 	}
@@ -249,6 +250,7 @@ func (uc *MaterializeExpenseOccurrences) Execute(ctx context.Context, gym uuid.U
 		return 0, shared.NewValidationErrorWithMessage(expErrors.ErrInvalidDate, "la fecha no puede estar a más de 400 días en el futuro")
 	}
 	tx, err := uc.UoW.Query(ctx)
+	defer shared.CloseQuery(tx)
 	if err != nil {
 		return 0, err
 	}
@@ -382,6 +384,7 @@ func (uc *ListExpenseOccurrences) Execute(ctx context.Context, q expRepo.Occurre
 		return nil, err
 	}
 	tx, err := uc.UoW.Query(ctx)
+	defer shared.CloseQuery(tx)
 	if err != nil {
 		return nil, shared.NewUnexpectedError(err)
 	}
@@ -412,6 +415,7 @@ func (uc *ListExpenseOccurrences) ExecutePage(ctx context.Context, q expRepo.Occ
 	q.Limit = pageSize
 	q.Offset = (page - 1) * pageSize
 	tx, err := uc.UoW.Query(ctx)
+	defer shared.CloseQuery(tx)
 	if err != nil {
 		return ExpenseOccurrencePage{}, shared.NewUnexpectedError(err)
 	}

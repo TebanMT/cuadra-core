@@ -41,6 +41,7 @@ type StartCheckoutOutput struct {
 // The gateway abstraction means swapping a processor (or adding a third) is a
 // new file in infraestructure/payments — this layer doesn't change.
 type StartCheckout struct {
+	Launch     subDomain.LaunchRepository // nil closes new admissions; existing benefits still apply.
 	Gateways   map[subDomain.Provider]subDomain.CheckoutGateway
 	Gyms       gymRepo.GymRepository
 	Users      userRepo.UserRepository
@@ -84,9 +85,7 @@ func (uc *StartCheckout) Execute(ctx context.Context, in StartCheckoutInput) (St
 		if in.Provider != subDomain.ProviderStripe {
 			return StartCheckoutOutput{}, sharedDomain.NewValidationError(errors.New("oxxo only available via stripe"))
 		}
-		if in.Plan != gymDomain.PlanStandardAnnual {
-			return StartCheckoutOutput{}, sharedDomain.NewValidationError(errors.New("oxxo only available for standard_annual"))
-		}
+
 	}
 	gateway, ok := uc.Gateways[in.Provider]
 	if !ok || gateway == nil {
@@ -94,12 +93,32 @@ func (uc *StartCheckout) Execute(ctx context.Context, in StartCheckoutInput) (St
 	}
 
 	tx, err := uc.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return StartCheckoutOutput{}, sharedDomain.NewUnexpectedError(err)
 	}
 	gym, err := uc.Gyms.GetByID(tx, in.GymID)
 	if err != nil {
 		return StartCheckoutOutput{}, err
+	}
+	launchPricing := gym.AllFeaturesAccess
+	if !launchPricing && uc.Launch != nil {
+		remaining, err := uc.Launch.Remaining(tx)
+		if err != nil {
+			return StartCheckoutOutput{}, sharedDomain.NewUnexpectedError(err)
+		}
+		launchPricing = remaining > 0
+	}
+	if launchPricing {
+		if in.Plan == gymDomain.PlanPlusMonthly {
+			in.Plan = gymDomain.PlanStandardMonthly
+		}
+		if in.Plan == gymDomain.PlanPlusAnnual {
+			in.Plan = gymDomain.PlanStandardAnnual
+		}
+	}
+	if in.PaymentMethod == "oxxo" && in.Plan != gymDomain.PlanStandardAnnual {
+		return StartCheckoutOutput{}, sharedDomain.NewValidationError(errors.New("oxxo only available for standard_annual"))
 	}
 	user, err := uc.Users.GetByID(tx, in.UserID)
 	if err != nil {
@@ -110,7 +129,9 @@ func (uc *StartCheckout) Execute(ctx context.Context, in StartCheckoutInput) (St
 	if gym.Name != nil {
 		gymName = *gym.Name
 	}
+	sharedDomain.CloseQuery(tx)
 	res, err := gateway.StartCheckout(ctx, subDomain.CheckoutRequest{
+		LaunchPricing: launchPricing,
 		GymID:         gym.ID,
 		Plan:          in.Plan,
 		GymName:       gymName,

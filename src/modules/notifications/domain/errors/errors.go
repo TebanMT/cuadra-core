@@ -19,6 +19,7 @@ import "errors"
 var (
 	// Generic
 	ErrNotificationNotFound = errors.New("notificación no encontrada")
+	ErrHeldConflict         = errors.New("El mensaje ya cambió. Actualiza la lista para revisarlo.")
 	ErrCrossGym             = errors.New("ese registro no pertenece a tu gimnasio")
 
 	// UC-037 Connect WhatsApp

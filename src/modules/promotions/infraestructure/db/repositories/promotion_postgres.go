@@ -16,6 +16,7 @@ import (
 	promoRepo "github.com/cuadra/cuadra-core/src/modules/promotions/domain/repository"
 	"github.com/cuadra/cuadra-core/src/modules/promotions/infraestructure/db/models"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
+	"github.com/cuadra/cuadra-core/src/shared/textsearch"
 )
 
 // PromotionPostgresRepository is the cloud-side Promotion repo.
@@ -65,15 +66,17 @@ func (r *PromotionPostgresRepository) GetByID(tx sharedDomain.Transaction, id uu
 
 func (r *PromotionPostgresRepository) GetByCode(tx sharedDomain.Transaction, gymID uuid.UUID, codeLower string) (*promoDomain.Promotion, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
-	var m models.PromotionModel
-	err := gormTx.Where("gym_id = ? AND LOWER(code) = ? AND deleted_at IS NULL", gymID, codeLower).First(&m).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, sharedDomain.NewBusinessError(promoErrors.ErrPromotionCodeNotFound, "")
-	}
-	if err != nil {
+	var rows []models.PromotionModel
+	if err := gormTx.Where("gym_id = ? AND "+textsearch.PostgresLowerColumn("code")+" = ? AND deleted_at IS NULL", gymID, strings.ToLower(strings.TrimSpace(codeLower))).Limit(2).Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	return promoFromModel(&m), nil
+	if len(rows) == 0 {
+		return nil, sharedDomain.NewBusinessError(promoErrors.ErrPromotionCodeNotFound, "")
+	}
+	if len(rows) > 1 {
+		return nil, sharedDomain.NewBusinessError(promoErrors.ErrPromotionCodeAmbiguous, "")
+	}
+	return promoFromModel(&rows[0]), nil
 }
 
 func (r *PromotionPostgresRepository) List(tx sharedDomain.Transaction, f promoRepo.ListFilter) ([]*promoDomain.Promotion, error) {
@@ -106,7 +109,7 @@ func (r *PromotionPostgresRepository) List(tx sharedDomain.Transaction, f promoR
 func (r *PromotionPostgresRepository) ExistsByCode(tx sharedDomain.Transaction, gymID uuid.UUID, codeLower string, excludeID *uuid.UUID) (bool, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	q := gormTx.Model(&models.PromotionModel{}).
-		Where("gym_id = ? AND LOWER(code) = ? AND deleted_at IS NULL", gymID, strings.ToLower(strings.TrimSpace(codeLower)))
+		Where("gym_id = ? AND "+textsearch.PostgresLowerColumn("code")+" = ? AND deleted_at IS NULL", gymID, strings.ToLower(strings.TrimSpace(codeLower)))
 	if excludeID != nil {
 		q = q.Where("id <> ?", *excludeID)
 	}

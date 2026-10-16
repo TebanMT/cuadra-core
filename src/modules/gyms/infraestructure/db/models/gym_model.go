@@ -37,6 +37,7 @@ type GymModel struct {
 	OpenTime       *string `gorm:"type:time;column:open_time"`
 	CloseTime      *string `gorm:"type:time;column:close_time"`
 
+	AllFeaturesAccess  bool       `gorm:"not null;default:false;column:all_features_access"`
 	SubscriptionPlan   string     `gorm:"not null;default:'trial';column:subscription_plan"`
 	TrialEndsAt        *time.Time `gorm:"column:trial_ends_at"`
 	SubscriptionEndsAt *time.Time `gorm:"column:subscription_ends_at"`

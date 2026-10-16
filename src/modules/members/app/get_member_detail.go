@@ -38,6 +38,7 @@ func NewGetMemberDetail(members memRepo.MemberRepository, fingerprints memRepo.F
 
 func (uc *GetMemberDetail) Execute(ctx context.Context, in GetMemberDetailInput) (*GetMemberDetailOutput, error) {
 	tx, err := uc.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}

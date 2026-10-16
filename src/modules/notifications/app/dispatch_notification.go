@@ -33,6 +33,7 @@ import (
 //   - any other err — treated as transient retry; first 3 attempts back off,
 //     after that the row is failed permanently.
 type DispatchNotification struct {
+	Held          *HeldNotifications
 	Notifications notiRepo.NotificationRepository
 	Templates     notiRepo.TemplateOverrideRepository
 	Gyms          gymRepo.GymRepository
@@ -87,10 +88,18 @@ func NewDispatchNotification(
 // Errors at the lease level (DB unreachable) are returned; per-message
 // failures are recorded on the row and the loop continues.
 func (uc *DispatchNotification) Tick(ctx context.Context, now time.Time) (int, error) {
+	if handled, n, err := sharedDomain.TenantWorker(ctx, uc.UoW, func(scoped context.Context) (int, error) { return uc.Tick(scoped, now) }); handled {
+		return n, err
+	}
 	if uc.BatchSize <= 0 {
 		uc.BatchSize = 20
 	}
 
+	if uc.Held != nil {
+		if _, err := uc.Held.Cleanup(ctx, now); err != nil {
+			return 0, err
+		}
+	}
 	// Lease + claim happens inside one Command tx — once we commit the
 	// rows are off the queue (status=pending but scheduled_for in the
 	// future, which the next leaser skips).
@@ -130,14 +139,42 @@ func (uc *DispatchNotification) Tick(ctx context.Context, now time.Time) (int, e
 // dispatchOne fires the provider call and persists the resulting state.
 // Returns true on successful send.
 func (uc *DispatchNotification) dispatchOne(ctx context.Context, n *notification.Notification, now time.Time) bool {
+	if n.RecoveryAction == "send" && n.RecoveryAttemptedAt != nil {
+		uc.markFailed(ctx, n, "No se pudo confirmar el envío. Revisa el resultado con soporte antes de volver a enviarlo.", now, false)
+		return false
+	}
 	// Fase 1 — supresión de mensajes stale. Si el evento ocurrió hace más que el
 	// TTL del template (gym mucho tiempo sin internet → la noti se encoló local
 	// y recién ahora sincronizó), NO lo enviamos tarde: lo retenemos en `held`
 	// (no se pierde; la Fase 2/Plus lo recupera). Sólo aplica a canales outbound
 	// — in_app es un flag local, no tiene "envío tarde".
 	if n.Channel == notification.ChannelWhatsApp || n.Channel == notification.ChannelEmail {
-		if isStale(n.TemplateKey, n.CreatedAt, now) {
+		anchor := n.CreatedAt
+		if n.RecoveryAt != nil && n.RecoveryAction == "send" {
+			anchor = *n.RecoveryAt
+		}
+		if isStale(n.TemplateKey, anchor, now) {
 			uc.markHeld(ctx, n, now)
+			return false
+		}
+	}
+	if n.RecoveryAction == "send" && n.RecoveryAt != nil {
+		if n.RecoveryAttemptedAt != nil {
+			uc.markFailed(ctx, n, "No se pudo confirmar el envío. Revisa el estado con soporte antes de volver a enviarlo.", now, false)
+			return false
+		}
+		if uc.Held == nil {
+			uc.markFailed(ctx, n, "Recuperación no configurada", now, false)
+			return false
+		}
+		var blocked string
+		err := uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error { var e error; blocked, e = uc.Held.Validate(tx, n); return e })
+		if err != nil {
+			uc.markFailed(ctx, n, "No se pudieron comprobar los permisos de envío", now, true)
+			return false
+		}
+		if blocked != "" {
+			uc.markFailed(ctx, n, blocked, now, false)
 			return false
 		}
 	}
@@ -236,6 +273,9 @@ func (uc *DispatchNotification) dispatchWhatsApp(ctx context.Context, n *notific
 		vars = withVar(n.Payload, "receipt_url", receiptURL)
 	}
 
+	if !uc.beginRecoveredSend(ctx, n, now) {
+		return false
+	}
 	providerMsgID, sendErr := uc.WhatsApp.SendTemplate(ctx, cfg, n.RecipientAddress, n.TemplateKey, vars)
 	if sendErr != nil {
 		// Distinguish retry-vs-final.
@@ -372,6 +412,9 @@ func (uc *DispatchNotification) tryEmailFallback(ctx context.Context, n *notific
 	if subject == "" {
 		subject = humanise(n.TemplateKey)
 	}
+	if !uc.beginRecoveredSend(ctx, n, now) {
+		return false
+	}
 	providerMsgID, sendErr := uc.Email.SendTransactional(ctx, email, subject, rendered, n.TemplateKey)
 	if sendErr != nil {
 		return false
@@ -402,6 +445,9 @@ func (uc *DispatchNotification) dispatchEmail(ctx context.Context, n *notificati
 	if subject == "" {
 		subject = humanise(n.TemplateKey)
 	}
+	if !uc.beginRecoveredSend(ctx, n, now) {
+		return false
+	}
 	providerMsgID, sendErr := uc.Email.SendTransactional(ctx, n.RecipientAddress, subject, rendered, n.TemplateKey)
 	if sendErr != nil {
 		if errors.Is(sendErr, notiErrors.ErrSendFailedFinal) {
@@ -416,6 +462,7 @@ func (uc *DispatchNotification) dispatchEmail(ctx context.Context, n *notificati
 
 func (uc *DispatchNotification) lookupOverride(ctx context.Context, gymID uuid.UUID, key string) *tplDomain.Override {
 	tx, err := uc.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return nil
 	}
@@ -450,6 +497,12 @@ func (uc *DispatchNotification) markFailed(ctx context.Context, n *notification.
 	// en notification_queue.error_message. Logueamos cada fallo (retry o
 	// final) para que "no se envió" siempre deje rastro en los logs del cloud.
 	disposition := "FAILED"
+	if n.RecoveryAttemptedAt != nil {
+		if retry {
+			reason = "El proveedor no confirmó el envío. Revisa el resultado con soporte antes de volver a enviarlo."
+		}
+		retry = false
+	}
 	if retry {
 		disposition = "reintentará"
 	}
@@ -534,6 +587,7 @@ func (uc *DispatchNotification) recipientOptedOut(ctx context.Context, address s
 		return false, nil
 	}
 	tx, err := uc.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return false, err
 	}
@@ -608,3 +662,37 @@ func (w *Worker) Start(ctx context.Context) {
 }
 
 func (w *Worker) Done() <-chan struct{} { return w.done }
+
+// A recovered request is attempted at most once across worker restarts. The
+// provider has no idempotency contract: an ambiguous outcome needs inspection,
+// never an automatic second delivery.
+func (uc *DispatchNotification) beginRecoveredSend(ctx context.Context, n *notification.Notification, now time.Time) bool {
+	if n.RecoveryAction != "send" || n.RecoveryAt == nil {
+		return true
+	}
+	if uc.Held == nil {
+		return false
+	}
+	allowed := false
+	err := uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
+		fresh, err := uc.Held.Held.LockHeld(tx, n.GymID, n.ID)
+		if err != nil {
+			return err
+		}
+		if fresh == nil || fresh.Status != notification.StatusPending || fresh.RecoveryVersion != n.RecoveryVersion || fresh.RecoveryAttemptedAt != nil {
+			return nil
+		}
+		fresh.RecoveryAttemptedAt = &now
+		fresh.Version++
+		if _, err = uc.Notifications.Update(tx, fresh); err != nil {
+			return err
+		}
+		allowed = true
+		return nil
+	})
+	if err != nil || !allowed {
+		return false
+	}
+	n.RecoveryAttemptedAt = &now
+	return true
+}

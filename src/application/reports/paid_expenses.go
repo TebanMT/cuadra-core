@@ -10,6 +10,7 @@ import (
 
 	gymRepo "github.com/cuadra/cuadra-core/src/modules/gyms/domain/repository"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
+	"github.com/cuadra/cuadra-core/src/shared/textsearch"
 	"github.com/google/uuid"
 )
 
@@ -97,11 +98,11 @@ func (uc *PaidExpenses) Execute(ctx context.Context, in PaidExpensesInput) (*Pai
 		for _, p := range purchases {
 			rows = append(rows, PaidExpenseItem{ID: "purchase:" + p.MovementID.String(), Kind: "purchase", MovementID: p.MovementID.String(), ProductID: p.ProductID.String(), Date: p.OccurredAt.Format("2006-01-02"), Description: fmt.Sprintf("%s · %d piezas", p.ProductName, p.Delta), Amount: p.CostTotal, Quantity: p.Delta, UnitCost: p.CostUnit})
 		}
-		query := strings.ToLower(strings.TrimSpace(in.Query))
+		query := textsearch.Normalize(in.Query)
 		filtered := rows[:0]
 		var cents int64
 		for _, row := range rows {
-			if query != "" && !strings.Contains(strings.ToLower(row.Description), query) {
+			if query != "" && !strings.Contains(textsearch.Normalize(row.Description), query) {
 				continue
 			}
 			filtered = append(filtered, row)

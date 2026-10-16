@@ -224,6 +224,7 @@ func NewGetWhatsAppStatus(gyms gymRepo.GymRepository, notifications notiRepo.Not
 
 func (uc *GetWhatsAppStatus) Execute(ctx context.Context, in GetWhatsAppStatusInput) (*GetWhatsAppStatusOutput, error) {
 	tx, err := uc.UoW.Query(ctx)
+	defer sharedDomain.CloseQuery(tx)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}
