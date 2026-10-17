@@ -7,7 +7,13 @@
 -- maestro compartido de Tinta. Si alguien dice STOP, no debe recibir marketing
 -- de NINGÚN gym por ese número. Cloud-only: el webhook de Twilio y el
 -- dispatcher viven en el cloud; no se sincroniza al sidecar.
+BEGIN;
+
 CREATE TABLE IF NOT EXISTS whatsapp_opt_outs (
     phone        TEXT PRIMARY KEY,
     opted_out_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+INSERT INTO _migrations(version,name) VALUES(31,'031_whatsapp_opt_outs')
+ON CONFLICT(version) DO NOTHING;
+COMMIT;

@@ -1,6 +1,8 @@
 -- Defense in depth for every writer: a global UUID does not authorize moving
 -- an entity or linking it to another tenant. NOT VALID avoids pretending that
 -- historical data has been audited; new/changed rows are enforced immediately.
+BEGIN;
+
 CREATE OR REPLACE FUNCTION tinta_immutable_tenant() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
@@ -47,3 +49,7 @@ BEGIN
       CASE WHEN r.condeferrable THEN CASE WHEN r.condeferred THEN 'DEFERRABLE INITIALLY DEFERRED' ELSE 'DEFERRABLE INITIALLY IMMEDIATE' END ELSE '' END);
   END LOOP;
 END $$;
+
+INSERT INTO _migrations(version,name) VALUES(55,'055_tenant_integrity')
+ON CONFLICT(version) DO NOTHING;
+COMMIT;

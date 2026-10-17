@@ -1,5 +1,7 @@
 -- Preserve the existing count, including imported history without events.
 -- Thereafter the immutable movements, not a device snapshot, determine stock.
+BEGIN;
+
 ALTER TABLE products ADD COLUMN stock_origin bigint;
 UPDATE products p SET stock_origin=p.stock-COALESCE((
   SELECT SUM(delta) FROM stock_movements m
@@ -67,3 +69,7 @@ BEGIN
 END $$;
 CREATE TRIGGER stock_event_publish AFTER INSERT ON stock_movements
 FOR EACH ROW EXECUTE FUNCTION tinta_stock_event_publish();
+
+INSERT INTO _migrations(version,name) VALUES(56,'056_stock_ledger')
+ON CONFLICT(version) DO NOTHING;
+COMMIT;

@@ -108,10 +108,7 @@ docker-down:
 	docker compose down
 
 migrate-postgres:
-	@for f in db_migrations/postgres/*.sql; do \
-		echo "applying $$f"; \
-		psql "$(DB_URL)" -v ON_ERROR_STOP=1 -f $$f; \
-	done
+	@DATABASE_URL="$(DB_URL)" go run -tags server ./cmd/migrate
 
 migrate-sqlite:
 	mkdir -p $$(dirname $(SIDECAR_DB))

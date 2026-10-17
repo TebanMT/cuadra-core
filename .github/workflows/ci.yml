@@ -89,8 +89,12 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
-      - name: Aplicar migraciones Postgres
-        run: make migrate-postgres
+      - name: Aplicar migraciones Postgres y comprobar reejecución
+        # Use the same version-aware runner as deployment. A second run must
+        # skip committed DDL before the test helpers invoke it again.
+        run: |
+          make migrate-postgres
+          make migrate-postgres
 
       - name: go test (server + sidecar)
         # El sidecar usa CGO via mattn/go-sqlite3; ubuntu-latest trae gcc.
