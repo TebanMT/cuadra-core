@@ -30,3 +30,6 @@ coverage.out
 /sidecar
 /import-gym
 *.exe
+
+# Worktrees locales de Claude; no forman parte del repositorio ni del CI.
+/.claude/worktrees/
