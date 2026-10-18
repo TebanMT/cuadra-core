@@ -36,8 +36,9 @@ jobs:
           POSTGRES_PASSWORD: isolated_e2e
           POSTGRES_DB: postgres
         ports: ['55439:5432']
+        # The runner passes these options directly to Docker; use double quotes.
         options: >-
-          --health-cmd 'pg_isready -U tinta -d postgres'
+          --health-cmd "pg_isready -U tinta -d postgres"
           --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
