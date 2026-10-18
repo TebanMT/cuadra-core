@@ -9,7 +9,8 @@ import harness as base
 def run_ui(suite):
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
-        context = browser.new_context(viewport={'width': 1440, 'height': 1000})
+        # Regression: cash uses the gym's business day on a UTC computer too.
+        context = browser.new_context(viewport={'width': 1440, 'height': 1000}, timezone_id='UTC')
         context.tracing.start(screenshots=True, snapshots=True)
         page = context.new_page()
         try:
@@ -23,14 +24,28 @@ def run_ui(suite):
 
             # Open a physical cash session using the actual form.
             page.goto(suite.args.desktop_ui + '/reports/cash-close')
-            expect(page.get_by_text('Cargando caja', exact=True)).to_have_count(0)
+            expect(page.get_by_role('button', name='Agregar efectivo', exact=True)).to_be_visible()
             opening = page.get_by_role('button', name=re.compile(r'^Abrir caja'))
             if opening.count():
                 opening.click()
                 dialog = page.get_by_role('dialog')
                 dialog.locator('#cash-opening').fill('500')
-                dialog.get_by_role('button', name='Confirmar efectivo inicial').click()
+                with page.expect_response(lambda r: r.url.endswith('/api/v1/cash-sessions/open') and r.request.method == 'POST') as saved:
+                    dialog.get_by_role('button', name='Confirmar efectivo inicial').click()
+                assert saved.value.ok, f'Abrir caja: HTTP {saved.value.status}: {saved.value.text()[:600]}'
                 expect(dialog).to_have_count(0)
+                suite.check('Navegador: apertura de caja con fecha del gimnasio desde un equipo UTC')
+
+            # The remaining forms capture local dates. Match the fixture gym
+            # explicitly instead of depending on the runner's timezone.
+            gym_context = browser.new_context(
+                viewport={'width': 1440, 'height': 1000},
+                timezone_id=suite.timezone, storage_state=context.storage_state())
+            context.tracing.stop(path=str(suite.root / 'browser-cash-trace.zip'))
+            context.close()
+            context = gym_context
+            context.tracing.start(screenshots=True, snapshots=True)
+            page = context.new_page()
 
             # Disconnect only the cloud transport. React and SQLite remain real.
             suite.wait('queues before browser offline sale', suite.settled)

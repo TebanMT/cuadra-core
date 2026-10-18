@@ -115,7 +115,8 @@ class Suite:
         self.edges = ['http://127.0.0.1:19091', 'http://127.0.0.1:19092']
         self.email = 'final-' + uuid.uuid4().hex[:10] + '@tinta-test.invalid'
         self.password = 'PruebaLocal2026!'
-        self.day = datetime.now(ZoneInfo('America/Mexico_City')).date().isoformat()
+        self.timezone = 'America/Mexico_City'
+        self.day = datetime.now(ZoneInfo(self.timezone)).date().isoformat()
 
     def check(self, name, details=None):
         item = {'scenario': name, 'status': 'passed', 'details': details}
@@ -230,7 +231,7 @@ class Suite:
         account = self.request(self.cloud, 'POST', '/api/v1/auth/signup', {'full_name': 'Dueño de Pruebas', 'email': self.email, 'password': self.password, 'password_confirm': self.password})
         self.gym = account['gym_id']
         # Fixture preparation only; every purchase/receipt uses public HTTP.
-        self.sql(f"UPDATE users SET email_verified_at=NOW() WHERE gym_id='{self.gym}'; UPDATE gyms SET name='Gimnasio de Pruebas Finales',setup_completed_at=NOW() WHERE id='{self.gym}'")
+        self.sql(f"UPDATE users SET email_verified_at=NOW() WHERE gym_id='{self.gym}'; UPDATE gyms SET name='Gimnasio de Pruebas Finales',timezone='{self.timezone}',setup_completed_at=NOW() WHERE id='{self.gym}'")
         self.login(self.cloud)
         for i in range(2):
             self.edge(i)
