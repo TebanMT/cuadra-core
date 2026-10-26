@@ -75,6 +75,7 @@ func (h *Handler) processFinancialGraph(ctx context.Context, gym, client uuid.UU
 		return 2 * refundPushRank(item)
 	}
 	sort.SliceStable(ordered, func(i, j int) bool { return rank(batch[ordered[i]]) < rank(batch[ordered[j]]) })
+	ordered = orderMembershipReplacements(batch, ordered)
 	results := map[int]PushItemResult{}
 	err := h.UoW.Command(ctx, func(tx shared.Transaction) error {
 		g := gormTx(tx).WithContext(ctx)
@@ -203,4 +204,37 @@ func validateOrdinaryFinancialState(g *gorm.DB, gym uuid.UUID, batch []PushItem)
 		return newFinancialConflict("venta incompleta: el detalle, importe o movimiento de inventario no coincide; vuelve a sincronizar la operación completa")
 	}
 	return nil
+}
+
+// orderMembershipReplacements projects each renewal target before its predecessor.
+// Queue coalescing keeps the predecessor's original position while replacing its
+// payload with the final replaced_by reference. A stable type sort alone cannot
+// satisfy that self-FK. Missing targets and cycles remain subject to DB checks.
+func orderMembershipReplacements(batch []PushItem, ordered []int) []int {
+	byID := make(map[string]int)
+	for _, i := range ordered {
+		if batch[i].EntityType == "memberships" {
+			byID[batch[i].EntityID] = i
+		}
+	}
+	result := make([]int, 0, len(ordered))
+	visited := make(map[int]bool)
+	var visit func(int)
+	visit = func(i int) {
+		if visited[i] {
+			return
+		}
+		visited[i] = true
+		if batch[i].EntityType == "memberships" {
+			target, _ := decodePushPayload(batch[i].Payload)["replaced_by"].(string)
+			if next, ok := byID[target]; ok {
+				visit(next)
+			}
+		}
+		result = append(result, i)
+	}
+	for _, i := range ordered {
+		visit(i)
+	}
+	return result
 }
