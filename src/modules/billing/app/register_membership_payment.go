@@ -23,6 +23,7 @@ import (
 	gymRepo "github.com/cuadra/cuadra-core/src/modules/gyms/domain/repository"
 	memApp "github.com/cuadra/cuadra-core/src/modules/members/app"
 	memberDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/member"
+	membershipDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/membership"
 	mtDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/membership_type"
 	memRepo "github.com/cuadra/cuadra-core/src/modules/members/domain/repository"
 	promoApp "github.com/cuadra/cuadra-core/src/modules/promotions/app"
@@ -223,6 +224,17 @@ func (uc *RegisterMembershipPayment) Execute(ctx context.Context, in RegisterMem
 		if err := validateRequestedCashDrawer(uc.CashDrawers, tx, in.GymID, in.Method, in.CashDrawerID); err != nil {
 			return err
 		}
+		// Operator permissions (UC-007): a manual discount or an earlier
+		// date need PermDiscounts. A promotion is the owner's own rule and
+		// stays open to every operator.
+		if in.Discount > 0 {
+			if err := sharedDomain.RequirePermission(ctx, sharedDomain.PermDiscounts); err != nil {
+				return err
+			}
+		}
+		if err := requireNotBackdated(ctx, tx, uc.Gyms, in.GymID, in.PaymentDate, now); err != nil {
+			return err
+		}
 
 		// 1. Member sanity check: must exist + belong to gym.
 		member, err := uc.Members.GetByID(tx, in.MemberID)
@@ -285,6 +297,11 @@ func (uc *RegisterMembershipPayment) Execute(ctx context.Context, in RegisterMem
 		if in.ChargeMaintenance != nil {
 			chargeMaintenance = *in.ChargeMaintenance && maintenanceAmt > 0
 		}
+		// Skipping a due fee or changing its amount needs PermDiscounts.
+		if err := requireMembershipFees(ctx, tx, uc.Gyms, in.GymID, member, mt, in.PaymentDate,
+			chargeEnrollment, enrollmentAmt, chargeMaintenance, maintenanceAmt); err != nil {
+			return err
+		}
 
 		subtotal := mt.Price
 		if chargeEnrollment {
@@ -344,6 +361,10 @@ func (uc *RegisterMembershipPayment) Execute(ctx context.Context, in RegisterMem
 		var balancePending float64
 		if paid < total {
 			balancePending = total - paid
+		}
+		// A partial payment leaves a balance (fiado): PermCredit.
+		if err := requireFullPayment(ctx, paid, total); err != nil {
+			return err
 		}
 
 		// 5. Mint folio (FOR UPDATE inside this tx).
@@ -422,7 +443,7 @@ func (uc *RegisterMembershipPayment) Execute(ctx context.Context, in RegisterMem
 					GymID:        in.GymID,
 					MembershipID: renewed.NewMembership.ID,
 					Days:         promoResult.ExtraDays,
-					Reason:       "promo: " + promoResult.Promotion.Name,
+					Reason:       membershipDomain.PromoAdjustmentReasonPrefix + promoResult.Promotion.Name,
 					ActorUserID:  in.ActorUserID,
 				}, now); err != nil {
 					return err
@@ -567,17 +588,5 @@ func shouldChargeMaintenance(member *memberDomain.Member, mt *mtDomain.Membershi
 // charges for the given frequency. 0 = always charge (monthly); -1 =
 // unknown frequency, never charge.
 func maintenanceThresholdDays(freq string) int {
-	switch freq {
-	case mtDomain.FrequencyMonthly:
-		return 0
-	case mtDomain.FrequencyBimonthly:
-		return 60
-	case mtDomain.FrequencyQuarterly:
-		return 90
-	case mtDomain.FrequencySemiannual:
-		return 180
-	case mtDomain.FrequencyAnnual:
-		return 365
-	}
-	return -1
+	return mtDomain.MaintenanceThresholdDays(freq)
 }

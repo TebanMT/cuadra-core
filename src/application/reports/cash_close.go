@@ -15,6 +15,7 @@ package reports
 import (
 	"context"
 	"errors"
+	"log"
 	"math"
 	"sort"
 	"strings"
@@ -81,6 +82,16 @@ type CashCloseReportOutput struct {
 	UncoveredCashActivity float64
 	RequiresNewSession    bool
 	SuggestedOpeningCash  *float64
+	// OpeningReference backs SuggestedOpeningCash for today's first opening:
+	// the opening is compared with it and a different amount needs a note.
+	OpeningReference *CashOpeningReference
+	// PendingReview is true for a past day whose selected drawer still holds
+	// cash without a certified count or an owner review: ReviewDay resolves it.
+	PendingReview bool
+	// TotalsHidden: the actor lacks PermViewTotals (UC-007). The day's money
+	// totals (by method, concept and operator) must not reach the response;
+	// the drawer's own figures stay, they are needed to count and close.
+	TotalsHidden bool
 }
 
 type CashSessionView struct {
@@ -114,6 +125,16 @@ type CashSessionView struct {
 	CorrectionReason        *string
 	UncoveredCashActivity   float64
 	RequiresNewSession      bool
+	// ReviewedWithoutCount marks a past session the owner closed out without a
+	// count. It never carries a difference and stops requesting attention
+	// until new activity re-closes it.
+	ReviewedWithoutCount bool
+	ReviewedAt           *time.Time
+	ReviewNote           *string
+	// Overnight check of the day's first opening (nil when not checked).
+	OpeningExpectedCash *float64
+	OpeningDifference   *float64
+	OpeningNote         *string
 }
 
 type CashMovementEntry struct {
@@ -123,6 +144,8 @@ type CashMovementEntry struct {
 	Amount               float64
 	OperatorID           uuid.UUID
 	ClassificationStatus string
+	Version              int
+	RecordedAt           time.Time
 }
 
 type CashDrawerView struct {
@@ -225,13 +248,23 @@ type CashCloseSubscriber interface {
 // CashCloseClosedEvent is the payload handed to subscribers. Discrepancy
 // is nil when no count was recorded, zero when the count matched, non-zero
 // when there's a gap — subscribers decide how to react.
+//
+// It fires after Close() and after a recount through Reconcile(); owner
+// corrections of an already certified count do not fire it. SessionID lets
+// subscribers dedupe per session, so a second session on the same day or a
+// recount with a new result is not swallowed. The names are best effort:
+// nil when unknown, and DrawerName is nil for the main drawer.
 type CashCloseClosedEvent struct {
 	GymID          uuid.UUID
 	ActorUserID    uuid.UUID
+	SessionID      uuid.UUID
 	CloseDate      time.Time
 	CalculatedCash float64
 	CountedCash    *float64
 	Discrepancy    *float64
+	Reason         *string
+	CountedByName  *string
+	DrawerName     *string
 	ClosedAt       time.Time
 }
 
@@ -323,6 +356,11 @@ func (uc *CashClose) report(ctx context.Context, tx sharedDomain.Transaction, in
 	if in.Date.IsZero() {
 		in.Date = localToday(tx, uc.Gyms, in.GymID, nowUTC())
 	}
+	// Without PermViewTotals an operator sees today's drawer only.
+	totalsHidden := sharedDomain.RequirePermission(ctx, sharedDomain.PermViewTotals) != nil
+	if totalsHidden && !dayUTC(in.Date).Equal(dayUTC(localToday(tx, uc.Gyms, in.GymID, nowUTC()))) {
+		return nil, sharedDomain.NewPermissionDeniedError(sharedDomain.PermViewTotals)
+	}
 	selectedDrawerID := cashCloseDomain.DefaultDrawerID(in.GymID)
 	if in.DrawerID != nil && *in.DrawerID != uuid.Nil {
 		selectedDrawerID = *in.DrawerID
@@ -335,6 +373,7 @@ func (uc *CashClose) report(ctx context.Context, tx sharedDomain.Transaction, in
 	}
 
 	out := &CashCloseReportOutput{
+		TotalsHidden:     totalsHidden,
 		Date:             dayUTC(in.Date),
 		Totals:           totals,
 		Expenses:         []CashCloseExpenseEntry{},
@@ -402,7 +441,7 @@ func (uc *CashClose) report(ctx context.Context, tx sharedDomain.Transaction, in
 				continue
 			}
 			selectedMovementIDs[m.ID] = true
-			out.CashMovements = append(out.CashMovements, CashMovementEntry{ID: m.ID, CashDrawerID: drawerID, MovementType: m.MovementType, Reason: m.Reason, Amount: m.Amount, OperatorID: m.OperatorID, ClassificationStatus: m.ClassificationStatus})
+			out.CashMovements = append(out.CashMovements, CashMovementEntry{ID: m.ID, CashDrawerID: drawerID, MovementType: m.MovementType, Reason: m.Reason, Amount: m.Amount, OperatorID: m.OperatorID, ClassificationStatus: m.ClassificationStatus, Version: m.Version, RecordedAt: m.CreatedAt})
 			if m.MovementType == cashDomain.CashIn {
 				out.CashInTotal += m.Amount
 			} else {
@@ -542,15 +581,32 @@ func (uc *CashClose) report(ctx context.Context, tx sharedDomain.Transaction, in
 		out.RequiresNewSession = !activity.Watermark.IsZero()
 	}
 	if out.Session == nil {
-		previous, err := uc.Events.LatestBefore(tx, in.GymID, selectedDrawerID, dayUTC(in.Date))
-		if err != nil {
-			return nil, sharedDomain.NewUnexpectedError(err)
+		today, timezone := localTodayAndTZ(tx, uc.Gyms, in.GymID, now)
+		if !dayUTC(in.Date).Before(dayUTC(today)) {
+			ref, err := uc.openingReference(tx, in.GymID, selectedDrawerID, in.Date, timezone, now)
+			if err != nil {
+				return nil, err
+			}
+			if ref != nil {
+				out.OpeningReference = ref
+				expected := ref.Expected
+				out.SuggestedOpeningCash = &expected
+			}
 		}
-		if previous != nil && previous.FinishedAt() != nil {
-			out.SuggestedOpeningCash = previous.CashLeft
+		if out.SuggestedOpeningCash == nil {
+			previous, err := uc.Events.LatestBefore(tx, in.GymID, selectedDrawerID, dayUTC(in.Date))
+			if err != nil {
+				return nil, sharedDomain.NewUnexpectedError(err)
+			}
+			if previous != nil && previous.FinishedAt() != nil {
+				out.SuggestedOpeningCash = previous.CashLeft
+			}
 		}
 	} else if out.Session.FinishedAt != nil {
 		out.SuggestedOpeningCash = out.Session.CashLeft
+	}
+	if today, _ := localTodayAndTZ(tx, uc.Gyms, in.GymID, now); dayUTC(in.Date).Before(dayUTC(today)) {
+		out.PendingReview = cashDayNeedsReview(out)
 	}
 	for _, drawer := range drawerViews {
 		out.Drawers = append(out.Drawers, *drawer)
@@ -632,6 +688,13 @@ func appendDrawerExpenses(out *CashCloseReportOutput, expenses []*expenseDomain.
 // from the calculated cash so "what should be in the drawer" reflects
 // gastos en efectivo que ya salieron.
 func (uc *CashClose) Close(ctx context.Context, in CashCloseInput) (*CashCloseOutput, error) {
+	// Taking the cash out while closing needs PermCashOut (UC-007); a close
+	// that leaves the cash in the drawer stays open to every operator.
+	if in.Withdraw {
+		if err := sharedDomain.RequirePermission(ctx, sharedDomain.PermCashOut); err != nil {
+			return nil, err
+		}
+	}
 	now := nowUTC()
 	var out CashCloseOutput
 	replayed := false
@@ -704,26 +767,30 @@ func (uc *CashClose) Close(ctx context.Context, in CashCloseInput) (*CashCloseOu
 			}
 		}
 		if session == nil || session.FinishedAt() != nil {
+			// Legacy close without an opened drawer (old clients). The opening is
+			// known only when someone gave it or the previous count left it;
+			// otherwise $0 would be an invented balance.
 			sequence := 1
-			opening := 0.0
+			opening, openingKnown := 0.0, false
 			start, _ := tz.DayBounds(timezone, in.Date, in.Date)
 			if session != nil {
 				sequence = session.Sequence + 1
 				if session.CashLeft != nil {
-					opening = *session.CashLeft
+					opening, openingKnown = *session.CashLeft, true
 				}
 				if session.FinishedAt() != nil {
 					start = nextSessionOpenedAt(session)
 				}
 			}
 			if in.OpeningCash != nil {
-				opening = *in.OpeningCash
+				opening, openingKnown = *in.OpeningCash, true
 			}
 			session, err = cashCloseDomain.Open(in.GymID, drawerID, in.ActorUserID,
 				in.Date, sequence, opening, start)
 			if err != nil {
 				return sharedDomain.NewValidationError(err)
 			}
+			session.OpeningCashKnown = openingKnown
 			if _, err = uc.Events.Create(tx, session); err != nil {
 				if errors.Is(err, billingErrors.ErrCashCloseAlreadyExists) {
 					return sharedDomain.NewBusinessError(billingErrors.ErrCashCloseAlreadyExists, "")
@@ -731,7 +798,8 @@ func (uc *CashClose) Close(ctx context.Context, in CashCloseInput) (*CashCloseOu
 				return sharedDomain.NewUnexpectedError(err)
 			}
 			if err := uc.recordSessionAudit(ctx, tx, session, in.ActorUserID, audit.ActionCreate,
-				map[string]any{"status": session.Status, "opening_cash": session.OpeningCash}, now); err != nil {
+				map[string]any{"status": session.Status, "opening_cash": session.OpeningCash,
+					"opening_cash_known": session.OpeningCashKnown}, now); err != nil {
 				return err
 			}
 		}
@@ -867,17 +935,68 @@ func (uc *CashClose) Close(ctx context.Context, in CashCloseInput) (*CashCloseOu
 		evt := CashCloseClosedEvent{
 			GymID:          in.GymID,
 			ActorUserID:    in.ActorUserID,
+			SessionID:      out.CashCloseID,
 			CloseDate:      in.Date,
 			CalculatedCash: out.CalculatedCash,
 			CountedCash:    out.CountedCash,
 			Discrepancy:    out.Discrepancy,
 			ClosedAt:       now,
 		}
-		for _, s := range uc.Subscribers {
-			s.OnCashCloseClosed(ctx, evt)
+		var drawerID uuid.UUID
+		if out.Session != nil {
+			drawerID = out.Session.DrawerID
+			evt.Reason = out.Session.DiscrepancyReason
+			if !out.Session.OperationalDate.IsZero() {
+				evt.CloseDate = out.Session.OperationalDate
+			}
 		}
+		uc.publishCount(ctx, evt, drawerID)
 	}
 	return &out, nil
+}
+
+// publishCount runs after commit. Names are only looked up for a real
+// difference, in a fresh read snapshot, and a lookup failure only drops the
+// names: the count already committed and the alert must still go out.
+func (uc *CashClose) publishCount(ctx context.Context, evt CashCloseClosedEvent, drawerID uuid.UUID) {
+	if evt.Discrepancy != nil && math.Abs(*evt.Discrepancy) >= 0.005 {
+		err := sharedDomain.ReadSnapshot(ctx, uc.UoW, func(tx sharedDomain.Transaction) error {
+			if uc.Users != nil && evt.ActorUserID != uuid.Nil {
+				user, err := uc.Users.GetByID(tx, evt.ActorUserID)
+				if err != nil {
+					return err
+				}
+				if user != nil {
+					evt.CountedByName = nonBlank(user.FullName)
+				}
+			}
+			if uc.Drawers != nil && drawerID != uuid.Nil {
+				drawer, err := uc.Drawers.GetByID(tx, evt.GymID, drawerID)
+				if err != nil {
+					return err
+				}
+				if drawer != nil && !drawer.IsMain {
+					evt.DrawerName = nonBlank(drawer.Name)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			log.Printf("[reports/cash_close] alert names gym=%s session=%s err=%v", evt.GymID, evt.SessionID, err)
+			evt.CountedByName, evt.DrawerName = nil, nil
+		}
+	}
+	for _, s := range uc.Subscribers {
+		s.OnCashCloseClosed(ctx, evt)
+	}
+}
+
+func nonBlank(value string) *string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil
+	}
+	return &trimmed
 }
 
 // Reopen is the legacy date-based alias for marking the current session stale.
@@ -946,7 +1065,9 @@ func (uc *CashClose) Reopen(ctx context.Context, in CashReopenInput) error {
 func (uc *CashClose) Reconcile(ctx context.Context, in CashReconcileInput) (*CashSessionView, error) {
 	now := nowUTC()
 	var view *CashSessionView
+	recounted := false
 	err := uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {
+		recounted = false
 		session, err := uc.Events.GetByID(tx, in.GymID, in.SessionID)
 		if err != nil {
 			return sharedDomain.NewUnexpectedError(err)
@@ -1048,12 +1169,26 @@ func (uc *CashClose) Reconcile(ctx context.Context, in CashReconcileInput) (*Cas
 			return err
 		}
 		view = cashSessionView(session, session.Status, false, session.CalculatedCash)
+		recounted = !correctingCertified
 		return nil
 	})
+	if err == nil && recounted && view != nil && len(uc.Subscribers) > 0 {
+		uc.publishCount(ctx, CashCloseClosedEvent{
+			GymID: in.GymID, ActorUserID: in.ActorUserID, SessionID: view.ID,
+			CloseDate: view.OperationalDate, CalculatedCash: view.ExpectedCash,
+			CountedCash: view.CountedCash, Discrepancy: view.Difference,
+			Reason: view.DiscrepancyReason, ClosedAt: now,
+		}, view.DrawerID)
+	}
 	return view, err
 }
 
 func (uc *CashClose) Withdraw(ctx context.Context, in CashWithdrawInput) (*CashSessionView, error) {
+	// The route is gated too (EnforceOperatorPermissions); this covers any
+	// other caller with an operator's grants.
+	if err := sharedDomain.RequirePermission(ctx, sharedDomain.PermCashOut); err != nil {
+		return nil, err
+	}
 	now := nowUTC()
 	var view *CashSessionView
 	var staleErr error
@@ -1193,16 +1328,33 @@ type historicalCashAdjustment struct {
 	RequireReason                       bool
 }
 
-func (uc *CashClose) markHistoricalCashAdjustment(ctx context.Context, tx sharedDomain.Transaction,
-	in historicalCashAdjustment) error {
-	sessions, err := uc.Events.ListByDate(tx, in.GymID, dayUTC(in.OperationalDate))
+// CoveredByOpenCashSession implements expensesApp.CashSessionOpenChecker with
+// the same session resolution used to invalidate a corrected movement.
+func (uc *CashClose) CoveredByOpenCashSession(_ context.Context, tx sharedDomain.Transaction,
+	in expApp.CashSessionAdjustmentInput) (bool, error) {
+	drawerID := in.DrawerID
+	if drawerID == uuid.Nil {
+		drawerID = cashCloseDomain.DefaultDrawerID(in.GymID)
+	}
+	target, err := uc.coveringSession(tx, in.GymID, drawerID, in.OperationalDate, in.OriginalRecordedAt)
 	if err != nil {
-		return sharedDomain.NewUnexpectedError(err)
+		return false, err
+	}
+	return target != nil && target.Status == cashCloseDomain.StatusOpen, nil
+}
+
+// coveringSession is the session of that drawer-day whose window contains
+// recordedAt (the latest one when recordedAt is zero).
+func (uc *CashClose) coveringSession(tx sharedDomain.Transaction, gymID, drawerID uuid.UUID,
+	date, recordedAt time.Time) (*cashCloseDomain.CashCloseEvent, error) {
+	sessions, err := uc.Events.ListByDate(tx, gymID, dayUTC(date))
+	if err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
 	}
 	var target *cashCloseDomain.CashCloseEvent
-	recordedAt := in.OriginalRecordedAt.UTC()
+	recordedAt = recordedAt.UTC()
 	for _, candidate := range sessions {
-		if candidate.DrawerID != in.DrawerID {
+		if candidate.DrawerID != drawerID {
 			continue
 		}
 		if !recordedAt.IsZero() {
@@ -1216,6 +1368,15 @@ func (uc *CashClose) markHistoricalCashAdjustment(ctx context.Context, tx shared
 		if target == nil || candidate.Sequence > target.Sequence {
 			target = candidate
 		}
+	}
+	return target, nil
+}
+
+func (uc *CashClose) markHistoricalCashAdjustment(ctx context.Context, tx sharedDomain.Transaction,
+	in historicalCashAdjustment) error {
+	target, err := uc.coveringSession(tx, in.GymID, in.DrawerID, in.OperationalDate, in.OriginalRecordedAt)
+	if err != nil {
+		return err
 	}
 	if target == nil || target.Status == cashCloseDomain.StatusOpen || target.Status == cashCloseDomain.StatusStale {
 		return nil
@@ -1253,6 +1414,7 @@ func (uc *CashClose) markHistoricalCashAdjustment(ctx context.Context, tx shared
 
 var _ billingApp.CashSessionCorrectionMarker = (*CashClose)(nil)
 var _ expApp.CashSessionAdjustmentMarker = (*CashClose)(nil)
+var _ expApp.CashSessionOpenChecker = (*CashClose)(nil)
 
 func cashSessionView(e *cashCloseDomain.CashCloseEvent, status string, stale bool, currentExpected float64) *CashSessionView {
 	if e == nil {
@@ -1274,6 +1436,14 @@ func cashSessionView(e *cashCloseDomain.CashCloseEvent, status string, stale boo
 	if !stale && !e.AdjustedAfterWithdrawal {
 		view.Difference = e.Difference()
 	}
+	if !stale && status == cashCloseDomain.StatusClosedUnverified && e.ReviewedWithoutCount() {
+		view.ReviewedWithoutCount = true
+		view.ReviewedAt = e.ReviewedAt
+		view.ReviewNote = e.ReviewNote
+	}
+	view.OpeningExpectedCash = e.OpeningExpectedCash
+	view.OpeningDifference = e.OpeningDifference()
+	view.OpeningNote = e.OpeningNote
 	return view
 }
 

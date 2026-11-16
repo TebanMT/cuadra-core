@@ -64,6 +64,8 @@ type meUserWire struct {
 	Role            string     `json:"role"`
 	HasPIN          bool       `json:"has_pin"`
 	EmailVerifiedAt *time.Time `json:"email_verified_at"`
+	// Permissions: lo que el usuario puede hacer (todos para el dueño).
+	Permissions []string `json:"permissions"`
 }
 
 type meGymWire struct {
@@ -200,6 +202,7 @@ func (ctrl *AuthController) handleGetMe(c *gin.Context) {
 			Role:            user.Role,
 			HasPIN:          user.HasPIN(),
 			EmailVerifiedAt: user.EmailVerifiedAt,
+			Permissions:     permissionKeys(user.EffectivePermissions()),
 		},
 		Gym: meGymWire{
 			GymID:              gym.ID,
@@ -251,12 +254,13 @@ func (ctrl *AuthController) handleUpdateMe(c *gin.Context) {
 		return
 	}
 	utils.JsonResponse(c, http.StatusOK, meUserWire{
-		UserID:   updated.ID,
-		FullName: updated.FullName,
-		Email:    updated.Email,
-		Phone:    updated.Phone,
-		Role:     updated.Role,
-		HasPIN:   updated.HasPIN(),
+		UserID:      updated.ID,
+		FullName:    updated.FullName,
+		Email:       updated.Email,
+		Phone:       updated.Phone,
+		Role:        updated.Role,
+		HasPIN:      updated.HasPIN(),
+		Permissions: permissionKeys(updated.EffectivePermissions()),
 	})
 }
 
@@ -616,6 +620,7 @@ type operatorWire struct {
 	HasPIN             bool       `json:"has_pin"`
 	LastLoginAt        *time.Time `json:"last_login_at"`
 	CreatedAt          time.Time  `json:"created_at"`
+	Permissions        []string   `json:"permissions"`
 }
 
 func toOperatorWire(u *userDomain.User) operatorWire {
@@ -634,6 +639,7 @@ func toOperatorWire(u *userDomain.User) operatorWire {
 		HasPIN:             u.HasPIN(),
 		LastLoginAt:        u.LastLoginAt,
 		CreatedAt:          u.CreatedAt,
+		Permissions:        permissionKeys(u.EffectivePermissions()),
 	}
 }
 

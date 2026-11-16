@@ -49,6 +49,9 @@ type ListGymPaymentsOutput struct {
 	// esto, una venta walk-in (member_id NULL) se pintaba como "—" en Cobros.
 	SaleSummaries map[uuid.UUID]string
 	SaleIDs       map[uuid.UUID]uuid.UUID
+	// TotalsHidden: the actor lacks PermViewTotals, so the aggregates were
+	// not computed and the response must omit them (absent, not zero).
+	TotalsHidden bool
 }
 
 type ListGymPayments struct {
@@ -108,6 +111,15 @@ func (uc *ListGymPayments) Execute(ctx context.Context, in ListGymPaymentsInput)
 			from = to
 		}
 	}
+	// Without PermViewTotals (UC-007) an operator lists today's payments
+	// only, and without the totals of the window.
+	totalsHidden := !allowed(ctx, sharedDomain.PermViewTotals)
+	if totalsHidden {
+		today := gymLocalPaymentDate(tx, uc.Gyms, in.GymID, time.Now().UTC())
+		if !monetaryDateOnly(from).Equal(today) || !monetaryDateOnly(to).Equal(today) {
+			return nil, sharedDomain.NewPermissionDeniedError(sharedDomain.PermViewTotals)
+		}
+	}
 	q := billingRepo.ListByGymQuery{
 		GymID:         in.GymID,
 		From:          from,
@@ -121,9 +133,12 @@ func (uc *ListGymPayments) Execute(ctx context.Context, in ListGymPaymentsInput)
 	if err != nil {
 		return nil, sharedDomain.NewUnexpectedError(err)
 	}
-	agg, err := uc.Payments.AggregateByGymBetweenDates(tx, q)
-	if err != nil {
-		return nil, sharedDomain.NewUnexpectedError(err)
+	var agg billingRepo.ListByGymAggregates
+	if !totalsHidden {
+		agg, err = uc.Payments.AggregateByGymBetweenDates(tx, q)
+		if err != nil {
+			return nil, sharedDomain.NewUnexpectedError(err)
+		}
 	}
 	memberIDs := make([]uuid.UUID, 0, len(rows))
 	seen := make(map[uuid.UUID]struct{}, len(rows))
@@ -198,5 +213,6 @@ func (uc *ListGymPayments) Execute(ctx context.Context, in ListGymPaymentsInput)
 		MemberNames:   names,
 		SaleSummaries: summaries,
 		SaleIDs:       saleIDs,
+		TotalsHidden:  totalsHidden,
 	}, nil
 }

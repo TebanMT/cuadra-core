@@ -79,6 +79,71 @@ func TestPostgresDirectSQLThenRunnerDoesNotReplayDDL(t *testing.T) {
 	}
 }
 
+// An early cash-session rollout could record 040 while leaving the legacy
+// one-close-per-day index behind. The runner skips historical migrations once
+// recorded, so a later, versioned repair must remove that stale index without
+// changing any operational rows.
+func TestPostgresMigrationRepairsLegacyCashCloseUnique(t *testing.T) {
+	db := emptyMigrationDatabase(t)
+	fullDir := filepath.Join("..", "..", "db_migrations", "postgres")
+	legacyDir := t.TempDir()
+	entries, err := os.ReadDir(fullDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundRepair := false
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+			continue
+		}
+		if entry.Name() == "066_repair_cash_session_legacy_unique.sql" {
+			foundRepair = true
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(fullDir, entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(legacyDir, entry.Name()), raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !foundRepair {
+		t.Fatal("cash-session repair migration missing")
+	}
+	if err := infraDB.ApplyPostgresMigrations(db, legacyDir); err != nil {
+		t.Fatalf("apply pre-repair migrations: %v", err)
+	}
+	if err := db.Exec(`CREATE UNIQUE INDEX uq_cash_close_events_gym_date
+		ON public.cash_close_events(gym_id, close_date) WHERE deleted_at IS NULL`).Error; err != nil {
+		t.Fatalf("seed legacy cash-close index: %v", err)
+	}
+
+	if err := infraDB.ApplyPostgresMigrations(db, fullDir); err != nil {
+		t.Fatalf("apply cash-session repair: %v", err)
+	}
+	var indexes []string
+	if err := db.Raw(`SELECT indexname FROM pg_indexes
+		WHERE schemaname='public' AND tablename='cash_close_events'
+		AND indexname IN ('uq_cash_close_events_gym_date','uq_cash_sessions_natural')
+		ORDER BY indexname`).Scan(&indexes).Error; err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(indexes, "uq_cash_close_events_gym_date") {
+		t.Fatalf("legacy cash-close index remains: %v", indexes)
+	}
+	if !slices.Contains(indexes, "uq_cash_sessions_natural") {
+		t.Fatalf("modern cash-session index missing: %v", indexes)
+	}
+	var repaired bool
+	if err := db.Raw(`SELECT EXISTS(SELECT 1 FROM _migrations WHERE version=66)`).Scan(&repaired).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !repaired {
+		t.Fatal("repair migration was not recorded")
+	}
+}
+
 // A separate database keeps this full migration-chain test isolated from the
 // fixtures and migration locks used by concurrently running packages.
 func emptyMigrationDatabase(t *testing.T) *gorm.DB {

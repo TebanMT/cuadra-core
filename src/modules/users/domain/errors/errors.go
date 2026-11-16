@@ -6,10 +6,10 @@ import "errors"
 // surfacing to operators / owners. UC mappings:
 //
 //	UC-002 Login         -> ErrInvalidCredentials, ErrAccountInactive
-//	UC-001 Signup        -> ErrEmailAlreadyExists, ErrInvalidEmail, ErrPasswordTooShort, ErrNameRequired
+//	UC-001 Signup        -> ErrEmailAlreadyExists, ErrInvalidEmail, ErrPasswordTooShort, ErrNameRequired, ErrLegalNotAccepted
 //	UC-004 Reset         -> ErrInvalidResetToken, ErrResetTokenExpired
-//	UC-006 CreateOper    -> ErrEmailAlreadyExists, ErrOperatorLimitReached
-//	UC-008 ToggleActive  -> ErrSelfDeactivate, ErrCannotDeactivateOwner
+//	UC-006 CreateOper    -> ErrEmailAlreadyExists, ErrOperatorLimitReached, ErrOperatorLimitStandard
+//	UC-008 ToggleActive  -> ErrSelfDeactivate, ErrCannotDeactivateOwner, ErrOperatorLimitReached, ErrOperatorLimitStandard (al reactivar)
 //	UC-010 Transfer      -> ErrInvalidOTP, ErrTargetNotEligible
 var (
 	ErrUserNotFound       = errors.New("usuario no encontrado")
@@ -24,9 +24,15 @@ var (
 	// ErrOwnerOnlyLogin — el binario cloud restringe /auth/login al dueño
 	// (el dashboard es superficie del dueño). El sidecar nunca lo emite:
 	// recepción sí loguea operadores.
-	ErrOwnerOnlyLogin    = errors.New("el dashboard es del dueño. En el gym, entra con la app de recepción")
-	ErrInvalidResetToken = errors.New("este link ya no es válido")
-	ErrResetTokenExpired = errors.New("este link expiró. Solicita uno nuevo")
+	ErrOwnerOnlyLogin = errors.New("el dashboard es del dueño. En el gym, entra con la app de recepción")
+	// ErrInvalidRefreshToken — el refresh token venció, ya se usó, se cerró
+	// sesión o se cambió la contraseña. El cliente vuelve al login.
+	ErrInvalidRefreshToken = errors.New("tu sesión terminó. Vuelve a entrar")
+	ErrInvalidResetToken   = errors.New("este link ya no es válido")
+	ErrResetTokenExpired   = errors.New("este link expiró. Solicita uno nuevo")
+	// ErrLegalNotAccepted — UC-001: el alta del dueño exige aceptar los
+	// Términos del Servicio y el Aviso de Privacidad.
+	ErrLegalNotAccepted = errors.New("acepta los Términos del Servicio y el Aviso de Privacidad para crear tu cuenta")
 	// UC-013 — verificación de correo.
 	ErrInvalidVerifyToken    = errors.New("este link de verificación ya no es válido")
 	ErrVerifyTokenExpired    = errors.New("este link de verificación expiró. Solicita uno nuevo")
@@ -35,12 +41,15 @@ var (
 	ErrSelfDeactivate        = errors.New("no puedes desactivar tu propia cuenta")
 	ErrCannotDeactivateOwner = errors.New("no puedes desactivar al dueño del gimnasio")
 	ErrCrossGym              = errors.New("ese usuario no pertenece a tu gimnasio")
-	ErrOperatorLimitReached  = errors.New("alcanzaste el máximo de 10 operadores por gimnasio")
-	// ErrOperatorLimitStandard se devuelve cuando el gym intenta crear un
-	// operador adicional sobre el cap del SKU Standard. El FE lo detecta
+	// ErrOperatorLimitReached / ErrOperatorLimitStandard: el cupo cuenta sólo
+	// operadores ACTIVOS (los desactivados no ocupan lugar; el dueño no
+	// cuenta). Aplican al dar de alta y al reactivar un operador.
+	ErrOperatorLimitReached = errors.New("alcanzaste el máximo de 10 operadores activos por gimnasio. Desactiva uno para dar acceso a otra persona")
+	// ErrOperatorLimitStandard se devuelve cuando el gym intenta crear o
+	// reactivar un operador sobre el cap del SKU Standard. El FE lo detecta
 	// para mostrar el upsell "mejora a Plus para operadores ilimitados"
 	// en lugar del límite absoluto del producto.
-	ErrOperatorLimitStandard = errors.New("tu plan Standard incluye 1 operador. Mejora a Plus para agregar más")
+	ErrOperatorLimitStandard = errors.New("tu plan Standard incluye 1 operador activo. Desactiva al actual o mejora a Plus para agregar más")
 	ErrInvalidOTP            = errors.New("código incorrecto o expirado")
 	ErrTargetNotEligible     = errors.New("el usuario seleccionado no existe o no es operador activo de tu gimnasio")
 	ErrAlreadyOwner          = errors.New("ese usuario ya es dueño")
@@ -57,4 +66,10 @@ var (
 	// Unicidad por gym (no global): la misma persona puede trabajar en dos
 	// gyms distintos con el mismo número.
 	ErrPhoneTakenInGym = errors.New("ese teléfono ya está registrado en este gimnasio")
+)
+
+// Permisos por operador (UC-007). El dueño siempre tiene todos.
+var (
+	ErrOwnerHasAllPermissions = errors.New("el dueño siempre tiene todos los permisos")
+	ErrUnknownPermission      = errors.New("ese permiso no existe")
 )

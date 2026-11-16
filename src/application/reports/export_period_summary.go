@@ -89,33 +89,8 @@ func renderPeriodSummaryPDF(gym *gymDomain.Gym, r *RangeReportOutput, from, to t
 	writeKPI("Asistencias", r.Totals.Checkins, false)
 	pdf.Ln(3)
 
-	// --- Caja del período. Flujo/retiros son acumulados del período;
-	// esperado/contado/diferencia pertenecen a una sola sesión (la última).
-	pdf.SetFont("Helvetica", "B", 11)
-	pdf.CellFormat(0, 6, asciiSafe("Caja del período"), "", 1, "L", false, 0, "")
-	pdf.SetFont("Helvetica", "", 9)
-	pdfCashRow := func(label string, value *float64) {
-		pdf.CellFormat(70, 5, asciiSafe(label), "1", 0, "L", false, 0, "")
-		if value == nil {
-			pdf.CellFormat(40, 5, asciiSafe("Pendiente"), "1", 1, "R", false, 0, "")
-		} else {
-			pdf.CellFormat(40, 5, fmt.Sprintf("$%.2f", *value), "1", 1, "R", false, 0, "")
-		}
-	}
-	periodActivity, periodWithdrawn := r.CashReconciliation.PeriodActivity, r.CashReconciliation.PeriodWithdrawn
-	pdfCashRow("Actividad de caja del período", &periodActivity)
-	pdfCashRow("Efectivo retirado en el período", &periodWithdrawn)
-	pdfCashRow("Esperado en el último conteo", r.CashReconciliation.LatestExpected)
-	pdfCashRow("Contado en el último conteo", r.CashReconciliation.LatestCounted)
-	pdf.CellFormat(70, 5, asciiSafe("Diferencia del último conteo"), "1", 0, "L", false, 0, "")
-	if r.CashReconciliation.LatestDifference == nil {
-		pdf.CellFormat(40, 5, asciiSafe("Pendiente"), "1", 1, "R", false, 0, "")
-	} else {
-		pdf.CellFormat(40, 5, fmt.Sprintf("$%.2f", *r.CashReconciliation.LatestDifference), "1", 1, "R", false, 0, "")
-	}
-	pdf.CellFormat(70, 5, asciiSafe("Cortes con conteo"), "1", 0, "L", false, 0, "")
-	pdf.CellFormat(40, 5, fmt.Sprintf("%d de %d", r.CashReconciliation.CountedCloses, r.CashReconciliation.TotalCloses), "1", 1, "R", false, 0, "")
-	pdf.Ln(3)
+	// --- Caja del período: mismas preguntas y palabras que la tarjeta de la app.
+	writePeriodCashPDF(pdf, r.CashReconciliation)
 
 	// --- Ingresos y salidas por día (tabla; las gráficas no se renderizan en PDF).
 	pdf.SetFont("Helvetica", "B", 11)
@@ -264,26 +239,7 @@ func renderPeriodSummaryXLSX(r *RangeReportOutput, from, to time.Time) ([]byte, 
 	row([]any{"Asistencias", r.Totals.Checkins.Current, r.Totals.Checkins.Previous, fmtKPIDelta(r.Totals.Checkins)})
 	rowIdx++
 
-	header("Caja del período", bold)
-	colsHeader([]string{"Indicador", "Valor"})
-	row([]any{"Actividad de caja del período", r.CashReconciliation.PeriodActivity})
-	row([]any{"Efectivo retirado en el período", r.CashReconciliation.PeriodWithdrawn})
-	if r.CashReconciliation.LatestExpected == nil {
-		row([]any{"Esperado en el último conteo", "Pendiente"})
-	} else {
-		row([]any{"Esperado en el último conteo", *r.CashReconciliation.LatestExpected})
-	}
-	if r.CashReconciliation.LatestCounted == nil {
-		row([]any{"Contado en el último conteo", "Pendiente"})
-	} else {
-		row([]any{"Contado en el último conteo", *r.CashReconciliation.LatestCounted})
-	}
-	if r.CashReconciliation.LatestDifference == nil {
-		row([]any{"Diferencia del último conteo", "Pendiente"})
-	} else {
-		row([]any{"Diferencia del último conteo", *r.CashReconciliation.LatestDifference})
-	}
-	row([]any{"Cortes con conteo", fmt.Sprintf("%d de %d", r.CashReconciliation.CountedCloses, r.CashReconciliation.TotalCloses)})
+	rowIdx = writePeriodCashXLSX(f, rowIdx, bold, r.CashReconciliation)
 	rowIdx++
 
 	// Daily series.

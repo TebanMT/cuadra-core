@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	expApp "github.com/cuadra/cuadra-core/src/modules/expenses/app"
 	"github.com/cuadra/cuadra-core/src/shared/auth"
 )
 
@@ -119,5 +120,33 @@ func TestExpenseRoutesAllowOwnerPlusAndOperatorStandardOnlyForDrawerOperations(t
 	}
 	if calls := atomic.LoadInt32(&gateCalls); calls != 0 {
 		t.Fatalf("Plus gate called for operator route; calls=%d", calls)
+	}
+}
+
+func TestOperatorCanVoidOwnMovementButNotDeleteIt(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tokens := auth.NewJWTService("expenses-void-test-secret-with-enough-entropy")
+	r := gin.New()
+	(&ExpenseController{Tokens: tokens, VoidCash: &expApp.VoidOwnCashMovement{}}).RegisterRoutes(r)
+	token, err := tokens.GenerateAccessToken(uuid.New(), uuid.New(), "operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := func(method, path string) int {
+		req := httptest.NewRequest(method, path, strings.NewReader(`{}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w.Code
+	}
+	id := uuid.New().String()
+	// Reaches the handler (DTO validation) instead of the owner gate; the
+	// use case decides whether the movement is theirs and the drawer open.
+	if got := request(http.MethodPost, "/api/v1/cash-movements/"+id+"/void"); got != http.StatusBadRequest {
+		t.Fatalf("operator void status=%d, want DTO validation 400", got)
+	}
+	if got := request(http.MethodDelete, "/api/v1/cash-movements/"+id+"?version=1"); got != http.StatusForbidden {
+		t.Fatalf("operator delete status=%d, want 403", got)
 	}
 }

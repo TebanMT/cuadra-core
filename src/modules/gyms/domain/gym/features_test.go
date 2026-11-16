@@ -19,7 +19,11 @@ func TestLaunchAccessDoesNotChangeBillingOrExpiration(t *testing.T) {
 			if g.CanAccessFeature("unknown_future_feature") {
 				t.Fatal("unknown feature must fail closed")
 			}
-			if g.SubscriptionPlan != plan || g.HasActiveAccess(time.Now()) || !g.IsAccessHardBlocked(time.Now()) {
+			// Una prueba cancelada queda en solo lectura (UC-002); un plan de
+			// pago cancelado, bloqueado. El grant no cambia ninguna de las dos.
+			now := time.Now()
+			hardBlocked := plan != PlanTrial
+			if g.SubscriptionPlan != plan || g.HasActiveAccess(now) || g.IsAccessHardBlocked(now) != hardBlocked || g.IsTrialReadOnly(now) == hardBlocked {
 				t.Fatal("grant changed billing/access rules")
 			}
 		}

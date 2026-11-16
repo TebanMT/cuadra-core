@@ -10,6 +10,7 @@ import (
 	"math"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -39,7 +40,14 @@ var (
 	ErrDifferenceReason      = errors.New("explica la diferencia del conteo")
 	ErrCorrectionReason      = errors.New("explica por qué se corrige el corte")
 	ErrCorrectionOwner       = errors.New("sólo el propietario puede corregir un conteo conciliado")
+	ErrReviewNote            = errors.New("escribe por qué este día se revisa sin conteo")
+	ErrReviewNoteTooLong     = errors.New("la nota de revisión no puede superar 500 caracteres")
+	ErrReviewOwner           = errors.New("sólo el propietario puede revisar un día sin conteo")
+	ErrReviewPastDay         = errors.New("sólo se revisan días anteriores; el día de hoy se cierra con el corte")
+	ErrNothingToReview       = errors.New("este día no tiene efectivo pendiente de revisar")
 	ErrWithdrawalDestination = errors.New("el destino del retiro no es válido")
+	ErrOpeningNote           = errors.New("el efectivo inicial no coincide con lo que quedó en el último corte; escribe qué pasó")
+	ErrOpeningNoteTooLong    = errors.New("la nota de apertura no puede superar 500 caracteres")
 )
 
 // Stable namespace: two offline devices derive the same UUID for the same
@@ -87,6 +95,18 @@ type CashCloseEvent struct {
 	StaleAt      *time.Time
 	WithdrawnAt  *time.Time
 	WithdrawnBy  *uuid.UUID
+
+	// The owner's review of a past session whose cash could no longer be
+	// counted on its own. See ReviewedWithoutCount for when it still holds.
+	ReviewedAt *time.Time
+	ReviewedBy *uuid.UUID
+	ReviewNote *string
+
+	// Overnight check of the first opening of a day: what the drawer should
+	// hold (cash left at the last count plus cash that moved since), frozen
+	// when the drawer is opened, and why the opening differs. See CheckOpening.
+	OpeningExpectedCash *float64
+	OpeningNote         *string
 
 	// CloseDate remains for compatibility with older clients and exports.
 	CloseDate time.Time
@@ -201,6 +221,7 @@ func (e *CashCloseEvent) Close(activityCash float64, actor uuid.UUID, now time.T
 	e.StaleAt = nil
 	e.WithdrawnAt = nil
 	e.WithdrawnBy = nil
+	e.clearReview()
 	e.ClosedAt = &now
 	e.ClosedBy = actor
 	e.Status = StatusClosedUnverified
@@ -221,7 +242,8 @@ func (e *CashCloseEvent) Reconcile(countedCash float64, reason *string, actor uu
 	}
 	reason = clean(reason)
 	diff, _ := money(counted - e.CalculatedCash)
-	if cents(diff) != 0 && reason == nil {
+	// Without a recorded opening there is no real difference to explain.
+	if e.OpeningCashKnown && cents(diff) != 0 && reason == nil {
 		return ErrDifferenceReason
 	}
 	now = now.UTC()
@@ -231,6 +253,7 @@ func (e *CashCloseEvent) Reconcile(countedCash float64, reason *string, actor uu
 	e.ReconciledAt = &now
 	e.ReconciledBy = &actor
 	e.StaleAt = nil
+	e.clearReview()
 	e.bump(now)
 	return nil
 }
@@ -269,6 +292,7 @@ func (e *CashCloseEvent) MarkStale(reason string, now time.Time) error {
 	e.Status = StatusStale
 	e.CorrectionReason = &reason
 	e.StaleAt = &now
+	e.clearReview()
 	e.bump(now)
 	return nil
 }
@@ -373,8 +397,96 @@ func (e *CashCloseEvent) Reopen(now time.Time) {
 	_ = e.MarkStale("reapertura_manual", now)
 }
 
+// ReviewWithoutCount records the owner's decision on a past closed session
+// whose cash can no longer be counted on its own. It never invents a count:
+// the session stays closed_unverified with no difference, and only stops
+// requesting attention. Any later re-close (late activity) invalidates it.
+func (e *CashCloseEvent) ReviewWithoutCount(note string, actor uuid.UUID, now time.Time) error {
+	if e == nil || e.DeletedAt != nil || e.Status != StatusClosedUnverified || e.ClosedAt == nil {
+		return ErrInvalidSessionState
+	}
+	note = strings.Join(strings.Fields(note), " ")
+	if note == "" {
+		return ErrReviewNote
+	}
+	if utf8.RuneCountInString(note) > 500 {
+		return ErrReviewNoteTooLong
+	}
+	now = now.UTC()
+	if now.Before(*e.ClosedAt) {
+		now = *e.ClosedAt
+	}
+	e.ReviewedAt = &now
+	e.ReviewedBy = &actor
+	e.ReviewNote = &note
+	e.bump(now)
+	return nil
+}
+
+// ReviewedWithoutCount reports whether the owner's review still describes the
+// session. A device that predates the review columns can re-close the session
+// without clearing them, so validity is anchored to closed_at, not to writes.
+func (e *CashCloseEvent) ReviewedWithoutCount() bool {
+	return e != nil && e.Status == StatusClosedUnverified && e.ReviewedAt != nil &&
+		e.ClosedAt != nil && !e.ReviewedAt.Before(*e.ClosedAt)
+}
+
+// CheckOpening freezes what the drawer should hold at the first opening of a
+// day. The physical count is the truth, so a different opening is accepted,
+// but it must be explained: cash missing overnight reaches the owner instead
+// of silently becoming the new starting point.
+func (e *CashCloseEvent) CheckOpening(expected float64, note string) error {
+	if e == nil || e.DeletedAt != nil || e.Status != StatusOpen || e.ClosedAt != nil {
+		return ErrInvalidSessionState
+	}
+	reference, err := nonNegativeMoney(expected, ErrInvalidMoney)
+	if err != nil {
+		return err
+	}
+	e.OpeningExpectedCash = &reference
+	e.OpeningNote = nil
+	note = strings.Join(strings.Fields(note), " ")
+	matches := cents(e.OpeningCash) == cents(reference)
+	if note == "" {
+		if matches {
+			return nil
+		}
+		return ErrOpeningNote
+	}
+	if utf8.RuneCountInString(note) > 500 {
+		return ErrOpeningNoteTooLong
+	}
+	// A matching opening may still carry a note: a recount after seeing the
+	// reference keeps the first count for the owner.
+	e.OpeningNote = &note
+	return nil
+}
+
+// OpeningDifference is opening − expected at the first opening of a day:
+// negative means cash went missing between counts. Nil without a reference
+// or when the opening matched.
+func (e *CashCloseEvent) OpeningDifference() *float64 {
+	if e == nil || e.OpeningExpectedCash == nil {
+		return nil
+	}
+	diff := cents(e.OpeningCash) - cents(*e.OpeningExpectedCash)
+	if diff == 0 {
+		return nil
+	}
+	value := float64(diff) / 100
+	return &value
+}
+
+func (e *CashCloseEvent) clearReview() {
+	e.ReviewedAt = nil
+	e.ReviewedBy = nil
+	e.ReviewNote = nil
+}
+
 func (e *CashCloseEvent) Difference() *float64 {
-	if e == nil || e.CountedCash == nil || e.AdjustedAfterWithdrawal ||
+	// A count compared against an opening nobody recorded proves nothing: the
+	// "difference" would just be the unknown starting cash.
+	if e == nil || e.CountedCash == nil || e.AdjustedAfterWithdrawal || !e.OpeningCashKnown ||
 		(e.Status != StatusReconciled && e.Status != StatusWithdrawn) {
 		return nil
 	}

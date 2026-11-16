@@ -177,8 +177,12 @@ func (r *SQLiteReader) SumCashCountedBetween(tx sharedDomain.Transaction, gymID 
 		ActiveDays                      int            `db:"active_days"`
 		MissingActiveDays               int            `db:"missing_active_days"`
 		UncoveredActivityDays           int            `db:"uncovered_activity_days"`
+		UncoveredActivityDates          sql.NullString `db:"uncovered_activity_dates"`
+		DifferenceSessions              sql.NullString `db:"difference_sessions"`
+		OpeningDifferences              sql.NullString `db:"opening_differences"`
 		OpenSessions                    int            `db:"open_sessions"`
 		ClosedUnverifiedSessions        int            `db:"closed_unverified_sessions"`
+		ReviewedSessions                int            `db:"reviewed_sessions"`
 		ReconciledSessions              int            `db:"reconciled_sessions"`
 		StaleSessions                   int            `db:"stale_sessions"`
 		WithdrawnSessions               int            `db:"withdrawn_sessions"`
@@ -220,7 +224,13 @@ func (r *SQLiteReader) SumCashCountedBetween(tx sharedDomain.Transaction, gymID 
 		    AND COALESCE(operational_date,close_date) >= ?
 		    AND COALESCE(operational_date,close_date) <= ?
 		), scoped_base AS (
-		  SELECT * FROM period_sessions
+		  -- A count is immutable from its withdrawal or, when finished without
+		  -- one ("Terminar sin retirar"), from its reconciliation. Later cash
+		  -- belongs to the next session, never to the finished count.
+		  SELECT *,
+		    COALESCE(withdrawn_at,
+		      CASE WHEN cash_left IS NOT NULL AND counted_cash IS NOT NULL THEN reconciled_at END) AS session_finished_at
+		  FROM period_sessions
 		  WHERE COALESCE(operational_date,close_date)>=(SELECT started_on FROM tracking)
 		), tracked_physical AS (
 		  SELECT * FROM physical WHERE day>=(SELECT started_on FROM tracking)
@@ -231,7 +241,7 @@ func (r *SQLiteReader) SumCashCountedBetween(tx sharedDomain.Transaction, gymID 
 		    ON p.day=COALESCE(s.operational_date,s.close_date)
 		   AND p.drawer_id=COALESCE(s.drawer_id,s.gym_id)
 		   AND p.recorded_at>=COALESCE(s.opened_at,s.created_at)
-		   AND (s.withdrawn_at IS NULL OR p.recorded_at<=s.withdrawn_at)
+		   AND (s.session_finished_at IS NULL OR p.recorded_at<=s.session_finished_at)
 		  GROUP BY s.id
 		), uncovered_dates(day) AS (
 		  SELECT DISTINCT p.day FROM tracked_physical p
@@ -240,14 +250,14 @@ func (r *SQLiteReader) SumCashCountedBetween(tx sharedDomain.Transaction, gymID 
 		           AND COALESCE(s.drawer_id,s.gym_id)=p.drawer_id
 		           AND p.recorded_at>=COALESCE(s.opened_at,s.created_at)
 		           AND (COALESCE(s.status,'closed_unverified')<>'withdrawn' OR s.withdrawn_at IS NOT NULL)
-		           AND (s.withdrawn_at IS NULL OR p.recorded_at<=s.withdrawn_at)) <> 1
+		           AND (s.session_finished_at IS NULL OR p.recorded_at<=s.session_finished_at)) <> 1
 		     OR EXISTS (SELECT 1 FROM scoped_base s
 		         WHERE COALESCE(s.operational_date,s.close_date)=p.day
 		           AND COALESCE(s.drawer_id,s.gym_id)=p.drawer_id
 		           AND p.recorded_at>=COALESCE(s.opened_at,s.created_at)
 		           AND s.closed_at IS NOT NULL AND p.touched_at>s.closed_at
-		           AND (COALESCE(s.status,'closed_unverified')<>'withdrawn'
-		             OR (s.withdrawn_at IS NOT NULL AND p.touched_at<=s.withdrawn_at)))
+		           AND ((COALESCE(s.status,'closed_unverified')<>'withdrawn' AND s.session_finished_at IS NULL)
+		             OR (s.session_finished_at IS NOT NULL AND p.touched_at<=s.session_finished_at)))
 		  UNION
 		  SELECT COALESCE(s.operational_date,s.close_date)
 		  FROM scoped_base s JOIN current_activity ca ON ca.id=s.id
@@ -255,11 +265,12 @@ func (r *SQLiteReader) SumCashCountedBetween(tx sharedDomain.Transaction, gymID 
 		    AND ca.amount<>COALESCE(s.activity_cash,0)
 		), scoped AS (
 		  SELECT s.*,
-		    CASE WHEN s.withdrawn_at IS NOT NULL
+		    CASE WHEN s.session_finished_at IS NOT NULL
 		                   AND ca.amount<>COALESCE(s.activity_cash,0)
 		         THEN 1 ELSE 0 END AS dynamic_post_withdrawal_adjustment,
 		    CASE WHEN s.status='stale' THEN 1
 		      WHEN COALESCE(s.status,'closed_unverified') IN ('open','withdrawn') THEN 0
+		      WHEN s.session_finished_at IS NOT NULL THEN 0
 		      WHEN ca.amount<>COALESCE(s.activity_cash,0) THEN 1
 		      WHEN s.closed_at IS NOT NULL AND EXISTS (
 		        SELECT 1 FROM physical p
@@ -267,13 +278,17 @@ func (r *SQLiteReader) SumCashCountedBetween(tx sharedDomain.Transaction, gymID 
 		          AND p.drawer_id=COALESCE(s.drawer_id,s.gym_id)
 		          AND p.recorded_at>=COALESCE(s.opened_at,s.created_at)
 		          AND p.recorded_at>s.closed_at
-		          AND (s.withdrawn_at IS NULL OR p.recorded_at<=s.withdrawn_at)
+		          AND (s.session_finished_at IS NULL OR p.recorded_at<=s.session_finished_at)
 		      ) THEN 1 ELSE 0 END AS needs_recount
 		  FROM scoped_base s JOIN current_activity ca ON ca.id=s.id
 		), effective AS (
 		  SELECT s.*,
 		    CASE WHEN needs_recount=1 THEN 'stale'
-		         ELSE COALESCE(status,'closed_unverified') END AS effective_status
+		         ELSE COALESCE(status,'closed_unverified') END AS effective_status,
+		    -- Owner review without a count; any later re-close invalidates it.
+		    CASE WHEN needs_recount=0 AND COALESCE(status,'closed_unverified')='closed_unverified'
+		              AND reviewed_at IS NOT NULL AND closed_at IS NOT NULL AND reviewed_at>=closed_at
+		         THEN 1 ELSE 0 END AS reviewed_without_count
 		  FROM scoped s
 		), latest AS (
 		  SELECT * FROM effective
@@ -299,12 +314,48 @@ func (r *SQLiteReader) SumCashCountedBetween(tx sharedDomain.Transaction, gymID 
 		          SELECT 1 FROM scoped_base s WHERE COALESCE(s.operational_date,s.close_date)=a.day
 		        )) AS missing_active_days,
 		       (SELECT COUNT(*) FROM uncovered_dates) AS uncovered_activity_days,
+		       (SELECT GROUP_CONCAT(day, ',') FROM uncovered_dates) AS uncovered_activity_dates,
+		       (SELECT json_group_array(json_object(
+		          'id', d.id,
+		          'date', COALESCE(d.operational_date,d.close_date),
+		          'drawer_id', d.drawer_id,
+		          'drawer_name', dr.name,
+		          'sequence', COALESCE(d.sequence,1),
+		          'difference_cents', d.counted_cash-d.calculated_cash,
+		          'counted_by_name', u.full_name,
+		          'reason', d.discrepancy_reason))
+		        FROM effective d
+		        LEFT JOIN cash_drawers dr ON dr.id=d.drawer_id AND dr.gym_id=d.gym_id
+		        LEFT JOIN users u ON u.id=COALESCE(d.reconciled_by,d.closed_by)
+		        WHERE d.effective_status IN ('reconciled','withdrawn')
+		          AND d.counted_cash IS NOT NULL
+		          AND COALESCE(d.adjusted_after_withdrawal,0)=0
+		          AND d.dynamic_post_withdrawal_adjustment=0
+		          AND COALESCE(d.opening_cash_known,0)=1
+		          AND d.counted_cash<>d.calculated_cash) AS difference_sessions,
+		       (SELECT json_group_array(json_object(
+		          'id', d.id,
+		          'date', COALESCE(d.operational_date,d.close_date),
+		          'drawer_id', d.drawer_id,
+		          'drawer_name', dr.name,
+		          'sequence', COALESCE(d.sequence,1),
+		          'difference_cents', d.opening_cash-d.opening_expected_cash,
+		          'counted_by_name', u.full_name,
+		          'reason', d.opening_note))
+		        FROM effective d
+		        LEFT JOIN cash_drawers dr ON dr.id=d.drawer_id AND dr.gym_id=d.gym_id
+		        LEFT JOIN users u ON u.id=d.opened_by
+		        WHERE d.opening_expected_cash IS NOT NULL
+		          AND d.opening_cash<>d.opening_expected_cash) AS opening_differences,
 		       (SELECT COUNT(*) FROM effective WHERE effective_status='open') AS open_sessions,
-		       (SELECT COUNT(*) FROM effective WHERE effective_status='closed_unverified') AS closed_unverified_sessions,
+		       (SELECT COUNT(*) FROM effective
+		         WHERE effective_status='closed_unverified' AND reviewed_without_count=0) AS closed_unverified_sessions,
+		       (SELECT COUNT(*) FROM effective WHERE reviewed_without_count=1) AS reviewed_sessions,
 		       (SELECT COUNT(*) FROM effective WHERE effective_status='reconciled') AS reconciled_sessions,
 		       (SELECT COUNT(*) FROM effective WHERE effective_status='stale') AS stale_sessions,
 		       (SELECT COUNT(*) FROM effective WHERE effective_status='withdrawn') AS withdrawn_sessions,
-		       (SELECT COUNT(*) FROM effective WHERE COALESCE(opening_cash_known,0)=0) AS unknown_opening_sessions,
+		       (SELECT COUNT(*) FROM effective
+		         WHERE COALESCE(opening_cash_known,0)=0 AND reviewed_without_count=0) AS unknown_opening_sessions,
 		       (SELECT COUNT(*) FROM effective
 		         WHERE COALESCE(adjusted_after_withdrawal,0)=1
 		            OR dynamic_post_withdrawal_adjustment=1) AS adjusted_after_withdrawal_sessions,
@@ -315,12 +366,13 @@ func (r *SQLiteReader) SumCashCountedBetween(tx sharedDomain.Transaction, gymID 
 		           AND e.expense_date BETWEEN ? AND ?) AS legacy_cash_source_unverified_count,
 		       (SELECT COUNT(*) FROM effective) AS total_sessions,
 		       l.id AS latest_session_id,
-		       l.calculated_cash AS latest_expected,
+		       CASE WHEN COALESCE(l.opening_cash_known,0)=1 THEN l.calculated_cash END AS latest_expected,
 		       l.counted_cash AS latest_counted,
 		       CASE WHEN l.counted_cash IS NOT NULL
 		                  AND l.effective_status IN ('reconciled','withdrawn')
 		                  AND COALESCE(l.adjusted_after_withdrawal,0)=0
 		                  AND l.dynamic_post_withdrawal_adjustment=0
+		                  AND COALESCE(l.opening_cash_known,0)=1
 		            THEN l.counted_cash-l.calculated_cash END AS latest_difference,
 		       CASE WHEN l.counted_cash IS NOT NULL
 		            THEN COALESCE(l.reconciled_at,l.closed_at,l.updated_at) END AS latest_counted_at,
@@ -342,7 +394,9 @@ func (r *SQLiteReader) SumCashCountedBetween(tx sharedDomain.Transaction, gymID 
 		HistoricalActivityDays: row.HistoricalActivityDays, HistoricalSessions: row.HistoricalSessions,
 		ActiveDays: row.ActiveDays, MissingActiveDays: row.MissingActiveDays,
 		UncoveredActivityDays: row.UncoveredActivityDays, OpenSessions: row.OpenSessions,
+		UncoveredActivityDates:   splitBusinessDates(row.UncoveredActivityDates.String),
 		ClosedUnverifiedSessions: row.ClosedUnverifiedSessions,
+		ReviewedSessions:         row.ReviewedSessions,
 		ReconciledSessions:       row.ReconciledSessions, StaleSessions: row.StaleSessions,
 		WithdrawnSessions: row.WithdrawnSessions, UnknownOpeningSessions: row.UnknownOpeningSessions,
 		AdjustedAfterWithdrawalSessions: row.AdjustedAfterWithdrawalSessions,
@@ -376,6 +430,13 @@ func (r *SQLiteReader) SumCashCountedBetween(tx sharedDomain.Transaction, gymID 
 		out.LatestStatus = row.LatestStatus.String
 	}
 	out.LatestNeedsRecount = row.LatestNeedsRecount != 0
+	if err != nil {
+		return out, err
+	}
+	if out.DifferenceSessions, err = parseCashDifferences(row.DifferenceSessions.String); err != nil {
+		return out, err
+	}
+	out.OpeningDifferences, err = parseCashOpeningDifferences(row.OpeningDifferences.String)
 	return out, err
 }
 

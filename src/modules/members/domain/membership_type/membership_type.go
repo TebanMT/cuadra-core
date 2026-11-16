@@ -25,6 +25,26 @@ const (
 	FrequencyAnnual     = "annual"
 )
 
+// MaintenanceThresholdDays returns the minimum days between maintenance
+// charges for freq: 0 = charge every payment (monthly), -1 = unknown
+// frequency (never charge). Billing and the operator-permission checks
+// share it so both decide "is maintenance due" the same way.
+func MaintenanceThresholdDays(freq string) int {
+	switch freq {
+	case FrequencyMonthly:
+		return 0
+	case FrequencyBimonthly:
+		return 60
+	case FrequencyQuarterly:
+		return 90
+	case FrequencySemiannual:
+		return 180
+	case FrequencyAnnual:
+		return 365
+	}
+	return -1
+}
+
 // allowedFrequencies — set de valores que el CHECK del schema acepta.
 // Si crece, debe sincronizarse con las migrations correspondientes.
 var allowedFrequencies = map[string]struct{}{

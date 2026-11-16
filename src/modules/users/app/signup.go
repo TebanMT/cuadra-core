@@ -12,6 +12,7 @@ import (
 	gymDomain "github.com/cuadra/cuadra-core/src/modules/gyms/domain/gym"
 	gymRepo "github.com/cuadra/cuadra-core/src/modules/gyms/domain/repository"
 	userErrors "github.com/cuadra/cuadra-core/src/modules/users/domain/errors"
+	"github.com/cuadra/cuadra-core/src/modules/users/domain/legal"
 	userRepo "github.com/cuadra/cuadra-core/src/modules/users/domain/repository"
 	userDomain "github.com/cuadra/cuadra-core/src/modules/users/domain/user"
 	"github.com/cuadra/cuadra-core/src/shared/audit"
@@ -33,6 +34,10 @@ type SignupOwnerInput struct {
 	Phone           string
 	Password        string
 	PasswordConfirm string
+	// AcceptedLegal: el dueño marcó que acepta los Términos del Servicio y
+	// el Aviso de Privacidad vigentes (legal.TermsVersion/PrivacyVersion).
+	// Sin eso no hay cuenta.
+	AcceptedLegal bool
 }
 
 // SignupOwnerOutput mirrors the JSON the handler returns to the wizard.
@@ -75,6 +80,10 @@ type SignupOwner struct {
 	// transacción del signup commitea — un fallo de entrega (Resend caído,
 	// timeout) NO debe revertir la creación de la cuenta.
 	EmailVerifier *RequestEmailVerification
+	// Legal guarda la aceptación de términos y aviso de privacidad en la
+	// misma transacción del alta. Solo el cloud lo cablea: el sidecar
+	// reenvía el signup al cloud y nunca ejecuta este caso de uso.
+	Legal userRepo.LegalAcceptanceRepository
 }
 
 func NewSignupOwner(users userRepo.UserRepository, gyms gymRepo.GymRepository,
@@ -100,7 +109,18 @@ func (s *SignupOwner) WithEmailVerifier(v *RequestEmailVerification) *SignupOwne
 	return s
 }
 
+// WithLegalAcceptances wires where the signup stores the acceptance of the
+// Terms of Service and the Privacy Notice. Same setter pattern as
+// WithEmailVerifier.
+func (s *SignupOwner) WithLegalAcceptances(r userRepo.LegalAcceptanceRepository) *SignupOwner {
+	s.Legal = r
+	return s
+}
+
 func (uc *SignupOwner) Execute(ctx context.Context, in SignupOwnerInput) (SignupOwnerOutput, error) {
+	if !in.AcceptedLegal {
+		return SignupOwnerOutput{}, sharedDomain.NewValidationError(userErrors.ErrLegalNotAccepted)
+	}
 	if err := userDomain.ValidateFullName(in.FullName); err != nil {
 		return SignupOwnerOutput{}, sharedDomain.NewValidationError(err)
 	}
@@ -169,6 +189,13 @@ func (uc *SignupOwner) Execute(ctx context.Context, in SignupOwnerInput) (Signup
 		if _, err := uc.Users.Create(tx, user); err != nil {
 			return sharedDomain.NewUnexpectedError(err)
 		}
+		if uc.Legal != nil {
+			acceptances := legal.CurrentAcceptances(gymID, userID, now,
+				audit.IPFromContext(ctx), audit.UAFromContext(ctx))
+			if err := uc.Legal.Record(tx, acceptances); err != nil {
+				return sharedDomain.NewUnexpectedError(err)
+			}
+		}
 		_ = uc.Audit.Record(ctx, tx, audit.Entry{
 			GymID:       gymID,
 			EntityType:  "users",
@@ -176,9 +203,11 @@ func (uc *SignupOwner) Execute(ctx context.Context, in SignupOwnerInput) (Signup
 			Action:      audit.ActionCreate,
 			ActorUserID: &userID,
 			Changes: map[string]any{
-				"role":         "owner",
-				"self_signup":  true,
-				"pin_assigned": true,
+				"role":            "owner",
+				"self_signup":     true,
+				"pin_assigned":    true,
+				"terms_version":   legal.TermsVersion,
+				"privacy_version": legal.PrivacyVersion,
 			},
 			IPAddress: audit.IPFromContext(ctx),
 			UserAgent: audit.UAFromContext(ctx),

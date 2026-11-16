@@ -16,6 +16,7 @@ import (
 	reportsApp "github.com/cuadra/cuadra-core/src/application/reports"
 	memApp "github.com/cuadra/cuadra-core/src/modules/members/app"
 	"github.com/cuadra/cuadra-core/src/shared/auth"
+	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 	"github.com/cuadra/cuadra-core/src/shared/middleware"
 	"github.com/cuadra/cuadra-core/src/shared/utils"
 )
@@ -175,8 +176,11 @@ func (ctrl *ReportsController) handleDashboard(c *gin.Context) {
 	// del MES es del dueño; para operadores esos campos van AUSENTES (no en
 	// cero — cero es un dato falso). Lo operacional (activos, check-ins de
 	// hoy, atención, últimos cobros, caja de hoy) viaja para ambos.
+	// Sin el permiso de ver totales (UC-007) tampoco viaja el efectivo del
+	// día, y los últimos cobros se limitan a los de hoy.
 	role, _ := middleware.GetRole(c)
-	utils.JsonResponse(c, http.StatusOK, toDashboardWire(out, role == "owner"))
+	includeTotals := sharedDomain.RequirePermission(c.Request.Context(), sharedDomain.PermViewTotals) == nil
+	utils.JsonResponse(c, http.StatusOK, toDashboardWire(out, role == "owner", includeTotals))
 }
 
 // ---------------------------------------------------------------------------
@@ -295,10 +299,11 @@ type dashboardWire struct {
 	Recoverable      kpiTrendWire                `json:"recoverable"`
 	AttentionSummary reportsApp.AttentionSummary `json:"attention_summary"`
 	RecentPayments   []recentPaymentWire         `json:"recent_payments"`
-	CashToday        cashTodayWire               `json:"cash_today"`
+	// CashToday — ausente para un operador sin el permiso de ver totales.
+	CashToday *cashTodayWire `json:"cash_today,omitempty"`
 }
 
-func toDashboardWire(d *reportsApp.DashboardOutput, includeMoney bool) dashboardWire {
+func toDashboardWire(d *reportsApp.DashboardOutput, includeMoney, includeTotals bool) dashboardWire {
 	w := dashboardWire{
 		LocalDate: d.LocalDate, Timezone: d.Timezone, PreviousFrom: d.PreviousFrom, PreviousTo: d.PreviousTo,
 		GeneratedAt:   d.GeneratedAt,
@@ -314,10 +319,20 @@ func toDashboardWire(d *reportsApp.DashboardOutput, includeMoney bool) dashboard
 		Recoverable:      kpiTrendWire{Value: float64(d.RecoverableExpired)},
 		AttentionSummary: d.AttentionSummary,
 		RecentPayments:   recentPaymentsToWire(d.RecentPayments),
-		CashToday: cashTodayWire{
+	}
+	if includeTotals {
+		w.CashToday = &cashTodayWire{
 			Total:    d.TodayCashTotal,
 			ByMethod: cashByMethod(d.TodayCash),
-		},
+		}
+	} else {
+		today := w.RecentPayments[:0]
+		for _, p := range w.RecentPayments {
+			if p.PaymentDate == d.LocalDate {
+				today = append(today, p)
+			}
+		}
+		w.RecentPayments = today
 	}
 	if includeMoney {
 		income := kpiToWire(d.IncomeMonth)

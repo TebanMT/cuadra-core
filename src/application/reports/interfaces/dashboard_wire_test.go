@@ -43,7 +43,8 @@ func TestDashboardWire_OperatorOmitsAdministrativeMoneyAndKeepsDailyOperation(t 
 		}},
 	}
 
-	payload, err := json.Marshal(toDashboardWire(out, false))
+	// An operator with the view-totals permission (UC-007).
+	payload, err := json.Marshal(toDashboardWire(out, false, true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,5 +75,47 @@ func TestDashboardWire_OperatorOmitsAdministrativeMoneyAndKeepsDailyOperation(t 
 	recent, ok := wire["recent_payments"].([]any)
 	if !ok || len(recent) != 1 || recent[0].(map[string]any)["amount"] != float64(15) {
 		t.Fatalf("operator recent_payments=%#v, want operational collection", wire["recent_payments"])
+	}
+}
+
+// Without the view-totals permission (UC-007) an operator gets neither the
+// day's cash nor payments from other days.
+func TestDashboardWire_OperatorWithoutTotalsSeesTodayOnly(t *testing.T) {
+	today := time.Date(2026, 8, 24, 0, 0, 0, 0, time.UTC)
+	out := &reportsApp.DashboardOutput{
+		LocalDate:      "2026-08-24",
+		TodayCash:      map[string]float64{"cash": 15},
+		TodayCashTotal: 15,
+		RecentPayments: []reportsApp.RecentPaymentRow{
+			{ID: uuid.New(), Amount: 15, Method: "cash", Concept: "product", PaymentDate: today},
+			{ID: uuid.New(), Amount: 400, Method: "card", Concept: "membership", PaymentDate: today.AddDate(0, 0, -1)},
+		},
+	}
+	payload, err := json.Marshal(toDashboardWire(out, false, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire map[string]any
+	if err = json.Unmarshal(payload, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := wire["cash_today"]; present {
+		t.Fatalf("cash_today leaked: %s", payload)
+	}
+	recent, ok := wire["recent_payments"].([]any)
+	if !ok || len(recent) != 1 || recent[0].(map[string]any)["payment_date"] != "2026-08-24" {
+		t.Fatalf("recent_payments=%#v, want only today's", wire["recent_payments"])
+	}
+
+	owner, err := json.Marshal(toDashboardWire(out, true, true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire = map[string]any{}
+	if err = json.Unmarshal(owner, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if wire["cash_today"] == nil || len(wire["recent_payments"].([]any)) != 2 {
+		t.Fatalf("owner wire changed: %s", owner)
 	}
 }

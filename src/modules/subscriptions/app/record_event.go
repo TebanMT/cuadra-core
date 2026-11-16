@@ -178,7 +178,14 @@ func (uc *RecordEvent) Execute(ctx context.Context, in RecordEventInput) (Record
 				gym.MarkPastDue(now)
 				subscriptionChanged = true
 			case subDomain.EventCancelled:
-				gym.Cancel(now)
+				// Una prueba nunca pagó: al cancelarse conserva sus días de
+				// gracia y luego queda en solo lectura (UC-002), en vez del
+				// bloqueo total de un plan pagado cancelado.
+				if gym.SubscriptionPlan == gymDomain.PlanTrial {
+					gym.EndTrial(now)
+				} else {
+					gym.Cancel(now)
+				}
 				subscriptionChanged = true
 			case subDomain.EventTrialExtended:
 				// Plan field doubles as days-to-extend (string-typed because the

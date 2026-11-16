@@ -18,6 +18,7 @@ dist/
 node_modules/
 .DS_Store
 coverage.out
+__pycache__/
 *.test
 
 # Binarios de `go build ./cmd/...` en la raíz. NUNCA se commitean —

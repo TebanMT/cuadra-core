@@ -197,10 +197,10 @@ func TestCashSession_CorrectingCertifiedCountRequiresOwnerAndReason(t *testing.T
 	f := setupSales(t)
 	productID := f.seedProduct(t, "Agua", 20, 2)
 	registerCashProductSale(t, f, productID)
-	counted := 20.0
+	counted, zero := 20.0, 0.0
 	cash := reportsApp.NewCashClose(f.cashCloseReader, f.cashCloseEvents, f.uow, f.recorder)
 	closed, err := cash.Close(context.Background(), reportsApp.CashCloseInput{GymID: f.gymID,
-		ActorUserID: f.ownerID, Date: cashSessionBusinessDay(t), CountedCash: &counted})
+		ActorUserID: f.ownerID, Date: cashSessionBusinessDay(t), OpeningCash: &zero, CountedCash: &counted})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,10 +245,10 @@ func TestCashSession_LateActivityAfterWithdrawalRequiresAndCreatesNextSequence(t
 	productID := f.seedProduct(t, "Agua", 20, 10)
 	registerCashProductSale(t, f, productID)
 	day := cashSessionBusinessDay(t)
-	counted20, left := 20.0, 5.0
+	counted20, left, zero := 20.0, 5.0, 0.0
 	uc := reportsApp.NewCashClose(f.cashCloseReader, f.cashCloseEvents, f.uow, f.recorder)
 	first, err := uc.Close(context.Background(), reportsApp.CashCloseInput{
-		GymID: f.gymID, ActorUserID: f.ownerID, Date: day, CountedCash: &counted20,
+		GymID: f.gymID, ActorUserID: f.ownerID, Date: day, OpeningCash: &zero, CountedCash: &counted20,
 		Withdraw: true, CashLeft: &left,
 	})
 	if err != nil {
@@ -354,16 +354,16 @@ func TestCashSession_TwoDrawersAreAttributedSelectedAndClosedIndependently(t *te
 	if activity[f.gymID] != 20 || activity[customDrawerID] != 20 {
 		t.Fatalf("drawer activities=%v", activity)
 	}
-	counted := 20.0
+	counted, zero := 20.0, 0.0
 	mainClose, err := cash.Close(context.Background(), reportsApp.CashCloseInput{
-		GymID: f.gymID, ActorUserID: f.ownerID, Date: day, CountedCash: &counted,
+		GymID: f.gymID, ActorUserID: f.ownerID, Date: day, OpeningCash: &zero, CountedCash: &counted,
 	})
 	if err != nil {
 		t.Fatalf("close main: %v", err)
 	}
 	customClose, err := cash.Close(context.Background(), reportsApp.CashCloseInput{
 		GymID: f.gymID, ActorUserID: f.ownerID, Date: day,
-		DrawerID: &customDrawerID, CountedCash: &counted,
+		DrawerID: &customDrawerID, OpeningCash: &zero, CountedCash: &counted,
 	})
 	if err != nil {
 		t.Fatalf("close custom: %v", err)

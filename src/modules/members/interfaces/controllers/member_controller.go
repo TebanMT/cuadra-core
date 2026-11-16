@@ -216,7 +216,7 @@ type toggleStatusReq struct {
 }
 
 type lockExpiryReq struct {
-	Mode      string `json:"mode" validate:"required,oneof=extend set"`
+	Mode      string `json:"mode" validate:"required,oneof=extend set reset"`
 	Days      int    `json:"days,omitempty"`
 	NewExpiry string `json:"new_expiry,omitempty"` // YYYY-MM-DD when mode=set
 	Reason    string `json:"reason" validate:"required,min=5,max=500"`
@@ -567,6 +567,8 @@ func (ctrl *MemberController) handleLockExpiry(c *gin.Context) {
 			return
 		}
 		in.NewExpiry = t
+	case "reset":
+		in.Mode = memApp.ModeReset
 	}
 	out, err := ctrl.LockExpiry.Execute(c.Request.Context(), in)
 	if err != nil {

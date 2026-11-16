@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/cuadra/cuadra-core/src/modules/users/domain/legal"
 	userDomain "github.com/cuadra/cuadra-core/src/modules/users/domain/user"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 )
@@ -25,6 +26,8 @@ type UserRepository interface {
 	ExistsByPhoneInGym(tx sharedDomain.Transaction, gymID uuid.UUID, phone string, excludeUserID *uuid.UUID) (bool, error)
 	Update(tx sharedDomain.Transaction, u *userDomain.User) (*userDomain.User, error)
 	ListByGym(tx sharedDomain.Transaction, gymID uuid.UUID) ([]*userDomain.User, error)
+	// CountOperatorsByGym cuenta los operadores ACTIVOS y no borrados del gym
+	// (el cupo del plan). Ni el dueño ni los operadores desactivados cuentan.
 	CountOperatorsByGym(tx sharedDomain.Transaction, gymID uuid.UUID) (int, error)
 }
 
@@ -64,6 +67,25 @@ type EmailVerificationRecord struct {
 // invalidate-all-sessions).
 type RefreshTokenBlacklist interface {
 	Revoke(tx sharedDomain.Transaction, tokenHash []byte, userID uuid.UUID, expiresAt time.Time) error
+	// RevokeAt revokes the token from revokedAt on. Refresh rotation uses a
+	// moment a few seconds ahead so two tabs refreshing at once both work.
+	// An earlier revocation of the same token wins.
+	RevokeAt(tx sharedDomain.Transaction, tokenHash []byte, userID uuid.UUID, expiresAt, revokedAt time.Time) error
 	IsRevoked(tx sharedDomain.Transaction, tokenHash []byte) (bool, error)
 	RevokeAllForUser(tx sharedDomain.Transaction, userID uuid.UUID, expiresAt time.Time) error
+	// RevokedAllAt returns the moment of the last RevokeAllForUser for the
+	// user, or nil when none is active. Refresh tokens issued before it are
+	// revoked.
+	RevokedAllAt(tx sharedDomain.Transaction, userID uuid.UUID) (*time.Time, error)
+	// DeleteExpiredForUser drops the user's rows whose token already expired:
+	// an expired refresh token is rejected anyway, so the row blocks nothing.
+	// Refresh rotation calls it to keep the table bounded.
+	DeleteExpiredForUser(tx sharedDomain.Transaction, userID uuid.UUID, now time.Time) error
+}
+
+// LegalAcceptanceRepository stores the owner's acceptance of the Terms of
+// Service and the Privacy Notice (UC-001). Cloud only; rows are append-only
+// evidence and are never updated.
+type LegalAcceptanceRepository interface {
+	Record(tx sharedDomain.Transaction, acceptances []legal.Acceptance) error
 }

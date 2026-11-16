@@ -328,3 +328,21 @@ func TestIsActiveAndDays(t *testing.T) {
 		t.Errorf("should NOT be active after expiry")
 	}
 }
+
+func TestManualAdjustmentDaysSkipsPromotions(t *testing.T) {
+	adj := func(reason string, days int) *membership.MembershipAdjustment {
+		return &membership.MembershipAdjustment{Reason: reason, DaysAdded: days}
+	}
+	got := membership.ManualAdjustmentDays([]*membership.MembershipAdjustment{
+		adj("Cortesía por cierre del gym", 14),
+		adj(membership.PromoAdjustmentReasonPrefix+"Buen Fin", 7),
+		nil,
+		adj("Fecha acordada con el socio", -3),
+	})
+	if got != 11 {
+		t.Fatalf("manual days = %d, want 11 (14 - 3; the promotion's 7 stay)", got)
+	}
+	if membership.ManualAdjustmentDays(nil) != 0 {
+		t.Fatal("no adjustments should sum 0")
+	}
+}

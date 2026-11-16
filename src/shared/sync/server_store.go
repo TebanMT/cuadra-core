@@ -504,6 +504,12 @@ func (s *PostgresStore) updateRow(
 // wire del sidecar. NULLs sobreviven: jsonb_build_object emite JSON null
 // donde corresponda (ej. gym recién creado sin trial_ends_at).
 //
+// Para entity_type='users' inyecta `permissions` desde el row vivo: lo
+// escribe el desktop (sidecar-owned, como kiosk_settings) y el projector lo
+// proyecta, pero un desktop de una versión anterior que empuje al usuario sin
+// la llave dejaría en sync_entities un payload sin permisos. Leerlo del row
+// garantiza que un equipo nuevo reciba los permisos vigentes.
+//
 // Para membership_types re-emite el row vivo completo. Builds anteriores
 // guardaron esos tres montos en CENTAVOS dentro del journal aunque el wire
 // canónico es PESOS; el sidecar multiplicaba de nuevo ×100 al materializar.
@@ -577,6 +583,8 @@ const canonicalAugmentExpr = `
 	            'created_at', (EXTRACT(EPOCH FROM sm.created_at) * 1000)::bigint,
 	            'updated_at', (EXTRACT(EPOCH FROM sm.updated_at) * 1000)::bigint
 	        )
+	    WHEN se.entity_type = 'users' AND us.id IS NOT NULL THEN
+	        se.payload || jsonb_build_object('permissions', us.permissions)
 	    ELSE se.payload
 	END`
 
@@ -608,6 +616,7 @@ func (s *PostgresStore) ListSinceCursor(ctx context.Context, tx sharedDomain.Tra
 	  LEFT JOIN gyms g ON se.entity_type = 'gyms' AND se.entity_id = g.id
 		  LEFT JOIN membership_types mt ON se.entity_type = 'membership_types' AND se.entity_id = mt.id
 		  LEFT JOIN stock_movements sm ON se.entity_type = 'stock_movements' AND se.entity_id = sm.id
+		  LEFT JOIN users us ON se.entity_type = 'users' AND se.entity_id = us.id AND se.gym_id = us.gym_id
 		 WHERE se.gym_id = ? AND (se.server_updated_at > ? OR (se.server_updated_at = ? AND (se.entity_id > ? OR (se.entity_id = ? AND se.entity_type > ?))))
          ORDER BY se.server_updated_at ASC, se.entity_id ASC,se.entity_type ASC
 		 LIMIT ?`
@@ -687,6 +696,7 @@ func (s *PostgresStore) ListForFullSync(
 	  LEFT JOIN gyms g ON se.entity_type = 'gyms' AND se.entity_id = g.id
 			  LEFT JOIN membership_types mt ON se.entity_type = 'membership_types' AND se.entity_id = mt.id
 			  LEFT JOIN stock_movements sm ON se.entity_type = 'stock_movements' AND se.entity_id = sm.id
+			  LEFT JOIN users us ON se.entity_type = 'users' AND se.entity_id = us.id AND se.gym_id = us.gym_id
 			 WHERE se.gym_id = ?
 			   AND se.entity_type = ?
 			   AND (

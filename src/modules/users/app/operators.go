@@ -34,6 +34,8 @@ type CreateOperatorInput struct {
 	FullName string
 	Phone    string
 	Email    *string // nil o "" -> sin correo
+	// Permissions: lo que el dueño le permite desde el alta. Vacío = ninguno.
+	Permissions []sharedDomain.Permission
 }
 
 // CreateOperatorOutput viaja al FE como wire-shape directo (auth_controller
@@ -54,9 +56,9 @@ type CreateOperator struct {
 	UoW      sharedDomain.UnitOfWork
 	Audit    audit.Recorder
 	Notifier OperatorWelcomePINNotifier
-	// Gyms (opcional). Cuando está cableado, el cap de operadores depende
-	// del SKU del gym: Standard = MaxOperatorsStandard, Plus/Trial =
-	// MaxOperatorsPerGym. Sin Gyms (tests), cae al cap absoluto.
+	// Gyms (opcional). Cuando está cableado, el cap de operadores activos
+	// depende del SKU del gym (ver checkOperatorCapacity). Sin Gyms (tests),
+	// cae al cap absoluto.
 	Gyms    gymRepo.GymRepository
 	NowFunc func() time.Time
 }
@@ -110,7 +112,11 @@ func (uc *CreateOperator) Execute(ctx context.Context, in CreateOperatorInput) (
 		return CreateOperatorOutput{}, sharedDomain.NewValidationError(err)
 	}
 	user.AssignPIN(pinHash, now)
-	// AssignPIN bumps Version a 2. Lo dejamos en 1 — el row recién creado.
+	if err := user.SetPermissions(in.Permissions, now); err != nil {
+		return CreateOperatorOutput{}, sharedDomain.NewValidationError(err)
+	}
+	// AssignPIN y SetPermissions bumpean Version. Lo dejamos en 1 — el row
+	// recién creado.
 	user.Version = 1
 
 	dispatch := OperatorWelcomePINDispatch{}
@@ -133,28 +139,9 @@ func (uc *CreateOperator) Execute(ctx context.Context, in CreateOperatorInput) (
 				return sharedDomain.NewBusinessError(userErrors.ErrPhoneTakenInGym, "")
 			}
 		}
-		count, err := uc.Users.CountOperatorsByGym(tx, in.GymID)
-		if err != nil {
-			return sharedDomain.NewUnexpectedError(err)
-		}
-		// Cap dependiente del SKU. MaxOperatorsStandard - 1 = 1 operador
-		// activo además del dueño en Standard; Plus/Trial usa el cap del
-		// producto (MaxOperatorsPerGym - 1 = 10). Si Gyms no está cableado
-		// (tests), cae al cap absoluto.
-		cap := userDomain.MaxOperatorsPerGym - 1
-		standardCap := false
-		if uc.Gyms != nil {
-			g, gerr := uc.Gyms.GetByID(tx, in.GymID)
-			if gerr == nil && g != nil && !g.CanAccessFeature(gymDomain.FeatureExtraOperators) {
-				cap = userDomain.MaxOperatorsStandard - 1
-				standardCap = true
-			}
-		}
-		if count >= cap {
-			if standardCap {
-				return sharedDomain.NewBusinessError(userErrors.ErrOperatorLimitStandard, "")
-			}
-			return sharedDomain.NewBusinessError(userErrors.ErrOperatorLimitReached, "")
+		// El operador nuevo nace activo: ocupa un lugar del cupo.
+		if err := checkOperatorCapacity(tx, uc.Users, uc.Gyms, in.GymID); err != nil {
+			return err
 		}
 		if _, err := uc.Users.Create(tx, user); err != nil {
 			return sharedDomain.NewUnexpectedError(err)
@@ -171,6 +158,7 @@ func (uc *CreateOperator) Execute(ctx context.Context, in CreateOperatorInput) (
 				"email":        user.Email,
 				"phone":        derefString(user.Phone),
 				"pin_assigned": true,
+				"permissions":  user.Permissions,
 			},
 			IPAddress: audit.IPFromContext(ctx),
 			UserAgent: audit.UAFromContext(ctx),
@@ -213,6 +201,9 @@ type UpdateOperatorInput struct {
 	FullName    *string
 	Email       *string
 	Phone       *string
+	// Permissions: nil = sin cambio; una lista (vacía incluida) reemplaza
+	// los permisos del operador.
+	Permissions *[]sharedDomain.Permission
 }
 
 type UpdateOperator struct {
@@ -269,6 +260,14 @@ func (uc *UpdateOperator) Execute(ctx context.Context, in UpdateOperatorInput) (
 		if err := u.UpdateProfile(in.FullName, in.Email, in.Phone, now); err != nil {
 			return sharedDomain.NewValidationError(err)
 		}
+		changes := map[string]any{"full_name": in.FullName, "email": in.Email, "phone": in.Phone}
+		if in.Permissions != nil {
+			before := u.EffectivePermissions()
+			if err := u.SetPermissions(*in.Permissions, now); err != nil {
+				return sharedDomain.NewValidationError(err)
+			}
+			changes["permissions"] = map[string]any{"before": before, "after": u.Permissions}
+		}
 		updated, err := uc.Users.Update(tx, u)
 		if err != nil {
 			return sharedDomain.NewUnexpectedError(err)
@@ -279,7 +278,7 @@ func (uc *UpdateOperator) Execute(ctx context.Context, in UpdateOperatorInput) (
 			EntityID:    in.TargetID,
 			Action:      audit.ActionUpdate,
 			ActorUserID: &in.ActorUserID,
-			Changes:     map[string]any{"full_name": in.FullName, "email": in.Email, "phone": in.Phone},
+			Changes:     changes,
 			IPAddress:   audit.IPFromContext(ctx),
 			UserAgent:   audit.UAFromContext(ctx),
 			At:          now,
@@ -303,11 +302,23 @@ type ToggleOperatorActive struct {
 	Blacklist userRepo.RefreshTokenBlacklist
 	UoW       sharedDomain.UnitOfWork
 	Audit     audit.Recorder
+	// Gyms (opcional): mismo cap por SKU que CreateOperator al reactivar.
+	// Sin Gyms (tests), cae al cap absoluto.
+	Gyms gymRepo.GymRepository
 }
 
 func NewToggleOperatorActive(users userRepo.UserRepository, bl userRepo.RefreshTokenBlacklist,
 	uow sharedDomain.UnitOfWork, recorder audit.Recorder) *ToggleOperatorActive {
 	return &ToggleOperatorActive{Users: users, Blacklist: bl, UoW: uow, Audit: recorder}
+}
+
+// WithGymRepo cablea el repo de gym para que reactivar respete el cap del
+// SKU (Standard vs Plus), igual que CreateOperator.WithGymRepo.
+func (uc *ToggleOperatorActive) WithGymRepo(g gymRepo.GymRepository) *ToggleOperatorActive {
+	if g != nil {
+		uc.Gyms = g
+	}
+	return uc
 }
 
 func (uc *ToggleOperatorActive) Execute(ctx context.Context, in ToggleOperatorActiveInput) (*userDomain.User, error) {
@@ -321,8 +332,18 @@ func (uc *ToggleOperatorActive) Execute(ctx context.Context, in ToggleOperatorAc
 		if u.GymID != in.GymID {
 			return sharedDomain.NewBusinessError(userErrors.ErrCrossGym, "")
 		}
+		wasActive := u.Active
 		if err := u.SetActive(in.Active, in.ActorUserID, now); err != nil {
 			return sharedDomain.NewBusinessError(err, "")
+		}
+		// Reactivar a un operador vuelve a ocupar un lugar del cupo (sólo
+		// cuentan los activos): mismo límite y mismo error que el alta. El
+		// conteo lee la BD antes del UPDATE, así que no incluye a este
+		// operador.
+		if in.Active && !wasActive && u.IsOperator() {
+			if err := checkOperatorCapacity(tx, uc.Users, uc.Gyms, in.GymID); err != nil {
+				return err
+			}
 		}
 		updated, err := uc.Users.Update(tx, u)
 		if err != nil {
@@ -531,6 +552,35 @@ func (uc *RotateOperatorPIN) Execute(ctx context.Context, in RotateOperatorPINIn
 		WhatsAppDelivery: dispatch.Dispatched,
 		WhatsAppSkipped:  dispatch.SkippedReason,
 	}, nil
+}
+
+// checkOperatorCapacity valida que quepa un operador ACTIVO más en el gym.
+// Lo usan el alta (UC-006) y la reactivación (UC-008): los desactivados no
+// ocupan lugar y el dueño no cuenta. Cap por SKU: sin extra_operators
+// (Standard) es MaxOperatorsStandard - 1 = 1 operador además del dueño; con
+// extra_operators (Plus) es el cap del producto, MaxOperatorsPerGym - 1 = 10.
+// Sin gyms cableado (tests) cae al cap absoluto.
+func checkOperatorCapacity(tx sharedDomain.Transaction, users userRepo.UserRepository, gyms gymRepo.GymRepository, gymID uuid.UUID) error {
+	count, err := users.CountOperatorsByGym(tx, gymID)
+	if err != nil {
+		return sharedDomain.NewUnexpectedError(err)
+	}
+	limit := userDomain.MaxOperatorsPerGym - 1
+	standardCap := false
+	if gyms != nil {
+		g, gerr := gyms.GetByID(tx, gymID)
+		if gerr == nil && g != nil && !g.CanAccessFeature(gymDomain.FeatureExtraOperators) {
+			limit = userDomain.MaxOperatorsStandard - 1
+			standardCap = true
+		}
+	}
+	if count >= limit {
+		if standardCap {
+			return sharedDomain.NewBusinessError(userErrors.ErrOperatorLimitStandard, "")
+		}
+		return sharedDomain.NewBusinessError(userErrors.ErrOperatorLimitReached, "")
+	}
+	return nil
 }
 
 func derefString(s *string) string {

@@ -9,7 +9,7 @@ import "errors"
 //	UC-012 CreateMember    -> ErrInvalidPhone, ErrInvalidName, ErrInvalidEmail, ErrInvalidStartDate, ErrPhoneAlreadyExists (warning)
 //	UC-013 UpdateMember    -> ErrMemberNotFound, ErrInvalidPhone, ErrInvalidEmail
 //	UC-016 ToggleStatus    -> ErrInvalidStatus
-//	UC-017 LockExpiry      -> ErrAdjustmentReasonRequired, ErrMembershipNotFound, ErrNoActiveMembership
+//	UC-017 LockExpiry      -> ErrAdjustmentReasonRequired, ErrMembershipNotFound, ErrNoActiveMembership, ErrNoManualAdjustments
 //	UC-032 AssignMemberNumber -> ErrInvalidMemberNumber, ErrMemberNumberAlreadyTaken, ErrMemberNumberExhausted
 var (
 	// Membership Type
@@ -43,6 +43,7 @@ var (
 	// Adjustment
 	ErrAdjustmentReasonRequired = errors.New("la razón del ajuste es obligatoria (mínimo 5 caracteres)")
 	ErrAdjustmentInvalidDays    = errors.New("la cantidad de días del ajuste no es válida")
+	ErrNoManualAdjustments      = errors.New("esta membresía no tiene ajustes manuales que quitar; ya está en su vencimiento calculado")
 
 	// Número de socio (ADR-010 — antes "PIN de acceso")
 	ErrInvalidMemberNumber      = errors.New("el número de socio no es válido")

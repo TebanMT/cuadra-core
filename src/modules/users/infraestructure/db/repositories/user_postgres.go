@@ -125,6 +125,7 @@ func emitUser(g *gorm.DB, u *userDomain.User) error {
 		"phone": u.Phone, "role": u.Role, "active": u.Active, "must_change_password": u.MustChangePassword,
 		"last_login_at": ms(u.LastLoginAt), "created_by": u.CreatedBy,
 		"pin_hash": u.PinHash, "pin_assigned_at": ms(u.PinAssignedAt),
+		"permissions": permissionsWire(u.Permissions),
 	})
 	if err != nil {
 		return err
@@ -164,11 +165,13 @@ func (r *UserPostgresRepository) ListByGym(tx sharedDomain.Transaction, gymID uu
 	return out, nil
 }
 
+// CountOperatorsByGym cuenta los operadores ACTIVOS del gym (cupo del plan).
+// Los desactivados no ocupan lugar y el dueño no cuenta.
 func (r *UserPostgresRepository) CountOperatorsByGym(tx sharedDomain.Transaction, gymID uuid.UUID) (int, error) {
 	gormTx := tx.(*sharedDomain.GormTransaction).Tx
 	var n int64
 	err := gormTx.Model(&models.UserModel{}).
-		Where("gym_id = ? AND role = ? AND deleted_at IS NULL", gymID, userDomain.RoleOperator).
+		Where("gym_id = ? AND role = ? AND active = TRUE AND deleted_at IS NULL", gymID, userDomain.RoleOperator).
 		Count(&n).Error
 	return int(n), err
 }
@@ -195,6 +198,7 @@ func userToModel(u *userDomain.User) models.UserModel {
 		PinHash:            u.PinHash,
 		PinAssignedAt:      u.PinAssignedAt,
 		EmailVerifiedAt:    u.EmailVerifiedAt,
+		Permissions:        marshalPermissions(u.Permissions),
 	}
 }
 
@@ -218,5 +222,6 @@ func userToDomain(m *models.UserModel) *userDomain.User {
 		PinHash:            m.PinHash,
 		PinAssignedAt:      m.PinAssignedAt,
 		EmailVerifiedAt:    m.EmailVerifiedAt,
+		Permissions:        unmarshalPermissions(m.Permissions),
 	}
 }

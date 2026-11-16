@@ -17,6 +17,7 @@ import (
 	paymentDomain "github.com/cuadra/cuadra-core/src/modules/billing/domain/payment"
 	refundDomain "github.com/cuadra/cuadra-core/src/modules/billing/domain/refund"
 	"github.com/cuadra/cuadra-core/src/shared/auth"
+	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 	"github.com/cuadra/cuadra-core/src/shared/middleware"
 	"github.com/cuadra/cuadra-core/src/shared/utils"
 )
@@ -114,9 +115,11 @@ func (ctrl *PaymentController) RegisterRoutes(r *gin.Engine) {
 		// gastos también es Standard; el rol operador puede ocultar el detalle
 		// administrativo, pero el cálculo físico del cajón siempre es correcto.
 		api.GET("/cash-close", ctrl.handleCashCloseReport)
+		api.GET("/cash-close/pending-days", ctrl.handleCashPendingDays)
 		api.POST("/cash-close", ctrl.handleCashClose)
 		api.POST("/cash-sessions/open", ctrl.handleCashOpen)
 		api.POST("/cash-close/reopen", middleware.RequireOwner(), ctrl.handleCashReopen)
+		api.POST("/cash-close/review", middleware.RequireOwner(), ctrl.handleCashReviewDay)
 		api.POST("/cash-sessions/:id/reopen", middleware.RequireOwner(), ctrl.handleCashReopen)
 		api.POST("/cash-sessions/:id/reconcile", ctrl.handleCashReconcile)
 		api.POST("/cash-sessions/:id/withdraw", ctrl.handleCashWithdraw)
@@ -290,12 +293,13 @@ type listGymPaymentsResp struct {
 	PageSize int           `json:"page_size"`
 	// total_paid es NETO del set filtrado completo (refunds restan);
 	// refund_total trae la magnitud devuelta por separado. Los por-método
-	// son netos del método.
-	TotalPaid     float64 `json:"total_paid"`
-	RefundTotal   float64 `json:"refund_total"`
-	CashTotal     float64 `json:"cash_total"`
-	TransferTotal float64 `json:"transfer_total"`
-	CardTotal     float64 `json:"card_total"`
+	// son netos del método. Ausentes (no en cero) para un operador sin el
+	// permiso de ver totales (UC-007).
+	TotalPaid     *float64 `json:"total_paid,omitempty"`
+	RefundTotal   *float64 `json:"refund_total,omitempty"`
+	CashTotal     *float64 `json:"cash_total,omitempty"`
+	TransferTotal *float64 `json:"transfer_total,omitempty"`
+	CardTotal     *float64 `json:"card_total,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -646,14 +650,15 @@ func (ctrl *PaymentController) handleListByGym(c *gin.Context) {
 		}
 		items = append(items, row)
 	}
-	utils.JsonResponse(c, http.StatusOK, listGymPaymentsResp{
-		Items: items, Total: out.Total, Page: out.Page, PageSize: out.PageSize,
-		TotalPaid:     out.TotalPaid,
-		RefundTotal:   out.RefundTotal,
-		CashTotal:     out.CashTotal,
-		TransferTotal: out.TransferTotal,
-		CardTotal:     out.CardTotal,
-	})
+	resp := listGymPaymentsResp{Items: items, Total: out.Total, Page: out.Page, PageSize: out.PageSize}
+	if !out.TotalsHidden {
+		resp.TotalPaid = &out.TotalPaid
+		resp.RefundTotal = &out.RefundTotal
+		resp.CashTotal = &out.CashTotal
+		resp.TransferTotal = &out.TransferTotal
+		resp.CardTotal = &out.CardTotal
+	}
+	utils.JsonResponse(c, http.StatusOK, resp)
 }
 
 func (ctrl *PaymentController) handleRefund(c *gin.Context) {
@@ -993,21 +998,32 @@ type cashLedgerEntryResp struct {
 	OperatorName string    `json:"operator_name"`
 }
 
+// cashOpeningReferenceResp: what today's first opening is compared with.
+type cashOpeningReferenceResp struct {
+	LastCountDate string  `json:"last_count_date"`
+	CashLeft      float64 `json:"cash_left"`
+	LaterCash     float64 `json:"later_cash"`
+	Expected      float64 `json:"expected"`
+}
+
 type cashCloseReportResp struct {
-	Timezone             string                      `json:"timezone"`
-	Entries              []cashLedgerEntryResp       `json:"entries"`
-	SuggestedOpeningCash *float64                    `json:"suggested_opening_cash"`
-	Date                 string                      `json:"date"`
-	ByMethod             map[string]float64          `json:"by_method"`
-	ByConcept            map[string]conceptTotalResp `json:"by_concept"`
-	Operators            []operatorTotalResp         `json:"operators"`
-	Total                float64                     `json:"total"`
+	Timezone             string                    `json:"timezone"`
+	Entries              []cashLedgerEntryResp     `json:"entries"`
+	SuggestedOpeningCash *float64                  `json:"suggested_opening_cash"`
+	OpeningReference     *cashOpeningReferenceResp `json:"opening_reference,omitempty"`
+	Date                 string                    `json:"date"`
+	// Totales del día: ausentes (no en cero) para un operador sin el permiso
+	// de ver totales (UC-007).
+	ByMethod  *map[string]float64          `json:"by_method,omitempty"`
+	ByConcept *map[string]conceptTotalResp `json:"by_concept,omitempty"`
+	Operators *[]operatorTotalResp         `json:"operators,omitempty"`
+	Total     *float64                     `json:"total,omitempty"`
 	// RefundsTotal / RefundByMethod van en MAGNITUD POSITIVA (el dominio los
 	// guarda negativos). El FE los muestra con un "−" explícito y resta los
 	// refunds en efectivo del cajón.
-	RefundsTotal     float64                `json:"refunds_total"`
-	RefundsCount     int                    `json:"refunds_count"`
-	RefundByMethod   map[string]float64     `json:"refund_by_method"`
+	RefundsTotal     *float64               `json:"refunds_total,omitempty"`
+	RefundsCount     *int                   `json:"refunds_count,omitempty"`
+	RefundByMethod   *map[string]float64    `json:"refund_by_method,omitempty"`
 	Expenses         []cashCloseExpenseResp `json:"expenses,omitempty"`
 	ExpensesTotal    *float64               `json:"expenses_total,omitempty"`
 	ExpensesByMethod map[string]float64     `json:"expenses_by_method,omitempty"`
@@ -1024,6 +1040,7 @@ type cashCloseReportResp struct {
 	Drawers               []cashDrawerResp     `json:"drawers"`
 	UncoveredCashActivity float64              `json:"uncovered_cash_activity"`
 	RequiresNewSession    bool                 `json:"requires_new_session"`
+	PendingReview         bool                 `json:"pending_review"`
 }
 
 type cashSessionResp struct {
@@ -1057,6 +1074,12 @@ type cashSessionResp struct {
 	CorrectionReason        *string   `json:"correction_reason,omitempty"`
 	UncoveredCashActivity   float64   `json:"uncovered_cash_activity"`
 	RequiresNewSession      bool      `json:"requires_new_session"`
+	ReviewedWithoutCount    bool      `json:"reviewed_without_count"`
+	ReviewedAt              *string   `json:"reviewed_at,omitempty"`
+	ReviewNote              *string   `json:"review_note,omitempty"`
+	OpeningExpectedCash     *float64  `json:"opening_expected_cash,omitempty"`
+	OpeningDifference       *float64  `json:"opening_difference,omitempty"`
+	OpeningNote             *string   `json:"opening_note,omitempty"`
 }
 type cashMovementResp struct {
 	ID                   uuid.UUID `json:"id"`
@@ -1066,6 +1089,8 @@ type cashMovementResp struct {
 	Amount               float64   `json:"amount"`
 	OperatorID           uuid.UUID `json:"operator_id"`
 	ClassificationStatus string    `json:"classification_status"`
+	Version              int       `json:"version"`
+	RecordedAt           time.Time `json:"recorded_at"`
 }
 
 type cashDrawerResp struct {
@@ -1107,6 +1132,25 @@ type cashReopenReq struct {
 	CashDrawerID *string `json:"cash_drawer_id,omitempty"`
 	DrawerID     *string `json:"drawer_id,omitempty"` // backward-compatible alias
 	Reason       string  `json:"reason" validate:"required,min=3,max=200"`
+}
+
+type cashPendingDayResp struct {
+	Date          string           `json:"date"`
+	IsToday       bool             `json:"is_today"`
+	CashDrawerID  uuid.UUID        `json:"cash_drawer_id"`
+	DrawerName    string           `json:"drawer_name"`
+	IsMainDrawer  bool             `json:"is_main_drawer"`
+	Reason        string           `json:"reason"`
+	ExpectedCash  *float64         `json:"expected_cash,omitempty"`
+	UncoveredCash float64          `json:"uncovered_cash"`
+	CountNow      bool             `json:"count_now"`
+	Session       *cashSessionResp `json:"session,omitempty"`
+}
+
+type cashReviewDayReq struct {
+	Date         string  `json:"date" validate:"required"`
+	CashDrawerID *string `json:"cash_drawer_id,omitempty"`
+	Note         string  `json:"note" validate:"required,max=500"`
 }
 
 type cashReconcileReq struct {
@@ -1566,7 +1610,8 @@ func (ctrl *PaymentController) handleCashCloseReport(c *gin.Context) {
 	moves := make([]cashMovementResp, len(out.CashMovements))
 	for i, m := range out.CashMovements {
 		moves[i] = cashMovementResp{ID: m.ID, CashDrawerID: m.CashDrawerID, MovementType: m.MovementType,
-			Reason: m.Reason, Amount: m.Amount, OperatorID: m.OperatorID, ClassificationStatus: m.ClassificationStatus}
+			Reason: m.Reason, Amount: m.Amount, OperatorID: m.OperatorID, ClassificationStatus: m.ClassificationStatus,
+			Version: m.Version, RecordedAt: m.RecordedAt}
 	}
 	drawers := make([]cashDrawerResp, len(out.Drawers))
 	for i, drawer := range out.Drawers {
@@ -1578,16 +1623,22 @@ func (ctrl *PaymentController) handleCashCloseReport(c *gin.Context) {
 		// El use case puede resolver la fecha por defecto en el día local del
 		// gym; responder con la variable del handler emitía 0001-01-01 cuando
 		// el caller omitía ?date=.
-		Date:           out.Date.Format("2006-01-02"),
-		ByMethod:       out.Totals.ByMethod,
-		ByConcept:      concepts,
-		Operators:      ops,
-		Total:          out.Totals.GrandTotal,
-		RefundsTotal:   -out.Totals.RefundTotal,
-		RefundsCount:   out.Totals.RefundCount,
-		RefundByMethod: refundByMethod,
-		CashMovements:  moves, CashInTotal: out.CashInTotal, CashOutTotal: out.CashOutTotal,
+		Date:          out.Date.Format("2006-01-02"),
+		CashMovements: moves, CashInTotal: out.CashInTotal, CashOutTotal: out.CashOutTotal,
 		CashDrawerID: out.SelectedDrawerID, Drawers: drawers,
+	}
+	if !out.TotalsHidden {
+		byMethod := out.Totals.ByMethod
+		grandTotal := out.Totals.GrandTotal
+		refundsTotal := -out.Totals.RefundTotal
+		refundsCount := out.Totals.RefundCount
+		resp.ByMethod = &byMethod
+		resp.ByConcept = &concepts
+		resp.Operators = &ops
+		resp.Total = &grandTotal
+		resp.RefundsTotal = &refundsTotal
+		resp.RefundsCount = &refundsCount
+		resp.RefundByMethod = &refundByMethod
 	}
 	if out.AdministrativeIncluded {
 		resp.Expenses = gastos
@@ -1614,12 +1665,19 @@ func (ctrl *PaymentController) handleCashCloseReport(c *gin.Context) {
 	}
 	resp.Timezone = out.Timezone
 	resp.SuggestedOpeningCash = out.SuggestedOpeningCash
+	if ref := out.OpeningReference; ref != nil {
+		resp.OpeningReference = &cashOpeningReferenceResp{
+			LastCountDate: ref.LastCountDate.Format("2006-01-02"), CashLeft: ref.CashLeft,
+			LaterCash: ref.LaterCash, Expected: ref.Expected,
+		}
+	}
 	resp.Entries = make([]cashLedgerEntryResp, 0, len(out.Entries))
 	for _, e := range out.Entries {
 		resp.Entries = append(resp.Entries, cashLedgerEntryResp{ID: e.ID, RecordedAt: e.RecordedAt.Format(time.RFC3339Nano), Amount: e.Amount, Concept: e.Concept, Reason: e.Reason, OperatorName: e.OperatorName})
 	}
 	resp.UncoveredCashActivity = out.UncoveredCashActivity
 	resp.RequiresNewSession = out.RequiresNewSession
+	resp.PendingReview = out.PendingReview
 	utils.JsonResponse(c, http.StatusOK, resp)
 }
 
@@ -1733,6 +1791,63 @@ func (ctrl *PaymentController) handleCashReopen(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
+// handleCashPendingDays backs the reminders: recent days left without a valid
+// count and, with ?include_today=true, today's drawers before logging out.
+func (ctrl *PaymentController) handleCashPendingDays(c *gin.Context) {
+	gymID, _ := middleware.GetGymID(c)
+	out, err := ctrl.CashClose.PendingDays(c.Request.Context(), reportsApp.CashPendingDaysInput{
+		GymID: gymID, IncludeToday: c.Query("include_today") == "true",
+	})
+	if err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	// Without PermViewTotals the reminder keeps the day and the reason, not
+	// how much cash was expected (UC-007).
+	hideExpected := sharedDomain.RequirePermission(c.Request.Context(), sharedDomain.PermViewTotals) != nil
+	items := make([]cashPendingDayResp, 0, len(out))
+	for _, day := range out {
+		if hideExpected {
+			day.ExpectedCash = nil
+		}
+		items = append(items, cashPendingDayResp{
+			Date: day.Date.Format("2006-01-02"), IsToday: day.IsToday, CashDrawerID: day.DrawerID, DrawerName: day.DrawerName,
+			IsMainDrawer: day.IsMainDrawer, Reason: day.Reason, ExpectedCash: day.ExpectedCash,
+			UncoveredCash: day.UncoveredCash, CountNow: day.CountNow, Session: cashSessionToResp(day.Session),
+		})
+	}
+	utils.JsonResponse(c, http.StatusOK, gin.H{"items": items})
+}
+
+func (ctrl *PaymentController) handleCashReviewDay(c *gin.Context) {
+	gymID, _ := middleware.GetGymID(c)
+	userID, _ := middleware.GetUserID(c)
+	role, _ := middleware.GetRole(c)
+	var req cashReviewDayReq
+	if !bindJSON(c, &req) {
+		return
+	}
+	date, err := time.Parse("2006-01-02", req.Date)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err)
+		return
+	}
+	drawerID, err := parseOptionalCashDrawerID(req.CashDrawerID)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, errBadID)
+		return
+	}
+	out, err := ctrl.CashClose.ReviewDay(c.Request.Context(), reportsApp.CashReviewDayInput{
+		GymID: gymID, ActorUserID: userID, ActorRole: role,
+		Date: date, DrawerID: drawerID, Note: req.Note,
+	})
+	if err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	utils.JsonResponse(c, http.StatusOK, cashSessionToResp(out))
+}
+
 func (ctrl *PaymentController) handleCashReconcile(c *gin.Context) {
 	gymID, _ := middleware.GetGymID(c)
 	userID, _ := middleware.GetUserID(c)
@@ -1807,6 +1922,12 @@ func cashSessionToResp(in *reportsApp.CashSessionView) *cashSessionResp {
 	out.ReconciledAt = formatOptionalTime(in.ReconciledAt)
 	out.StaleAt = formatOptionalTime(in.StaleAt)
 	out.WithdrawnAt = formatOptionalTime(in.WithdrawnAt)
+	out.ReviewedWithoutCount = in.ReviewedWithoutCount
+	out.ReviewedAt = formatOptionalTime(in.ReviewedAt)
+	out.ReviewNote = in.ReviewNote
+	out.OpeningExpectedCash = in.OpeningExpectedCash
+	out.OpeningDifference = in.OpeningDifference
+	out.OpeningNote = in.OpeningNote
 	return out
 }
 
@@ -1857,6 +1978,7 @@ func (ctrl *PaymentController) handleCashOpen(c *gin.Context) {
 		Date         string   `json:"date" validate:"required"`
 		CashDrawerID *string  `json:"cash_drawer_id"`
 		OpeningCash  *float64 `json:"opening_cash"`
+		OpeningNote  string   `json:"opening_note" validate:"max=500"`
 		Sequence     int      `json:"sequence" validate:"min=1"`
 	}
 	if !bindJSON(c, &req) {
@@ -1876,7 +1998,7 @@ func (ctrl *PaymentController) handleCashOpen(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, errBadID)
 		return
 	}
-	out, err := ctrl.CashClose.Open(c.Request.Context(), reportsApp.CashOpenInput{GymID: gymID, ActorUserID: actorID, Date: date, DrawerID: drawer, OpeningCash: *req.OpeningCash, Sequence: req.Sequence})
+	out, err := ctrl.CashClose.Open(c.Request.Context(), reportsApp.CashOpenInput{GymID: gymID, ActorUserID: actorID, Date: date, DrawerID: drawer, OpeningCash: *req.OpeningCash, OpeningNote: req.OpeningNote, Sequence: req.Sequence})
 	if err != nil {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
 		return

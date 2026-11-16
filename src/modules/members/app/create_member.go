@@ -13,15 +13,19 @@ import (
 	folioSvc "github.com/cuadra/cuadra-core/src/modules/billing/domain/folio"
 	paymentDomain "github.com/cuadra/cuadra-core/src/modules/billing/domain/payment"
 	billingRepo "github.com/cuadra/cuadra-core/src/modules/billing/domain/repository"
+	gymDomain "github.com/cuadra/cuadra-core/src/modules/gyms/domain/gym"
+	gymRepo "github.com/cuadra/cuadra-core/src/modules/gyms/domain/repository"
 	memErrors "github.com/cuadra/cuadra-core/src/modules/members/domain/errors"
 	memberDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/member"
 	membershipDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/membership"
+	mtDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/membership_type"
 	memRepo "github.com/cuadra/cuadra-core/src/modules/members/domain/repository"
 	promoApp "github.com/cuadra/cuadra-core/src/modules/promotions/app"
 	promoDomain "github.com/cuadra/cuadra-core/src/modules/promotions/domain/promotion"
 	"github.com/cuadra/cuadra-core/src/shared/audit"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 	phonepkg "github.com/cuadra/cuadra-core/src/shared/phone"
+	"github.com/cuadra/cuadra-core/src/shared/tz"
 )
 
 // CreateMemberPromotion es el sub-input opcional para aplicar una promo
@@ -157,8 +161,12 @@ type CreateMember struct {
 	// alta. Nil = sólo se honran promos sin efectos (percent, fixed,
 	// free_enrollment).
 	MemberSvc *MemberService
-	UoW       sharedDomain.UnitOfWork
-	Audit     audit.Recorder
+	// Gyms (opcional) da la configuración de cuotas y la zona horaria para
+	// revisar los permisos del operador en el primer pago (UC-007). Nil =
+	// sin cuotas configuradas y día UTC.
+	Gyms  gymRepo.GymRepository
+	UoW   sharedDomain.UnitOfWork
+	Audit audit.Recorder
 }
 
 func NewCreateMember(members memRepo.MemberRepository, memberships memRepo.MembershipRepository,
@@ -189,6 +197,13 @@ func NewCreateMemberWithBilling(members memRepo.MemberRepository, memberships me
 // the use case defaults to noopWelcomeNotifier.
 func (uc *CreateMember) WithWelcomeNotifier(n WelcomeNotifier) *CreateMember {
 	uc.Welcome = n
+	return uc
+}
+
+// WithGyms wires the gyms repository for the operator-permission checks of
+// the first payment.
+func (uc *CreateMember) WithGyms(gyms gymRepo.GymRepository) *CreateMember {
+	uc.Gyms = gyms
 	return uc
 }
 
@@ -425,6 +440,10 @@ func (uc *CreateMember) Execute(ctx context.Context, in CreateMemberInput) (*Cre
 			if chargeMaintenance {
 				subtotal += maintenanceAmt
 			}
+			if err := uc.requireFirstPaymentPermissions(ctx, tx, in, m, mt, now,
+				chargeEnrollment, enrollmentAmt, chargeMaintenance, maintenanceAmt); err != nil {
+				return err
+			}
 
 			// 6.1) Promo opcional. Resolve antes de crear el payment para
 			//      tener el discount listo + el effect a persistir post-create.
@@ -508,7 +527,7 @@ func (uc *CreateMember) Execute(ctx context.Context, in CreateMemberInput) (*Cre
 						GymID:        in.GymID,
 						MembershipID: ms.ID,
 						Days:         promoResult.ExtraDays,
-						Reason:       "promo: " + promoResult.Promotion.Name,
+						Reason:       membershipDomain.PromoAdjustmentReasonPrefix + promoResult.Promotion.Name,
 						ActorUserID:  in.ActorUserID,
 					}, now); err != nil {
 						return err
@@ -640,4 +659,33 @@ func normalizeAndValidatePhone(raw string) (string, error) {
 		return "", memErrors.ErrInvalidPhone
 	}
 	return v, nil
+}
+
+// requireFirstPaymentPermissions: without PermDiscounts an operator charges
+// the first payment dated today with the fees reception offers (UC-007).
+// Promotions stay open; the first payment is always paid in full.
+func (uc *CreateMember) requireFirstPaymentPermissions(ctx context.Context, tx sharedDomain.Transaction,
+	in CreateMemberInput, m *memberDomain.Member, mt *mtDomain.MembershipType, now time.Time,
+	chargeEnrollment bool, enrollmentAmt float64, chargeMaintenance bool, maintenanceAmt float64,
+) error {
+	if sharedDomain.RequirePermission(ctx, sharedDomain.PermDiscounts) == nil {
+		return nil
+	}
+	var g *gymDomain.Gym
+	today := dateOnly(now)
+	if uc.Gyms != nil {
+		loaded, err := uc.Gyms.GetByID(tx, in.GymID)
+		if err != nil {
+			return sharedDomain.NewUnexpectedError(err)
+		}
+		g = loaded
+		if g != nil {
+			today = tz.LocalToday(g.Timezone, now)
+		}
+	}
+	if err := RequireTodayCharge(ctx, in.StartDate, today); err != nil {
+		return err
+	}
+	return RequireDefaultFees(ctx, OperatorFeeDefaults(g, m, mt, in.StartDate),
+		chargeEnrollment, enrollmentAmt, chargeMaintenance, maintenanceAmt)
 }

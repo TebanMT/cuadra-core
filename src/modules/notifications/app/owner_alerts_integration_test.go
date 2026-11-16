@@ -5,7 +5,11 @@ package app_test
 import (
 	"context"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
+
+	reportsApp "github.com/cuadra/cuadra-core/src/application/reports"
 	notiApp "github.com/cuadra/cuadra-core/src/modules/notifications/app"
 	alertDomain "github.com/cuadra/cuadra-core/src/modules/notifications/domain/alertconfig"
 	notiRepoLite "github.com/cuadra/cuadra-core/src/modules/notifications/infraestructure/db/repositories"
@@ -165,5 +169,61 @@ func TestUC040_UnknownKeyRejected(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected validation error for unknown key")
+	}
+}
+
+func TestUC040_CashDiffAlertIsPerSessionAndResult(t *testing.T) {
+	f := newFixture(t)
+	if _, err := f.db.Exec(`UPDATE users SET phone='+525500000000' WHERE id=?`, f.ownerID); err != nil {
+		t.Fatal(err)
+	}
+	userRepo := usersRepoLite.NewUserSQLiteRepository()
+	enqueue := notiApp.NewEnqueueOwnerAlert(f.notiRepo, f.gymRepo, userRepo, notiRepoLite.NewAlertConfigSQLiteRepository(), f.uow)
+	subscriber := notiApp.NewCashCloseAlertSubscriber(enqueue)
+	day := time.Date(2026, 11, 12, 0, 0, 0, 0, time.UTC)
+	ana, note := "Ana", "no había cambio"
+	diff := func(v float64) *float64 { return &v }
+	first, second := uuid.New(), uuid.New()
+	ctx := context.Background()
+	subscriber.OnCashCloseClosed(ctx, reportsApp.CashCloseClosedEvent{GymID: f.gymID, SessionID: first, CloseDate: day,
+		Discrepancy: diff(-50), CountedByName: &ana, Reason: &note})
+	// A retried request for the same count must not message the owner twice.
+	subscriber.OnCashCloseClosed(ctx, reportsApp.CashCloseClosedEvent{GymID: f.gymID, SessionID: first, CloseDate: day,
+		Discrepancy: diff(-50), CountedByName: &ana, Reason: &note})
+	// A recount that changes the result is new information.
+	subscriber.OnCashCloseClosed(ctx, reportsApp.CashCloseClosedEvent{GymID: f.gymID, SessionID: first, CloseDate: day,
+		Discrepancy: diff(-20)})
+	// A second session or drawer on the same day used to collide on the date key.
+	subscriber.OnCashCloseClosed(ctx, reportsApp.CashCloseClosedEvent{GymID: f.gymID, SessionID: second, CloseDate: day,
+		Discrepancy: diff(15)})
+	subscriber.OnCashCloseClosed(ctx, reportsApp.CashCloseClosedEvent{GymID: f.gymID, SessionID: uuid.New(), CloseDate: day,
+		Discrepancy: diff(0.004)})
+
+	tx, err := f.uow.Query(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, total, err := f.notiRepo.ListByGym(tx, f.gymID, "", 1, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 3 {
+		t.Fatalf("cash diff alerts = %d, want 3 (one per session and result)", total)
+	}
+	amounts := map[string]bool{}
+	for _, row := range rows {
+		if row.TemplateKey != "owner_alert_cash_close_diff" {
+			t.Fatalf("unexpected template %q", row.TemplateKey)
+		}
+		amounts[row.Payload["diff_amount"]] = true
+	}
+	for _, want := range []string{
+		"50.00 (faltante) · contó Ana · 12 nov · Nota: no había cambio",
+		"20.00 (faltante) · 12 nov",
+		"15.00 (sobrante) · 12 nov",
+	} {
+		if !amounts[want] {
+			t.Errorf("missing alert %q in %v", want, amounts)
+		}
 	}
 }

@@ -48,6 +48,8 @@ type sqliteUserRow struct {
 	CreatedBy          sql.NullString `db:"created_by"`
 	PinHash            sql.NullString `db:"pin_hash"`
 	PinAssignedAt      sql.NullInt64  `db:"pin_assigned_at"`
+	// Permissions is the JSON array of permission keys (migration 050).
+	Permissions string `db:"permissions"`
 }
 
 func userToRow(u *userDomain.User) sqliteUserRow {
@@ -62,6 +64,7 @@ func userToRow(u *userDomain.User) sqliteUserRow {
 		Role:               u.Role,
 		Active:             boolToInt(u.Active),
 		MustChangePassword: boolToInt(u.MustChangePassword),
+		Permissions:        marshalPermissions(u.Permissions),
 	}
 	// "" en dominio = sin contraseña (pin-first) = NULL en DB — misma
 	// convención que la migración 016 y el cloud post-019.
@@ -104,6 +107,7 @@ func userFromRow(r *sqliteUserRow) *userDomain.User {
 		MustChangePassword: r.MustChangePassword != 0,
 		CreatedAt:          time.UnixMilli(r.CreatedAt).UTC(),
 		UpdatedAt:          time.UnixMilli(r.UpdatedAt).UTC(),
+		Permissions:        unmarshalPermissions(r.Permissions),
 	}
 	if r.Phone.Valid {
 		v := r.Phone.String
@@ -139,11 +143,11 @@ func (r *UserSQLiteRepository) Create(tx sharedDomain.Transaction, u *userDomain
 		INSERT INTO users (
 		    id, gym_id, version, created_at, updated_at, deleted_at,
 		    email, password_hash, full_name, phone, role, active, must_change_password, last_login_at, created_by,
-		    pin_hash, pin_assigned_at
+		    pin_hash, pin_assigned_at, permissions
 		) VALUES (
 		    :id, :gym_id, :version, :created_at, :updated_at, :deleted_at,
 		    :email, :password_hash, :full_name, :phone, :role, :active, :must_change_password, :last_login_at, :created_by,
-		    :pin_hash, :pin_assigned_at
+		    :pin_hash, :pin_assigned_at, :permissions
 		)`
 	if _, err := stx.NamedExec(context.Background(), stmt, row); err != nil {
 		return nil, err
@@ -231,7 +235,8 @@ func (r *UserSQLiteRepository) Update(tx sharedDomain.Transaction, u *userDomain
 		    email = :email, password_hash = :password_hash, full_name = :full_name,
 		    phone = :phone, role = :role, active = :active,
 		    must_change_password = :must_change_password, last_login_at = :last_login_at,
-		    pin_hash = :pin_hash, pin_assigned_at = :pin_assigned_at
+		    pin_hash = :pin_hash, pin_assigned_at = :pin_assigned_at,
+		    permissions = :permissions
 		WHERE id = :id`
 	if _, err := stx.NamedExec(context.Background(), stmt, row); err != nil {
 		return nil, err
@@ -258,11 +263,13 @@ func (r *UserSQLiteRepository) ListByGym(tx sharedDomain.Transaction, gymID uuid
 	return out, nil
 }
 
+// CountOperatorsByGym cuenta los operadores ACTIVOS del gym (cupo del plan).
+// Los desactivados no ocupan lugar y el dueño no cuenta.
 func (r *UserSQLiteRepository) CountOperatorsByGym(tx sharedDomain.Transaction, gymID uuid.UUID) (int, error) {
 	stx := tx.(*sharedDomain.SqlxTransaction)
 	var n int
 	err := stx.Get(context.Background(), &n,
-		`SELECT COUNT(1) FROM users WHERE gym_id = ? AND role = ? AND deleted_at IS NULL`,
+		`SELECT COUNT(1) FROM users WHERE gym_id = ? AND role = ? AND active = 1 AND deleted_at IS NULL`,
 		gymID.String(), userDomain.RoleOperator)
 	return n, err
 }
@@ -305,6 +312,7 @@ func enqueueUser(stx *sharedDomain.SqlxTransaction, u *userDomain.User) error {
 		"must_change_password": u.MustChangePassword,
 		"pin_hash":             u.PinHash,
 		"pin_assigned_at":      pinAssignedAtMs(u.PinAssignedAt),
+		"permissions":          permissionsWire(u.Permissions),
 		"created_at":           u.CreatedAt.UnixMilli(),
 		"updated_at":           u.UpdatedAt.UnixMilli(),
 	})

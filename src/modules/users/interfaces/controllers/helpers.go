@@ -10,6 +10,7 @@ import (
 
 	gymDomain "github.com/cuadra/cuadra-core/src/modules/gyms/domain/gym"
 	userDomain "github.com/cuadra/cuadra-core/src/modules/users/domain/user"
+	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 	"github.com/cuadra/cuadra-core/src/shared/utils"
 )
 
@@ -110,6 +111,26 @@ type userResponse struct {
 	Role               string    `json:"role"`
 	Active             bool      `json:"active"`
 	MustChangePassword bool      `json:"must_change_password"`
+	Permissions        []string  `json:"permissions"`
+}
+
+// permissionKeys is the wire form of a permission list (never null).
+func permissionKeys(perms []sharedDomain.Permission) []string {
+	out := make([]string, 0, len(perms))
+	for _, p := range perms {
+		out = append(out, string(p))
+	}
+	return out
+}
+
+// parsePermissionKeys turns the wire list into domain permissions; the
+// domain rejects unknown keys.
+func parsePermissionKeys(keys []string) []sharedDomain.Permission {
+	out := make([]sharedDomain.Permission, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, sharedDomain.Permission(k))
+	}
+	return out
 }
 
 func toUserResponse(u *userDomain.User) userResponse {
@@ -125,5 +146,6 @@ func toUserResponse(u *userDomain.User) userResponse {
 		Role:               u.Role,
 		Active:             u.Active,
 		MustChangePassword: u.MustChangePassword,
+		Permissions:        permissionKeys(u.EffectivePermissions()),
 	}
 }

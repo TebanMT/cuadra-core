@@ -16,9 +16,14 @@ import (
 
 // ListMembersInput backs UC-014.
 type ListMembersInput struct {
-	GymID         uuid.UUID
-	Search        string
-	StatusFilter  string // "" / "active" / "expiring_soon" / "expired" / "inactive"
+	GymID  uuid.UUID
+	Search string
+	// StatusFilter: "" / "active" / "expiring_soon" / "expired" / "lapsed" /
+	// "unpaid_enrollment" / "no_membership" / "unrenewed" / "inactive". Ver
+	// MemberRepository.List; los tres desgloses de "expired" usan las mismas
+	// reglas que AccessStatus (denied_expired / denied_unpaid_enrollment /
+	// denied_no_membership), así filtro e insignia no discrepan.
+	StatusFilter  string
 	PlanID        *uuid.UUID
 	Sort          string // "name" / "expiry" / "created_at"
 	SortAscending bool

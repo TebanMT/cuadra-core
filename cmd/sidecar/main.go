@@ -265,7 +265,7 @@ func main() {
 	updateChargeSettings := gymApp.NewUpdateChargeSettings(gymRepo, uow, recorder)
 	createOp := usersApp.NewCreateOperator(userRepo, uow, recorder).WithGymRepo(gymRepo)
 	updateOp := usersApp.NewUpdateOperator(userRepo, uow, recorder)
-	toggleOp := usersApp.NewToggleOperatorActive(userRepo, nil, uow, recorder)
+	toggleOp := usersApp.NewToggleOperatorActive(userRepo, nil, uow, recorder).WithGymRepo(gymRepo)
 	resetOp := usersApp.NewResetOperatorPassword(userRepo, nil, uow, recorder)
 	rotateOpPIN := usersApp.NewRotateOperatorPIN(userRepo, uow, recorder)
 	requestTransfer := usersApp.NewRequestTransferOwnership(userRepo, otpRepo, uow, recorder, emailSender)
@@ -286,7 +286,8 @@ func main() {
 	// propia tx (sin pasar por UC-018, que renovaría la membresía recién
 	// creada). Mismo generator que usa billing más abajo.
 	folios := folioSvc.NewGenerator(paymentRepo)
-	createMember := memApp.NewCreateMemberWithBilling(memberRepo, membershipRepo, mtRepo, paymentRepo, folios, uow, recorder)
+	createMember := memApp.NewCreateMemberWithBilling(memberRepo, membershipRepo, mtRepo, paymentRepo, folios, uow, recorder).
+		WithGyms(gymRepo) // fee config + timezone for the operator-permission checks
 	updateMember := memApp.NewUpdateMember(memberRepo, uow, recorder)
 	listMembers := memApp.NewListMembers(memberRepo, uow).WithGyms(gymRepo)
 	memberDetail := memApp.NewGetMemberDetail(memberRepo, fingerprintRepo, uow)
@@ -475,6 +476,7 @@ func main() {
 	deleteExpense.WithCashSessionMarker(cashClose)
 	updateCashMovement.WithCashSessionMarker(cashClose)
 	deleteCashMovement.WithCashSessionMarker(cashClose)
+	voidCashMovement := expApp.NewVoidOwnCashMovement(cashMovementRepo, expenseRepo, cashClose, uow, recorder)
 	reopenExpenseOccurrence.WithCashSessionMarker(cashClose)
 	correctSale := billingApp.NewCorrectSale(saleRepo, saleItemRepo, paymentRepo, saleCorrectionRepo,
 		refundRepo, productSvc, folios, cashClose, uow, recorder).WithGyms(gymRepo)
@@ -564,7 +566,8 @@ func main() {
 		WithRemotePurchases(nil, prodApp.NewReceiveInventoryPurchase(inventoryPurchaseRepo, inventoryReceiptRepo, uow, recorder))
 	expenseController := expCtrl.NewExpenseController(createExpense, updateExpense, deleteExpense, listExpenses, tokens).
 		WithPlusOperations(getExpense, createCashMovement, updateCashMovement, deleteCashMovement, listCashMovements, classifyCashMovement, createExpenseTemplate, updateExpenseTemplate, setExpenseTemplateActive, listExpenseTemplates, materializeExpenseOccurrences, listExpenseOccurrences, payExpenseOccurrence, skipExpenseOccurrence).
-		WithCorrectionOperations(unclassifyCashMovement, reopenExpenseOccurrence)
+		WithCorrectionOperations(unclassifyCashMovement, reopenExpenseOccurrence).
+		WithVoidOperation(voidCashMovement)
 	expenseController.PlanGate = featureGate(gymDomain.FeatureRecurringExpenses)
 	fingerprintAvailable := bioHub.Available
 	checkinCtrl := chkCtrl.NewCheckinController(checkinManual, checkinNumber, checkinOverride, checkinRepo, uow, fingerprintAvailable, tokens).
@@ -582,7 +585,7 @@ func main() {
 
 	// Suscripción — sidecar sólo expone el GET. El historial ahora SÍ vive
 	// local: subscription_events es una SyncedTable pull-only (cloud → sidecar)
-	// que el sync agent llena. Checkout/extend-trial siguen cloud-only — el
+	// que el sync agent llena. Checkout sigue cloud-only — el
 	// FE abre el dashboard cloud para ese flujo via openExternal (decisión
 	// del riesgo 1: pagos siempre suceden en browser conectado a internet,
 	// proxy-ear sólo agregaría complejidad sin ganancia de UX).
@@ -614,6 +617,10 @@ func main() {
 	// subscription/me read, sync/*) para que la pantalla de bloqueo del FE
 	// pueda renderearse y el dueño pueda escapar al dashboard cloud.
 	r.Use(middleware.EnforceActiveSubscription(tokens, gymRepo, uow))
+	// Permisos por operador (UC-007): a nivel engine, antes de registrar
+	// rutas. Resuelve qué puede hacer el usuario en cada escritura y bloquea
+	// las rutas que el dueño no le permitió.
+	r.Use(middleware.EnforceOperatorPermissions(tokens, userRepo, uow))
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "cuadra-sidecar", "version": version})
 	})
@@ -642,6 +649,8 @@ func main() {
 		DeviceLabel:   deviceLabel,
 		LoginPIN:      loginPIN,
 		ListOperators: listOperatorsForLogin,
+		// Refresh keeps the token's user and reads their current role.
+		Users: userRepo,
 		// LoginGymID reads the cached_login row each call so the operators
 		// grid follows whatever gym this sidecar is currently paired to.
 		// Returns uuid.Nil when the sidecar hasn't been redeemed yet —

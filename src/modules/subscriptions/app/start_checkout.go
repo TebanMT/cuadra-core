@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -41,9 +42,12 @@ type StartCheckoutOutput struct {
 // The gateway abstraction means swapping a processor (or adding a third) is a
 // new file in infraestructure/payments — this layer doesn't change.
 type StartCheckout struct {
-	Launch     subDomain.LaunchRepository // nil closes new admissions; existing benefits still apply.
-	Gateways   map[subDomain.Provider]subDomain.CheckoutGateway
-	Gyms       gymRepo.GymRepository
+	Launch   subDomain.LaunchRepository // nil closes new admissions; existing benefits still apply.
+	Gateways map[subDomain.Provider]subDomain.CheckoutGateway
+	Gyms     gymRepo.GymRepository
+	// Events dice cómo se pagó el plan vigente (ver runningSubscription).
+	// nil solo en pruebas que no tocan planes de pago.
+	Events     subDomain.EventRepository
 	Users      userRepo.UserRepository
 	UoW        sharedDomain.UnitOfWork
 	SuccessURL string
@@ -53,6 +57,7 @@ type StartCheckout struct {
 func NewStartCheckout(
 	gateways map[subDomain.Provider]subDomain.CheckoutGateway,
 	gyms gymRepo.GymRepository,
+	events subDomain.EventRepository,
 	users userRepo.UserRepository,
 	uow sharedDomain.UnitOfWork,
 	successURL, cancelURL string,
@@ -60,6 +65,7 @@ func NewStartCheckout(
 	return &StartCheckout{
 		Gateways:   gateways,
 		Gyms:       gyms,
+		Events:     events,
 		Users:      users,
 		UoW:        uow,
 		SuccessURL: successURL,
@@ -99,6 +105,9 @@ func (uc *StartCheckout) Execute(ctx context.Context, in StartCheckoutInput) (St
 	}
 	gym, err := uc.Gyms.GetByID(tx, in.GymID)
 	if err != nil {
+		return StartCheckoutOutput{}, err
+	}
+	if err := uc.runningSubscription(tx, gym, time.Now().UTC()); err != nil {
 		return StartCheckoutOutput{}, err
 	}
 	launchPricing := gym.AllFeaturesAccess
@@ -147,4 +156,57 @@ func (uc *StartCheckout) Execute(ctx context.Context, in StartCheckoutInput) (St
 		return StartCheckoutOutput{}, sharedDomain.NewUnexpectedError(err)
 	}
 	return StartCheckoutOutput{URL: res.URL, SessionID: res.SessionID}, nil
+}
+
+// runningSubscription evita el cobro doble: Stripe crea una suscripción nueva
+// por cada checkout aunque la anterior siga cobrando. Bloquea cuando el plan
+// vigente se cobra solo (tarjeta o Mercado Pago):
+//   - past_due: Stripe reintenta el cobro; se arregla cambiando la tarjeta;
+//   - activo: para cambiar de plan o de tarjeta está el portal de pagos;
+//   - cancelado con periodo pagado por delante: se reactiva en el portal.
+//
+// Deja pasar la prueba, un plan ya terminado y los periodos pagados por OXXO
+// o a mano, que se renuevan justo con un checkout nuevo (el recordatorio
+// anual de OXXO usa este mismo caso de uso).
+func (uc *StartCheckout) runningSubscription(tx sharedDomain.Transaction, gym *gymDomain.Gym, now time.Time) error {
+	if gym.SubscriptionPlan == gymDomain.PlanTrial {
+		return nil
+	}
+	switch gym.SubscriptionStatus {
+	case gymDomain.StatusPastDue:
+		return sharedDomain.NewBusinessError(subDomain.ErrSubscriptionPastDue, "")
+	case gymDomain.StatusCancelled:
+		if gym.SubscriptionEndsAt == nil || !gym.SubscriptionEndsAt.After(now) {
+			return nil
+		}
+	}
+	last, err := uc.lastPayment(tx, gym.ID)
+	if err != nil {
+		return sharedDomain.NewUnexpectedError(err)
+	}
+	if !last.RenewsAutomatically() {
+		return nil
+	}
+	if gym.SubscriptionStatus == gymDomain.StatusCancelled {
+		return sharedDomain.NewBusinessError(subDomain.ErrSubscriptionStillRunning, "")
+	}
+	return sharedDomain.NewBusinessError(subDomain.ErrSubscriptionRenewsItself, "")
+}
+
+// lastPayment es el evento activated/renewed más reciente del gym, o nil.
+func (uc *StartCheckout) lastPayment(tx sharedDomain.Transaction, gymID uuid.UUID) (*subDomain.Event, error) {
+	if uc.Events == nil {
+		return nil, nil
+	}
+	events, err := uc.Events.ListByGym(tx, gymID, 50)
+	if err != nil {
+		return nil, err
+	}
+	var last *subDomain.Event
+	for _, e := range events {
+		if (e.Type == subDomain.EventActivated || e.Type == subDomain.EventRenewed) && (last == nil || e.OccurredAt.After(last.OccurredAt)) {
+			last = e
+		}
+	}
+	return last, nil
 }

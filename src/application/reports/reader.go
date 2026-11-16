@@ -17,6 +17,32 @@ import (
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 )
 
+// CashSessionDifference is one certified count that did not match the
+// expected cash. Difference is counted − expected: negative is a shortage.
+type CashSessionDifference struct {
+	SessionID     uuid.UUID  `json:"session_id"`
+	Date          string     `json:"date"` // business date, YYYY-MM-DD
+	DrawerID      *uuid.UUID `json:"drawer_id,omitempty"`
+	DrawerName    *string    `json:"drawer_name,omitempty"`
+	Sequence      int        `json:"sequence"`
+	Difference    float64    `json:"difference"`
+	CountedByName *string    `json:"counted_by_name,omitempty"`
+	Reason        *string    `json:"reason,omitempty"`
+}
+
+// CashOpeningDifference is a day's first opening that did not match the cash
+// left at the drawer's last count plus the cash that moved since. Difference
+// is opening − expected: negative means cash went missing between counts.
+type CashOpeningDifference struct {
+	SessionID    uuid.UUID  `json:"session_id"`
+	Date         string     `json:"date"` // business date, YYYY-MM-DD
+	DrawerID     *uuid.UUID `json:"drawer_id,omitempty"`
+	DrawerName   *string    `json:"drawer_name,omitempty"`
+	Difference   float64    `json:"difference"`
+	OpenedByName *string    `json:"opened_by_name,omitempty"`
+	Note         *string    `json:"note,omitempty"`
+}
+
 // CashCountSummary describes the physical counts captured in completed cash
 // closes. CountedCloses can be lower than TotalCloses because the API permits
 // closing without a count; callers must not calculate a reconciliation from
@@ -31,13 +57,28 @@ type CashCountSummary struct {
 	// OpenSessions; TotalSessions includes them.
 	// Dates and legacy cuts before the first explicit opening are history,
 	// not missing work. Activity totals still include those dates.
-	HistoricalActivityDays          int
-	HistoricalSessions              int
-	ActiveDays                      int
-	MissingActiveDays               int
-	UncoveredActivityDays           int
-	OpenSessions                    int
-	ClosedUnverifiedSessions        int
+	HistoricalActivityDays int
+	HistoricalSessions     int
+	ActiveDays             int
+	MissingActiveDays      int
+	UncoveredActivityDays  int
+	// UncoveredActivityDates lists the business dates behind
+	// UncoveredActivityDays as ascending YYYY-MM-DD strings.
+	UncoveredActivityDates []string
+	// DifferenceSessions lists every certified count in the range whose
+	// physical cash did not match the expected cash, newest first. Stale or
+	// post-withdrawal-adjusted sessions are excluded because their original
+	// difference no longer describes the drawer.
+	DifferenceSessions []CashSessionDifference
+	// OpeningDifferences lists first openings in the range that did not match
+	// the previous count, newest first. They never affect coverage.
+	OpeningDifferences       []CashOpeningDifference
+	OpenSessions             int
+	ClosedUnverifiedSessions int
+	// ReviewedSessions are closed_unverified sessions the owner closed out
+	// without a count (ReviewDay). They are excluded from
+	// ClosedUnverifiedSessions and UnknownOpeningSessions.
+	ReviewedSessions                int
 	ReconciledSessions              int
 	StaleSessions                   int
 	WithdrawnSessions               int

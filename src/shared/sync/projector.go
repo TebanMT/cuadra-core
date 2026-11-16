@@ -42,6 +42,7 @@ func newFinancialConflict(format string, args ...any) error {
 // re-marshal.
 var jsonbColumns = map[string]map[string]bool{
 	"gyms":               {"payment_methods": true, "kiosk_settings": true, "charge_settings": true},
+	"users":              {"permissions": true},
 	"notification_queue": {"payload": true},
 	"audit_log":          {"changes": true},
 	// payments.breakdown carries the per-concept line items as a JSON

@@ -21,6 +21,10 @@ const (
 	ModeExtendDays LockMembershipExpiryMode = iota
 	// ModeSetDate — "Establecer fecha [DD/MM/YYYY]".
 	ModeSetDate
+	// ModeReset — "Volver al vencimiento calculado": undoes the manual
+	// adjustments (extend / set date). Promotion days stay. It is recorded as
+	// one more adjustment, so the history keeps every change.
+	ModeReset
 )
 
 // LockMembershipExpiryInput backs UC-017.
@@ -91,6 +95,20 @@ func (uc *LockMembershipExpiry) Execute(ctx context.Context, in LockMembershipEx
 				return sharedDomain.NewValidationError(memErrors.ErrAdjustmentInvalidDays)
 			}
 			prev, next, daysAdded = p, *ms.ExpiryDate, d
+		case ModeReset:
+			adjustments, err := uc.Adjustments.ListByMembership(tx, ms.ID)
+			if err != nil {
+				return sharedDomain.NewUnexpectedError(err)
+			}
+			manual := membershipDomain.ManualAdjustmentDays(adjustments)
+			if manual == 0 {
+				return sharedDomain.NewValidationError(memErrors.ErrNoManualAdjustments)
+			}
+			p, n, err := ms.AdjustExpiry(-manual, now)
+			if err != nil {
+				return sharedDomain.NewValidationError(err)
+			}
+			prev, next, daysAdded = p, n, -manual
 		default:
 			return sharedDomain.NewValidationError(memErrors.ErrAdjustmentInvalidDays)
 		}

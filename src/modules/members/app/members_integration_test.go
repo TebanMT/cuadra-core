@@ -18,6 +18,7 @@ import (
 	billingRepoLite "github.com/cuadra/cuadra-core/src/modules/billing/infraestructure/db/repositories"
 	gymRepoLite "github.com/cuadra/cuadra-core/src/modules/gyms/infraestructure/db/repositories"
 	memApp "github.com/cuadra/cuadra-core/src/modules/members/app"
+	"github.com/cuadra/cuadra-core/src/modules/members/domain/access"
 	memberDomain "github.com/cuadra/cuadra-core/src/modules/members/domain/member"
 	memRepoLite "github.com/cuadra/cuadra-core/src/modules/members/infraestructure/db/repositories"
 	usersApp "github.com/cuadra/cuadra-core/src/modules/users/app"
@@ -97,6 +98,7 @@ func setupMembersFixture(t *testing.T) *membersFixture {
 		Email:           "owner@gym.com",
 		Password:        "supersecret123",
 		PasswordConfirm: "supersecret123",
+		AcceptedLegal:   true,
 	})
 	if err != nil {
 		t.Fatalf("signup: %v", err)
@@ -492,6 +494,88 @@ func TestUC014_ListMembers_FiltersAndSearch(t *testing.T) {
 	out, _ = uc.Execute(context.Background(), memApp.ListMembersInput{GymID: f.gymID, Search: "Bru"})
 	if out.Total != 1 || out.Items[0].Member.FullName != "Bruno Ramos" {
 		t.Errorf("search Bru: %+v", out.Items)
+	}
+}
+
+// TestUC014_ListMembers_SearchSurnameFolioNumberAndBreakdown recorre el use
+// case con folios y números generados de verdad (NextFolio / auto número):
+// apellido, folio tal cual y con ceros, número de socio, y que los desgloses
+// de "Por cobrar" lleguen con la misma insignia (access_status). El detalle
+// por dialecto vive en repositories/member_list_scenario_test.go.
+func TestUC014_ListMembers_SearchSurnameFolioNumberAndBreakdown(t *testing.T) {
+	f := setupMembersFixture(t)
+	typeID := f.createMembershipType(t, "Mensual")
+	create := memApp.NewCreateMember(f.memberRepo, f.membershipR, f.mtRepo, f.uow, f.recorder)
+	ids := map[string]uuid.UUID{}
+	folios := map[string]string{}
+	for i, name := range []string{"Noe Miranda Gonzales", "Gonzalo Pérez", "Ana Ruiz"} {
+		out, err := create.Execute(context.Background(), memApp.CreateMemberInput{
+			GymID: f.gymID, ActorUserID: f.ownerID,
+			FullName: name, Phone: phoneFor(i),
+			MembershipTypeID: typeID, StartDate: time.Now().UTC(),
+		})
+		if err != nil {
+			t.Fatalf("create %s: %v", name, err)
+		}
+		ids[name], folios[name] = out.MemberID, out.Folio
+	}
+	// Número determinista: < MinMemberNumber, así nunca choca con los
+	// auto-generados (>= 1000). Los teléfonos de prueba no contienen 7.
+	if _, err := memApp.NewAssignMemberNumber(f.memberRepo, f.uow, f.recorder).Execute(context.Background(), memApp.AssignMemberNumberInput{
+		GymID: f.gymID, ActorUserID: f.ownerID, MemberID: ids["Ana Ruiz"], Number: 777,
+	}); err != nil {
+		t.Fatalf("assign number: %v", err)
+	}
+	if folios["Gonzalo Pérez"] != "MEM-000002" {
+		t.Fatalf("folio generado = %q, el caso asume MEM-NNNNNN", folios["Gonzalo Pérez"])
+	}
+
+	uc := memApp.NewListMembers(f.memberRepo, f.uow)
+	search := func(term string) []string {
+		t.Helper()
+		out, err := uc.Execute(context.Background(), memApp.ListMembersInput{GymID: f.gymID, Search: term, Sort: "name", SortAscending: true})
+		if err != nil {
+			t.Fatalf("search %q: %v", term, err)
+		}
+		names := make([]string, 0, len(out.Items))
+		for _, it := range out.Items {
+			names = append(names, it.Member.FullName)
+		}
+		if out.Total != len(names) {
+			t.Fatalf("search %q: total=%d items=%d", term, out.Total, len(names))
+		}
+		return names
+	}
+	for _, tc := range []struct{ term, want string }{
+		{"gonz", "Gonzalo Pérez|Noe Miranda Gonzales"}, // prefijo primero, luego apellido
+		{"MEM-000002", "Gonzalo Pérez"},
+		{"000002", "Gonzalo Pérez"}, // también es substring del teléfono de Gonzalo
+		{"777", "Ana Ruiz"},
+		{"0777", "Ana Ruiz"},
+		{"77", ""}, // número por igualdad, no substring
+	} {
+		if got := strings.Join(search(tc.term), "|"); got != tc.want {
+			t.Errorf("search %q = %q, want %q", tc.term, got, tc.want)
+		}
+	}
+
+	// Sin primer pago los tres quedan pending_payment: "Por cobrar" =
+	// unpaid_enrollment, y la insignia coincide con el filtro.
+	totals := map[string]int{}
+	for _, status := range []string{"expired", "lapsed", "unpaid_enrollment", "no_membership"} {
+		out, err := uc.Execute(context.Background(), memApp.ListMembersInput{GymID: f.gymID, StatusFilter: status})
+		if err != nil {
+			t.Fatalf("filter %s: %v", status, err)
+		}
+		totals[status] = out.Total
+		for _, it := range out.Items {
+			if status == "unpaid_enrollment" && it.AccessStatus != access.DeniedUnpaidEnrollment {
+				t.Errorf("%s: %s access_status=%s", status, it.Member.FullName, it.AccessStatus)
+			}
+		}
+	}
+	if totals["unpaid_enrollment"] != 3 || totals["expired"] != totals["lapsed"]+totals["unpaid_enrollment"]+totals["no_membership"] {
+		t.Errorf("totales = %v", totals)
 	}
 }
 

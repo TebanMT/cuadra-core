@@ -416,6 +416,11 @@ type sqliteCashCloseEventRow struct {
 	StaleAt                 sql.NullInt64  `db:"stale_at"`
 	WithdrawnAt             sql.NullInt64  `db:"withdrawn_at"`
 	WithdrawnBy             sql.NullString `db:"withdrawn_by"`
+	ReviewedAt              sql.NullInt64  `db:"reviewed_at"`
+	ReviewedBy              sql.NullString `db:"reviewed_by"`
+	ReviewNote              sql.NullString `db:"review_note"`
+	OpeningExpectedCash     sql.NullInt64  `db:"opening_expected_cash"`
+	OpeningNote             sql.NullString `db:"opening_note"`
 }
 
 func (r *CashCloseEventSQLiteRepository) Create(tx sharedDomain.Transaction, e *cashCloseDomain.CashCloseEvent) (*cashCloseDomain.CashCloseEvent, error) {
@@ -430,7 +435,9 @@ func (r *CashCloseEventSQLiteRepository) Create(tx sharedDomain.Transaction, e *
 		    withdrawal_destination, discrepancy_reason, correction_reason,
 		    adjusted_after_withdrawal, integrity_note,
 		    opened_at, opened_by, closed_at, closed_by, reconciled_at,
-		    reconciled_by, stale_at, withdrawn_at, withdrawn_by
+		    reconciled_by, stale_at, withdrawn_at, withdrawn_by,
+		    reviewed_at, reviewed_by, review_note,
+		    opening_expected_cash, opening_note
 		) VALUES (
 		    :id, :gym_id, :version, :created_at, :updated_at, :deleted_at,
 		    :drawer_id, :drawer_code, :operational_date, :sequence, :status,
@@ -439,7 +446,9 @@ func (r *CashCloseEventSQLiteRepository) Create(tx sharedDomain.Transaction, e *
 		    :withdrawal_destination, :discrepancy_reason, :correction_reason,
 		    :adjusted_after_withdrawal, :integrity_note,
 		    :opened_at, :opened_by, :closed_at, :closed_by, :reconciled_at,
-		    :reconciled_by, :stale_at, :withdrawn_at, :withdrawn_by
+		    :reconciled_by, :stale_at, :withdrawn_at, :withdrawn_by,
+		    :reviewed_at, :reviewed_by, :review_note,
+		    :opening_expected_cash, :opening_note
 		)`
 	if _, err := stx.NamedExec(context.Background(), stmt, row); err != nil {
 		var sqliteErr sqlite3.Error
@@ -472,7 +481,9 @@ func (r *CashCloseEventSQLiteRepository) Update(tx sharedDomain.Transaction, e *
 			opened_at=:opened_at, opened_by=:opened_by, closed_at=:closed_at,
 			closed_by=:closed_by, reconciled_at=:reconciled_at,
 			reconciled_by=:reconciled_by, stale_at=:stale_at,
-			withdrawn_at=:withdrawn_at, withdrawn_by=:withdrawn_by
+			withdrawn_at=:withdrawn_at, withdrawn_by=:withdrawn_by,
+			reviewed_at=:reviewed_at, reviewed_by=:reviewed_by, review_note=:review_note,
+			opening_expected_cash=:opening_expected_cash, opening_note=:opening_note
 		WHERE gym_id=:gym_id AND id=:id AND version=:previous_version`, map[string]any{
 		"id": row.ID, "gym_id": row.GymID, "version": row.Version,
 		"previous_version": row.Version - 1, "updated_at": row.UpdatedAt,
@@ -493,7 +504,12 @@ func (r *CashCloseEventSQLiteRepository) Update(tx sharedDomain.Transaction, e *
 		"reconciled_at": nullCashCloseInt(row.ReconciledAt),
 		"reconciled_by": nullCashCloseString(row.ReconciledBy),
 		"stale_at":      nullCashCloseInt(row.StaleAt), "withdrawn_at": nullCashCloseInt(row.WithdrawnAt),
-		"withdrawn_by": nullCashCloseString(row.WithdrawnBy),
+		"withdrawn_by":          nullCashCloseString(row.WithdrawnBy),
+		"reviewed_at":           nullCashCloseInt(row.ReviewedAt),
+		"reviewed_by":           nullCashCloseString(row.ReviewedBy),
+		"review_note":           nullCashCloseString(row.ReviewNote),
+		"opening_expected_cash": nullCashCloseInt(row.OpeningExpectedCash),
+		"opening_note":          nullCashCloseString(row.OpeningNote),
 	})
 	if err != nil {
 		return nil, err
@@ -629,6 +645,13 @@ func cashCloseEventToRow(e *cashCloseDomain.CashCloseEvent) sqliteCashCloseEvent
 	row.StaleAt = cashCloseNullTime(e.StaleAt)
 	row.WithdrawnAt = cashCloseNullTime(e.WithdrawnAt)
 	row.WithdrawnBy = cashCloseNullUUID(e.WithdrawnBy)
+	row.ReviewedAt = cashCloseNullTime(e.ReviewedAt)
+	row.ReviewedBy = cashCloseNullUUID(e.ReviewedBy)
+	row.ReviewNote = cashCloseNullString(e.ReviewNote)
+	if e.OpeningExpectedCash != nil {
+		row.OpeningExpectedCash = sql.NullInt64{Int64: toCents(*e.OpeningExpectedCash), Valid: true}
+	}
+	row.OpeningNote = cashCloseNullString(e.OpeningNote)
 	return row
 }
 
@@ -681,6 +704,14 @@ func cashCloseEventFromRow(r *sqliteCashCloseEventRow) *cashCloseDomain.CashClos
 	e.StaleAt = cashCloseTimePtr(r.StaleAt)
 	e.WithdrawnAt = cashCloseTimePtr(r.WithdrawnAt)
 	e.WithdrawnBy = cashCloseUUIDPtr(r.WithdrawnBy)
+	e.ReviewedAt = cashCloseTimePtr(r.ReviewedAt)
+	e.ReviewedBy = cashCloseUUIDPtr(r.ReviewedBy)
+	e.ReviewNote = cashCloseStringPtr(r.ReviewNote)
+	if r.OpeningExpectedCash.Valid {
+		v := fromCents(r.OpeningExpectedCash.Int64)
+		e.OpeningExpectedCash = &v
+	}
+	e.OpeningNote = cashCloseStringPtr(r.OpeningNote)
 	return e
 }
 
@@ -730,6 +761,11 @@ func enqueueCashCloseEvent(stx *sharedDomain.SqlxTransaction, e *cashCloseDomain
 		"stale_at":                  cashCloseMillis(e.StaleAt),
 		"withdrawn_at":              cashCloseMillis(e.WithdrawnAt),
 		"withdrawn_by":              e.WithdrawnBy,
+		"reviewed_at":               cashCloseMillis(e.ReviewedAt),
+		"reviewed_by":               e.ReviewedBy,
+		"review_note":               e.ReviewNote,
+		"opening_expected_cash":     e.OpeningExpectedCash,
+		"opening_note":              e.OpeningNote,
 	})
 	if err != nil {
 		return err

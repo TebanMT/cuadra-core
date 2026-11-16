@@ -192,17 +192,22 @@ func cashClosePhysicalMetrics(session *CashSessionView) []cashClosePhysicalMetri
 	if !session.OpeningCashKnown {
 		opening = nil
 	}
+	// An owner review closes the day without a count; it is no longer pending.
+	uncounted := "Pendiente"
+	if session.ReviewedWithoutCount {
+		uncounted = "Sin conteo (revisado por el dueño)"
+	}
 	metrics := []cashClosePhysicalMetric{
 		{Label: "Efectivo inicial", Value: opening, Empty: "No confirmado"},
 		{Label: "Movimiento neto de efectivo", Value: value(session.ActivityCash)},
 		{Label: "Efectivo esperado", Value: value(session.ExpectedCash)},
-		{Label: "Efectivo contado", Value: session.CountedCash, Empty: "Pendiente"},
+		{Label: "Efectivo contado", Value: session.CountedCash, Empty: uncounted},
 	}
 	difference := session.Difference
 	if session.IsStale || session.AdjustedAfterWithdrawal {
 		difference = nil
 	}
-	metrics = append(metrics, cashClosePhysicalMetric{Label: "Diferencia", Value: difference, Empty: "Pendiente"})
+	metrics = append(metrics, cashClosePhysicalMetric{Label: "Diferencia", Value: difference, Empty: uncounted})
 	if session.WithdrawnCash != nil {
 		metrics = append(metrics, cashClosePhysicalMetric{Label: "Efectivo retirado", Value: session.WithdrawnCash})
 	}

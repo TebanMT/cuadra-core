@@ -35,6 +35,13 @@ func NewToggleMemberStatus(members memRepo.MemberRepository, uow sharedDomain.Un
 }
 
 func (uc *ToggleMemberStatus) Execute(ctx context.Context, in ToggleMemberStatusInput) (*memberDomain.Member, error) {
+	// Deactivating a member or marking them lost needs PermMemberStatus
+	// (UC-007). Reactivating stays open: it only brings a member back.
+	if in.NewStatus != memberDomain.StatusActive {
+		if err := sharedDomain.RequirePermission(ctx, sharedDomain.PermMemberStatus); err != nil {
+			return nil, err
+		}
+	}
 	now := time.Now().UTC()
 	var out *memberDomain.Member
 	err := uc.UoW.Command(ctx, func(tx sharedDomain.Transaction) error {

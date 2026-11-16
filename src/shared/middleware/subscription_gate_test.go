@@ -214,3 +214,62 @@ func TestGate_NilDeps_NoOps(t *testing.T) {
 		t.Errorf("nil-deps gate = %d, want 200", w.Code)
 	}
 }
+
+// Prueba vencida (UC-002): la recepción queda en solo lectura. Consulta y
+// check-in por búsqueda o número pasan; cobrar, dar de alta, editar y
+// "Permitir de todos modos" reciben 402 subscription_read_only.
+func TestGate_TrialReadOnlyAllowsReadsAndCheckins(t *testing.T) {
+	gym := cancelledGym(time.Hour)
+	gym.SubscriptionPlan = gymDomain.PlanTrial
+	r, tokens := newGateRouter(t, gym)
+	for _, p := range []string{"/api/v1/checkins/manual", "/api/v1/checkins/number", "/api/v1/checkins/override"} {
+		r.POST(p, func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
+	}
+	r.GET("/api/v1/members", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
+	token := makeAccessToken(t, tokens)
+
+	cases := []struct {
+		method, path string
+		want         int
+	}{
+		{http.MethodGet, "/api/v1/members", http.StatusOK},
+		{http.MethodPost, "/api/v1/checkins/manual", http.StatusOK},
+		{http.MethodPost, "/api/v1/checkins/number", http.StatusOK},
+		{http.MethodPost, "/api/v1/checkins/override", http.StatusPaymentRequired},
+		{http.MethodPost, "/api/v1/members", http.StatusPaymentRequired},
+		{http.MethodPatch, "/api/v1/gyms/me", http.StatusPaymentRequired},
+	}
+	for _, tc := range cases {
+		req := httptest.NewRequest(tc.method, tc.path, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code != tc.want {
+			t.Errorf("%s %s = %d, want %d (body=%s)", tc.method, tc.path, w.Code, tc.want, w.Body.String())
+			continue
+		}
+		if tc.want == http.StatusPaymentRequired {
+			var body SubscriptionInactiveResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if body.Error != "subscription_read_only" {
+				t.Errorf("%s %s error = %q, want subscription_read_only", tc.method, tc.path, body.Error)
+			}
+		}
+	}
+}
+
+// Durante los días de gracia de la prueba no se restringe nada.
+func TestGate_TrialGraceKeepsFullAccess(t *testing.T) {
+	gym := cancelledGym(-48 * time.Hour) // la gracia vence en 2 días
+	gym.SubscriptionPlan = gymDomain.PlanTrial
+	r, tokens := newGateRouter(t, gym)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/members", nil)
+	req.Header.Set("Authorization", "Bearer "+makeAccessToken(t, tokens))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 during the trial grace", w.Code)
+	}
+}

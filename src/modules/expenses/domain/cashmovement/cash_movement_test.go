@@ -70,3 +70,35 @@ func TestUnclassifyLegacyCashInRepairsToNonOperating(t *testing.T) {
 		t.Fatalf("legacy cash-in repair = %+v, want non-operating without expense", m)
 	}
 }
+
+func TestOnlyWhoCapturedAMovementCanVoidIt(t *testing.T) {
+	now := time.Now().UTC()
+	operator := uuid.New()
+	m, err := cashmovement.New(uuid.New(), uuid.New(), operator, now, 50,
+		cashmovement.CashOut, "Garrafones", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !m.CanBeVoidedBy(operator) || m.CanBeVoidedBy(uuid.New()) || m.CanBeVoidedBy(uuid.Nil) {
+		t.Fatal("only the operator who captured the movement may void it")
+	}
+	expenseID := uuid.New()
+	if err := m.Classify(&expenseID, cashmovement.AsExpense, now); err != nil {
+		t.Fatal(err)
+	}
+	if !m.CanBeVoidedBy(operator) {
+		t.Fatal("an outflow paid as expense is voided together with its expense")
+	}
+	purchase, _ := cashmovement.New(uuid.New(), uuid.New(), operator, now, 80,
+		cashmovement.CashOut, "Proteína", now)
+	if err := purchase.ClassifyInventoryPurchase(now); err != nil {
+		t.Fatal(err)
+	}
+	if purchase.CanBeVoidedBy(operator) {
+		t.Fatal("inventory purchases are corrected from the purchase")
+	}
+	m.SoftDelete(now)
+	if m.CanBeVoidedBy(operator) {
+		t.Fatal("a voided movement cannot be voided again")
+	}
+}

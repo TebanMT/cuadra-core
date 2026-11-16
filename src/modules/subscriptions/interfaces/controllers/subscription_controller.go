@@ -57,7 +57,6 @@ func (ctrl *SubscriptionController) RegisterRoutes(r *gin.Engine) {
 	authed.Use(middleware.AuthMiddleware(ctrl.Tokens))
 	{
 		authed.GET("/me", middleware.RequireOwner(), ctrl.handleGetMine)
-		authed.POST("/me/extend-trial", middleware.RequireOwner(), ctrl.handleExtendTrial)
 		authed.POST("/checkout-session", middleware.RequireOwner(), ctrl.handleStartCheckout)
 		authed.POST("/billing-portal-session", middleware.RequireOwner(), ctrl.handleStartBillingPortal)
 	}
@@ -69,7 +68,7 @@ func (ctrl *SubscriptionController) RegisterRoutes(r *gin.Engine) {
 // RegisterReadOnlyRoutes expone solamente GET /subscriptions/me. El sidecar
 // lo monta porque la página de Suscripción del desktop necesita poder leer el
 // plan/status para no caer en error de carga, pero el resto del surface
-// (checkout, webhooks, extend-trial) son cloud-only — el dueño hace ese flujo
+// (checkout, webhooks) son cloud-only — el dueño hace ese flujo
 // desde el browser cuando hay internet. La historia de eventos puede venir
 // vacía si el repo del sidecar es un stub (no sincronizamos
 // `subscription_events` todavía); el FE renderea "aún no hay movimientos"
@@ -251,40 +250,9 @@ func (ctrl *SubscriptionController) handleStartBillingPortal(c *gin.Context) {
 	utils.JsonResponse(c, http.StatusOK, billingPortalResp{URL: out.URL})
 }
 
-// ---------------------------------------------------------------------------
-// Manual extend-trial (sales tool).
-// ---------------------------------------------------------------------------
-
-type extendTrialReq struct {
-	Days int `json:"days"`
-}
-
-func (ctrl *SubscriptionController) handleExtendTrial(c *gin.Context) {
-	gymID, _ := middleware.GetGymID(c)
-	var req extendTrialReq
-	if err := c.ShouldBindJSON(&req); err != nil {
-		utils.ErrorResponse(c, http.StatusBadRequest, err)
-		return
-	}
-	if req.Days <= 0 || req.Days > 90 {
-		utils.ErrorResponse(c, http.StatusBadRequest, errors.New("days must be 1..90"))
-		return
-	}
-	out, err := ctrl.Record.Execute(c.Request.Context(), subApp.RecordEventInput{
-		GymID:      gymID,
-		Provider:   subDomain.ProviderManual,
-		Type:       subDomain.EventTrialExtended,
-		ExternalID: "manual-" + uuid.NewString(),
-		Plan:       "",
-		RawPayload: map[string]any{"days": float64(req.Days)},
-		OccurredAt: time.Now().UTC(),
-	})
-	if err != nil {
-		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
-		return
-	}
-	utils.JsonResponse(c, http.StatusOK, gin.H{"applied": out.Applied, "event_id": out.EventID})
-}
+// Extender una prueba ya no es un endpoint: cualquier dueño podía llamarlo
+// con su sesión y saltarse el fin de la prueba (UC-002). El founder lo hace
+// con cmd/admin-extend-trial en el servidor.
 
 // ---------------------------------------------------------------------------
 // Stripe webhook.

@@ -69,6 +69,23 @@ func (uc *RegisterInventoryPurchase) Execute(ctx context.Context, in RegisterInv
 	if in.ActorRole != "owner" && (in.ActorRole != "operator" || uc.Origin != "desktop" || (in.Paid && !operatorCashPayment)) {
 		return nil, shared.NewBusinessError(prodErrors.ErrPurchaseOwnerRequired, "")
 	}
+	// Paying it from the drawer takes cash out: PermCashOut (UC-007).
+	// Registering or receiving a pending purchase stays open.
+	if in.Paid && operatorCashPayment {
+		if err := shared.RequirePermission(ctx, shared.PermCashOut); err != nil {
+			return nil, err
+		}
+	}
+	// Creating a product from the purchase form sets its sale price:
+	// PermProducts, same as the products screen.
+	for _, line := range in.Items {
+		if line.NewProduct != nil {
+			if err := shared.RequirePermission(ctx, shared.PermProducts); err != nil {
+				return nil, err
+			}
+			break
+		}
+	}
 	if !in.Paid && (!in.PaidOn.IsZero() || in.PaymentMethod != "" || in.PaidFrom != "" || in.CashDrawerID != nil) {
 		return nil, shared.NewValidationError(prodErrors.ErrIncompletePurchasePayment)
 	}

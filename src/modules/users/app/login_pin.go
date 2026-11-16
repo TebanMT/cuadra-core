@@ -42,6 +42,8 @@ type LoginPINOutput struct {
 	TrialEndsAt       *time.Time
 	AllFeaturesAccess bool
 	SubscriptionPlan  string
+	// Permissions: lo que el usuario puede hacer (todos para el dueño).
+	Permissions []sharedDomain.Permission
 }
 
 type LoginPIN struct {
@@ -113,6 +115,7 @@ func (uc *LoginPIN) Execute(ctx context.Context, in LoginPINInput) (LoginPINOutp
 		out.TrialEndsAt = gym.TrialEndsAt
 		out.SubscriptionPlan = gym.SubscriptionPlan
 		out.AllFeaturesAccess = gym.AllFeaturesAccess
+		out.Permissions = user.EffectivePermissions()
 		return nil
 	})
 	if err != nil {

@@ -199,6 +199,16 @@ func (uc *RegisterSale) Execute(ctx context.Context, in RegisterSaleInput) (*Reg
 			wasReplay = true
 			return nil
 		}
+		// Operator permissions (UC-007): a manual discount or an earlier
+		// date need PermDiscounts; a promotion stays open.
+		if in.Discount > 0 {
+			if err := sharedDomain.RequirePermission(ctx, sharedDomain.PermDiscounts); err != nil {
+				return err
+			}
+		}
+		if err := requireNotBackdated(ctx, tx, uc.Gyms, in.GymID, in.PaymentDate, now); err != nil {
+			return err
+		}
 
 		// Optional member sanity check.
 		if in.MemberID != nil {
@@ -315,6 +325,10 @@ func (uc *RegisterSale) Execute(ctx context.Context, in RegisterSaleInput) (*Reg
 			if paid < s.Total && in.MemberID == nil {
 				return sharedDomain.NewBusinessError(billingErrors.ErrCreditRequiresMember, "")
 			}
+		}
+		// Selling on credit (fiado) needs PermCredit.
+		if err := requireFullPayment(ctx, paid, s.Total); err != nil {
+			return err
 		}
 		p, err := paymentDomain.NewProductSalePayment(
 			paymentIDReserved, in.GymID, in.ActorUserID, in.MemberID, folio,

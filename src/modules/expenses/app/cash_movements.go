@@ -50,6 +50,12 @@ func (uc *CreateCashMovement) WithExpenses(expenses expRepo.ExpenseRepository) *
 	return uc
 }
 func (uc *CreateCashMovement) Execute(ctx context.Context, in CashMovementInput) (*cashDomain.CashMovement, error) {
+	// A cash outflow needs PermCashOut (UC-007); adding cash stays open.
+	if in.MovementType == cashDomain.CashOut {
+		if err := shared.RequirePermission(ctx, shared.PermCashOut); err != nil {
+			return nil, err
+		}
+	}
 	if (in.Purpose != "" && in.Purpose != cashDomain.AsExpense && in.Purpose != cashDomain.NonOperating) ||
 		(in.Purpose != "" && in.MovementType != cashDomain.CashOut) ||
 		(in.Category != "" && in.Purpose != cashDomain.AsExpense) {

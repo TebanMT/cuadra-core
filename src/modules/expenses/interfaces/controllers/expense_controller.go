@@ -44,6 +44,7 @@ type ExpenseController struct {
 	ListCash          *expApp.ListCashMovementsByDate
 	ClassifyCash      *expApp.ClassifyCashMovement
 	UnclassifyCash    *expApp.UnclassifyCashMovement
+	VoidCash          *expApp.VoidOwnCashMovement
 	CreateTemplate    *expApp.CreateRecurringExpenseTemplate
 	UpdateTemplate    *expApp.UpdateRecurringExpenseTemplate
 	SetTemplateActive *expApp.DeactivateRecurringExpenseTemplate
@@ -83,6 +84,13 @@ func (ctrl *ExpenseController) WithCorrectionOperations(unclassify *expApp.Uncla
 	return ctrl
 }
 
+// WithVoidOperation lets whoever captured a movement void it while its drawer
+// is still open (front-desk self-correction).
+func (ctrl *ExpenseController) WithVoidOperation(void *expApp.VoidOwnCashMovement) *ExpenseController {
+	ctrl.VoidCash = void
+	return ctrl
+}
+
 func NewExpenseController(
 	create *expApp.CreateExpense,
 	update *expApp.UpdateExpense,
@@ -99,6 +107,10 @@ func (ctrl *ExpenseController) RegisterRoutes(r *gin.Engine) {
 	// Physical drawer movements are Standard and operational.
 	api.POST("/cash-movements", ctrl.handleCreateCash)
 	api.GET("/cash-movements", ctrl.handleListCash)
+	if ctrl.VoidCash != nil {
+		// Own capture only, while the drawer is open; enforced by the use case.
+		api.POST("/cash-movements/:id/void", ctrl.handleVoidCash)
+	}
 
 	admin := api.Group("")
 	admin.Use(middleware.RequireOwner())
@@ -638,6 +650,27 @@ func (ctrl *ExpenseController) handleClassifyCash(c *gin.Context) {
 type correctionReq struct {
 	Version          int    `json:"version" validate:"required,gt=0"`
 	CorrectionReason string `json:"correction_reason" validate:"required,min=3,max=200"`
+}
+
+func (ctrl *ExpenseController) handleVoidCash(c *gin.Context) {
+	gym, _ := middleware.GetGymID(c)
+	user, _ := middleware.GetUserID(c)
+	id, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	var req correctionReq
+	if !bindJSON(c, &req) {
+		return
+	}
+	if err := ctrl.VoidCash.Execute(c.Request.Context(), expApp.VoidOwnCashMovementInput{
+		GymID: gym, ActorUserID: user, MovementID: id,
+		ExpectedVersion: req.Version, Reason: req.CorrectionReason,
+	}); err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	c.Status(http.StatusNoContent)
 }
 
 func (ctrl *ExpenseController) handleUnclassifyCash(c *gin.Context) {

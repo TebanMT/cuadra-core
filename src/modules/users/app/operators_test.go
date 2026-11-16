@@ -44,6 +44,7 @@ func applySQLiteMigrations(t *testing.T, dir string, db *sqlx.DB) {
 		"016_operators_pin_first.sql",
 		"018_gyms_stripe_customer.sql",
 		"047_launch_access.sql",
+		"050_user_permissions.sql",
 	} {
 		raw, err := os.ReadFile(filepath.Join(dir, m))
 		if err != nil {
@@ -398,5 +399,86 @@ func TestOperatorsGrid_LoginPIN_ToleranPasswordHashNull(t *testing.T) {
 	}
 	if out.Role != "owner" || out.AccessToken == "" {
 		t.Errorf("login-pin incompleto: %+v", out)
+	}
+}
+
+// Permisos por operador (UC-007): el alta los guarda, la edición los
+// reemplaza, el login-pin los devuelve y el sync los lleva en el payload.
+func TestOperatorPermissions_CreateUpdateLoginRoundTrip(t *testing.T) {
+	db, uow, gym := setupOperatorsFixture(t)
+	userRepo := usersRepoLite.NewUserSQLiteRepository()
+	rec := audit.NewSQLiteRecorder()
+	seedOwner(t, uow, userRepo, gym.ID)
+	ownerID := fetchOwnerID(t, db, gym.ID)
+
+	create := usersApp.NewCreateOperator(userRepo, uow, rec)
+	if _, err := create.Execute(context.Background(), usersApp.CreateOperatorInput{
+		GymID: gym.ID, OwnerID: ownerID, FullName: "Sin Permisos", Phone: "+52 442 000 0001",
+		Permissions: []sharedDomain.Permission{"see_totals"},
+	}); err == nil {
+		t.Fatal("unknown permission must be rejected")
+	}
+	out, err := create.Execute(context.Background(), usersApp.CreateOperatorInput{
+		GymID: gym.ID, OwnerID: ownerID, FullName: "Carla Recepción", Phone: "+52 442 123 4567",
+		Permissions: []sharedDomain.Permission{sharedDomain.PermInventory, sharedDomain.PermCredit},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	var stored string
+	if err := db.Get(&stored, "SELECT permissions FROM users WHERE id = ?", out.UserID.String()); err != nil {
+		t.Fatalf("read permissions: %v", err)
+	}
+	if stored != `["credit","inventory"]` {
+		t.Errorf("stored permissions = %s", stored)
+	}
+	var payload string
+	if err := db.Get(&payload, "SELECT payload FROM sync_queue WHERE entity_id = ? ORDER BY rowid DESC LIMIT 1", out.UserID.String()); err != nil {
+		t.Fatalf("read sync payload: %v", err)
+	}
+	if !strings.Contains(payload, `"permissions":["credit","inventory"]`) {
+		t.Errorf("sync payload lacks permissions: %s", payload)
+	}
+
+	update := usersApp.NewUpdateOperator(userRepo, uow, rec)
+	empty := []sharedDomain.Permission{}
+	if _, err := update.Execute(context.Background(), usersApp.UpdateOperatorInput{
+		GymID: gym.ID, ActorUserID: ownerID, TargetID: out.UserID, Permissions: &empty,
+	}); err != nil {
+		t.Fatalf("clear permissions: %v", err)
+	}
+	newName := "Carla R."
+	if _, err := update.Execute(context.Background(), usersApp.UpdateOperatorInput{
+		GymID: gym.ID, ActorUserID: ownerID, TargetID: out.UserID, FullName: &newName,
+	}); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if err := db.Get(&stored, "SELECT permissions FROM users WHERE id = ?", out.UserID.String()); err != nil {
+		t.Fatalf("read permissions: %v", err)
+	}
+	if stored != `[]` {
+		t.Errorf("after clearing + rename, permissions = %s, want []", stored)
+	}
+	owner := []sharedDomain.Permission{sharedDomain.PermCredit}
+	if _, err := update.Execute(context.Background(), usersApp.UpdateOperatorInput{
+		GymID: gym.ID, ActorUserID: ownerID, TargetID: ownerID, Permissions: &owner,
+	}); err == nil {
+		t.Error("the owner's permissions can't be edited")
+	}
+
+	cashOut := []sharedDomain.Permission{sharedDomain.PermCashOut}
+	if _, err := update.Execute(context.Background(), usersApp.UpdateOperatorInput{
+		GymID: gym.ID, ActorUserID: ownerID, TargetID: out.UserID, Permissions: &cashOut,
+	}); err != nil {
+		t.Fatalf("grant cash_out: %v", err)
+	}
+	login := usersApp.NewLoginPIN(userRepo, gymRepoLite.NewGymSQLiteRepository(), uow,
+		auth.NewJWTService("test-secret"), rec)
+	session, err := login.Execute(context.Background(), usersApp.LoginPINInput{UserID: out.UserID, PIN: out.PIN})
+	if err != nil {
+		t.Fatalf("login-pin: %v", err)
+	}
+	if len(session.Permissions) != 1 || session.Permissions[0] != sharedDomain.PermCashOut {
+		t.Errorf("login-pin permissions = %v", session.Permissions)
 	}
 }

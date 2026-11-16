@@ -18,6 +18,9 @@ type CashOpenInput struct {
 	Date               time.Time
 	DrawerID           *uuid.UUID
 	OpeningCash        float64
+	// OpeningNote explains a first opening of the day that does not match the
+	// cash left at the last count (see CashOpeningReference).
+	OpeningNote string
 	// Expected slot makes retrying an opening safe even if someone already closed it.
 	Sequence int
 }
@@ -71,7 +74,12 @@ func (uc *CashClose) Open(ctx context.Context, in CashOpenInput) (*CashSessionVi
 		}
 		sequence := 1
 		start, _ := tz.DayBounds(zone, in.Date, in.Date)
-		if previous != nil {
+		var reference *CashOpeningReference
+		if previous == nil {
+			if reference, err = uc.openingReference(tx, in.GymID, drawerID, in.Date, zone, now); err != nil {
+				return err
+			}
+		} else {
 			if previous.FinishedAt() == nil {
 				return domain.NewBusinessError(billingErrors.ErrCashCloseConflict, "hay un corte pendiente; complétalo antes de abrir otro periodo")
 			}
@@ -90,10 +98,18 @@ func (uc *CashClose) Open(ctx context.Context, in CashOpenInput) (*CashSessionVi
 		if err != nil {
 			return domain.NewValidationError(err)
 		}
+		if reference != nil {
+			if err = session.CheckOpening(reference.Expected, in.OpeningNote); err != nil {
+				return domain.NewValidationError(err)
+			}
+		}
 		if _, err = uc.Events.Create(tx, session); err != nil {
 			return domain.NewUnexpectedError(err)
 		}
-		if err = uc.recordSessionAudit(ctx, tx, session, in.ActorUserID, audit.ActionCreate, map[string]any{"opening_cash": session.OpeningCash, "status": session.Status}, now); err != nil {
+		if err = uc.recordSessionAudit(ctx, tx, session, in.ActorUserID, audit.ActionCreate, map[string]any{
+			"opening_cash": session.OpeningCash, "status": session.Status,
+			"opening_expected_cash": session.OpeningExpectedCash, "opening_note": session.OpeningNote,
+		}, now); err != nil {
 			return err
 		}
 		out = cashSessionView(session, session.Status, false, session.CalculatedCash)

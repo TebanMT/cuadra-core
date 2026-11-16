@@ -279,21 +279,18 @@ func (r *MemberSQLiteRepository) List(tx sharedDomain.Transaction, q memRepo.Lis
 
 	where := []string{`m.gym_id = ? AND m.deleted_at IS NULL`}
 	args := []any{q.GymID.String()}
-	if s := textsearch.Normalize(q.Search); s != "" {
-		// Nombre: prefix match para mantener el ordenamiento por relevancia
-		// del operador ("Juan…" matchea "Juan García" pero no "García Juan").
-		// Teléfono: substring match sobre la versión solo-dígitos del
-		// término (los teléfonos en BD están normalizados sin espacios
-		// ni guiones). Antes era sufijo, así que tipear los primeros
-		// dígitos no encontraba nada.
-		phoneDigits := stripPhoneSeparators(s)
-		if phoneDigits != "" {
-			where = append(where, "("+textsearch.SQLiteColumn("m.full_name")+" LIKE ? ESCAPE '!' OR m.phone LIKE ?)")
-			args = append(args, textsearch.EscapeLike(s)+"%", "%"+phoneDigits+"%")
-		} else {
-			where = append(where, textsearch.SQLiteColumn("m.full_name")+" LIKE ? ESCAPE '!'")
-			args = append(args, textsearch.EscapeLike(s)+"%")
-		}
+	// Relevancia de la búsqueda: va al inicio del ORDER BY. Sus argumentos
+	// se enlazan DESPUÉS de los del WHERE (orden de los `?` en el SQL).
+	var rank string
+	var rankArgs []any
+	if s, ok := parseMemberSearch(q.Search); ok {
+		// Nombre por inicio de cualquier palabra, teléfono por substring de
+		// dígitos y, si el término es numérico, folio / número de socio por
+		// igualdad. Mismas reglas que Postgres (ver member_search.go).
+		searchWhere, searchArgs, r, rArgs := s.sql(textsearch.SQLiteColumn("m.full_name"))
+		where = append(where, searchWhere)
+		args = append(args, searchArgs...)
+		rank, rankArgs = r, rArgs
 	}
 	switch q.StatusFilter {
 	case "active":
@@ -310,8 +307,21 @@ func (r *MemberSQLiteRepository) List(tx sharedDomain.Transaction, q memRepo.Lis
 	case "expired":
 		// "Por cobrar" en la UI: vencidos clásicos + pending_payment
 		// + socios sin membership. Misma acción del operador (cobrar).
+		// Es la unión exacta (y disjunta) de lapsed + unpaid_enrollment +
+		// no_membership.
 		where = append(where, `m.status = 'active' AND (ms.id IS NULL OR ms.status = 'pending_payment' OR (ms.status = 'active' AND ms.expiry_date < ?))`)
 		args = append(args, today)
+	case "lapsed":
+		// Vencidos de verdad: membership activa con expiry < hoy. Coincide
+		// con access_status = denied_expired.
+		where = append(where, `m.status = 'active' AND ms.status = 'active' AND ms.expiry_date < ?`)
+		args = append(args, today)
+	case "unpaid_enrollment":
+		// Inscritos sin primer pago. Coincide con denied_unpaid_enrollment.
+		where = append(where, `m.status = 'active' AND ms.status = 'pending_payment'`)
+	case "no_membership":
+		// Sin fila active/pending_payment. Coincide con denied_no_membership.
+		where = append(where, `m.status = 'active' AND ms.id IS NULL`)
 	case "unrenewed":
 		where = append(where, `m.status <> 'lost' AND EXISTS (
  SELECT 1 FROM memberships expired WHERE expired.member_id=m.id AND expired.deleted_at IS NULL
@@ -352,10 +362,14 @@ func (r *MemberSQLiteRepository) List(tx sharedDomain.Transaction, q memRepo.Lis
 			order = "m.full_name COLLATE NOCASE DESC"
 		}
 	case "expiry":
+		// Sin fecha (pending_payment / sin membership) al final en ambos
+		// sentidos, igual que el NULLS LAST de Postgres. `IS NULL` vale 0/1,
+		// así que funciona en cualquier versión de SQLite (NULLS LAST llegó
+		// apenas en 3.30).
 		if asc {
-			order = "ms.expiry_date ASC"
+			order = "ms.expiry_date IS NULL, ms.expiry_date ASC"
 		} else {
-			order = "ms.expiry_date DESC"
+			order = "ms.expiry_date IS NULL, ms.expiry_date DESC"
 		}
 	case "created_at":
 		if asc {
@@ -363,6 +377,14 @@ func (r *MemberSQLiteRepository) List(tx sharedDomain.Transaction, q memRepo.Lis
 		} else {
 			order = "m.created_at DESC"
 		}
+	}
+	// m.id desempata para que la paginación sea estable (nombres o fechas
+	// repetidos no saltan ni duplican filas entre páginas).
+	order += ", m.id ASC"
+	listArgs := args
+	if rank != "" {
+		order = rank + ", " + order
+		listArgs = append(append([]any{}, args...), rankArgs...)
 	}
 
 	listQ := fmt.Sprintf(`
@@ -384,7 +406,7 @@ func (r *MemberSQLiteRepository) List(tx sharedDomain.Transaction, q memRepo.Lis
 		LIMIT %d OFFSET %d`, join, whereClause, order, pageSize, (page-1)*pageSize)
 
 	var rows []joinedMemberRow
-	if err := stx.Select(context.Background(), &rows, listQ, args...); err != nil {
+	if err := stx.Select(context.Background(), &rows, listQ, listArgs...); err != nil {
 		return nil, 0, err
 	}
 	out := make([]*memRepo.MemberWithMembership, 0, len(rows))

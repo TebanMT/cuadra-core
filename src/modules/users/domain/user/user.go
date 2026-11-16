@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	userErrors "github.com/cuadra/cuadra-core/src/modules/users/domain/errors"
+	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 	phonepkg "github.com/cuadra/cuadra-core/src/shared/phone"
 )
 
@@ -56,6 +57,12 @@ type User struct {
 	// verification link sent to their inbox. The dashboard nags
 	// unverified owners with a banner; nothing is hard-blocked.
 	EmailVerifiedAt *time.Time
+	// Permissions lists what the owner allowed this operator to do beyond
+	// the basic reception work (see sharedDomain.Permission). New operators
+	// start with none; operators created before permissions existed were
+	// given every permission by the migration. Ignored for the owner, who
+	// always has all of them.
+	Permissions []sharedDomain.Permission
 }
 
 // NewUser constructs a User with role + canonicalised email. Caller is
@@ -156,6 +163,9 @@ func NewOperator(id, gymID uuid.UUID, fullName, phone string, email *string, pas
 		CreatedBy:    &ownerID,
 		CreatedAt:    now,
 		UpdatedAt:    now,
+		// A new employee starts without permissions; the owner turns on
+		// the ones they want.
+		Permissions: []sharedDomain.Permission{},
 	}
 	return u, nil
 }
@@ -205,6 +215,57 @@ func (u *User) ClearPIN(now time.Time) {
 
 func (u *User) IsOwner() bool    { return u.Role == RoleOwner }
 func (u *User) IsOperator() bool { return u.Role == RoleOperator }
+
+// Can reports whether the user may do p. The owner can do everything.
+func (u *User) Can(p sharedDomain.Permission) bool {
+	return u.Grants().Allows(p)
+}
+
+// Grants is the request-scoped view of what the user may do.
+func (u *User) Grants() sharedDomain.Grants {
+	if u.IsOwner() {
+		return sharedDomain.OwnerGrants()
+	}
+	return sharedDomain.OperatorGrants(u.Permissions)
+}
+
+// EffectivePermissions is what the user may do, in catalog order: every
+// permission for the owner, the allowed ones for an operator.
+func (u *User) EffectivePermissions() []sharedDomain.Permission {
+	out := make([]sharedDomain.Permission, 0, len(sharedDomain.AllPermissions))
+	for _, p := range sharedDomain.AllPermissions {
+		if u.Can(p) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// SetPermissions replaces an operator's permissions. Unknown values are
+// rejected and duplicates dropped; the result is stored in catalog order so
+// the same choice always serializes the same way.
+func (u *User) SetPermissions(perms []sharedDomain.Permission, now time.Time) error {
+	if u.IsOwner() {
+		return userErrors.ErrOwnerHasAllPermissions
+	}
+	chosen := make(map[sharedDomain.Permission]bool, len(perms))
+	for _, p := range perms {
+		if !sharedDomain.IsKnownPermission(p) {
+			return userErrors.ErrUnknownPermission
+		}
+		chosen[p] = true
+	}
+	cleaned := make([]sharedDomain.Permission, 0, len(chosen))
+	for _, p := range sharedDomain.AllPermissions {
+		if chosen[p] {
+			cleaned = append(cleaned, p)
+		}
+	}
+	u.Permissions = cleaned
+	u.Version++
+	u.UpdatedAt = now
+	return nil
+}
 
 // MarkLoggedIn bumps last_login_at. Called from UC-002 after credentials check.
 func (u *User) MarkLoggedIn(now time.Time) {

@@ -73,6 +73,11 @@ var SyncedTables = []EntityTable{
 			// already opaque so we don't add a separate encryption
 			// layer here (same posture as password_hash above).
 			"pin_hash", "pin_assigned_at",
+			// permissions: per-operator permissions (JSON array). Pushed by
+			// the desktop like any column; pulls read it from the live row
+			// (canonicalAugmentExpr) so an older desktop that pushes the
+			// user without the key never leaves a stale payload behind.
+			"permissions",
 		},
 	},
 	{
@@ -314,6 +319,8 @@ var SyncedTables = []EntityTable{
 			"adjusted_after_withdrawal", "integrity_note",
 			"opened_at", "opened_by", "closed_at", "closed_by", "reconciled_at",
 			"reconciled_by", "stale_at", "withdrawn_at", "withdrawn_by",
+			"reviewed_at", "reviewed_by", "review_note",
+			"opening_expected_cash", "opening_note",
 		},
 	},
 	{

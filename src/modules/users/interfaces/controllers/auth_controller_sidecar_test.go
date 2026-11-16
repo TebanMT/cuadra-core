@@ -45,6 +45,7 @@ func setupSidecarTestDB(t *testing.T) (*sqlx.DB, sharedDomain.UnitOfWork) {
 		"../../../../../db_migrations/sqlite/008_gym_charge_settings.sql",
 		"../../../../../db_migrations/sqlite/018_gyms_stripe_customer.sql",
 		"../../../../../db_migrations/sqlite/047_launch_access.sql",
+		"../../../../../db_migrations/sqlite/050_user_permissions.sql",
 	} {
 		b, err := os.ReadFile(m)
 		if err != nil {
@@ -337,8 +338,8 @@ func TestProxy_SignupMirrorsCloudIdentityIntoLocalDB(t *testing.T) {
 }
 
 // TestProxy_RefreshAlwaysSucceedsWithCachedLogin — desktop is a kiosko;
-// /auth/refresh must NEVER kick the operator out as long as cached_login
-// exists. The endpoint mints a fresh JWT pair locally, no cloud round-trip.
+// /auth/refresh must NEVER kick the user out while their refresh token is
+// valid. The endpoint mints a fresh JWT pair locally, no cloud round-trip.
 func TestProxy_RefreshAlwaysSucceedsWithCachedLogin(t *testing.T) {
 	_, uow := setupSidecarTestDB(t)
 	tokens := auth.NewJWTService("refresh-test-secret")
@@ -357,10 +358,19 @@ func TestProxy_RefreshAlwaysSucceedsWithCachedLogin(t *testing.T) {
 		ClientID:    uuid.New(),
 	})
 	// Prime cached_login.
-	if rec := doProxyReq(r, "POST", "/api/v1/auth/login", map[string]any{
+	login := doProxyReq(r, "POST", "/api/v1/auth/login", map[string]any{
 		"email": "owner@gym.com", "password": "secret",
-	}); rec.Code != 200 {
-		t.Fatalf("priming login = %d body=%s", rec.Code, rec.Body.String())
+	})
+	if login.Code != 200 {
+		t.Fatalf("priming login = %d body=%s", login.Code, login.Body.String())
+	}
+	var loginEnv struct {
+		Data struct {
+			RefreshToken string `json:"refresh_token"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(login.Body.Bytes(), &loginEnv); err != nil || loginEnv.Data.RefreshToken == "" {
+		t.Fatalf("login refresh token missing: %v body=%s", err, login.Body.String())
 	}
 
 	// Even when cloud is dead, refresh must succeed from cache.
@@ -372,7 +382,7 @@ func TestProxy_RefreshAlwaysSucceedsWithCachedLogin(t *testing.T) {
 		ClientID:    uuid.New(),
 	})
 	rec := doProxyReq(rOffline, "POST", "/api/v1/auth/refresh", map[string]any{
-		"refresh_token": "anything-the-desktop-stored",
+		"refresh_token": loginEnv.Data.RefreshToken,
 	})
 	if rec.Code != 200 {
 		t.Fatalf("refresh status = %d, want 200, body=%s", rec.Code, rec.Body.String())
@@ -421,4 +431,86 @@ func TestProxy_LoginRelaysCloud401(t *testing.T) {
 	if rec.Code != 401 {
 		t.Errorf("relayed status = %d, want 401", rec.Code)
 	}
+}
+
+// TestProxy_RefreshKeepsTheTokensUser — refresh used to mint from
+// cached_login (the owner's last online login on this laptop), so an
+// operator's refresh came back with an owner token. It must keep the
+// operator, and reject a token it did not sign.
+func TestProxy_RefreshKeepsTheTokensUser(t *testing.T) {
+	_, uow := setupSidecarTestDB(t)
+	tokens := auth.NewJWTService("refresh-test-secret")
+	cloud := newFakeCloud(t)
+	gymID := uuid.New()
+	ownerID := uuid.New()
+	cloud.respStatus = 200
+	cloud.respBody = []byte(fmt.Sprintf(
+		`{"status_code":200,"data":{"user_id":%q,"gym_id":%q,"role":"owner","access_token":"jwt","refresh_token":"r","setup_completed":true,"subscription_plan":"trial","gyms":[{"id":%q,"name":"Gym"}]}}`,
+		ownerID, gymID, gymID,
+	))
+	r := newProxyRouter(t, usersCtrl.SidecarAuthProxy{
+		CloudURL:    cloud.srv.URL,
+		UoW:         uow,
+		LocalTokens: tokens,
+		ClientID:    uuid.New(),
+	})
+	if rec := doProxyReq(r, "POST", "/api/v1/auth/login", map[string]any{
+		"email": "owner@gym.com", "password": "secret",
+	}); rec.Code != 200 {
+		t.Fatalf("priming login = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	operatorID := uuid.New()
+	opRefresh, err := tokens.GenerateRefreshToken(operatorID, gymID, "operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := doProxyReq(r, "POST", "/api/v1/auth/refresh", map[string]any{"refresh_token": opRefresh})
+	if rec.Code != 200 {
+		t.Fatalf("operator refresh = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var env struct {
+		Data struct {
+			AccessToken string `json:"access_token"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	claims, err := tokens.ValidateAccessToken(env.Data.AccessToken)
+	if err != nil {
+		t.Fatalf("access token invalid: %v", err)
+	}
+	if claims.UserID != operatorID || claims.Role != "operator" {
+		t.Errorf("refreshed claims = user %s role %q, want operator %s", claims.UserID, claims.Role, operatorID)
+	}
+
+	for name, token := range map[string]string{
+		"missing":      "",
+		"garbage":      "anything-the-desktop-stored",
+		"access token": mustAccessToken(t, tokens, operatorID, gymID),
+		"other secret": mustRefreshToken(t, auth.NewJWTService("another-secret"), ownerID, gymID),
+	} {
+		if rec := doProxyReq(r, "POST", "/api/v1/auth/refresh", map[string]any{"refresh_token": token}); rec.Code != 401 {
+			t.Errorf("%s: refresh = %d, want 401", name, rec.Code)
+		}
+	}
+}
+
+func mustAccessToken(t *testing.T, s auth.TokenService, user, gym uuid.UUID) string {
+	t.Helper()
+	tok, err := s.GenerateAccessToken(user, gym, "operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tok
+}
+
+func mustRefreshToken(t *testing.T, s auth.TokenService, user, gym uuid.UUID) string {
+	t.Helper()
+	tok, err := s.GenerateRefreshToken(user, gym, "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tok
 }

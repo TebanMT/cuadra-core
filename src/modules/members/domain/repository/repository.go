@@ -51,8 +51,19 @@ type MemberRepository interface {
 	// SHOULD use SELECT ... FOR UPDATE (Postgres) or SQLite's serialised tx
 	// guarantees so concurrent creates don't collide.
 	NextFolio(tx sharedDomain.Transaction, gymID uuid.UUID) (string, error)
-	// List supports UC-014. Returns rows + total. statusFilter is one of
-	// "" / "active" / "expiring_soon" / "expired" / "inactive".
+	// List supports UC-014. Returns rows + total. StatusFilter is one of:
+	//   - "" (sin filtro)
+	//   - "active": vigente (expiry >= hoy), incluye por vencer
+	//   - "expiring_soon": vigente que vence en 0..7 días
+	//   - "expired" ("Por cobrar"): lapsed ∪ unpaid_enrollment ∪ no_membership
+	//   - "lapsed": membership activa con expiry < hoy (denied_expired)
+	//   - "unpaid_enrollment": membership pending_payment (denied_unpaid_enrollment)
+	//   - "no_membership": sin membership active/pending_payment (denied_no_membership)
+	//   - "unrenewed": venció en los últimos 60 días y no renovó
+	//   - "inactive": socio no activo
+	// Los tres desgloses de "expired" son disjuntos y su suma es "expired";
+	// todos exigen socio activo. Un valor desconocido no filtra.
+	// Con Search, el orden es primero por relevancia (ver ListQuery.Search).
 	List(tx sharedDomain.Transaction, q ListQuery) ([]*MemberWithMembership, int, error)
 	GetWithCurrentMembership(tx sharedDomain.Transaction, gymID, memberID uuid.UUID) (*MemberWithMembership, error)
 	// GetNamesByIDs returns id→full_name for the given members. Missing IDs
@@ -79,8 +90,14 @@ type MemberContact struct {
 
 // ListQuery is the input for UC-014.
 type ListQuery struct {
-	GymID         uuid.UUID
-	Search        string // matches LOWER(full_name) prefix OR phone suffix
+	GymID uuid.UUID
+	// Search: el inicio de cualquier palabra del nombre (sin acentos ni
+	// mayúsculas) o un substring de los dígitos del teléfono. Si el término
+	// es numérico ("1124", "01124", "MEM-01124"), además el folio y el
+	// número de socio por igualdad numérica. Resultados por relevancia: el
+	// nombre empieza con el término, luego alguna palabra, luego
+	// folio/número/teléfono; dentro de cada grupo, el Sort pedido.
+	Search        string
 	StatusFilter  string // see MemberRepository.List
 	PlanID        *uuid.UUID
 	Sort          string // "name" | "expiry" | "created_at" | "last_checkin"

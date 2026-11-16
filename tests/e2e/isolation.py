@@ -6,7 +6,7 @@ import uuid
 
 def check_isolation(s):
     email = 'isolation-' + uuid.uuid4().hex + '@tinta-test.invalid'
-    account = s.request(s.cloud, 'POST', '/api/v1/auth/signup', {'full_name':'Otro Dueño', 'email':email, 'password':s.password, 'password_confirm':s.password})
+    account = s.request(s.cloud, 'POST', '/api/v1/auth/signup', {'full_name':'Otro Dueño', 'email':email, 'password':s.password, 'password_confirm':s.password, 'accepted_legal':True})
     other = account['gym_id']
     s.sql(f"UPDATE users SET email_verified_at=NOW() WHERE gym_id='{other}'; UPDATE gyms SET setup_completed_at=NOW(),subscription_plan='standard_monthly',all_features_access=false WHERE id='{other}'")
     auth = s.request(s.cloud, 'POST', '/api/v1/auth/login', {'email':email, 'password':s.password})

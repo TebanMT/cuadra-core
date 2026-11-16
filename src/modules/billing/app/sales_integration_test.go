@@ -472,11 +472,11 @@ func TestUC027_Close_PersistsCashCloseEvent(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("sale: %v", err)
 	}
-	counted := 18.0
+	counted, zero := 18.0, 0.0
 	differenceReason := "faltaron dos pesos en el conteo"
 	uc := reportsApp.NewCashClose(f.cashCloseReader, f.cashCloseEvents, f.uow, f.recorder)
 	out, err := uc.Close(context.Background(), reportsApp.CashCloseInput{
-		GymID: f.gymID, ActorUserID: f.ownerID, Date: day,
+		GymID: f.gymID, ActorUserID: f.ownerID, Date: day, OpeningCash: &zero,
 		CountedCash: &counted, DiscrepancyReason: &differenceReason,
 	})
 	if err != nil {

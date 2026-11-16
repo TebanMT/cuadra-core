@@ -54,7 +54,7 @@ var moneyColumns = map[string]map[string]bool{
 	"expense_occurrences":         {"expected_amount": true},
 	"memberships":                 {"price_snapshot": true},
 	"membership_types":            {"price": true, "enrollment_fee": true, "maintenance_fee": true},
-	"cash_close_events":           {"opening_cash": true, "activity_cash": true, "calculated_cash": true, "counted_cash": true, "cash_left": true, "withdrawn_cash": true},
+	"cash_close_events":           {"opening_cash": true, "activity_cash": true, "calculated_cash": true, "counted_cash": true, "cash_left": true, "withdrawn_cash": true, "opening_expected_cash": true},
 	"cash_transfers":              {"amount": true},
 	"applied_promotions":          {"discount_amount": true},
 }

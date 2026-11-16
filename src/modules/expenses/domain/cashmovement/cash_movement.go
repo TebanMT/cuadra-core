@@ -78,6 +78,14 @@ func (m *CashMovement) CanCorrectPhysical() bool {
 			(m.MovementType == CashIn && m.ClassificationStatus == NonOperating))
 }
 
+// CanBeVoidedBy lets whoever captured a movement take it back. Inventory
+// purchases are owned by their purchase and are corrected there; whether the
+// drawer is still open is decided by the cash session, not by the movement.
+func (m *CashMovement) CanBeVoidedBy(actor uuid.UUID) bool {
+	return m != nil && m.DeletedAt == nil && actor != uuid.Nil && m.OperatorID == actor &&
+		m.ClassificationStatus != AsInventoryPurchase
+}
+
 func (m *CashMovement) Classify(expenseID *uuid.UUID, status string, now time.Time) error {
 	if m.MovementType != CashOut {
 		return expErrors.ErrCashInCannotBeClassified

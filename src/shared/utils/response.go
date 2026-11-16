@@ -85,6 +85,8 @@ func DomainErrorToHttpCode(err error) int {
 			return 400
 		case sharedDomain.CodeBusiness:
 			return 422
+		case sharedDomain.CodeForbidden:
+			return 403
 		case sharedDomain.CodeUnexpected:
 			return 500
 		}

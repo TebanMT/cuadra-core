@@ -228,7 +228,7 @@ class Suite:
             'UPLOADS_DIR': str(self.root / 'cloud/uploads'),
         })
         self.wait('cloud health', lambda: self.request(self.cloud, 'GET', '/health'))
-        account = self.request(self.cloud, 'POST', '/api/v1/auth/signup', {'full_name': 'Dueño de Pruebas', 'email': self.email, 'password': self.password, 'password_confirm': self.password})
+        account = self.request(self.cloud, 'POST', '/api/v1/auth/signup', {'full_name': 'Dueño de Pruebas', 'email': self.email, 'password': self.password, 'password_confirm': self.password, 'accepted_legal': True})
         self.gym = account['gym_id']
         # Fixture preparation only; every purchase/receipt uses public HTTP.
         self.sql(f"UPDATE users SET email_verified_at=NOW() WHERE gym_id='{self.gym}'; UPDATE gyms SET name='Gimnasio de Pruebas Finales',timezone='{self.timezone}',setup_completed_at=NOW() WHERE id='{self.gym}'")

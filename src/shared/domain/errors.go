@@ -10,6 +10,7 @@ const (
 	CodeValidation ErrorCode = "01" // 400 — bad input
 	CodeBusiness   ErrorCode = "02" // 422 — valid input, broken invariant
 	CodeUnexpected ErrorCode = "00" // 500 — infra failure
+	CodeForbidden  ErrorCode = "03" // 403 — the actor may not do this
 )
 
 // CustomError wraps a sentinel error with a classification + optional

@@ -110,3 +110,13 @@ cloud_only: pg=056_stock_ledger.sql reason="reconciliación de existencias desde
 cloud_only: pg=057_tenant_rls.sql reason="aislamiento PostgreSQL por contexto transaccional y accesos iniciales acotados"
 
 cloud_only: pg=058_held_recovery.sql reason="acciones y control de envío de mensajes retenidos, autoridad cloud"
+
+cloud_only: pg=066_repair_cash_session_legacy_unique.sql reason="repara bases Postgres que registraron 040 pero conservaron el índice legado; SQLite ya lo quita en 035_cash_sessions"
+
+pair: pg=067_cash_session_review.sql sqlite=048_cash_session_review.sql
+
+pair: pg=068_cash_opening_check.sql sqlite=049_cash_opening_check.sql
+
+cloud_only: pg=069_legal_acceptances.sql reason="aceptación de términos y aviso de privacidad del dueño al crear la cuenta; el alta solo ocurre en el cloud"
+
+pair: pg=070_user_permissions.sql sqlite=050_user_permissions.sql

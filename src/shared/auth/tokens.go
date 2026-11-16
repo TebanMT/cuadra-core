@@ -124,6 +124,10 @@ func (s *JWTService) generate(userID, gymID uuid.UUID, role, tokenType string, d
 		Role:      role,
 		TokenType: tokenType,
 		RegisteredClaims: jwt.RegisteredClaims{
+			// jti: without it two tokens minted in the same second for the
+			// same user are byte-identical, so revoking one (logout, refresh
+			// rotation) would also revoke the other.
+			ID:        uuid.NewString(),
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(dur)),
 			Issuer:    "cuadra",

@@ -41,4 +41,6 @@ var (
 	ErrCashMovementNotCompatible   = errors.New("la salida de caja no coincide con la fecha, monto o caja de esta compra")
 	ErrCorrectionReasonRequired    = errors.New("indica un motivo de corrección de al menos 3 caracteres")
 	ErrCorrectionOwnerRequired     = errors.New("sólo el propietario puede deshacer una clasificación o vencimiento resuelto")
+	ErrVoidNotOwnMovement          = errors.New("sólo quien registró el movimiento puede anularlo; pídele al dueño que lo corrija")
+	ErrVoidCashSessionNotOpen      = errors.New("sólo puedes anular un movimiento mientras su caja sigue abierta; pídele al dueño que lo corrija")
 )

@@ -64,6 +64,7 @@ func setupMeFixture(t *testing.T) *meFixture {
 		"../../../../../db_migrations/sqlite/008_gym_charge_settings.sql",
 		"../../../../../db_migrations/sqlite/018_gyms_stripe_customer.sql",
 		"../../../../../db_migrations/sqlite/047_launch_access.sql",
+		"../../../../../db_migrations/sqlite/050_user_permissions.sql",
 	} {
 		b, err := os.ReadFile(m)
 		if err != nil {
@@ -84,6 +85,7 @@ func setupMeFixture(t *testing.T) *meFixture {
 	owner, err := signup.Execute(context.Background(), usersApp.SignupOwnerInput{
 		FullName: "Owner", Email: "owner@gym.com",
 		Password: "supersecret123", PasswordConfirm: "supersecret123",
+		AcceptedLegal: true,
 	})
 	if err != nil {
 		t.Fatalf("signup: %v", err)

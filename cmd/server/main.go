@@ -213,9 +213,11 @@ func main() {
 		log.Printf("R2 not configured (R2_ACCOUNT_ID / R2_ACCESS_KEY / R2_SECRET_KEY / R2_BUCKET) — member photo uploads will queue locally until env vars are set")
 	}
 
-	signup := usersApp.NewSignupOwner(userRepo, gymRepo, uow, tokens, recorder, trialDays)
+	signup := usersApp.NewSignupOwner(userRepo, gymRepo, uow, tokens, recorder, trialDays).
+		WithLegalAcceptances(usersRepoPg.NewLegalAcceptancePostgresRepository())
 	login := usersApp.NewLogin(userRepo, gymRepo, uow, tokens, recorder)
 	logout := usersApp.NewLogout(blRepo, uow, tokens, recorder)
+	refreshSession := usersApp.NewRefreshSession(userRepo, blRepo, uow, tokens)
 	requestReset := usersApp.NewRequestPasswordReset(userRepo, resetRepo, uow, recoveryChannels, recorder, dashboardURL)
 	confirmReset := usersApp.NewConfirmPasswordReset(userRepo, resetRepo, blRepo, uow, recorder)
 	requestEmailVerify := usersApp.NewRequestEmailVerification(userRepo, emailVerifyRepo, uow, emailSender, recorder, dashboardURL)
@@ -234,7 +236,7 @@ func main() {
 	updateChargeSettings := gymApp.NewUpdateChargeSettings(gymRepo, uow, recorder)
 	createOp := usersApp.NewCreateOperator(userRepo, uow, recorder).WithGymRepo(gymRepo)
 	updateOp := usersApp.NewUpdateOperator(userRepo, uow, recorder)
-	toggleOp := usersApp.NewToggleOperatorActive(userRepo, blRepo, uow, recorder)
+	toggleOp := usersApp.NewToggleOperatorActive(userRepo, blRepo, uow, recorder).WithGymRepo(gymRepo)
 	resetOp := usersApp.NewResetOperatorPassword(userRepo, blRepo, uow, recorder)
 	rotateOpPIN := usersApp.NewRotateOperatorPIN(userRepo, uow, recorder)
 	requestTransfer := usersApp.NewRequestTransferOwnership(userRepo, otpRepo, uow, recorder, emailSender)
@@ -246,7 +248,8 @@ func main() {
 	// Folios: el mismo generator que usa billing abajo, anticipado para
 	// que CreateMember pueda cobrar el primer pago en la misma tx.
 	folios := folioSvc.NewGenerator(paymentRepo)
-	createMember := memApp.NewCreateMemberWithBilling(memberRepo, membershipRepo, mtRepo, paymentRepo, folios, uow, recorder)
+	createMember := memApp.NewCreateMemberWithBilling(memberRepo, membershipRepo, mtRepo, paymentRepo, folios, uow, recorder).
+		WithGyms(gymRepo) // fee config + timezone for the operator-permission checks
 	// Promotions wire — declarado más abajo después de memberSvc, pero el
 	// CreateMember se puede enchufar después con WithPromotions una vez
 	// que applyPromo y memberSvc estén listos (ver línea ~232).
@@ -442,6 +445,7 @@ func main() {
 	deleteExpense.WithCashSessionMarker(cashClose)
 	updateCashMovement.WithCashSessionMarker(cashClose)
 	deleteCashMovement.WithCashSessionMarker(cashClose)
+	voidCashMovement := expApp.NewVoidOwnCashMovement(cashMovementRepo, expenseRepo, cashClose, uow, recorder)
 	reopenExpenseOccurrence.WithCashSessionMarker(cashClose)
 	correctSale := billingApp.NewCorrectSale(saleRepo, saleItemRepo, paymentRepo, saleCorrectionRepo,
 		refundRepo, productSvc, folios, cashClose, uow, recorder).WithGyms(gymRepo)
@@ -481,6 +485,7 @@ func main() {
 		Signup:             signup,
 		Login:              login,
 		Logout:             logout,
+		Refresh:            refreshSession,
 		RequestReset:       requestReset,
 		ConfirmReset:       confirmReset,
 		RequestEmailVerify: requestEmailVerify,
@@ -537,7 +542,8 @@ func main() {
 		WithRemotePurchases(prodApp.NewCreateRemoteInventoryPurchase(inventoryPurchaseRepo, productRepo, gymRepo, uow, recorder).WithReceipts(inventoryReceiptRepo), nil)
 	expenseController := expCtrl.NewExpenseController(createExpense, updateExpense, deleteExpense, listExpenses, tokens).
 		WithPlusOperations(getExpense, createCashMovement, updateCashMovement, deleteCashMovement, listCashMovements, classifyCashMovement, createExpenseTemplate, updateExpenseTemplate, setExpenseTemplateActive, listExpenseTemplates, materializeExpenseOccurrences, listExpenseOccurrences, payExpenseOccurrence, skipExpenseOccurrence).
-		WithCorrectionOperations(unclassifyCashMovement, reopenExpenseOccurrence)
+		WithCorrectionOperations(unclassifyCashMovement, reopenExpenseOccurrence).
+		WithVoidOperation(voidCashMovement)
 	expenseController.PlanGate = featureGate(gymDomain.FeatureRecurringExpenses)
 	// Cloud has no biometric reader — fingerprint flows live on the sidecar.
 	checkinCtrl := chkCtrl.NewCheckinController(checkinManual, checkinNumber, checkinOverride, checkinRepo, uow, nil, tokens).WithGyms(gymRepo)
@@ -588,7 +594,7 @@ func main() {
 	// del Checkout.
 	billingSuccessURL := envOrDefault("BILLING_SUCCESS_URL", dashboardURL+"/settings/subscription?status=success")
 	billingCancelURL := envOrDefault("BILLING_CANCEL_URL", dashboardURL+"/settings/subscription?status=cancelled")
-	startCheckout := subApp.NewStartCheckout(subGateways, gymRepo, userRepo, uow, billingSuccessURL, billingCancelURL)
+	startCheckout := subApp.NewStartCheckout(subGateways, gymRepo, subEventRepo, userRepo, uow, billingSuccessURL, billingCancelURL)
 	if launchOfferEnabled {
 		startCheckout.Launch = launchRepo
 	}
@@ -617,6 +623,14 @@ func main() {
 	r.Use(middleware.CORS(middleware.CORSConfig{
 		AllowedOrigins: parseOrigins(envOrDefault("CORS_ALLOWED_ORIGINS", "http://localhost:5174")),
 	}))
+	// Prueba terminada (UC-002): el dashboard queda en solo lectura igual que
+	// la recepción. A nivel engine y antes de registrar rutas para cubrir
+	// toda la API; trae su propia lista de rutas que siempre pasan (auth,
+	// sync, pagar el plan, webhooks).
+	r.Use(middleware.EnforceTrialReadOnly(tokens, gymRepo, uow))
+	// Permisos por operador (UC-007). El dashboard sólo lo usa el dueño, pero
+	// la API cloud aplica las mismas reglas que la recepción.
+	r.Use(middleware.EnforceOperatorPermissions(tokens, userRepo, uow))
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "tinta-server", "version": version})
 	})
@@ -705,6 +719,14 @@ func main() {
 	oxxoWorker := subApp.NewOXXORenewalWorker(oxxoReminderUC, oxxoCancelUC, oxxoInterval)
 	go oxxoWorker.Start(bgCtx)
 
+	// Fin de la prueba gratis (UC-002): cierra las pruebas vencidas sin pago.
+	// Les da TrialGraceDays de acceso completo y después la recepción queda en
+	// solo lectura con check-in. Corre cada hora (barato e idempotente).
+	expireTrials := subApp.NewExpireTrials(subDB.NewTrialExpiryPostgresReader(), recordSubEvent, uow)
+	trialInterval := time.Duration(envInt("TRIAL_EXPIRY_INTERVAL_M", 60)) * time.Minute
+	trialWorker := subApp.NewTrialExpiryWorker(expireTrials, trialInterval)
+	go trialWorker.Start(bgCtx)
+
 	port := envOrDefault("PORT", "8080")
 	log.Printf("tinta-server starting on :%s", port)
 
@@ -738,6 +760,7 @@ func main() {
 		dispatchWorker.Done(),
 		expiryScheduler.Done(),
 		oxxoWorker.Done(),
+		trialWorker.Done(),
 	} {
 		select {
 		case <-done:

@@ -87,6 +87,7 @@ func setupProducts(t *testing.T) *productsFixture {
 		Email:           "owner@gym.com",
 		Password:        "supersecret123",
 		PasswordConfirm: "supersecret123",
+		AcceptedLegal:   true,
 	})
 	if err != nil {
 		t.Fatalf("signup: %v", err)

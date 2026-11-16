@@ -57,6 +57,7 @@ func setupExpenses(t *testing.T) *expensesFixture {
 		"../../../../db_migrations/sqlite/012_expenses.sql",
 		"../../../../db_migrations/sqlite/018_gyms_stripe_customer.sql",
 		"../../../../db_migrations/sqlite/047_launch_access.sql",
+		"../../../../db_migrations/sqlite/050_user_permissions.sql",
 		"../../../../db_migrations/sqlite/030_stock_movements_is_purchase.sql",
 		"../../../../db_migrations/sqlite/032_expenses_plus.sql",
 		"../../../../db_migrations/sqlite/033_simple_financial_model.sql",
@@ -92,6 +93,7 @@ func setupExpenses(t *testing.T) *expensesFixture {
 		Email:           "owner@gym.com",
 		Password:        "supersecret123",
 		PasswordConfirm: "supersecret123",
+		AcceptedLegal:   true,
 	})
 	if err != nil {
 		t.Fatalf("signup: %v", err)

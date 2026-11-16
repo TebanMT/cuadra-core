@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -307,8 +308,16 @@ func TestRangeReport_CashCoverageDistinguishesNoActivityFromUncoveredCash(t *tes
 	if noActivity.CashReconciliation.Status != "complete" || !noActivity.CashReconciliation.Complete {
 		t.Fatalf("no activity = %+v, want complete coverage with zero activity", noActivity.CashReconciliation)
 	}
+	noActivityWire, err := json.Marshal(noActivity.CashReconciliation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(noActivityWire), `"uncovered_activity_dates":[]`) {
+		t.Fatalf("no activity wire must carry an empty dates array: %s", noActivityWire)
+	}
 	uncovered, err := reports.NewRangeReport(&fakeReader{cashCounted: reports.CashCountSummary{
 		ActiveDays: 1, MissingActiveDays: 1, UncoveredActivityDays: 1,
+		UncoveredActivityDates: []string{"2026-11-03"},
 	}}, fakeUoW{}).Execute(context.Background(), reports.RangeReportInput{
 		GymID: uuid.New(), Period: reports.PeriodMonth,
 	})
@@ -317,6 +326,49 @@ func TestRangeReport_CashCoverageDistinguishesNoActivityFromUncoveredCash(t *tes
 	}
 	if uncovered.CashReconciliation.Status != "incomplete" || uncovered.CashReconciliation.Complete {
 		t.Fatalf("uncovered cash = %+v, want incomplete", uncovered.CashReconciliation)
+	}
+	if got := uncovered.CashReconciliation.UncoveredActivityDates; len(got) != 1 || got[0] != "2026-11-03" {
+		t.Fatalf("uncovered dates = %#v, want [2026-11-03]", got)
+	}
+}
+
+func TestRangeReport_CashDifferencesTotalShortagesAndSurplusesSeparately(t *testing.T) {
+	empty, err := reports.NewRangeReport(&fakeReader{}, fakeUoW{}).Execute(context.Background(), reports.RangeReportInput{
+		GymID: uuid.New(), Period: reports.PeriodMonth,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyWire, err := json.Marshal(empty.CashReconciliation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(emptyWire), `"difference_sessions":[]`) ||
+		!strings.Contains(string(emptyWire), `"shortage_total":0`) {
+		t.Fatalf("empty wire must carry zero totals and an empty list: %s", emptyWire)
+	}
+	shortA, shortB, surplus := uuid.New(), uuid.New(), uuid.New()
+	out, err := reports.NewRangeReport(&fakeReader{cashCounted: reports.CashCountSummary{
+		DifferenceSessions: []reports.CashSessionDifference{
+			{SessionID: shortA, Date: "2026-11-05", Sequence: 1, Difference: -50.1},
+			{SessionID: surplus, Date: "2026-11-04", Sequence: 1, Difference: 200},
+			{SessionID: uuid.New(), Date: "2026-11-03", Sequence: 1, Difference: 0.004},
+			{SessionID: shortB, Date: "2026-11-02", Sequence: 2, Difference: -149.9},
+		},
+	}}, fakeUoW{}).Execute(context.Background(), reports.RangeReportInput{
+		GymID: uuid.New(), Period: reports.PeriodMonth,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cash := out.CashReconciliation
+	// A $200 surplus must not cancel out $200 in shortages.
+	if cash.ShortageTotal != 200 || cash.ShortageSessions != 2 || cash.SurplusTotal != 200 || cash.SurplusSessions != 1 {
+		t.Fatalf("totals = shortage %v/%d surplus %v/%d", cash.ShortageTotal, cash.ShortageSessions, cash.SurplusTotal, cash.SurplusSessions)
+	}
+	if len(cash.DifferenceSessions) != 3 || cash.DifferenceSessions[0].SessionID != shortA ||
+		cash.DifferenceSessions[1].SessionID != surplus || cash.DifferenceSessions[2].SessionID != shortB {
+		t.Fatalf("difference sessions = %+v, want sub-cent rows dropped and order kept", cash.DifferenceSessions)
 	}
 }
 

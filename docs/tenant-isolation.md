@@ -36,6 +36,16 @@ heredar su rol. Esta es la separación que se comprueba, no una política
 probada con un superusuario que la elude. El contexto representa una identidad
 ya autenticada por la aplicación; RLS no sustituye esa autenticación.
 
+## Respaldos
+
+`pg_dump` necesita leer todos los gimnasios, así que no puede usar el rol de
+la API. Usa `tinta_backup`: `LOGIN BYPASSRLS` con `pg_read_all_data`, sin
+superusuario, sin CREATE y sin ser dueño de tablas. Su credencial vive en
+`/etc/tinta/backup.env` (root, 0600) y solo la recibe `tinta-backup.service`,
+que corre como el usuario de sistema `tinta-backup`. Setup:
+`scripts/deploy/04-backup-role.sh` y la sección "Backups a R2" de
+`scripts/deploy/README.md`.
+
 ## Preparación del servidor antes de publicar
 
 **Estos pasos no se ejecutaron en producción.** Requieren preparar la

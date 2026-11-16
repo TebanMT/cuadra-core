@@ -353,6 +353,31 @@ type MembershipAdjustment struct {
 	DeletedAt      *time.Time
 }
 
+// PromoAdjustmentReasonPrefix starts the reason of the adjustments that a
+// promotion's extra_days writes. Those days are part of the computed expiry,
+// not a manual change, so "volver al vencimiento calculado" keeps them.
+const PromoAdjustmentReasonPrefix = "promo: "
+
+// IsPromotion reports whether a promotion wrote the adjustment.
+func (a *MembershipAdjustment) IsPromotion() bool {
+	return strings.HasPrefix(a.Reason, PromoAdjustmentReasonPrefix)
+}
+
+// ManualAdjustmentDays sums the days of the manual adjustments (UC-017
+// "extender" / "establecer fecha", including earlier resets). Subtracting it
+// from the current expiry gives the expiry the system computed: plan duration,
+// renewal and promotions.
+func ManualAdjustmentDays(adjustments []*MembershipAdjustment) int {
+	total := 0
+	for _, a := range adjustments {
+		if a == nil || a.IsPromotion() {
+			continue
+		}
+		total += a.DaysAdded
+	}
+	return total
+}
+
 // NewAdjustment validates the reason length (≥5 — chk_adjustments_reason_length)
 // before constructing the row.
 func NewAdjustment(id uuid.UUID, gymID, membershipID, adjustedBy uuid.UUID,

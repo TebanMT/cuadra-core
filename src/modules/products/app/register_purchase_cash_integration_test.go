@@ -14,6 +14,7 @@ import (
 	prodApp "github.com/cuadra/cuadra-core/src/modules/products/app"
 	prodErrors "github.com/cuadra/cuadra-core/src/modules/products/domain/errors"
 	repos "github.com/cuadra/cuadra-core/src/modules/products/infraestructure/db/repositories"
+	shared "github.com/cuadra/cuadra-core/src/shared/domain"
 	"github.com/google/uuid"
 )
 
@@ -147,5 +148,41 @@ func TestReceptionPurchaseCashAtomicityAndReplay(t *testing.T) {
 	}
 	if count("SELECT COUNT(*) FROM pragma_foreign_key_check") != 0 {
 		t.Fatal("broken foreign keys")
+	}
+}
+
+// Operator permissions (UC-007): paying from the drawer needs cash_out and a
+// new product from the purchase form needs products. Both are checked
+// before anything is written.
+func TestReceptionPurchasePermissions(t *testing.T) {
+	f := setupProducts(t)
+	operator := uuid.New()
+	now := time.Now().UTC().UnixMilli()
+	if _, err := f.db.Exec(`INSERT INTO users (id,gym_id,version,created_at,updated_at,email,password_hash,full_name,role,active) VALUES (?,?,1,?,?,?,'unused','Reception','operator',1)`, operator, f.gymID, now, now, operator.String()+"@test.local"); err != nil {
+		t.Fatal(err)
+	}
+	cash := expenseApp.NewInventoryPurchaseCashService(expenseRepos.NewCashMovementSQLiteRepository())
+	uc := prodApp.NewRegisterInventoryPurchase(repos.NewInventoryPurchaseSQLiteRepository(), repos.NewInventoryPurchaseReceiptSQLiteRepository(), f.productRepo, gymRepos.NewGymSQLiteRepository(), cash, f.uow, f.recorder, "desktop")
+	newLine := []prodApp.PurchaseLineInput{{ProductID: uuid.New(), Quantity: 5, UnitCost: 10, NewProduct: &prodApp.PurchaseProductInput{Name: "Agua", Price: 20}}}
+	paid := prodApp.RegisterInventoryPurchaseInput{ID: uuid.New(), GymID: f.gymID, ActorUserID: operator, ActorRole: "operator", Received: true, Paid: true,
+		PaidOn: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC), PaymentMethod: "cash", PaidFrom: "cash_drawer", Items: newLine}
+	grants := func(perms ...shared.Permission) context.Context {
+		return shared.WithGrants(context.Background(), shared.OperatorGrants(perms))
+	}
+
+	if _, err := uc.Execute(grants(shared.PermProducts), paid); !errors.Is(err, shared.ErrPermissionDenied) {
+		t.Errorf("paid from the drawer without cash_out: err = %v", err)
+	}
+	pending := paid
+	pending.ID, pending.Paid, pending.PaidOn, pending.PaymentMethod, pending.PaidFrom = uuid.New(), false, time.Time{}, "", ""
+	if _, err := uc.Execute(grants(), pending); !errors.Is(err, shared.ErrPermissionDenied) {
+		t.Errorf("new product without products: err = %v", err)
+	}
+	var count int
+	if err := f.db.Get(&count, "SELECT COUNT(*) FROM inventory_purchases"); err != nil || count != 0 {
+		t.Fatalf("denied purchases wrote %d rows (err %v)", count, err)
+	}
+	if _, err := uc.Execute(grants(shared.PermProducts, shared.PermCashOut), paid); err != nil {
+		t.Fatalf("operator with both: %v", err)
 	}
 }

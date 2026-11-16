@@ -36,6 +36,7 @@ type AuthController struct {
 	Signup            *usersApp.SignupOwner
 	Login             *usersApp.Login
 	Logout            *usersApp.Logout
+	Refresh           *usersApp.RefreshSession // solo cmd/server; el sidecar refresca offline en SidecarAuthProxy
 	RequestReset      *usersApp.RequestPasswordReset
 	ConfirmReset      *usersApp.ConfirmPasswordReset
 	UpdateBasicInfo   *gymApp.UpdateBasicInfo
@@ -145,6 +146,9 @@ func (ctrl *AuthController) RegisterRoutes(r *gin.Engine) {
 		authGrp.POST("/signup", ctrl.handleSignup)
 		authGrp.POST("/login", ctrl.handleLogin)
 		authGrp.POST("/logout", ctrl.handleLogout)
+		if ctrl.Refresh != nil {
+			authGrp.POST("/refresh", ctrl.handleRefresh)
+		}
 		// Forgot-password manda email. Sin throttle, un atacante podría
 		// drenar la cuota diaria SMTP de Zoho con un loop. burst=3 con
 		// refill cada 60s por (IP, email): un usuario humano olvidando su
@@ -315,6 +319,9 @@ type signupReq struct {
 	Phone           string `json:"phone,omitempty"`
 	Password        string `json:"password" validate:"required,min=8"`
 	PasswordConfirm string `json:"password_confirm" validate:"required"`
+	// AcceptedLegal: casilla "Acepto los Términos del Servicio y el Aviso
+	// de Privacidad". El caso de uso rechaza el alta sin ella.
+	AcceptedLegal bool `json:"accepted_legal"`
 }
 
 type signupResp struct {
@@ -372,6 +379,15 @@ type logoutReq struct {
 	RefreshToken string `json:"refresh_token"`
 }
 
+type refreshReq struct {
+	RefreshToken string `json:"refresh_token" validate:"required"`
+}
+
+type refreshResp struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+}
+
 type forgotPasswordReq struct {
 	Email string `json:"email" validate:"required,email"`
 }
@@ -417,6 +433,8 @@ type createOperatorReq struct {
 	FullName string  `json:"full_name" validate:"required,min=3,max=100"`
 	Phone    string  `json:"phone" validate:"required"`
 	Email    *string `json:"email,omitempty"`
+	// Permissions: lo que el dueño le permite desde el alta (omitido = ninguno).
+	Permissions []string `json:"permissions,omitempty"`
 }
 
 // createOperatorResp viaja al FE con el PIN plaintext (mostrado UNA vez +
@@ -436,6 +454,8 @@ type updateOperatorReq struct {
 	FullName *string `json:"full_name,omitempty"`
 	Email    *string `json:"email,omitempty"`
 	Phone    *string `json:"phone,omitempty"`
+	// Permissions: omitido = sin cambio; una lista (vacía incluida) los reemplaza.
+	Permissions *[]string `json:"permissions,omitempty"`
 }
 
 // rotateOperatorPINResp viaja al FE cuando el dueño regenera el PIN del
@@ -551,6 +571,7 @@ func (ctrl *AuthController) handleSignup(c *gin.Context) {
 	out, err := ctrl.Signup.Execute(c.Request.Context(), usersApp.SignupOwnerInput{
 		FullName: req.FullName, Email: req.Email, Phone: req.Phone,
 		Password: req.Password, PasswordConfirm: req.PasswordConfirm,
+		AcceptedLegal: req.AcceptedLegal,
 	})
 	if err != nil {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
@@ -667,6 +688,42 @@ func (ctrl *AuthController) handleLogout(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+// handleRefresh cambia un refresh token vivo por un par nuevo. El dashboard
+// lo llama cuando vence su access token de 15 minutos; cualquier 401/403 lo
+// manda al login.
+func (ctrl *AuthController) handleRefresh(c *gin.Context) {
+	var req refreshReq
+	if !bind(c, &req) {
+		return
+	}
+	out, err := ctrl.Refresh.Execute(c.Request.Context(), req.RefreshToken)
+	if err != nil {
+		utils.ErrorResponse(c, refreshErrorStatus(err), err)
+		return
+	}
+	// Misma regla que /auth/login: el dashboard es del dueño. Si al
+	// operador lo cambiaron de rol, su sesión de dashboard termina aquí.
+	if ctrl.OwnerOnlyLogin && out.Role != userDomain.RoleOwner && readClientID(c) == uuid.Nil {
+		utils.ErrorResponse(c, http.StatusForbidden, userErrors.ErrOwnerOnlyLogin)
+		return
+	}
+	utils.JsonResponse(c, http.StatusOK, refreshResp{
+		AccessToken:  out.AccessToken,
+		RefreshToken: out.RefreshToken,
+	})
+}
+
+func refreshErrorStatus(err error) int {
+	switch {
+	case errors.Is(err, userErrors.ErrInvalidRefreshToken):
+		return http.StatusUnauthorized
+	case errors.Is(err, userErrors.ErrAccountInactive):
+		return http.StatusForbidden
+	default:
+		return utils.DomainErrorToHttpCode(err)
+	}
 }
 
 func (ctrl *AuthController) handleForgotPassword(c *gin.Context) {
@@ -1332,9 +1389,10 @@ func (ctrl *AuthController) handleCreateOperator(c *gin.Context) {
 	}
 	out, err := ctrl.CreateOperator.Execute(c.Request.Context(), usersApp.CreateOperatorInput{
 		GymID: gymID, OwnerID: ownerID,
-		FullName: req.FullName,
-		Phone:    req.Phone,
-		Email:    req.Email,
+		FullName:    req.FullName,
+		Phone:       req.Phone,
+		Email:       req.Email,
+		Permissions: parsePermissionKeys(req.Permissions),
 	})
 	if err != nil {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
@@ -1385,9 +1443,15 @@ func (ctrl *AuthController) handleUpdateOperator(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, err)
 		return
 	}
+	var permissions *[]sharedDomain.Permission
+	if req.Permissions != nil {
+		parsed := parsePermissionKeys(*req.Permissions)
+		permissions = &parsed
+	}
 	out, err := ctrl.UpdateOperator.Execute(c.Request.Context(), usersApp.UpdateOperatorInput{
 		GymID: gymID, ActorUserID: actorID, TargetID: targetID,
 		FullName: req.FullName, Email: req.Email, Phone: req.Phone,
+		Permissions: permissions,
 	})
 	if err != nil {
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)

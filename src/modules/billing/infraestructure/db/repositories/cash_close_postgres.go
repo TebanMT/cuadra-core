@@ -389,6 +389,8 @@ func (r *CashCloseEventPostgresRepository) Update(tx sharedDomain.Transaction, e
 			"closed_by": e.ClosedBy, "reconciled_at": e.ReconciledAt,
 			"reconciled_by": e.ReconciledBy, "stale_at": e.StaleAt,
 			"withdrawn_at": e.WithdrawnAt, "withdrawn_by": e.WithdrawnBy,
+			"reviewed_at": e.ReviewedAt, "reviewed_by": e.ReviewedBy, "review_note": e.ReviewNote,
+			"opening_expected_cash": e.OpeningExpectedCash, "opening_note": e.OpeningNote,
 		})
 	if res.Error != nil {
 		return nil, res.Error
@@ -428,6 +430,9 @@ func cashClosePayload(e *cashCloseDomain.CashCloseEvent) map[string]any {
 		"reconciled_at": cashCloseTimeMillis(e.ReconciledAt), "reconciled_by": e.ReconciledBy,
 		"stale_at": cashCloseTimeMillis(e.StaleAt), "withdrawn_at": cashCloseTimeMillis(e.WithdrawnAt),
 		"withdrawn_by": e.WithdrawnBy,
+		"reviewed_at":  cashCloseTimeMillis(e.ReviewedAt), "reviewed_by": e.ReviewedBy,
+		"review_note":           e.ReviewNote,
+		"opening_expected_cash": e.OpeningExpectedCash, "opening_note": e.OpeningNote,
 	}
 }
 
@@ -546,6 +551,11 @@ func cashCloseEventToModel(e *cashCloseDomain.CashCloseEvent) models.CashCloseEv
 		StaleAt:                 e.StaleAt,
 		WithdrawnAt:             e.WithdrawnAt,
 		WithdrawnBy:             e.WithdrawnBy,
+		ReviewedAt:              e.ReviewedAt,
+		ReviewedBy:              e.ReviewedBy,
+		ReviewNote:              e.ReviewNote,
+		OpeningExpectedCash:     e.OpeningExpectedCash,
+		OpeningNote:             e.OpeningNote,
 	}
 }
 
@@ -581,6 +591,11 @@ func cashCloseEventFromModel(m *models.CashCloseEventModel) *cashCloseDomain.Cas
 		StaleAt:                 m.StaleAt,
 		WithdrawnAt:             m.WithdrawnAt,
 		WithdrawnBy:             m.WithdrawnBy,
+		ReviewedAt:              m.ReviewedAt,
+		ReviewedBy:              m.ReviewedBy,
+		ReviewNote:              m.ReviewNote,
+		OpeningExpectedCash:     m.OpeningExpectedCash,
+		OpeningNote:             m.OpeningNote,
 		CreatedAt:               m.CreatedAt,
 		UpdatedAt:               m.UpdatedAt,
 		DeletedAt:               m.DeletedAt,

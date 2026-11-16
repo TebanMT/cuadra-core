@@ -10,6 +10,7 @@ package reports
 
 import (
 	"context"
+	"math"
 	"time"
 
 	"github.com/google/uuid"
@@ -139,18 +140,39 @@ type CashReconciliation struct {
 	// These counters partition tracked, non-deleted sessions in the period by their
 	// effective status. A late movement turns a previously reconciled session
 	// into stale for reporting, even before its persisted status catches up.
-	HistoricalActivityDays          int `json:"historical_activity_days"`
-	HistoricalSessions              int `json:"historical_sessions"`
-	ActiveDays                      int `json:"active_days"`
-	MissingActiveDays               int `json:"missing_active_days"`
-	UncoveredActivityDays           int `json:"uncovered_activity_days"`
-	OpenSessions                    int `json:"open_sessions"`
-	ClosedUnverifiedSessions        int `json:"closed_unverified_sessions"`
-	ReconciledSessions              int `json:"reconciled_sessions"`
-	StaleSessions                   int `json:"stale_sessions"`
-	WithdrawnSessions               int `json:"withdrawn_sessions"`
-	UnknownOpeningSessions          int `json:"unknown_opening_sessions"`
-	AdjustedAfterWithdrawalSessions int `json:"adjusted_after_withdrawal_sessions"`
+	HistoricalActivityDays int `json:"historical_activity_days"`
+	HistoricalSessions     int `json:"historical_sessions"`
+	ActiveDays             int `json:"active_days"`
+	MissingActiveDays      int `json:"missing_active_days"`
+	UncoveredActivityDays  int `json:"uncovered_activity_days"`
+	// Ascending YYYY-MM-DD business dates behind UncoveredActivityDays, so the
+	// owner can open the affected day instead of bisecting the range.
+	UncoveredActivityDates []string `json:"uncovered_activity_dates"`
+	// Certified counts that did not match, newest first. Shortages and
+	// surpluses are totalled separately so a surplus never hides a shortage.
+	// ADR-011: these sums belong to the session detail, never next to the
+	// latest count.
+	ShortageTotal      float64                 `json:"shortage_total"`
+	ShortageSessions   int                     `json:"shortage_sessions"`
+	SurplusTotal       float64                 `json:"surplus_total"`
+	SurplusSessions    int                     `json:"surplus_sessions"`
+	DifferenceSessions []CashSessionDifference `json:"difference_sessions"`
+	// First openings that did not match the previous count: cash that moved
+	// between one day's count and the next day's opening. Reported apart from
+	// count differences and never part of the coverage verdict.
+	OpeningShortageTotal            float64                 `json:"opening_shortage_total"`
+	OpeningShortageSessions         int                     `json:"opening_shortage_sessions"`
+	OpeningSurplusTotal             float64                 `json:"opening_surplus_total"`
+	OpeningSurplusSessions          int                     `json:"opening_surplus_sessions"`
+	OpeningDifferences              []CashOpeningDifference `json:"opening_differences"`
+	OpenSessions                    int                     `json:"open_sessions"`
+	ClosedUnverifiedSessions        int                     `json:"closed_unverified_sessions"`
+	ReviewedSessions                int                     `json:"reviewed_sessions"`
+	ReconciledSessions              int                     `json:"reconciled_sessions"`
+	StaleSessions                   int                     `json:"stale_sessions"`
+	WithdrawnSessions               int                     `json:"withdrawn_sessions"`
+	UnknownOpeningSessions          int                     `json:"unknown_opening_sessions"`
+	AdjustedAfterWithdrawalSessions int                     `json:"adjusted_after_withdrawal_sessions"`
 	// Historical expenses with an ambiguous source are not silently applied to
 	// the drawer. The financial result remains valid, but physical cash cannot
 	// be certified until an owner confirms Caja or Fondo.
@@ -168,8 +190,8 @@ func cashReconciliationCoverage(summary CashCountSummary, totalSessions, reconci
 	if summary.StaleSessions > 0 {
 		return "stale", false, true
 	}
-	resolved := reconciledSessions + summary.WithdrawnSessions
-	complete := summary.MissingActiveDays == 0 &&
+	resolved := reconciledSessions + summary.WithdrawnSessions + summary.ReviewedSessions
+	covered := summary.MissingActiveDays == 0 &&
 		summary.UncoveredActivityDays == 0 &&
 		summary.OpenSessions == 0 &&
 		summary.ClosedUnverifiedSessions == 0 &&
@@ -177,10 +199,12 @@ func cashReconciliationCoverage(summary CashCountSummary, totalSessions, reconci
 		summary.AdjustedAfterWithdrawalSessions == 0 &&
 		summary.LegacyCashSourceUnverifiedCount == 0 &&
 		resolved == totalSessions &&
-		summary.CountedCloses == summary.TotalCloses
-	if complete {
-		// Historical coverage is unknown, but cannot become a retroactive task.
-		if summary.HistoricalActivityDays > 0 || summary.HistoricalSessions > 0 {
+		summary.CountedCloses+summary.ReviewedSessions == summary.TotalCloses
+	if covered {
+		// Historical coverage is unknown and owner reviews certify nothing,
+		// but neither can become a pending task.
+		if summary.ReviewedSessions > 0 ||
+			summary.HistoricalActivityDays > 0 || summary.HistoricalSessions > 0 {
 			return "incomplete", false, false
 		}
 		return "complete", true, false
@@ -399,8 +423,9 @@ func (uc *RangeReport) executeInSnapshot(ctx context.Context, tx sharedDomain.Tr
 		totalSessions = countedCash.TotalCloses
 	}
 	reconciledSessions := countedCash.ReconciledSessions
-	if countedCash.OpenSessions+countedCash.ClosedUnverifiedSessions+countedCash.ReconciledSessions+
-		countedCash.StaleSessions+countedCash.WithdrawnSessions == 0 && totalSessions > 0 {
+	if countedCash.OpenSessions+countedCash.ClosedUnverifiedSessions+countedCash.ReviewedSessions+
+		countedCash.ReconciledSessions+countedCash.StaleSessions+countedCash.WithdrawnSessions == 0 &&
+		totalSessions > 0 {
 		reconciledSessions = countedCash.CountedCloses
 	}
 	status, complete, requiresAttention := cashReconciliationCoverage(countedCash, totalSessions, reconciledSessions)
@@ -409,6 +434,46 @@ func (uc *RangeReport) executeInSnapshot(ctx context.Context, tx sharedDomain.Tr
 	latestDifference := roundReportPointer(countedCash.LatestDifference)
 	if countedCash.LatestNeedsRecount || countedCash.LatestStatus == "stale" {
 		latestDifference = nil
+	}
+	uncoveredDates := countedCash.UncoveredActivityDates
+	if uncoveredDates == nil {
+		uncoveredDates = []string{}
+	}
+	differenceSessions := []CashSessionDifference{}
+	var shortageCents, surplusCents int64
+	var shortageSessions, surplusSessions int
+	for _, session := range countedCash.DifferenceSessions {
+		cents := int64(math.Round(session.Difference * 100))
+		if cents == 0 {
+			continue
+		}
+		session.Difference = float64(cents) / 100
+		if cents < 0 {
+			shortageCents -= cents
+			shortageSessions++
+		} else {
+			surplusCents += cents
+			surplusSessions++
+		}
+		differenceSessions = append(differenceSessions, session)
+	}
+	openingDifferences := []CashOpeningDifference{}
+	var openingShortCents, openingSurplusCents int64
+	var openingShortSessions, openingSurplusSessions int
+	for _, opening := range countedCash.OpeningDifferences {
+		cents := int64(math.Round(opening.Difference * 100))
+		if cents == 0 {
+			continue
+		}
+		opening.Difference = float64(cents) / 100
+		if cents < 0 {
+			openingShortCents -= cents
+			openingShortSessions++
+		} else {
+			openingSurplusCents += cents
+			openingSurplusSessions++
+		}
+		openingDifferences = append(openingDifferences, opening)
 	}
 	out.CashReconciliation = CashReconciliation{
 		Status:                          status,
@@ -428,8 +493,20 @@ func (uc *RangeReport) executeInSnapshot(ctx context.Context, tx sharedDomain.Tr
 		ActiveDays:                      countedCash.ActiveDays,
 		MissingActiveDays:               countedCash.MissingActiveDays,
 		UncoveredActivityDays:           countedCash.UncoveredActivityDays,
+		UncoveredActivityDates:          uncoveredDates,
+		ShortageTotal:                   float64(shortageCents) / 100,
+		ShortageSessions:                shortageSessions,
+		SurplusTotal:                    float64(surplusCents) / 100,
+		SurplusSessions:                 surplusSessions,
+		DifferenceSessions:              differenceSessions,
+		OpeningShortageTotal:            float64(openingShortCents) / 100,
+		OpeningShortageSessions:         openingShortSessions,
+		OpeningSurplusTotal:             float64(openingSurplusCents) / 100,
+		OpeningSurplusSessions:          openingSurplusSessions,
+		OpeningDifferences:              openingDifferences,
 		OpenSessions:                    countedCash.OpenSessions,
 		ClosedUnverifiedSessions:        countedCash.ClosedUnverifiedSessions,
+		ReviewedSessions:                countedCash.ReviewedSessions,
 		ReconciledSessions:              reconciledSessions,
 		StaleSessions:                   countedCash.StaleSessions,
 		WithdrawnSessions:               countedCash.WithdrawnSessions,

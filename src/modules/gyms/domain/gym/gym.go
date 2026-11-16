@@ -185,6 +185,30 @@ func (g *Gym) Cancel(now time.Time) {
 	g.UpdatedAt = now
 }
 
+// TrialGraceDays is the full access an owner keeps after the trial ends
+// without a payment. It covers an OXXO voucher that takes a day or two to
+// confirm. After it the reception goes read-only (IsTrialReadOnly).
+const TrialGraceDays = 3
+
+// EndTrial closes a trial that ended without a payment (cloud job
+// ExpireTrials, or any cancellation that reaches a gym still on trial). The
+// gym keeps full access for TrialGraceDays, written to SubscriptionEndsAt
+// like the grace of a cancelled paid plan. The grace counts from now, so an
+// owner always gets those days of notice even if the trial ended long before
+// the job ran (first deploy, job down); a trial cancelled before its end keeps
+// the days it had left.
+func (g *Gym) EndTrial(now time.Time) {
+	from := now
+	if g.TrialEndsAt != nil && g.TrialEndsAt.After(now) {
+		from = *g.TrialEndsAt
+	}
+	graceEnds := from.Add(TrialGraceDays * 24 * time.Hour)
+	g.SubscriptionStatus = StatusCancelled
+	g.SubscriptionEndsAt = &graceEnds
+	g.Version++
+	g.UpdatedAt = now
+}
+
 // ExtendTrial pushes TrialEndsAt forward by `days` (admin / sales tool, not a
 // processor event). Idempotent on already-extended trials.
 func (g *Gym) ExtendTrial(days int, now time.Time) {
@@ -261,15 +285,28 @@ func (g *Gym) HasActiveAccess(now time.Time) bool {
 // El cron del cloud es quien decide CUÁNDO marcar cancelled (típicamente al
 // final del trial sin upgrade, o tras N intentos fallidos de cobro). El
 // sidecar no se mete en esa decisión — sólo aplica el resultado.
+//
+// Una prueba que terminó sin pago nunca llega al bloqueo total: queda en
+// solo lectura con check-in (IsTrialReadOnly, UC-002).
 func (g *Gym) IsAccessHardBlocked(now time.Time) bool {
+	return g.SubscriptionPlan != PlanTrial && g.cancelledAfterGrace(now)
+}
+
+// IsTrialReadOnly reports whether the reception runs read-only because the
+// trial ended without a payment (UC-002 "Trial vencido"): the cloud already
+// confirmed it (status cancelled, via sync) and TrialGraceDays passed. The
+// operator can still look things up and check members in; charging, sign-ups
+// and edits wait until the owner activates a plan.
+func (g *Gym) IsTrialReadOnly(now time.Time) bool {
+	return g.SubscriptionPlan == PlanTrial && g.cancelledAfterGrace(now)
+}
+
+// cancelledAfterGrace: cancelled and the grace (SubscriptionEndsAt) is over.
+func (g *Gym) cancelledAfterGrace(now time.Time) bool {
 	if g.SubscriptionStatus != StatusCancelled {
 		return false
 	}
-	// Grace period activa = sigue operando hasta que venza.
-	if g.SubscriptionEndsAt != nil && g.SubscriptionEndsAt.After(now) {
-		return false
-	}
-	return true
+	return g.SubscriptionEndsAt == nil || !g.SubscriptionEndsAt.After(now)
 }
 
 // SetupStep figures out which wizard step the user lands on if they bail

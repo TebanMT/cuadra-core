@@ -39,6 +39,7 @@ func TestSignupOwner_SQLite(t *testing.T) {
 		"../../../../db_migrations/sqlite/008_gym_charge_settings.sql",
 		"../../../../db_migrations/sqlite/018_gyms_stripe_customer.sql",
 		"../../../../db_migrations/sqlite/047_launch_access.sql",
+		"../../../../db_migrations/sqlite/050_user_permissions.sql",
 	} {
 		schema, err := os.ReadFile(m)
 		if err != nil {
@@ -63,6 +64,7 @@ func TestSignupOwner_SQLite(t *testing.T) {
 		Email:           "esteban@gym.com",
 		Password:        "supersecret123",
 		PasswordConfirm: "supersecret123",
+		AcceptedLegal:   true,
 	})
 	if err != nil {
 		t.Fatalf("signup: %v", err)
@@ -126,6 +128,7 @@ func TestSignupOwner_SQLite(t *testing.T) {
 		Email:           "esteban@gym.com",
 		Password:        "anotherone1",
 		PasswordConfirm: "anotherone1",
+		AcceptedLegal:   true,
 	})
 	if err == nil {
 		t.Errorf("expected duplicate-email error")
@@ -154,6 +157,7 @@ func TestSignupOwner_WithPhone(t *testing.T) {
 		"../../../../db_migrations/sqlite/008_gym_charge_settings.sql",
 		"../../../../db_migrations/sqlite/018_gyms_stripe_customer.sql",
 		"../../../../db_migrations/sqlite/047_launch_access.sql",
+		"../../../../db_migrations/sqlite/050_user_permissions.sql",
 	} {
 		schema, err := os.ReadFile(m)
 		if err != nil {
@@ -182,6 +186,7 @@ func TestSignupOwner_WithPhone(t *testing.T) {
 		Phone:           inputPhone,
 		Password:        "supersecret123",
 		PasswordConfirm: "supersecret123",
+		AcceptedLegal:   true,
 	}); err != nil {
 		t.Fatalf("signup with phone: %v", err)
 	}
@@ -201,6 +206,7 @@ func TestSignupOwner_WithPhone(t *testing.T) {
 		Phone:           "abc-letters",
 		Password:        "anotherone1",
 		PasswordConfirm: "anotherone1",
+		AcceptedLegal:   true,
 	})
 	if err == nil {
 		t.Errorf("expected validation error for letters in phone")

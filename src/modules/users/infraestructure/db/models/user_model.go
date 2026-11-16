@@ -27,6 +27,8 @@ type UserModel struct {
 	PinHash            *string    `gorm:"column:pin_hash"`
 	PinAssignedAt      *time.Time `gorm:"column:pin_assigned_at"`
 	EmailVerifiedAt    *time.Time `gorm:"column:email_verified_at"`
+	// Permissions is a JSON array of permission keys (migration 070).
+	Permissions string `gorm:"type:jsonb;not null;default:'[]';column:permissions"`
 }
 
 func (UserModel) TableName() string { return "users" }

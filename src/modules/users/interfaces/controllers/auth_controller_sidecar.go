@@ -18,6 +18,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	usersApp "github.com/cuadra/cuadra-core/src/modules/users/app"
+	usersRepo "github.com/cuadra/cuadra-core/src/modules/users/domain/repository"
 	"github.com/cuadra/cuadra-core/src/shared/auth"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 	syncShared "github.com/cuadra/cuadra-core/src/shared/sync"
@@ -110,6 +111,12 @@ type SidecarAuthProxy struct {
 	// dump arbitrary gyms. Set at boot from the cached_login row (mirrored
 	// from cloud on installer redemption); zero until first online login.
 	LoginGymID func() uuid.UUID
+
+	// Users (optional) reads the local users table on /auth/refresh so a
+	// refreshed session keeps the token's user with its current role, and
+	// a deactivated operator can't refresh. Nil = the role signed in the
+	// refresh token.
+	Users usersRepo.UserRepository
 }
 
 func NewSidecarAuthProxy(cfg SidecarAuthProxy) *SidecarAuthProxy {
@@ -288,57 +295,58 @@ func (p *SidecarAuthProxy) handleLogin(c *gin.Context) {
 	})
 }
 
-// handleRefresh mints a fresh local JWT pair from cached_login. Cuadra
-// desktop is a kiosko — checkins must keep working all day, so this
-// endpoint is intentionally generous: as long as the operator has logged
-// in once on this laptop (cached_login present), refresh always succeeds.
+// handleRefresh mints a fresh local JWT pair for the user in the presented
+// refresh token. Cuadra desktop is a kiosko — checkins must keep working all
+// day, so a valid refresh token always succeeds, with the cloud offline too.
 //
-// Cloud is NOT consulted: today the cloud has no /auth/refresh handler,
-// and even when it does we still want the sidecar to be the trust anchor
-// for desktop sessions. The sidecar's local JWT_SECRET signs these
-// tokens; the same middleware verifies them on the next request, so the
-// loop closes without a network round-trip.
+// Cloud is NOT consulted, even though it now has its own /auth/refresh
+// (for the dashboard): we want the sidecar to be the trust anchor for
+// desktop sessions. The sidecar's local JWT_SECRET signs these tokens; the
+// same middleware verifies them on the next request, so the loop closes
+// without a network round-trip.
+//
+// The new pair is for the token's user, never for cached_login: that row
+// is the last online (owner) login on this laptop, and minting from it
+// handed an operator's session the owner's identity.
 //
 // Failure modes:
-//   - cached_login missing (fresh laptop, never logged in): 401 — the
-//     desktop has no cached identity to mint from. Operator must run
-//     /auth/login at least once with internet.
+//   - missing or invalid refresh token: 401 — the desktop goes back to
+//     the login screen (PIN or password).
+//   - the user is no longer active on this gym (local users table): 401.
 //   - JWT signing failure (local crypto error, vanishingly rare): 500.
 func (p *SidecarAuthProxy) handleRefresh(c *gin.Context) {
-	cached, ok := p.loadCachedLogin(c.Request.Context())
-	if !ok {
+	var req struct {
+		RefreshToken string `json:"refresh_token"`
+	}
+	_ = c.ShouldBindJSON(&req)
+	claims, err := p.LocalTokens.ValidateRefreshToken(strings.TrimSpace(req.RefreshToken))
+	if err != nil {
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-			"error": "auth.refresh.errors.no_cache",
-			"hint":  "Necesitas iniciar sesión otra vez con internet.",
+			"error": "auth.refresh.errors.invalid",
+			"hint":  "Tu sesión terminó. Vuelve a entrar.",
 		})
 		return
 	}
-	userID, err := uuid.Parse(cached.UserID)
-	if err != nil {
-		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "cached user_id invalid"})
+	role, ok := p.refreshRole(c.Request.Context(), claims)
+	if !ok {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+			"error": "auth.refresh.errors.inactive",
+			"hint":  "Tu usuario ya no está activo en este gimnasio.",
+		})
 		return
 	}
-	gymID, err := uuid.Parse(cached.GymID)
-	if err != nil {
-		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "cached gym_id invalid"})
-		return
-	}
-	role := cached.Role
-	if role == "" {
-		role = "owner"
-	}
-	access, err := p.LocalTokens.GenerateAccessToken(userID, gymID, role)
+	access, err := p.LocalTokens.GenerateAccessToken(claims.UserID, claims.GymID, role)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	refresh, err := p.LocalTokens.GenerateRefreshToken(userID, gymID, role)
+	refresh, err := p.LocalTokens.GenerateRefreshToken(claims.UserID, claims.GymID, role)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	if p.OnActiveGymChanged != nil {
-		p.OnActiveGymChanged(gymID)
+		p.OnActiveGymChanged(claims.GymID)
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"status_code": http.StatusOK,
@@ -347,6 +355,38 @@ func (p *SidecarAuthProxy) handleRefresh(c *gin.Context) {
 			"refresh_token": refresh,
 		},
 	})
+}
+
+// refreshRole is the role for the refreshed session: the user's current
+// role in the local users table when the row is there (false when it is
+// inactive or on another gym), otherwise the role signed in the token. A
+// token without a role keeps the legacy owner default only for the cached
+// owner login, the one identity that predates roles in tokens.
+func (p *SidecarAuthProxy) refreshRole(ctx context.Context, claims auth.Claims) (string, bool) {
+	role := claims.Role
+	if p.Users != nil && p.UoW != nil {
+		if tx, err := p.UoW.Query(sharedDomain.WithTenant(ctx, claims.GymID)); err == nil {
+			u, getErr := p.Users.GetByID(tx, claims.UserID)
+			sharedDomain.CloseQuery(tx)
+			if getErr == nil && u != nil {
+				if !u.Active || u.GymID != claims.GymID {
+					return "", false
+				}
+				return string(u.Role), true
+			}
+		}
+	}
+	if role == "" {
+		cached, ok := p.loadCachedLogin(ctx)
+		if !ok || cached.UserID != claims.UserID.String() {
+			return "", false
+		}
+		role = cached.Role
+		if role == "" {
+			role = "owner"
+		}
+	}
+	return role, true
 }
 
 func (p *SidecarAuthProxy) handleLogout(c *gin.Context) {
@@ -1072,6 +1112,7 @@ func (p *SidecarAuthProxy) handleLoginPIN(c *gin.Context) {
 			"trial_ends_at":       out.TrialEndsAt,
 			"subscription_plan":   out.SubscriptionPlan,
 			"all_features_access": out.AllFeaturesAccess,
+			"permissions":         permissionKeys(out.Permissions),
 		},
 	})
 }

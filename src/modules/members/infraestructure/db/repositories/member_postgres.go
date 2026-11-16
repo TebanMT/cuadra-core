@@ -191,18 +191,16 @@ func (r *MemberPostgresRepository) List(tx sharedDomain.Transaction, q memRepo.L
 			AND ms.deleted_at IS NULL`).
 		Where("m.gym_id = ? AND m.deleted_at IS NULL", q.GymID)
 
-	if s := textsearch.Normalize(q.Search); s != "" {
-		// Nombre: prefix match. Teléfono: substring match sobre la
-		// versión solo-dígitos del término (los teléfonos en BD están
-		// normalizados sin espacios ni guiones). Antes era sufijo y los
-		// primeros dígitos no matcheaban nada.
-		like := textsearch.EscapeLike(s) + "%"
-		phoneDigits := stripPhoneSeparators(s)
-		if phoneDigits != "" {
-			base = base.Where(textsearch.PostgresColumn("m.full_name")+" LIKE ? ESCAPE '!' OR m.phone LIKE ?", like, "%"+phoneDigits+"%")
-		} else {
-			base = base.Where(textsearch.PostgresColumn("m.full_name")+" LIKE ? ESCAPE '!'", like)
-		}
+	// Relevancia de la búsqueda: va al inicio del ORDER BY (ver abajo).
+	var rank string
+	var rankArgs []any
+	if s, ok := parseMemberSearch(q.Search); ok {
+		// Nombre por inicio de cualquier palabra, teléfono por substring de
+		// dígitos y, si el término es numérico, folio / número de socio por
+		// igualdad. Mismas reglas que SQLite (ver member_search.go).
+		searchWhere, searchArgs, r, rArgs := s.sql(textsearch.PostgresColumn("m.full_name"))
+		base = base.Where(searchWhere, searchArgs...)
+		rank, rankArgs = r, rArgs
 	}
 	switch q.StatusFilter {
 	case "active":
@@ -213,7 +211,18 @@ func (r *MemberPostgresRepository) List(tx sharedDomain.Transaction, q memRepo.L
 		base = base.Where("m.status = ? AND ms.status = 'active' AND ms.expiry_date IS NOT NULL AND ms.expiry_date - ?::date BETWEEN 0 AND 7", memberDomain.StatusActive, today)
 	case "expired":
 		// "Por cobrar": vencidos clásicos + pending_payment + sin membership.
+		// Es la unión exacta (y disjunta) de lapsed + unpaid_enrollment +
+		// no_membership.
 		base = base.Where("m.status = ? AND (ms.id IS NULL OR ms.status = 'pending_payment' OR (ms.status = 'active' AND ms.expiry_date < ?::date))", memberDomain.StatusActive, today)
+	case "lapsed":
+		// Vencidos de verdad (access_status = denied_expired).
+		base = base.Where("m.status = ? AND ms.status = 'active' AND ms.expiry_date < ?::date", memberDomain.StatusActive, today)
+	case "unpaid_enrollment":
+		// Inscritos sin primer pago (denied_unpaid_enrollment).
+		base = base.Where("m.status = ? AND ms.status = 'pending_payment'", memberDomain.StatusActive)
+	case "no_membership":
+		// Sin fila active/pending_payment (denied_no_membership).
+		base = base.Where("m.status = ? AND ms.id IS NULL", memberDomain.StatusActive)
 	case "unrenewed":
 		base = base.Where(`m.status <> 'lost' AND EXISTS (
  SELECT 1 FROM memberships expired WHERE expired.member_id=m.id AND expired.deleted_at IS NULL
@@ -256,6 +265,15 @@ func (r *MemberPostgresRepository) List(tx sharedDomain.Transaction, q memRepo.L
 			order = "m.created_at DESC"
 		}
 	}
+	// m.id desempata para que la paginación sea estable (mismo criterio que
+	// SQLite).
+	order += ", m.id ASC"
+	orderBy := clause.OrderBy{Columns: []clause.OrderByColumn{{Column: clause.Column{Name: order, Raw: true}}}}
+	if rank != "" {
+		// La relevancia lleva argumentos enlazados: va como expresión para
+		// que GORM numere sus placeholders después de los del WHERE.
+		orderBy = clause.OrderBy{Expression: clause.Expr{SQL: rank + ", " + order, Vars: rankArgs}}
+	}
 
 	type row struct {
 		models.MemberModel
@@ -285,7 +303,7 @@ func (r *MemberPostgresRepository) List(tx sharedDomain.Transaction, q memRepo.L
 			ms.duration_days_snapshot AS ms_duration_days_snapshot,
 			ms.start_date AS ms_start_date, ms.expiry_date AS ms_expiry_date,
 			ms.status AS ms_status, ms.replaced_by AS ms_replaced_by`).
-		Order(order).
+		Order(orderBy).
 		Limit(pageSize).Offset((page - 1) * pageSize).
 		Scan(&rows).Error
 	if err != nil {

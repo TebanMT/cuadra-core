@@ -4,6 +4,7 @@ package app_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -179,8 +180,12 @@ func TestCashPeriod_OpeningSuggestionUsesPreviousDrawerAndNeedsConfirmation(t *t
 	if report.SuggestedOpeningCash != nil {
 		t.Fatal("suggestion leaked from another drawer")
 	}
-	opened, err := uc.Open(ctx, reports.CashOpenInput{GymID: f.gymID, ActorUserID: f.ownerID, Date: today, OpeningCash: 70, Sequence: 1})
-	if err != nil || opened.OpeningCash != 70 {
+	// A different next-day opening is accepted, but only explained (#6).
+	if _, err := uc.Open(ctx, reports.CashOpenInput{GymID: f.gymID, ActorUserID: f.ownerID, Date: today, OpeningCash: 70, Sequence: 1}); !errors.Is(err, cash.ErrOpeningNote) {
+		t.Fatalf("unexplained next-day difference = %v", err)
+	}
+	opened, err := uc.Open(ctx, reports.CashOpenInput{GymID: f.gymID, ActorUserID: f.ownerID, Date: today, OpeningCash: 70, OpeningNote: "Se pagó el garrafón temprano", Sequence: 1})
+	if err != nil || opened.OpeningCash != 70 || opened.OpeningDifference == nil || *opened.OpeningDifference != -10 {
 		t.Fatalf("explicit next-day correction rejected: %+v %v", opened, err)
 	}
 }

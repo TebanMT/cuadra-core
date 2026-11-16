@@ -44,6 +44,11 @@ type CashCloseEventModel struct {
 	StaleAt                 *time.Time `gorm:"column:stale_at"`
 	WithdrawnAt             *time.Time `gorm:"column:withdrawn_at"`
 	WithdrawnBy             *uuid.UUID `gorm:"type:uuid;column:withdrawn_by"`
+	ReviewedAt              *time.Time `gorm:"column:reviewed_at"`
+	ReviewedBy              *uuid.UUID `gorm:"type:uuid;column:reviewed_by"`
+	ReviewNote              *string    `gorm:"column:review_note"`
+	OpeningExpectedCash     *float64   `gorm:"type:numeric(12,2);column:opening_expected_cash"`
+	OpeningNote             *string    `gorm:"column:opening_note"`
 }
 
 func (CashCloseEventModel) TableName() string { return "cash_close_events" }
