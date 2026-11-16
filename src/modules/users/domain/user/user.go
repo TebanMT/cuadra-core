@@ -19,13 +19,14 @@ const (
 	RoleOperator = "operator"
 
 	// MaxOperatorsPerGym es el techo absoluto del producto (anti-abuso) y
-	// vale para gyms en Plus. Incluye al dueño. Si más adelante necesitas
+	// vale para todo gym con extra_operators (prueba, Standard y Plus desde
+	// el 16 nov 2026). Incluye al dueño. Si más adelante necesitas
 	// gyms con 50+ operadores (cadenas), levanta este número o introduce
 	// un override por cuenta.
 	MaxOperatorsPerGym = 11
-	// MaxOperatorsStandard es el cap por SKU para Standard. 2 = el dueño
-	// + 1 operador (recepcionista). El delta hasta MaxOperatorsPerGym se
-	// desbloquea con Plus.
+	// MaxOperatorsStandard es el cap para un gym SIN extra_operators. 2 = el
+	// dueño + 1 operador (recepcionista). Hoy ningún plan vigente cae aquí
+	// (ver gym.MinimumTier); se conserva por si la feature vuelve a Plus.
 	MaxOperatorsStandard = 2
 )
 

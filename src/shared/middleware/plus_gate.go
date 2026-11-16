@@ -65,13 +65,14 @@ func RequireFeature(gyms gymRepo.GymRepository, uow sharedDomain.UnitOfWork, fea
 	}
 }
 
-// EnforcePlusInline corre la misma decisión que RequirePlusPlan pero como
-// llamada desde un handler — útil cuando un endpoint mezcla acciones
-// Standard y Plus (p. ej. PATCH /gyms/me que toca branding[Plus] y
-// city[Standard], o POST /broadcasts dentro del controller de
-// notifications que también tiene rutas Standard). Retorna true si el
-// caller debe seguir; false si ya abortó la response con 402.
-func EnforcePlusInline(c *gin.Context, gyms gymRepo.GymRepository, uow sharedDomain.UnitOfWork) bool {
+// EnforceFeaturesInline corre la misma decisión que RequireFeature pero como
+// llamada desde un handler — útil cuando un endpoint mezcla campos libres y
+// campos con función propia en el catálogo (p. ej. PATCH /gyms/me, donde
+// branding, datos fiscales y webhook de acceso tienen cada uno su feature y
+// city/horario no). Pasa sólo si el gym tiene TODAS las features pedidas.
+// Retorna true si el caller debe seguir; false si ya abortó la response con
+// 402 o 503.
+func EnforceFeaturesInline(c *gin.Context, gyms gymRepo.GymRepository, uow sharedDomain.UnitOfWork, features ...gymDomain.Feature) bool {
 	if gyms == nil || uow == nil {
 		abortPlanCheckUnavailable(c)
 		return false
@@ -91,16 +92,19 @@ func EnforcePlusInline(c *gin.Context, gyms gymRepo.GymRepository, uow sharedDom
 		abortPlanCheckUnavailable(c)
 		return false
 	}
-	if gymDomain.CanAccessPlusFeatures(g.SubscriptionPlan, g.AllFeaturesAccess) {
-		return true
+	for _, feature := range features {
+		if g.CanAccessFeature(feature) {
+			continue
+		}
+		c.AbortWithStatusJSON(http.StatusPaymentRequired, PlanGateResponse{
+			Error:        "plan_required",
+			RequiredPlan: "plus",
+			CurrentPlan:  g.SubscriptionPlan,
+			Message:      "Esta acción requiere el plan Plus. Mejora tu suscripción para usarla.",
+		})
+		return false
 	}
-	c.AbortWithStatusJSON(http.StatusPaymentRequired, PlanGateResponse{
-		Error:        "plan_required",
-		RequiredPlan: "plus",
-		CurrentPlan:  g.SubscriptionPlan,
-		Message:      "Esta acción requiere el plan Plus. Mejora tu suscripción para usarla.",
-	})
-	return false
+	return true
 }
 
 func abortPlanCheckUnavailable(c *gin.Context) {

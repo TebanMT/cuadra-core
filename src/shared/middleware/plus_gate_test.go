@@ -77,14 +77,40 @@ func TestRequirePlusPlan_FailsClosedWhenLookupUnavailable(t *testing.T) {
 	}
 }
 
-func TestRequirePlusPlan_BlocksStandardAndAllowsPlus(t *testing.T) {
-	standard := &gymDomain.Gym{SubscriptionPlan: gymDomain.PlanStandardMonthly}
-	if w := plusGateRequest(t, RequirePlusPlan(plusGateGymRepo{gym: standard}, plusGateUoW{})); w.Code != http.StatusPaymentRequired {
-		t.Errorf("standard status = %d, want 402", w.Code)
+// Standard trae todo lo que existe (análisis incluido); sólo las features que
+// siguen en Plus (número propio, envíos sin tope) responden 402.
+func TestRequireFeature_StandardPassesExceptPlusOnly(t *testing.T) {
+	t.Setenv("TINTA_MODE", "test")
+	standard := plusGateGymRepo{gym: &gymDomain.Gym{SubscriptionPlan: gymDomain.PlanStandardMonthly}}
+	if w := plusGateRequest(t, RequirePlusPlan(standard, plusGateUoW{})); w.Code != http.StatusOK {
+		t.Errorf("standard analytics status = %d, want 200", w.Code)
 	}
-	plus := &gymDomain.Gym{SubscriptionPlan: gymDomain.PlanPlusMonthly}
-	if w := plusGateRequest(t, RequirePlusPlan(plusGateGymRepo{gym: plus}, plusGateUoW{})); w.Code != http.StatusOK {
-		t.Errorf("plus status = %d, want 200", w.Code)
+	if w := plusGateRequest(t, RequireFeature(standard, plusGateUoW{}, gymDomain.FeatureBroadcasts)); w.Code != http.StatusPaymentRequired {
+		t.Errorf("standard broadcasts status = %d, want 402", w.Code)
+	}
+	plus := plusGateGymRepo{gym: &gymDomain.Gym{SubscriptionPlan: gymDomain.PlanPlusMonthly}}
+	if w := plusGateRequest(t, RequireFeature(plus, plusGateUoW{}, gymDomain.FeatureBroadcasts)); w.Code != http.StatusOK {
+		t.Errorf("plus broadcasts status = %d, want 200", w.Code)
+	}
+}
+
+// PATCH /gyms/me: un gym Standard sin grant puede guardar branding, datos
+// fiscales y webhook; una feature que sigue en Plus aborta con 402.
+func TestEnforceFeaturesInline_StandardProfileFields(t *testing.T) {
+	t.Setenv("TINTA_MODE", "test")
+	repo := plusGateGymRepo{gym: &gymDomain.Gym{SubscriptionPlan: gymDomain.PlanStandardMonthly}}
+	inline := func(features ...gymDomain.Feature) gin.HandlerFunc {
+		return func(c *gin.Context) {
+			if EnforceFeaturesInline(c, repo, plusGateUoW{}, features...) {
+				c.Next()
+			}
+		}
+	}
+	if w := plusGateRequest(t, inline(gymDomain.FeatureBranding, gymDomain.FeatureFiscalDetails, gymDomain.FeatureAccessHardware)); w.Code != http.StatusOK {
+		t.Errorf("standard profile fields status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if w := plusGateRequest(t, inline(gymDomain.FeatureBranding, gymDomain.FeatureOwnWhatsApp)); w.Code != http.StatusPaymentRequired {
+		t.Errorf("standard + own_whatsapp status = %d, want 402", w.Code)
 	}
 }
 
@@ -108,7 +134,7 @@ func TestLaunchAccessGatesByFeature(t *testing.T) {
 		t.Fatal("unknown feature allowed")
 	}
 	if w := plusGateRequest(t, func(c *gin.Context) {
-		if EnforcePlusInline(c, repo, plusGateUoW{}) {
+		if EnforceFeaturesInline(c, repo, plusGateUoW{}, gymDomain.FeatureOwnWhatsApp) {
 			c.Next()
 		}
 	}); w.Code != 200 {

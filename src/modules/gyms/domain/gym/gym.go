@@ -429,31 +429,32 @@ type ProfileUpdate struct {
 	AccessWebhookSecret *string
 }
 
-// HasPlusOnlyFields reporta si la actualización toca algún campo
-// reservado al tier Plus. Lo usa el handler PATCH /gyms/me para gatear
-// la mutación cuando el gym está en Standard: branding (logo + colores),
-// datos fiscales (RFC, razón social, código postal, régimen) y webhook
-// de access-granted son features Plus por pricing.
+// GatedFeatures devuelve las funciones del catálogo (features.go) que toca
+// la actualización. El handler PATCH /gyms/me valida cada una contra el plan
+// del gym antes de guardar: branding (logo + colores), datos fiscales (RFC,
+// razón social, código postal, régimen) y webhook de acceso.
 //
-// City, WhatsApp, Timezone, OpenTime, CloseTime, KioskVolume / TTL
-// siguen siendo Standard — no entran en este check.
-func (u ProfileUpdate) HasPlusOnlyFields() bool {
-	return u.RFC != nil ||
-		u.RazonSocial != nil ||
-		u.CodigoPostal != nil ||
-		u.RegimenFiscal != nil ||
-		u.LogoURL != nil ||
-		u.PrimaryColor != nil ||
-		u.SecondaryColor != nil ||
-		// El webhook de acceso solo es acción Plus cuando se ESTABLECE una
-		// URL/secret real. Un valor VACÍO significa "no usar" o "limpiar" la
-		// feature y NO debe gatear: el desktop manda access_webhook_url:""
-		// en CADA guardado de perfil aunque el gym Standard no tenga webhook,
-		// y un puntero a "" no es nil (omitempty solo afecta el marshaling),
-		// así que sin este guard TODO gym Standard recibía 402 al guardar su
-		// propio perfil. ApplyProfileUpdate ya trata "" como clear sin error.
-		profileFieldSet(u.AccessWebhookURL) ||
-		profileFieldSet(u.AccessWebhookSecret)
+// City, WhatsApp, Timezone, OpenTime, CloseTime, KioskVolume / TTL no
+// tienen función propia y no entran en este check.
+func (u ProfileUpdate) GatedFeatures() []Feature {
+	var out []Feature
+	if u.LogoURL != nil || u.PrimaryColor != nil || u.SecondaryColor != nil {
+		out = append(out, FeatureBranding)
+	}
+	if u.RFC != nil || u.RazonSocial != nil || u.CodigoPostal != nil || u.RegimenFiscal != nil {
+		out = append(out, FeatureFiscalDetails)
+	}
+	// El webhook de acceso sólo cuenta cuando se ESTABLECE una URL/secret
+	// real. Un valor VACÍO significa "no usar" o "limpiar" la feature y NO
+	// debe gatear: el desktop manda access_webhook_url:"" en CADA guardado de
+	// perfil aunque el gym no tenga webhook, y un puntero a "" no es nil
+	// (omitempty solo afecta el marshaling), así que sin este guard un gym
+	// sin la función recibía 402 al guardar su propio perfil.
+	// ApplyProfileUpdate ya trata "" como clear sin error.
+	if profileFieldSet(u.AccessWebhookURL) || profileFieldSet(u.AccessWebhookSecret) {
+		out = append(out, FeatureAccessHardware)
+	}
+	return out
 }
 
 // profileFieldSet reporta si el puntero trae un valor no vacío (tras trim).

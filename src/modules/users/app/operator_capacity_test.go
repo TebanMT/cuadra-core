@@ -34,9 +34,9 @@ type capacityFixture struct {
 	toggle  *usersApp.ToggleOperatorActive
 }
 
-// newCapacityFixture: withGyms=true cablea el repo de gym (cap por SKU; el
-// gym de prueba es trial sin extra_operators → cap Standard de 1 operador);
-// false deja el cap absoluto del producto (10).
+// newCapacityFixture: withGyms=true cablea el repo de gym (cap por plan; el
+// gym de prueba es trial, que desde el 16 nov 2026 trae extra_operators →
+// 10 operadores); false deja el cap absoluto del producto (10).
 func newCapacityFixture(t *testing.T, withGyms bool) *capacityFixture {
 	t.Helper()
 	// El modo dev relaja los gates Plus: el test fija el plan real.
@@ -122,44 +122,41 @@ func TestCountOperatorsByGym_OnlyActiveOperators(t *testing.T) {
 	}
 }
 
-// Standard (1 operador): desactivar libera el lugar; reactivar sobre el cupo
-// se bloquea con el mismo error de negocio que el alta.
-func TestToggleOperatorActive_ReactivationBlockedAtStandardCap(t *testing.T) {
+// La prueba (y Standard) traen el equipo completo: 10 operadores además del
+// dueño, con el mismo error de cupo que el cap absoluto. Desactivar libera el
+// lugar; reactivar sobre el cupo se bloquea; reactivar a alguien ya activo
+// es no-op.
+func TestCreateOperator_TrialGetsFullTeam(t *testing.T) {
 	f := newCapacityFixture(t, true)
-	a, err := f.createOp(1)
-	if err != nil {
-		t.Fatalf("create a: %v", err)
+	ids := make([]uuid.UUID, 0, 10)
+	for i := 1; i <= 10; i++ {
+		id, err := f.createOp(i)
+		if err != nil {
+			t.Fatalf("operador %d en prueba: %v", i, err)
+		}
+		ids = append(ids, id)
 	}
-	if _, err := f.createOp(2); !errors.Is(err, userErrors.ErrOperatorLimitStandard) {
-		t.Fatalf("2º operador en Standard: err = %v, want ErrOperatorLimitStandard", err)
+	if _, err := f.createOp(11); !errors.Is(err, userErrors.ErrOperatorLimitReached) {
+		t.Fatalf("11º operador: err = %v, want ErrOperatorLimitReached", err)
 	}
+	a := ids[0]
 	if err := f.setActive(a, false); err != nil {
 		t.Fatalf("deactivate a: %v", err)
 	}
-	// Con A inactivo, el lugar está libre.
-	b, err := f.createOp(2)
-	if err != nil {
-		t.Fatalf("create b con a inactivo: %v", err)
+	if _, err := f.createOp(11); err != nil {
+		t.Fatalf("11º operador con a inactivo: %v", err)
 	}
-	if err := f.setActive(a, true); !errors.Is(err, userErrors.ErrOperatorLimitStandard) {
-		t.Fatalf("reactivar a con b activo: err = %v, want ErrOperatorLimitStandard", err)
+	if err := f.setActive(a, true); !errors.Is(err, userErrors.ErrOperatorLimitReached) {
+		t.Fatalf("reactivar a sobre el cupo: err = %v, want ErrOperatorLimitReached", err)
 	}
 	if f.isActive(t, a) {
 		t.Fatal("la reactivación bloqueada no debe persistir")
 	}
-	// Desactivar ya activo / reactivar con lugar libre funciona.
-	if err := f.setActive(b, false); err != nil {
-		t.Fatalf("deactivate b: %v", err)
+	if err := f.setActive(ids[1], true); err != nil {
+		t.Fatalf("reactivar a alguien ya activo: %v", err)
 	}
-	if err := f.setActive(a, true); err != nil {
-		t.Fatalf("reactivar a con lugar libre: %v", err)
-	}
-	if !f.isActive(t, a) || f.count(t) != 1 {
-		t.Fatalf("a activo=%v count=%d", f.isActive(t, a), f.count(t))
-	}
-	// Reactivar a alguien ya activo es no-op: no choca con su propio lugar.
-	if err := f.setActive(a, true); err != nil {
-		t.Fatalf("reactivar a ya activo: %v", err)
+	if n := f.count(t); n != 10 {
+		t.Fatalf("count = %d, want 10", n)
 	}
 }
 

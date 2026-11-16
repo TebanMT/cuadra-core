@@ -205,29 +205,36 @@ func TestIsAccessHardBlocked(t *testing.T) {
 	}
 }
 
-// TestHasPlusOnlyFields_EmptyWebhookNotPlus — regresión: el desktop manda
+// TestGatedFeatures_EmptyWebhookNotGated — regresión: el desktop manda
 // access_webhook_url:"" en cada guardado de perfil; un valor VACÍO no debe
-// considerarse acción Plus (antes gateaba a 402 a todo gym Standard).
-func TestHasPlusOnlyFields_EmptyWebhookNotPlus(t *testing.T) {
+// contar como uso del webhook (antes gateaba a 402 a todo gym sin la función).
+func TestGatedFeatures_EmptyWebhookNotGated(t *testing.T) {
 	sp := func(s string) *string { return &s }
 	cases := []struct {
 		name string
 		u    gymDomain.ProfileUpdate
-		want bool
+		want []gymDomain.Feature
 	}{
-		{"vacío (caso del desktop) → no Plus", gymDomain.ProfileUpdate{AccessWebhookURL: sp("")}, false},
-		{"solo espacios → no Plus", gymDomain.ProfileUpdate{AccessWebhookURL: sp("   ")}, false},
-		{"nil → no Plus", gymDomain.ProfileUpdate{AccessWebhookURL: nil}, false},
-		{"URL real → Plus", gymDomain.ProfileUpdate{AccessWebhookURL: sp("https://x/door")}, true},
-		{"secret vacío → no Plus", gymDomain.ProfileUpdate{AccessWebhookSecret: sp("")}, false},
-		{"secret real → Plus", gymDomain.ProfileUpdate{AccessWebhookSecret: sp("s3cr3t")}, true},
-		{"RFC → Plus", gymDomain.ProfileUpdate{RFC: sp("XAXX010101000")}, true},
-		{"solo nombre/horario → no Plus", gymDomain.ProfileUpdate{Name: sp("Gym"), OpenTime: sp("06:00")}, false},
+		{"vacío (caso del desktop) → nada", gymDomain.ProfileUpdate{AccessWebhookURL: sp("")}, nil},
+		{"solo espacios → nada", gymDomain.ProfileUpdate{AccessWebhookURL: sp("   ")}, nil},
+		{"nil → nada", gymDomain.ProfileUpdate{AccessWebhookURL: nil}, nil},
+		{"URL real → acceso", gymDomain.ProfileUpdate{AccessWebhookURL: sp("https://x/door")}, []gymDomain.Feature{gymDomain.FeatureAccessHardware}},
+		{"secret vacío → nada", gymDomain.ProfileUpdate{AccessWebhookSecret: sp("")}, nil},
+		{"secret real → acceso", gymDomain.ProfileUpdate{AccessWebhookSecret: sp("s3cr3t")}, []gymDomain.Feature{gymDomain.FeatureAccessHardware}},
+		{"RFC → fiscal", gymDomain.ProfileUpdate{RFC: sp("XAXX010101000")}, []gymDomain.Feature{gymDomain.FeatureFiscalDetails}},
+		{"logo + RFC → branding y fiscal", gymDomain.ProfileUpdate{LogoURL: sp("https://x/logo.png"), RFC: sp("XAXX010101000")}, []gymDomain.Feature{gymDomain.FeatureBranding, gymDomain.FeatureFiscalDetails}},
+		{"solo nombre/horario → nada", gymDomain.ProfileUpdate{Name: sp("Gym"), OpenTime: sp("06:00")}, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.u.HasPlusOnlyFields(); got != tc.want {
-				t.Errorf("HasPlusOnlyFields() = %v, want %v", got, tc.want)
+			got := tc.u.GatedFeatures()
+			if len(got) != len(tc.want) {
+				t.Fatalf("GatedFeatures() = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("GatedFeatures() = %v, want %v", got, tc.want)
+				}
 			}
 		})
 	}

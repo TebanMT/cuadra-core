@@ -353,24 +353,35 @@ func TestDashboard_RealizedMarginNilWhenNoProductSales(t *testing.T) {
 	}
 }
 
-func TestDashboard_StandardOmitsProductProfitWithoutQueryingIt(t *testing.T) {
+// Standard trae la utilidad de productos desde el 16 nov 2026; un gym sin la
+// feature (plan desconocido) no la recibe ni ejecuta las consultas.
+func TestDashboard_ProductProfitFollowsPlan(t *testing.T) {
 	t.Setenv("TINTA_MODE", "test")
-	reader := &fakeReader{
-		realizedNow:  reports.RealizedProductProfit{Revenue: 1000, COGS: 600, ItemsTotal: 8, ItemsWithCost: 5},
-		realizedPrev: reports.RealizedProductProfit{Revenue: 800, COGS: 500},
-	}
-	g := sampleGym()
-	g.SubscriptionPlan = "standard_monthly"
-	out, err := reports.NewDashboard(reader, fakeUoW{}, 0).WithGyms(&fakeGymRepo{gym: g}).Execute(
-		context.Background(), reports.DashboardInput{GymID: uuid.New()})
-	if err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-	if out.RealizedProfitMonth != nil || out.RealizedProfitCoverage != nil || out.RealizedProfitMarginPct != nil {
-		t.Fatalf("standard leaked product profit: %+v / %+v / %v", out.RealizedProfitMonth, out.RealizedProfitCoverage, out.RealizedProfitMarginPct)
-	}
-	if reader.realizedCalls != 0 {
-		t.Fatalf("standard executed %d premium profit queries, want 0", reader.realizedCalls)
+	for _, tc := range []struct {
+		plan    string
+		allowed bool
+	}{
+		{"standard_monthly", true}, {"", false},
+	} {
+		t.Run(tc.plan, func(t *testing.T) {
+			reader := &fakeReader{
+				realizedNow:  reports.RealizedProductProfit{Revenue: 1000, COGS: 600, ItemsTotal: 8, ItemsWithCost: 5},
+				realizedPrev: reports.RealizedProductProfit{Revenue: 800, COGS: 500},
+			}
+			g := sampleGym()
+			g.SubscriptionPlan = tc.plan
+			out, err := reports.NewDashboard(reader, fakeUoW{}, 0).WithGyms(&fakeGymRepo{gym: g}).Execute(
+				context.Background(), reports.DashboardInput{GymID: uuid.New()})
+			if err != nil {
+				t.Fatalf("execute: %v", err)
+			}
+			if got := out.RealizedProfitMonth != nil && out.RealizedProfitCoverage != nil; got != tc.allowed {
+				t.Fatalf("%q product profit = %+v / %+v, want present=%v", tc.plan, out.RealizedProfitMonth, out.RealizedProfitCoverage, tc.allowed)
+			}
+			if (reader.realizedCalls > 0) != tc.allowed {
+				t.Fatalf("%q executed %d profit queries, want present=%v", tc.plan, reader.realizedCalls, tc.allowed)
+			}
+		})
 	}
 }
 

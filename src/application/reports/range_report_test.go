@@ -708,14 +708,15 @@ func TestRangeReport_ComparisonMetadataMatchesQueriedDates(t *testing.T) {
 	}
 }
 
-// Paid metrics are withheld in the API as well as in the interface.
-func TestRangeReport_ProductAnalysisRequiresPlus(t *testing.T) {
+// Product analysis is part of Standard since 16 nov 2026; a gym without the
+// feature (unknown plan) gets neither the data nor the query.
+func TestRangeReport_ProductAnalysisFollowsPlan(t *testing.T) {
 	t.Setenv("TINTA_MODE", "test")
 	for _, tc := range []struct {
 		plan    string
 		allowed bool
 	}{
-		{"standard_monthly", false}, {"plus_monthly", true},
+		{"standard_monthly", true}, {"plus_monthly", true}, {"", false},
 	} {
 		t.Run(tc.plan, func(t *testing.T) {
 			reader := &profitabilitySpy{}

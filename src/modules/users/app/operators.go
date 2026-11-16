@@ -556,10 +556,10 @@ func (uc *RotateOperatorPIN) Execute(ctx context.Context, in RotateOperatorPINIn
 
 // checkOperatorCapacity valida que quepa un operador ACTIVO más en el gym.
 // Lo usan el alta (UC-006) y la reactivación (UC-008): los desactivados no
-// ocupan lugar y el dueño no cuenta. Cap por SKU: sin extra_operators
-// (Standard) es MaxOperatorsStandard - 1 = 1 operador además del dueño; con
-// extra_operators (Plus) es el cap del producto, MaxOperatorsPerGym - 1 = 10.
-// Sin gyms cableado (tests) cae al cap absoluto.
+// ocupan lugar y el dueño no cuenta. Con extra_operators (hoy: prueba,
+// Standard y Plus) el cap es el del producto, MaxOperatorsPerGym - 1 = 10;
+// sin la feature cae a MaxOperatorsStandard - 1 = 1 operador además del
+// dueño. Sin gyms cableado (tests) cae al cap absoluto.
 func checkOperatorCapacity(tx sharedDomain.Transaction, users userRepo.UserRepository, gyms gymRepo.GymRepository, gymID uuid.UUID) error {
 	count, err := users.CountOperatorsByGym(tx, gymID)
 	if err != nil {

@@ -318,11 +318,11 @@ func (ctrl *AuthController) handleUpdateProfileWire(c *gin.Context) {
 		AccessWebhookURL:    req.AccessWebhookURL,
 		AccessWebhookSecret: req.AccessWebhookSecret,
 	}
-	// Si el dueño tocó campos exclusivos de Plus (branding, datos fiscales,
-	// webhook), gatear contra el SKU. El resto del PATCH (city, horario,
-	// kiosko) sigue siendo Standard y no llega al gate.
-	if upd.HasPlusOnlyFields() {
-		if !middleware.EnforcePlusInline(c, ctrl.Gyms, ctrl.UoW) {
+	// Si el dueño tocó campos con función propia en el catálogo (branding,
+	// datos fiscales, webhook de acceso), validar cada una contra el plan.
+	// El resto del PATCH (city, horario, kiosko) no llega al gate.
+	if gated := upd.GatedFeatures(); len(gated) > 0 {
+		if !middleware.EnforceFeaturesInline(c, ctrl.Gyms, ctrl.UoW, gated...) {
 			return
 		}
 	}

@@ -26,14 +26,21 @@ const (
 )
 
 // MinimumTier is deliberately explicit and fails closed for unknown keys.
+//
+// Oferta vigente (decisión del fundador, 16 nov 2026): un solo plan Standard
+// con todo lo que existe hoy, igual que la prueba, como promete la landing.
+// Plus conserva sólo lo que no se vende todavía: conectar el número propio de
+// WhatsApp y los envíos masivos sin tope. En Standard esos envíos salen por el
+// número de Tinta con los topes de notifications/app/broadcast.go, porque el
+// costo de cada mensaje lo absorbe Tinta.
 func MinimumTier(feature Feature) (FeatureTier, bool) {
 	switch feature {
-	case FeatureDailyOperations:
+	case FeatureDailyOperations, FeatureRecurringExpenses, FeatureAnalytics,
+		FeatureReportExports, FeatureProductMargins, FeaturePromotionsROI,
+		FeatureAuditLog, FeatureBranding, FeatureFiscalDetails,
+		FeatureAccessHardware, FeatureHeldMessages, FeatureExtraOperators:
 		return TierStandard, true
-	case FeatureRecurringExpenses, FeatureAnalytics, FeatureReportExports,
-		FeatureProductMargins, FeaturePromotionsROI, FeatureAuditLog, FeatureBranding,
-		FeatureFiscalDetails, FeatureAccessHardware, FeatureOwnWhatsApp,
-		FeatureBroadcasts, FeatureExtraOperators, FeatureHeldMessages:
+	case FeatureOwnWhatsApp, FeatureBroadcasts:
 		return TierPlus, true
 	default:
 		return "", false
