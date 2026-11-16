@@ -10,10 +10,12 @@
 #                exacto que estás taggeando.
 #   2. build   — cross-compila tinta-server linux/amd64 estampando la
 #                versión (-X main.version=<tag>) y la sube como artifact.
-#   3. deploy  — baja el artifact, scp atómico al server, rsync de las
-#                migraciones a /opt/tinta/migrations, restart de systemd
-#                (migrador separado antes del reinicio de API)
-#                y smoke test a /health.
+#   3. deploy  — baja el artifact y sube binarios + SQL al server sin
+#                activarlos. Luego scripts/deploy/remote-release.sh:
+#                respaldo previo → migraciones (rol dueño separado) →
+#                cambio de binario → restart → /health con la versión
+#                nueva. Si las migraciones fallan, la API vieja sigue
+#                intacta; si la nueva no arranca, rollback automático.
 #
 # Así puedes subir todos los commits que quieras a main sin tocar prod;
 # el tag es la única puerta a producción y te da semantic versioning real
@@ -213,62 +215,37 @@ jobs:
             exit 1
           fi
 
-      - name: Subir binario (atómico)
+      - name: Subir binarios y migraciones (sin activar)
+        # Nada de esto toca la API que está corriendo: los binarios quedan
+        # como .new y el SQL solo se copia. Si el setup de RLS (servicio
+        # tinta-migrate) falta, se aborta antes de subir.
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
         run: |
-          # Fail before replacing files if the one-time RLS setup is missing.
           ssh tinta@${DEPLOY_HOST} '/bin/systemctl cat tinta-migrate >/dev/null'
+          scp bin/tinta-server-linux-amd64 tinta@${DEPLOY_HOST}:/opt/tinta/bin/tinta-server.new
           scp bin/tinta-migrate-linux-amd64 tinta@${DEPLOY_HOST}:/opt/tinta/bin/tinta-migrate.new
-          ssh tinta@${DEPLOY_HOST} 'chmod +x /opt/tinta/bin/tinta-migrate.new && mv /opt/tinta/bin/tinta-migrate.new /opt/tinta/bin/tinta-migrate'
-          REMOTE_BIN=/opt/tinta/bin/tinta-server
-          scp bin/tinta-server-linux-amd64 \
-            tinta@${DEPLOY_HOST}:${REMOTE_BIN}.new
-          ssh tinta@${DEPLOY_HOST} "
-            set -e
-            chmod +x ${REMOTE_BIN}.new
-            mv ${REMOTE_BIN}.new ${REMOTE_BIN}
-          "
-
-      - name: Sincronizar migraciones SQL
-        # Migration owner and runtime are separate roles.
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-        run: |
+          scp scripts/deploy/remote-release.sh tinta@${DEPLOY_HOST}:/opt/tinta/bin/remote-release.sh
           rsync -avz --delete \
             db_migrations/postgres/ \
             tinta@${DEPLOY_HOST}:/opt/tinta/migrations/
 
-      - name: Aplicar migraciones con rol separado
+      - name: Migrar y activar (rollback automático)
+        # scripts/deploy/remote-release.sh, en el servidor:
+        #   respaldo previo (si el timer está activo) → migraciones →
+        #   cambio de binario → restart → /health con la versión nueva.
+        # Si fallan las migraciones, la API anterior sigue sin cambios. Si
+        # la nueva no responde, regresa sola al binario anterior y el job
+        # falla igual, para que lo veas.
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-        run: ssh tinta@${DEPLOY_HOST} 'sudo /bin/systemctl start tinta-migrate'
-
-      - name: Reiniciar tinta-server (RLS obligatorio)
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-        run: |
-          ssh tinta@${DEPLOY_HOST} 'sudo /bin/systemctl restart tinta-server'
-
-          # Startup verifies that the runtime role cannot bypass tenant policies.
-          for i in $(seq 1 15); do
-            status=$(ssh tinta@${DEPLOY_HOST} 'sudo /bin/systemctl is-active tinta-server' || true)
-            if [ "$status" = "active" ]; then
-              echo "✓ tinta-server activo"
-              exit 0
-            fi
-            echo "(intento $i) status=$status — esperando..."
-            sleep 2
-          done
-
-          echo "::error::tinta-server no quedó activo después del restart"
-          ssh tinta@${DEPLOY_HOST} 'sudo /bin/systemctl status tinta-server --no-pager -l | tail -30'
-          ssh tinta@${DEPLOY_HOST} 'sudo /bin/journalctl -u tinta-server -n 50 --no-pager'
-          exit 1
+          VERSION: ${{ needs.build.outputs.version }}
+        run: ssh tinta@${DEPLOY_HOST} "bash /opt/tinta/bin/remote-release.sh '${VERSION}'"
 
       - name: Smoke test (público)
         # No es bloqueante — si DNS o cert TLS aún no están listos, solo
-        # emite warning. La verificación dura es el `is-active` anterior.
+        # emite warning. La verificación dura es el /health local del paso
+        # anterior (con rollback si no responde).
         # Además confirma que /health reporta la versión recién desplegada.
         continue-on-error: true
         env:

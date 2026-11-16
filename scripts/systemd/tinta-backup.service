@@ -1,0 +1,21 @@
+[Unit]
+Description=Tinta nightly Postgres backup to R2 (read-only BYPASSRLS role)
+After=postgresql.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=tinta-backup
+Group=tinta-backup
+# root:root 0600; systemd lo lee antes de bajar privilegios. La API nunca
+# recibe esta credencial (lee todo el padrón sin RLS).
+EnvironmentFile=/etc/tinta/backup.env
+Environment=HOME=/tmp
+ExecStart=/usr/local/sbin/tinta-backup
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=3600

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # install-system-files.sh — instala/actualiza los archivos de sistema
-# (systemd unit + Caddyfile) en el servidor.
+# (systemd units, Caddyfile y script de respaldo) en el servidor.
 #
 # Se ejecuta DESDE TU LAPTOP. Va con sudo en remoto. Lo corres una vez al
 # inicio y cada vez que cambia el .service o el Caddyfile en el repo.
@@ -28,6 +28,11 @@ scp "${REPO_ROOT}/scripts/systemd/tinta-migrate.service" \
     "${SSH_USER}@${SERVER}:/tmp/tinta-migrate.service"
 scp "${REPO_ROOT}/scripts/deploy/Caddyfile" \
     "${SSH_USER}@${SERVER}:/tmp/Caddyfile"
+scp "${REPO_ROOT}/scripts/systemd/tinta-backup.service" \
+    "${REPO_ROOT}/scripts/systemd/tinta-backup.timer" \
+    "${SSH_USER}@${SERVER}:/tmp/"
+scp "${REPO_ROOT}/scripts/deploy/03-backup.sh" \
+    "${SSH_USER}@${SERVER}:/tmp/tinta-backup.sh"
 
 echo "→ Instalando en el servidor..."
 ssh "${SSH_USER}@${SERVER}" bash -s <<'EOF'
@@ -58,6 +63,24 @@ rm /tmp/tinta-migrate.service
 printf '%s\n' 'tinta ALL=(root) NOPASSWD: /bin/systemctl start tinta-migrate' > /etc/sudoers.d/tinta-migrate
 chmod 440 /etc/sudoers.d/tinta-migrate
 visudo -cf /etc/sudoers.d/tinta-migrate
+# remote-release.sh (deploy): respaldo previo, rollback y logs cuando algo
+# falla. Comandos exactos; sudo -n nunca pide contraseña.
+cat > /etc/sudoers.d/tinta-deploy <<'SUDO'
+tinta ALL=(root) NOPASSWD: /bin/systemctl start tinta-backup, /bin/systemctl reset-failed tinta-server, /bin/journalctl -u tinta-server -n 50 --no-pager, /bin/journalctl -u tinta-migrate -n 50 --no-pager, /bin/journalctl -u tinta-backup -n 50 --no-pager
+SUDO
+chmod 440 /etc/sudoers.d/tinta-deploy
+visudo -cf /etc/sudoers.d/tinta-deploy
+# Respaldo nocturno: usuario propio. Su credencial (BYPASSRLS, lee todos los
+# gyms) vive en /etc/tinta/backup.env y la API nunca la ve. El script es de
+# root para que el usuario de la API no pueda cambiar lo que corre con ella.
+# El timer lo activa 04-backup-role.sh cuando el rol y R2 están listos.
+command -v pg_dump >/dev/null 2>&1 || echo "⚠ Falta pg_dump (paquete postgresql-client-16)."
+command -v aws >/dev/null 2>&1 || echo "⚠ Falta aws CLI v2 — ver 'Backups a R2' en scripts/deploy/README.md."
+id tinta-backup >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin tinta-backup
+install -o root -g root -m 755 /tmp/tinta-backup.sh /usr/local/sbin/tinta-backup
+install -o root -g root -m 644 /tmp/tinta-backup.service /etc/systemd/system/tinta-backup.service
+install -o root -g root -m 644 /tmp/tinta-backup.timer /etc/systemd/system/tinta-backup.timer
+rm /tmp/tinta-backup.sh /tmp/tinta-backup.service /tmp/tinta-backup.timer
 # systemd unit.
 install -o root -g root -m 644 /tmp/tinta-server.service /etc/systemd/system/tinta-server.service
 rm /tmp/tinta-server.service
@@ -98,3 +121,6 @@ echo "         root@${SERVER}:/opt/tinta/tinta-server.env.tmpl"
 echo "       ssh root@${SERVER}"
 echo "       # editas el archivo, lo mueves a tinta-server.env, chown tinta:tinta, chmod 600"
 echo "  2. bash 02-deploy-binary.sh"
+echo ""
+echo "Respaldos: el timer queda instalado pero apagado hasta correr"
+echo "  SERVER=${SERVER} bash scripts/deploy/04-backup-role.sh"

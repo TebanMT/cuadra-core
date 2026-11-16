@@ -1,0 +1,11 @@
+[Unit]
+Description=Nightly Tinta Postgres backup (03:15 UTC, 21:15 CDMX)
+
+[Timer]
+OnCalendar=*-*-* 03:15:00 UTC
+RandomizedDelaySec=300
+# Si el servidor estaba apagado a esa hora, corre al arrancar.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,95 +1,133 @@
 #!/usr/bin/env bash
-# 03-backup.sh — pg_dump + upload a Cloudflare R2 (S3-compatible).
+# 03-backup.sh — pg_dump + subida a Cloudflare R2 (S3-compatible).
 #
-# Vive en /opt/tinta/bin/backup.sh en el servidor y se corre cada noche
-# vía cron del usuario `tinta`. Conserva 7 dailies + 4 weeklies + 12
-# monthlies (rotation hecha en R2 con lifecycle rules).
+# En el servidor vive como /usr/local/sbin/tinta-backup (root, 0755) y lo
+# corre tinta-backup.timer cada noche a las 03:15 UTC (21:15 CDMX, después
+# del cierre del gym) como el usuario de sistema `tinta-backup`. Los logs
+# quedan en journald: journalctl -u tinta-backup. La rotación (7 dailies +
+# 4 weeklies + 12 monthlies) es una lifecycle rule del bucket en R2.
 #
-# Setup en el servidor (una sola vez, como root):
+# Por qué un rol propio: desde la migración 057 las tablas tienen RLS y el
+# rol de la API (tinta_app) no puede saltarla. pg_dump con ese rol falla con
+# "query would be affected by row-level security policy". El respaldo usa
+# `tinta_backup`: solo lectura (pg_read_all_data) + BYPASSRLS. Su
+# credencial vive en /etc/tinta/backup.env (root, 0600), que systemd
+# entrega solo a este servicio; la API nunca la ve.
 #
-#   1. apt-get -y install awscli postgresql-client-16
+# Setup en el servidor (una sola vez): ver "Backups a R2" en
+# scripts/deploy/README.md. En resumen:
+#   1. install-system-files.sh   — usuario, script, service y timer.
+#   2. 04-backup-role.sh         — rol tinta_backup + /etc/tinta/backup.env.
+#   3. Agregar las variables de R2 a /etc/tinta/backup.env.
+#   4. Volver a correr 04-backup-role.sh: prueba el dump y activa el timer.
 #
-#   2. Crear bucket en https://dash.cloudflare.com/?to=/:account/r2 — name:
-#      tinta-backups (private). Anota el Account ID.
+# Variables (de /etc/tinta/backup.env):
+#   BACKUP_DATABASE_URL   — conexión con tinta_backup. Obligatoria. A
+#                           propósito NO se cae a DATABASE_URL.
+#   R2_ENDPOINT           — https://<acct>.r2.cloudflarestorage.com
+#   R2_BUCKET             — nombre del bucket (default tinta-backups).
+#   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+#                         — token de R2 "Object Read & Write" del bucket.
+#   R2_PROFILE            — opcional: profile de ~/.aws/credentials en vez
+#                           de las dos variables anteriores (corridas a mano).
 #
-#   3. Crear API token: R2 → Manage R2 API Tokens → "Object Read & Write"
-#      scoped al bucket. Te da access_key + secret + endpoint
-#      https://<acct>.r2.cloudflarestorage.com.
-#
-#   4. Como `tinta` user:
-#        sudo -u tinta mkdir -p /home/tinta/.aws
-#        sudo -u tinta tee /home/tinta/.aws/credentials >/dev/null <<E
-#        [r2]
-#        aws_access_key_id=...
-#        aws_secret_access_key=...
-#        E
-#        sudo chmod 600 /home/tinta/.aws/credentials
-#        sudo chown -R tinta:tinta /home/tinta/.aws
-#
-#   5. Subir este script:
-#        scp 03-backup.sh tinta@$SERVER:/opt/tinta/bin/backup.sh
-#        ssh tinta@$SERVER "chmod +x /opt/tinta/bin/backup.sh"
-#
-#   6. Cron entry (como tinta):
-#        crontab -e
-#        # Daily at 03:15 UTC (= 21:15 CDMX, después del cierre del gym).
-#        15 3 * * * /opt/tinta/bin/backup.sh >> /var/log/tinta/backup.log 2>&1
-#
-# Variables que el script espera leer del .env del servidor:
-#   DATABASE_URL   — para pg_dump.
-#   R2_BUCKET      — name del bucket (default tinta-backups).
-#   R2_ENDPOINT    — https://<acct>.r2.cloudflarestorage.com
-#   R2_PROFILE     — profile name en ~/.aws/credentials (default r2).
+# Opcionales para corridas manuales:
+#   BACKUP_ENV_FILE=<ruta> — carga ese archivo antes de empezar.
+#   BACKUP_DRY_RUN=1       — hace el dump y lo verifica, sin subirlo.
+#   BACKUP_KEEP_DIR=<dir>  — deja una copia del .sql.gz ahí (prueba de restore).
 
 set -euo pipefail
 
-ENV_FILE="${ENV_FILE:-/opt/tinta/tinta-server.env}"
-if [ -f "${ENV_FILE}" ]; then
+log() { echo "[$(date -u +%FT%TZ)] $*"; }
+fail() {
+  log "✗ $*" >&2
+  exit 1
+}
+
+if [ -n "${BACKUP_ENV_FILE:-}" ]; then
+  [ -f "${BACKUP_ENV_FILE}" ] || fail "No existe ${BACKUP_ENV_FILE}"
   # shellcheck disable=SC1090
-  set -a; source "${ENV_FILE}"; set +a
+  set -a; source "${BACKUP_ENV_FILE}"; set +a
 fi
 
-: "${DATABASE_URL:?Falta DATABASE_URL — revisar ${ENV_FILE}}"
-: "${R2_ENDPOINT:?Falta R2_ENDPOINT (ej: https://abc123.r2.cloudflarestorage.com)}"
+if [ -z "${BACKUP_DATABASE_URL:-}" ]; then
+  fail "Falta BACKUP_DATABASE_URL (rol tinta_backup). No se usa DATABASE_URL: el rol de la API no puede leer a través de RLS. Ver scripts/deploy/04-backup-role.sh."
+fi
+
+DRY_RUN="${BACKUP_DRY_RUN:-0}"
 R2_BUCKET="${R2_BUCKET:-tinta-backups}"
-R2_PROFILE="${R2_PROFILE:-r2}"
+if [ "${DRY_RUN}" != "1" ]; then
+  : "${R2_ENDPOINT:?Falta R2_ENDPOINT (ej: https://abc123.r2.cloudflarestorage.com)}"
+  if [ -z "${R2_PROFILE:-}" ] && { [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; }; then
+    fail "Faltan AWS_ACCESS_KEY_ID y AWS_SECRET_ACCESS_KEY (token de R2) o R2_PROFILE."
+  fi
+fi
+export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-auto}"
+AWS_ARGS=(--endpoint-url "${R2_ENDPOINT:-}")
+if [ -n "${R2_PROFILE:-}" ]; then
+  AWS_ARGS+=(--profile "${R2_PROFILE}")
+fi
 
+# Preflight: sin BYPASSRLS el dump falla a la mitad. Mejor un error claro
+# antes de empezar.
+CAN_READ=$(psql "${BACKUP_DATABASE_URL}" -X -A -t -v ON_ERROR_STOP=1 \
+  -c "SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user") ||
+  fail "No se pudo conectar con BACKUP_DATABASE_URL."
+if [ "${CAN_READ}" != "t" ]; then
+  fail "El rol de BACKUP_DATABASE_URL no tiene BYPASSRLS: pg_dump no puede leer las tablas con RLS. Corre scripts/deploy/04-backup-role.sh."
+fi
+
+umask 077
 DATE_UTC=$(date -u +%Y-%m-%dT%H-%M-%SZ)
-TMPDIR=$(mktemp -d)
-trap 'rm -rf "${TMPDIR}"' EXIT
+WORKDIR=$(mktemp -d)
+trap 'rm -rf "${WORKDIR}"' EXIT
+DUMP_FILE="${WORKDIR}/tinta-${DATE_UTC}.sql.gz"
 
-DUMP_FILE="${TMPDIR}/tinta-${DATE_UTC}.sql.gz"
-
-echo "[$(date -u +%FT%TZ)] → pg_dump → ${DUMP_FILE}"
-# --no-owner --no-privileges para que el restore sea portable. -F p (plain)
-# para gz; alternativamente -F c (custom) si prefieres pg_restore.
-pg_dump "${DATABASE_URL}" \
+log "→ pg_dump → ${DUMP_FILE}"
+# --no-owner --no-privileges para que el restore sea portable. Formato
+# plain + gzip; con pipefail un error de pg_dump aborta aquí.
+pg_dump "${BACKUP_DATABASE_URL}" \
   --no-owner --no-privileges \
   --format=plain \
   | gzip -9 > "${DUMP_FILE}"
 
+# Verificación antes de subir: gzip íntegro, dump terminado y con datos.
+gzip -t "${DUMP_FILE}" || fail "El archivo comprimido está corrupto."
+TAIL=$(gzip -dc "${DUMP_FILE}" | tail -n 5)
+case "${TAIL}" in
+  *"PostgreSQL database dump complete"*) ;;
+  *) fail "El dump quedó incompleto (no termina con 'dump complete')." ;;
+esac
+GYMS_COPY=$(gzip -dc "${DUMP_FILE}" | grep -c '^COPY public\.gyms ' || true)
+[ "${GYMS_COPY}" = "1" ] || fail "El dump no trae la tabla gyms."
+
 SIZE=$(du -h "${DUMP_FILE}" | cut -f1)
-echo "[$(date -u +%FT%TZ)] dump size: ${SIZE}"
+log "dump verificado: ${SIZE}"
+
+if [ -n "${BACKUP_KEEP_DIR:-}" ]; then
+  cp "${DUMP_FILE}" "${BACKUP_KEEP_DIR}/"
+  log "copia local: ${BACKUP_KEEP_DIR}/$(basename "${DUMP_FILE}")"
+fi
+
+if [ "${DRY_RUN}" = "1" ]; then
+  log "✓ BACKUP_DRY_RUN=1: no se subió a R2."
+  exit 0
+fi
 
 # Subida a R2. Path: <bucket>/postgres/YYYY/MM/tinta-<ts>.sql.gz
 YEAR=$(date -u +%Y)
 MONTH=$(date -u +%m)
 S3_KEY="postgres/${YEAR}/${MONTH}/$(basename "${DUMP_FILE}")"
 
-echo "[$(date -u +%FT%TZ)] → s3 cp s3://${R2_BUCKET}/${S3_KEY}"
+log "→ s3 cp s3://${R2_BUCKET}/${S3_KEY}"
 aws s3 cp "${DUMP_FILE}" "s3://${R2_BUCKET}/${S3_KEY}" \
-  --endpoint-url "${R2_ENDPOINT}" \
-  --profile "${R2_PROFILE}" \
+  "${AWS_ARGS[@]}" \
   --only-show-errors
 
-echo "[$(date -u +%FT%TZ)] ✓ backup uploaded"
-
-# Health-check: lista las últimas 5 keys del prefix de hoy para verificar.
-echo "[$(date -u +%FT%TZ)] últimos backups en R2:"
-aws s3 ls "s3://${R2_BUCKET}/postgres/${YEAR}/${MONTH}/" \
-  --endpoint-url "${R2_ENDPOINT}" \
-  --profile "${R2_PROFILE}" \
-  | tail -5
+# Confirmar que el objeto quedó en el bucket, no solo que el comando salió.
+LISTED=$(aws s3 ls "s3://${R2_BUCKET}/${S3_KEY}" "${AWS_ARGS[@]}" || true)
+[ -n "${LISTED}" ] || fail "La subida no aparece en s3://${R2_BUCKET}/${S3_KEY}."
+log "✓ backup en R2: ${LISTED}"
 
 # La rotación (delete dailies > 7 días, etc) se configura en CF como
 # "Lifecycle rule" del bucket — no hay que hacer nada acá.
