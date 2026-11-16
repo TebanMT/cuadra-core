@@ -1,0 +1,17 @@
+# Arranque aislado de Mancuerna para pruebas locales
+
+`MANCUERNA_LOCAL_ONLY=1` selecciona una rama al comienzo de `main`, antes de cargar `.env` o inicializar Tinta, sus bases o proveedores. Cualquier otro valor no vacío falla cerrado. Esta rama exige `MANCUERNA_CONFIG_FILE` como ruta absoluta a un JSON privado y sólo prepara rutas personales. Escucha exclusivamente `127.0.0.1:18883`; `PORT`, `DATABASE_URL` y configuración administrativa no pueden cambiarlo. Incluye límites HTTP y cierre ordenado. No hay rutas administrativas ni health de Tinta.
+
+Ambas DSN deben estar en ese archivo, con usuarios explícitos, puerto explícito, host `localhost`/loopback o socket Unix local y base `mancuerna_*test*` sin `prod`. Se rechazan múltiples hosts, nombres remotos y parámetros que alteren identidad/conexión. `localhost` se normaliza a `127.0.0.1`; el socket se resuelve a un directorio local sin lista de fallback. La rama rechaza variables de conexión `PG*` para impedir que pgx lea un servicefile ambiental. Fija `sslmode=disable`, timeout y `passfile=/dev/null`; el launcher debe usar un entorno filtrado. No ejecuta migraciones y requiere revisión de esquema personal 6 y roles auth/data restringidos.
+
+La propiedad opcional `local_verify_guard` del montaje general contiene `ledger_path` y `destinations`; es **obligatoria en el modo local**. El servicio y cuenta Verify provienen del bloque privado `verify` y se comprueban también contra el adaptador real y el ledger. El archivo debe existir desde una inicialización explícita con `InitializeLocalVerifyLedger`, nunca realizada por startup. La [guardia](../../src/modules/personalaccounts/infraestructure/verification/LOCAL_GUARD.md) limita cuatro envíos compartidos con reserva conservadora de USD 1 por llamada y USD 1 de margen, sin afirmar un costo facturado. No borrar ni reemplazar el ledger para recuperar presupuesto.
+
+Las pruebas unitarias cubren rechazo de DSN remotas/fallback, secretos ambientales, configuración/guardia ausentes y proceso `main` con `.env` sintético que termina antes del arranque administrativo. `TestMancuernaLocalPreparesOnlyLoopbackWithExistingGuardAndRestrictedPools` usa PostgreSQL real desechable, prepara el servidor sin abrir listener, comprueba sus 29 rutas y confirma que el ledger conserva cero envíos. La suite central debe ejecutar esta prueba con migraciones 059–064. El arranque y las pruebas no acreditan por sí mismos entrega real de OTP ni un recorrido de cuenta móvil.
+
+Fotografía243 acredita recuperación como ruta24 y `recovery_limit` con ventana e intentos máximos explícitos; no configura política de retención ni soporte.
+
+Fotografía 263 agrega cambio de teléfono, consulta de resultado y continuidad de intento; mantiene 27 rutas y no realiza envíos reales. La foto histórica 243 acreditaba las 24 rutas de ese momento.
+
+Fotografía273 añade solicitud de eliminación y resultado mínimo. El montaje mantiene Policy:nil y devuelve POLICY_NOT_CONFIGURED; sólo pruebas con política sintética aceptan solicitudes. No hay purga ni liberación de números habilitadas.
+
+Fotografía354 añade `/sync/push`, inicialmente con productores tipados `workout.start` y `workout.set.create`. Validación completa antes del primer efecto, preflight de actor/orígenes, hasta50 operaciones/2MiB y resultados individuales. Cada comando conserva su transacción y recibo; el lote no es atómico. El cliente/outbox sigue en desarrollo.

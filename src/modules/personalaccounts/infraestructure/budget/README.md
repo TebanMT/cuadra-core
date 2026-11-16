@@ -1,0 +1,22 @@
+# Capacidad persistente de OTP
+
+Este módulo cuenta reservas de envío y comprobación en `mancuerna.otp_budgets`. No envía mensajes, no abre rutas y no fija un presupuesto monetario. Configurar `MaxSend` no autoriza gasto: la autorización monetaria y sus destinos se coordinan por separado en MC-P01.
+
+`budget.NewRules` exige límites positivos de envío/comprobación y ventana explícita para los tres ámbitos `destination`, `origin` y `service`. Una configuración cero, parcial, con ventanas fraccionarias o fuera del rango INTEGER de PostgreSQL falla cerrada. `NewRecoveryRules` ofrece un ámbito aparte para recuperación; no reemplaza los límites telefónicos. WhatsApp y SMS no son dimensiones: consumen la misma capacidad.
+
+El caso de uso obtiene la hora del servidor, normaliza sus identificadores y llama al hasher HMAC-SHA256 con una llave inyectada estable de al menos 32 bytes. La llave no se genera al reiniciar ni se lee del entorno por este módulo. Cambiar la llave o la política de ventanas requiere una transición operativa explícita: hacerlo sin conservar el vínculo con los contadores puede reiniciar capacidad. El origen debe derivarse de información confiable de la petición; no se toma directamente de un encabezado arbitrario aquí.
+
+`Rules.Plan` crea un plan inmutable con ventanas ancladas al epoch UTC. Se construye para cada nueva operación con el reloj confiable del servidor; no se conserva como configuración ni se reutiliza para evadir el cambio de ventana. Cada ventana conserva `send_count` y `check_count` separados. Una reserva consume uno sólo del contador solicitado en cada dimensión. La igualdad con el límite rechaza; un `blocked_until` vigente rechaza y su instante final permite reservar si queda capacidad. Un bloqueo activo en una ventana anterior se respeta al comenzar otra.
+
+`OTPBudgetRepository.Reserve(tx, plan)` exige un handle GORM transaccional existente con `READ COMMITTED` y escritura habilitada; utiliza únicamente ese handle. Rechaza snapshots retenidos: un advisory lock no hace visible un bloqueo confirmado después del snapshot de `REPEATABLE READ`. Antes de insertar o leer filas toma todos los locks transaccionales de advisory: namespace entero exclusivo `0x4d434250`, clave de sujeto derivada de scope/hash, orden por clave efectiva y eliminación de duplicados. El espacio PostgreSQL de dos enteros es independiente del espacio bigint de los futuros locks de teléfono. Las colisiones sólo añaden contención. Después bloquea las filas relevantes por ventana y evalúa todas las dimensiones antes de actualizar contadores. Todo futuro escritor que añada bloqueos debe seguir el mismo protocolo. El orden cubre una reserva por transacción; componer varias reservas exige adquirir previamente la unión ordenada de sus locks o manejar el rollback de un deadlock, no asumir que cada orden parcial basta. [Aislamiento PostgreSQL](https://www.postgresql.org/docs/current/transaction-iso.html).
+
+La futura operación de acceso debe persistir intento/intención y reserva en la misma `UnitOfWork.Command`, propagar cualquier error y salir de la transacción antes de llamar Verify. Un error propagado revierte todos los efectos. Si el caller ignora un error, pueden persistir filas vacías creadas antes de detectar el rechazo; no se promete atomicidad de la operación si el caller decide continuar y confirmar. Ninguna dimensión consume contadores antes de que todas acepten; un error posterior durante SQL exige igualmente rollback del caller. El resultado incierto del proveedor no devuelve capacidad ni inicia otra reserva automáticamente. Este repositorio no decide idempotencia: el futuro caso de uso debe reconocer la misma intención antes de reservar para evitar contar y enviar dos veces un reintento HTTP.
+
+Pruebas reproducibles:
+
+```sh
+go test -tags server ./src/modules/personalaccounts/domain/budget ./src/modules/personalaccounts/infraestructure/budget
+go test -race -tags server,integration ./src/modules/personalaccounts/infraestructure/db/repositories -run TestOTPBudget -count=1
+```
+
+Las integraciones requieren `MANCUERNA_TEST_OWNER_DSN` y `MANCUERNA_TEST_AUTH_DSN` del runner aislado. Rechazan hosts remotos; no usan `.env` ni `DATABASE_URL`, no migran y no cambian permisos. Cubren concurrencia, instancias/reinicio, canales compartidos, contadores independientes, rollback, bloqueo y límites de ventana. Sin esos DSN quedan omitidas, no aprobadas.

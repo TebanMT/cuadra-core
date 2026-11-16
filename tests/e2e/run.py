@@ -73,6 +73,8 @@ def run():
         current_sidecar = root/'sidecar-current'
         for target, tag, package in [('server', 'server', './cmd/server'), ('sidecar-current', 'sidecar', './cmd/sidecar'), ('migrate', 'server', './cmd/migrate'), ('tenant-backup', 'server', './cmd/tenant-backup')]:
             command(['go', 'build', '-tags', tag, '-o', root/target, package], cwd=repo, env=clean)
+        # Cluster-scoped, restricted NOLOGIN roles, before database-scoped DDL.
+        sql(dsn, (repo/'scripts/db/mancuerna_roles.sql').read_text())
         command([root/'migrate', '--dir', repo/'db_migrations/postgres'], env={**clean,'DATABASE_URL':dsn})
         password = uuid.uuid4().hex
         sql(args.admin_dsn, f"CREATE ROLE {role} LOGIN PASSWORD '{password}' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE")

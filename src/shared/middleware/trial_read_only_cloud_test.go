@@ -46,6 +46,7 @@ var cloudGateRoutes = []struct{ method, path string }{
 	{http.MethodPatch, "/api/v1/users/:id/active"},
 	{http.MethodPost, "/api/v1/users/:id/rotate-pin"},
 	{http.MethodPatch, "/api/v1/users/:id"},
+	{http.MethodPost, "/api/mancuerna/v1/commands"},
 }
 
 func newCloudGateRouter(t *testing.T, gym *gymDomain.Gym, uow sharedDomain.UnitOfWork) (*gin.Engine, string) {
@@ -96,6 +97,7 @@ func TestCloudTrialReadOnly_BlocksDashboardWrites(t *testing.T) {
 		{http.MethodPost, "/api/v1/uploads/presign-get", http.StatusOK},
 		{http.MethodPatch, "/api/v1/users/" + id + "/active", http.StatusOK},
 		{http.MethodPost, "/api/v1/users/" + id + "/rotate-pin", http.StatusOK},
+		{http.MethodPost, "/api/mancuerna/v1/commands", http.StatusOK},
 		{http.MethodPost, "/api/v1/members", http.StatusPaymentRequired},
 		{http.MethodPatch, "/api/v1/gyms/me", http.StatusPaymentRequired},
 		{http.MethodPost, "/api/v1/payments/membership", http.StatusPaymentRequired},

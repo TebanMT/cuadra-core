@@ -19,7 +19,7 @@ var ErrTenantScope = errors.New("contexto de gimnasio inválido")
 // A nested operation cannot silently switch to another gym.
 func WithTenant(ctx context.Context, id uuid.UUID) context.Context {
 	previous, _ := ctx.Value(tenantKey{}).(tenantScope)
-	invalid := previous.Invalid || id == uuid.Nil || previous.ID != uuid.Nil && previous.ID != id
+	invalid := previous.Invalid || personalContextPresent(ctx) || id == uuid.Nil || previous.ID != uuid.Nil && previous.ID != id
 	return context.WithValue(ctx, tenantKey{}, tenantScope{ID: id, Invalid: invalid})
 }
 func TenantID(ctx context.Context) uuid.UUID {
@@ -27,6 +27,12 @@ func TenantID(ctx context.Context) uuid.UUID {
 	return scope.ID
 }
 func tenantInvalid(ctx context.Context) bool {
+	return tenantScopeInvalid(ctx) || personalContextPresent(ctx)
+}
+
+// Personal scope validation needs the gym scope's own invalid bit without
+// treating its valid personal identity as an administrative authorization.
+func tenantScopeInvalid(ctx context.Context) bool {
 	scope, _ := ctx.Value(tenantKey{}).(tenantScope)
 	return scope.Invalid
 }

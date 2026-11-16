@@ -1,0 +1,12 @@
+{
+  "name": "@tinta/mancuerna-contract",
+  "version": "1.0.3",
+  "private": true,
+  "scripts": {
+    "generate": "python3 build_contract.py && python3 build_examples.py",
+    "test": "node tests/contracts.cjs && tsc --noEmit --strict --skipLibCheck --target es2022 types.ts fixtures/consumer.ts",
+    "check": "python3 tests/generated.py"
+  },
+  "devDependencies": { "ajv": "8.20.0", "typescript": "5.9.3" },
+  "packageManager": "pnpm@10.29.3"
+}

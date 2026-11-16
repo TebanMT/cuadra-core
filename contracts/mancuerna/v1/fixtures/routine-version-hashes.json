@@ -1,0 +1,2700 @@
+{
+  "version": 1,
+  "algorithm": "SHA-256",
+  "material": "S00 canonical UTF-8 of the complete RoutineVersion DTO except only content_hash; no prefix or normalization",
+  "generator": "Python standard-library json.dumps(ensure_ascii=False,sort_keys=True,separators=(comma,colon)) and hashlib.sha256; synthetic protocol fixture",
+  "valid": [
+    {
+      "name": "unicode-and-null-rest",
+      "dto": {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "routine_id": "10000000-0000-4000-8000-000000000002",
+        "revision": "1",
+        "version_number": 7,
+        "title_snapshot": "Fuerza – México 🏋️",
+        "format_version": 1,
+        "source_draft_revision": "9007199254740993",
+        "published_at": "2026-10-19T12:34:56.000Z",
+        "days": [
+          {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "label": "Día Á",
+            "position": 0,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000005",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-000000000069"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": null,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000006",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006a"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 0,
+                "notes": ""
+              }
+            ]
+          },
+          {
+            "id": "10000000-0000-4000-8000-000000000004",
+            "label": "Día B",
+            "position": 1,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000007",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006b"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 3600,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000008",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-00000000006c"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 90,
+                "notes": ""
+              }
+            ]
+          }
+        ],
+        "content_hash": "598fc5945525a69a2f9cbdf06730d653c2a0e0161f0417f4c995179b5f65c4f1"
+      },
+      "canonical_content": "{\"days\":[{\"exercises\":[{\"exercise_ref\":{\"id\":\"10000000-0000-4000-8000-000000000069\",\"source\":\"catalog\"},\"id\":\"10000000-0000-4000-8000-000000000005\",\"load_mode_snapshot\":\"external\",\"name_snapshot\":\"Press – Pecho 🏋️\",\"notes\":\"Á · Á · 😀 <tinta> \\\\\\n\\\"\",\"position\":0,\"prescribed_reps\":\"8–12\",\"prescribed_sets\":3,\"rest_seconds\":null},{\"exercise_ref\":{\"id\":\"10000000-0000-4000-8000-00000000006a\",\"source\":\"personal\"},\"id\":\"10000000-0000-4000-8000-000000000006\",\"load_mode_snapshot\":\"none\",\"name_snapshot\":\"Sentadilla ágil\",\"notes\":\"\",\"position\":1,\"prescribed_reps\":\"Al fallo\",\"prescribed_sets\":1,\"rest_seconds\":0}],\"id\":\"10000000-0000-4000-8000-000000000003\",\"label\":\"Día Á\",\"position\":0},{\"exercises\":[{\"exercise_ref\":{\"id\":\"10000000-0000-4000-8000-00000000006b\",\"source\":\"personal\"},\"id\":\"10000000-0000-4000-8000-000000000007\",\"load_mode_snapshot\":\"external\",\"name_snapshot\":\"Press – Pecho 🏋️\",\"notes\":\"Á · Á · 😀 <tinta> \\\\\\n\\\"\",\"position\":0,\"prescribed_reps\":\"8–12\",\"prescribed_sets\":3,\"rest_seconds\":3600},{\"exercise_ref\":{\"id\":\"10000000-0000-4000-8000-00000000006c\",\"source\":\"catalog\"},\"id\":\"10000000-0000-4000-8000-000000000008\",\"load_mode_snapshot\":\"none\",\"name_snapshot\":\"Sentadilla ágil\",\"notes\":\"\",\"position\":1,\"prescribed_reps\":\"Al fallo\",\"prescribed_sets\":1,\"rest_seconds\":90}],\"id\":\"10000000-0000-4000-8000-000000000004\",\"label\":\"Día B\",\"position\":1}],\"format_version\":1,\"id\":\"10000000-0000-4000-8000-000000000001\",\"published_at\":\"2026-10-19T12:34:56.000Z\",\"revision\":\"1\",\"routine_id\":\"10000000-0000-4000-8000-000000000002\",\"source_draft_revision\":\"9007199254740993\",\"title_snapshot\":\"Fuerza – México 🏋️\",\"version_number\":7}",
+      "hash": "598fc5945525a69a2f9cbdf06730d653c2a0e0161f0417f4c995179b5f65c4f1"
+    },
+    {
+      "name": "timestamp-seconds",
+      "dto": {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "routine_id": "10000000-0000-4000-8000-000000000002",
+        "revision": "1",
+        "version_number": 7,
+        "title_snapshot": "Fuerza – México 🏋️",
+        "format_version": 1,
+        "source_draft_revision": "9007199254740993",
+        "published_at": "2026-10-19T12:34:56Z",
+        "days": [
+          {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "label": "Día Á",
+            "position": 0,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000005",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-000000000069"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": null,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000006",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006a"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 0,
+                "notes": ""
+              }
+            ]
+          },
+          {
+            "id": "10000000-0000-4000-8000-000000000004",
+            "label": "Día B",
+            "position": 1,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000007",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006b"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 3600,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000008",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-00000000006c"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 90,
+                "notes": ""
+              }
+            ]
+          }
+        ],
+        "content_hash": "68bbd4572a07aba5ba8b590eba0cf1dd15d526afcfb71490e3033357bb153e47"
+      },
+      "canonical_content": "{\"days\":[{\"exercises\":[{\"exercise_ref\":{\"id\":\"10000000-0000-4000-8000-000000000069\",\"source\":\"catalog\"},\"id\":\"10000000-0000-4000-8000-000000000005\",\"load_mode_snapshot\":\"external\",\"name_snapshot\":\"Press – Pecho 🏋️\",\"notes\":\"Á · Á · 😀 <tinta> \\\\\\n\\\"\",\"position\":0,\"prescribed_reps\":\"8–12\",\"prescribed_sets\":3,\"rest_seconds\":null},{\"exercise_ref\":{\"id\":\"10000000-0000-4000-8000-00000000006a\",\"source\":\"personal\"},\"id\":\"10000000-0000-4000-8000-000000000006\",\"load_mode_snapshot\":\"none\",\"name_snapshot\":\"Sentadilla ágil\",\"notes\":\"\",\"position\":1,\"prescribed_reps\":\"Al fallo\",\"prescribed_sets\":1,\"rest_seconds\":0}],\"id\":\"10000000-0000-4000-8000-000000000003\",\"label\":\"Día Á\",\"position\":0},{\"exercises\":[{\"exercise_ref\":{\"id\":\"10000000-0000-4000-8000-00000000006b\",\"source\":\"personal\"},\"id\":\"10000000-0000-4000-8000-000000000007\",\"load_mode_snapshot\":\"external\",\"name_snapshot\":\"Press – Pecho 🏋️\",\"notes\":\"Á · Á · 😀 <tinta> \\\\\\n\\\"\",\"position\":0,\"prescribed_reps\":\"8–12\",\"prescribed_sets\":3,\"rest_seconds\":3600},{\"exercise_ref\":{\"id\":\"10000000-0000-4000-8000-00000000006c\",\"source\":\"catalog\"},\"id\":\"10000000-0000-4000-8000-000000000008\",\"load_mode_snapshot\":\"none\",\"name_snapshot\":\"Sentadilla ágil\",\"notes\":\"\",\"position\":1,\"prescribed_reps\":\"Al fallo\",\"prescribed_sets\":1,\"rest_seconds\":90}],\"id\":\"10000000-0000-4000-8000-000000000004\",\"label\":\"Día B\",\"position\":1}],\"format_version\":1,\"id\":\"10000000-0000-4000-8000-000000000001\",\"published_at\":\"2026-10-19T12:34:56Z\",\"revision\":\"1\",\"routine_id\":\"10000000-0000-4000-8000-000000000002\",\"source_draft_revision\":\"9007199254740993\",\"title_snapshot\":\"Fuerza – México 🏋️\",\"version_number\":7}",
+      "hash": "68bbd4572a07aba5ba8b590eba0cf1dd15d526afcfb71490e3033357bb153e47"
+    },
+    {
+      "name": "days-order-preserved",
+      "dto": {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "routine_id": "10000000-0000-4000-8000-000000000002",
+        "revision": "1",
+        "version_number": 7,
+        "title_snapshot": "Fuerza – México 🏋️",
+        "format_version": 1,
+        "source_draft_revision": "9007199254740993",
+        "published_at": "2026-10-19T12:34:56.000Z",
+        "days": [
+          {
+            "id": "10000000-0000-4000-8000-000000000004",
+            "label": "Día B",
+            "position": 1,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000007",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006b"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 3600,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000008",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-00000000006c"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 90,
+                "notes": ""
+              }
+            ]
+          },
+          {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "label": "Día Á",
+            "position": 0,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000005",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-000000000069"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": null,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000006",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006a"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 0,
+                "notes": ""
+              }
+            ]
+          }
+        ],
+        "content_hash": "52355399ce827edbffc239968aa3e2d3987c39fc4e95cebab10e65cc7dfaf9f6"
+      },
+      "canonical_content": "{\"days\":[{\"exercises\":[{\"exercise_ref\":{\"id\":\"10000000-0000-4000-8000-00000000006b\",\"source\":\"personal\"},\"id\":\"10000000-0000-4000-8000-000000000007\",\"load_mode_snapshot\":\"external\",\"name_snapshot\":\"Press – Pecho 🏋️\",\"notes\":\"Á · Á · 😀 <tinta> \\\\\\n\\\"\",\"position\":0,\"prescribed_reps\":\"8–12\",\"prescribed_sets\":3,\"rest_seconds\":3600},{\"exercise_ref\":{\"id\":\"10000000-0000-4000-8000-00000000006c\",\"source\":\"catalog\"},\"id\":\"10000000-0000-4000-8000-000000000008\",\"load_mode_snapshot\":\"none\",\"name_snapshot\":\"Sentadilla ágil\",\"notes\":\"\",\"position\":1,\"prescribed_reps\":\"Al fallo\",\"prescribed_sets\":1,\"rest_seconds\":90}],\"id\":\"10000000-0000-4000-8000-000000000004\",\"label\":\"Día B\",\"position\":1},{\"exercises\":[{\"exercise_ref\":{\"id\":\"10000000-0000-4000-8000-000000000069\",\"source\":\"catalog\"},\"id\":\"10000000-0000-4000-8000-000000000005\",\"load_mode_snapshot\":\"external\",\"name_snapshot\":\"Press – Pecho 🏋️\",\"notes\":\"Á · Á · 😀 <tinta> \\\\\\n\\\"\",\"position\":0,\"prescribed_reps\":\"8–12\",\"prescribed_sets\":3,\"rest_seconds\":null},{\"exercise_ref\":{\"id\":\"10000000-0000-4000-8000-00000000006a\",\"source\":\"personal\"},\"id\":\"10000000-0000-4000-8000-000000000006\",\"load_mode_snapshot\":\"none\",\"name_snapshot\":\"Sentadilla ágil\",\"notes\":\"\",\"position\":1,\"prescribed_reps\":\"Al fallo\",\"prescribed_sets\":1,\"rest_seconds\":0}],\"id\":\"10000000-0000-4000-8000-000000000003\",\"label\":\"Día Á\",\"position\":0}],\"format_version\":1,\"id\":\"10000000-0000-4000-8000-000000000001\",\"published_at\":\"2026-10-19T12:34:56.000Z\",\"revision\":\"1\",\"routine_id\":\"10000000-0000-4000-8000-000000000002\",\"source_draft_revision\":\"9007199254740993\",\"title_snapshot\":\"Fuerza – México 🏋️\",\"version_number\":7}",
+      "hash": "52355399ce827edbffc239968aa3e2d3987c39fc4e95cebab10e65cc7dfaf9f6"
+    },
+    {
+      "name": "exercises-order-preserved",
+      "dto": {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "routine_id": "10000000-0000-4000-8000-000000000002",
+        "revision": "1",
+        "version_number": 7,
+        "title_snapshot": "Fuerza – México 🏋️",
+        "format_version": 1,
+        "source_draft_revision": "9007199254740993",
+        "published_at": "2026-10-19T12:34:56.000Z",
+        "days": [
+          {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "label": "Día Á",
+            "position": 0,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000006",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006a"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 0,
+                "notes": ""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000005",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-000000000069"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": null,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              }
+            ]
+          },
+          {
+            "id": "10000000-0000-4000-8000-000000000004",
+            "label": "Día B",
+            "position": 1,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000007",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006b"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 3600,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000008",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-00000000006c"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 90,
+                "notes": ""
+              }
+            ]
+          }
+        ],
+        "content_hash": "81b90828e6227c29cb453efaf44604e3be6532316c05aa7ff2f362c77cea96ea"
+      },
+      "canonical_content": "{\"days\":[{\"exercises\":[{\"exercise_ref\":{\"id\":\"10000000-0000-4000-8000-00000000006a\",\"source\":\"personal\"},\"id\":\"10000000-0000-4000-8000-000000000006\",\"load_mode_snapshot\":\"none\",\"name_snapshot\":\"Sentadilla ágil\",\"notes\":\"\",\"position\":1,\"prescribed_reps\":\"Al fallo\",\"prescribed_sets\":1,\"rest_seconds\":0},{\"exercise_ref\":{\"id\":\"10000000-0000-4000-8000-000000000069\",\"source\":\"catalog\"},\"id\":\"10000000-0000-4000-8000-000000000005\",\"load_mode_snapshot\":\"external\",\"name_snapshot\":\"Press – Pecho 🏋️\",\"notes\":\"Á · Á · 😀 <tinta> \\\\\\n\\\"\",\"position\":0,\"prescribed_reps\":\"8–12\",\"prescribed_sets\":3,\"rest_seconds\":null}],\"id\":\"10000000-0000-4000-8000-000000000003\",\"label\":\"Día Á\",\"position\":0},{\"exercises\":[{\"exercise_ref\":{\"id\":\"10000000-0000-4000-8000-00000000006b\",\"source\":\"personal\"},\"id\":\"10000000-0000-4000-8000-000000000007\",\"load_mode_snapshot\":\"external\",\"name_snapshot\":\"Press – Pecho 🏋️\",\"notes\":\"Á · Á · 😀 <tinta> \\\\\\n\\\"\",\"position\":0,\"prescribed_reps\":\"8–12\",\"prescribed_sets\":3,\"rest_seconds\":3600},{\"exercise_ref\":{\"id\":\"10000000-0000-4000-8000-00000000006c\",\"source\":\"catalog\"},\"id\":\"10000000-0000-4000-8000-000000000008\",\"load_mode_snapshot\":\"none\",\"name_snapshot\":\"Sentadilla ágil\",\"notes\":\"\",\"position\":1,\"prescribed_reps\":\"Al fallo\",\"prescribed_sets\":1,\"rest_seconds\":90}],\"id\":\"10000000-0000-4000-8000-000000000004\",\"label\":\"Día B\",\"position\":1}],\"format_version\":1,\"id\":\"10000000-0000-4000-8000-000000000001\",\"published_at\":\"2026-10-19T12:34:56.000Z\",\"revision\":\"1\",\"routine_id\":\"10000000-0000-4000-8000-000000000002\",\"source_draft_revision\":\"9007199254740993\",\"title_snapshot\":\"Fuerza – México 🏋️\",\"version_number\":7}",
+      "hash": "81b90828e6227c29cb453efaf44604e3be6532316c05aa7ff2f362c77cea96ea"
+    },
+    {
+      "name": "zero-distinct-from-null",
+      "dto": {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "routine_id": "10000000-0000-4000-8000-000000000002",
+        "revision": "1",
+        "version_number": 7,
+        "title_snapshot": "Fuerza – México 🏋️",
+        "format_version": 1,
+        "source_draft_revision": "9007199254740993",
+        "published_at": "2026-10-19T12:34:56.000Z",
+        "days": [
+          {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "label": "Día Á",
+            "position": 0,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000005",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-000000000069"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 0,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000006",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006a"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 0,
+                "notes": ""
+              }
+            ]
+          },
+          {
+            "id": "10000000-0000-4000-8000-000000000004",
+            "label": "Día B",
+            "position": 1,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000007",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006b"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 3600,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000008",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-00000000006c"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 90,
+                "notes": ""
+              }
+            ]
+          }
+        ],
+        "content_hash": "c522b10794ea510c0e5d99e094f5670ec3ac73f4bbe07a9b84160ef2ccf35806"
+      },
+      "canonical_content": "{\"days\":[{\"exercises\":[{\"exercise_ref\":{\"id\":\"10000000-0000-4000-8000-000000000069\",\"source\":\"catalog\"},\"id\":\"10000000-0000-4000-8000-000000000005\",\"load_mode_snapshot\":\"external\",\"name_snapshot\":\"Press – Pecho 🏋️\",\"notes\":\"Á · Á · 😀 <tinta> \\\\\\n\\\"\",\"position\":0,\"prescribed_reps\":\"8–12\",\"prescribed_sets\":3,\"rest_seconds\":0},{\"exercise_ref\":{\"id\":\"10000000-0000-4000-8000-00000000006a\",\"source\":\"personal\"},\"id\":\"10000000-0000-4000-8000-000000000006\",\"load_mode_snapshot\":\"none\",\"name_snapshot\":\"Sentadilla ágil\",\"notes\":\"\",\"position\":1,\"prescribed_reps\":\"Al fallo\",\"prescribed_sets\":1,\"rest_seconds\":0}],\"id\":\"10000000-0000-4000-8000-000000000003\",\"label\":\"Día Á\",\"position\":0},{\"exercises\":[{\"exercise_ref\":{\"id\":\"10000000-0000-4000-8000-00000000006b\",\"source\":\"personal\"},\"id\":\"10000000-0000-4000-8000-000000000007\",\"load_mode_snapshot\":\"external\",\"name_snapshot\":\"Press – Pecho 🏋️\",\"notes\":\"Á · Á · 😀 <tinta> \\\\\\n\\\"\",\"position\":0,\"prescribed_reps\":\"8–12\",\"prescribed_sets\":3,\"rest_seconds\":3600},{\"exercise_ref\":{\"id\":\"10000000-0000-4000-8000-00000000006c\",\"source\":\"catalog\"},\"id\":\"10000000-0000-4000-8000-000000000008\",\"load_mode_snapshot\":\"none\",\"name_snapshot\":\"Sentadilla ágil\",\"notes\":\"\",\"position\":1,\"prescribed_reps\":\"Al fallo\",\"prescribed_sets\":1,\"rest_seconds\":90}],\"id\":\"10000000-0000-4000-8000-000000000004\",\"label\":\"Día B\",\"position\":1}],\"format_version\":1,\"id\":\"10000000-0000-4000-8000-000000000001\",\"published_at\":\"2026-10-19T12:34:56.000Z\",\"revision\":\"1\",\"routine_id\":\"10000000-0000-4000-8000-000000000002\",\"source_draft_revision\":\"9007199254740993\",\"title_snapshot\":\"Fuerza – México 🏋️\",\"version_number\":7}",
+      "hash": "c522b10794ea510c0e5d99e094f5670ec3ac73f4bbe07a9b84160ef2ccf35806"
+    },
+    {
+      "name": "unicode-not-normalized",
+      "dto": {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "routine_id": "10000000-0000-4000-8000-000000000002",
+        "revision": "1",
+        "version_number": 7,
+        "title_snapshot": "Fuerza – México 🏋️",
+        "format_version": 1,
+        "source_draft_revision": "9007199254740993",
+        "published_at": "2026-10-19T12:34:56.000Z",
+        "days": [
+          {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "label": "Día Á",
+            "position": 0,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000005",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-000000000069"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": null,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000006",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006a"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 0,
+                "notes": ""
+              }
+            ]
+          },
+          {
+            "id": "10000000-0000-4000-8000-000000000004",
+            "label": "Día B",
+            "position": 1,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000007",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006b"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 3600,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000008",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-00000000006c"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 90,
+                "notes": ""
+              }
+            ]
+          }
+        ],
+        "content_hash": "5f1ba4d28fc94cc4d963e6f6fb999ff7b68d967a399e7de4f2f52bbf2eb1dc51"
+      },
+      "canonical_content": "{\"days\":[{\"exercises\":[{\"exercise_ref\":{\"id\":\"10000000-0000-4000-8000-000000000069\",\"source\":\"catalog\"},\"id\":\"10000000-0000-4000-8000-000000000005\",\"load_mode_snapshot\":\"external\",\"name_snapshot\":\"Press – Pecho 🏋️\",\"notes\":\"Á · Á · 😀 <tinta> \\\\\\n\\\"\",\"position\":0,\"prescribed_reps\":\"8–12\",\"prescribed_sets\":3,\"rest_seconds\":null},{\"exercise_ref\":{\"id\":\"10000000-0000-4000-8000-00000000006a\",\"source\":\"personal\"},\"id\":\"10000000-0000-4000-8000-000000000006\",\"load_mode_snapshot\":\"none\",\"name_snapshot\":\"Sentadilla ágil\",\"notes\":\"\",\"position\":1,\"prescribed_reps\":\"Al fallo\",\"prescribed_sets\":1,\"rest_seconds\":0}],\"id\":\"10000000-0000-4000-8000-000000000003\",\"label\":\"Día Á\",\"position\":0},{\"exercises\":[{\"exercise_ref\":{\"id\":\"10000000-0000-4000-8000-00000000006b\",\"source\":\"personal\"},\"id\":\"10000000-0000-4000-8000-000000000007\",\"load_mode_snapshot\":\"external\",\"name_snapshot\":\"Press – Pecho 🏋️\",\"notes\":\"Á · Á · 😀 <tinta> \\\\\\n\\\"\",\"position\":0,\"prescribed_reps\":\"8–12\",\"prescribed_sets\":3,\"rest_seconds\":3600},{\"exercise_ref\":{\"id\":\"10000000-0000-4000-8000-00000000006c\",\"source\":\"catalog\"},\"id\":\"10000000-0000-4000-8000-000000000008\",\"load_mode_snapshot\":\"none\",\"name_snapshot\":\"Sentadilla ágil\",\"notes\":\"\",\"position\":1,\"prescribed_reps\":\"Al fallo\",\"prescribed_sets\":1,\"rest_seconds\":90}],\"id\":\"10000000-0000-4000-8000-000000000004\",\"label\":\"Día B\",\"position\":1}],\"format_version\":1,\"id\":\"10000000-0000-4000-8000-000000000001\",\"published_at\":\"2026-10-19T12:34:56.000Z\",\"revision\":\"1\",\"routine_id\":\"10000000-0000-4000-8000-000000000002\",\"source_draft_revision\":\"9007199254740993\",\"title_snapshot\":\"Fuerza – México 🏋️\",\"version_number\":7}",
+      "hash": "5f1ba4d28fc94cc4d963e6f6fb999ff7b68d967a399e7de4f2f52bbf2eb1dc51"
+    },
+    {
+      "name": "integer-and-revision-boundaries",
+      "dto": {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "routine_id": "10000000-0000-4000-8000-000000000002",
+        "revision": "1",
+        "version_number": 2147483647,
+        "title_snapshot": "Fuerza – México 🏋️",
+        "format_version": 1,
+        "source_draft_revision": "9223372036854775807",
+        "published_at": "2026-10-19T12:34:56.000Z",
+        "days": [
+          {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "label": "Día Á",
+            "position": 0,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000005",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-000000000069"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": null,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000006",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006a"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 0,
+                "notes": ""
+              }
+            ]
+          },
+          {
+            "id": "10000000-0000-4000-8000-000000000004",
+            "label": "Día B",
+            "position": 1,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000007",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006b"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 3600,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000008",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-00000000006c"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 90,
+                "notes": ""
+              }
+            ]
+          }
+        ],
+        "content_hash": "14e7a90585eb86352844e2468e98abdd6196fae7c761b536df7f507a0aed4d49"
+      },
+      "canonical_content": "{\"days\":[{\"exercises\":[{\"exercise_ref\":{\"id\":\"10000000-0000-4000-8000-000000000069\",\"source\":\"catalog\"},\"id\":\"10000000-0000-4000-8000-000000000005\",\"load_mode_snapshot\":\"external\",\"name_snapshot\":\"Press – Pecho 🏋️\",\"notes\":\"Á · Á · 😀 <tinta> \\\\\\n\\\"\",\"position\":0,\"prescribed_reps\":\"8–12\",\"prescribed_sets\":3,\"rest_seconds\":null},{\"exercise_ref\":{\"id\":\"10000000-0000-4000-8000-00000000006a\",\"source\":\"personal\"},\"id\":\"10000000-0000-4000-8000-000000000006\",\"load_mode_snapshot\":\"none\",\"name_snapshot\":\"Sentadilla ágil\",\"notes\":\"\",\"position\":1,\"prescribed_reps\":\"Al fallo\",\"prescribed_sets\":1,\"rest_seconds\":0}],\"id\":\"10000000-0000-4000-8000-000000000003\",\"label\":\"Día Á\",\"position\":0},{\"exercises\":[{\"exercise_ref\":{\"id\":\"10000000-0000-4000-8000-00000000006b\",\"source\":\"personal\"},\"id\":\"10000000-0000-4000-8000-000000000007\",\"load_mode_snapshot\":\"external\",\"name_snapshot\":\"Press – Pecho 🏋️\",\"notes\":\"Á · Á · 😀 <tinta> \\\\\\n\\\"\",\"position\":0,\"prescribed_reps\":\"8–12\",\"prescribed_sets\":3,\"rest_seconds\":3600},{\"exercise_ref\":{\"id\":\"10000000-0000-4000-8000-00000000006c\",\"source\":\"catalog\"},\"id\":\"10000000-0000-4000-8000-000000000008\",\"load_mode_snapshot\":\"none\",\"name_snapshot\":\"Sentadilla ágil\",\"notes\":\"\",\"position\":1,\"prescribed_reps\":\"Al fallo\",\"prescribed_sets\":1,\"rest_seconds\":90}],\"id\":\"10000000-0000-4000-8000-000000000004\",\"label\":\"Día B\",\"position\":1}],\"format_version\":1,\"id\":\"10000000-0000-4000-8000-000000000001\",\"published_at\":\"2026-10-19T12:34:56.000Z\",\"revision\":\"1\",\"routine_id\":\"10000000-0000-4000-8000-000000000002\",\"source_draft_revision\":\"9223372036854775807\",\"title_snapshot\":\"Fuerza – México 🏋️\",\"version_number\":2147483647}",
+      "hash": "14e7a90585eb86352844e2468e98abdd6196fae7c761b536df7f507a0aed4d49"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "changed-title-retains-old-hash",
+      "dto": {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "routine_id": "10000000-0000-4000-8000-000000000002",
+        "revision": "1",
+        "version_number": 7,
+        "title_snapshot": "Otro título",
+        "format_version": 1,
+        "source_draft_revision": "9007199254740993",
+        "published_at": "2026-10-19T12:34:56.000Z",
+        "days": [
+          {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "label": "Día Á",
+            "position": 0,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000005",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-000000000069"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": null,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000006",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006a"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 0,
+                "notes": ""
+              }
+            ]
+          },
+          {
+            "id": "10000000-0000-4000-8000-000000000004",
+            "label": "Día B",
+            "position": 1,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000007",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006b"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 3600,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000008",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-00000000006c"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 90,
+                "notes": ""
+              }
+            ]
+          }
+        ],
+        "content_hash": "598fc5945525a69a2f9cbdf06730d653c2a0e0161f0417f4c995179b5f65c4f1"
+      },
+      "error": "HASH"
+    },
+    {
+      "name": "changed-hash",
+      "dto": {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "routine_id": "10000000-0000-4000-8000-000000000002",
+        "revision": "1",
+        "version_number": 7,
+        "title_snapshot": "Fuerza – México 🏋️",
+        "format_version": 1,
+        "source_draft_revision": "9007199254740993",
+        "published_at": "2026-10-19T12:34:56.000Z",
+        "days": [
+          {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "label": "Día Á",
+            "position": 0,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000005",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-000000000069"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": null,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000006",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006a"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 0,
+                "notes": ""
+              }
+            ]
+          },
+          {
+            "id": "10000000-0000-4000-8000-000000000004",
+            "label": "Día B",
+            "position": 1,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000007",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006b"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 3600,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000008",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-00000000006c"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 90,
+                "notes": ""
+              }
+            ]
+          }
+        ],
+        "content_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "error": "HASH"
+    },
+    {
+      "name": "hash-uppercase",
+      "dto": {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "routine_id": "10000000-0000-4000-8000-000000000002",
+        "revision": "1",
+        "version_number": 7,
+        "title_snapshot": "Fuerza – México 🏋️",
+        "format_version": 1,
+        "source_draft_revision": "9007199254740993",
+        "published_at": "2026-10-19T12:34:56.000Z",
+        "days": [
+          {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "label": "Día Á",
+            "position": 0,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000005",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-000000000069"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": null,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000006",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006a"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 0,
+                "notes": ""
+              }
+            ]
+          },
+          {
+            "id": "10000000-0000-4000-8000-000000000004",
+            "label": "Día B",
+            "position": 1,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000007",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006b"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 3600,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000008",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-00000000006c"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 90,
+                "notes": ""
+              }
+            ]
+          }
+        ],
+        "content_hash": "598FC5945525A69A2F9CBDF06730D653C2A0E0161F0417F4C995179B5F65C4F1"
+      },
+      "error": "INVALID"
+    },
+    {
+      "name": "extra-root-field",
+      "dto": {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "routine_id": "10000000-0000-4000-8000-000000000002",
+        "revision": "1",
+        "version_number": 7,
+        "title_snapshot": "Fuerza – México 🏋️",
+        "format_version": 1,
+        "source_draft_revision": "9007199254740993",
+        "published_at": "2026-10-19T12:34:56.000Z",
+        "days": [
+          {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "label": "Día Á",
+            "position": 0,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000005",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-000000000069"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": null,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000006",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006a"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 0,
+                "notes": ""
+              }
+            ]
+          },
+          {
+            "id": "10000000-0000-4000-8000-000000000004",
+            "label": "Día B",
+            "position": 1,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000007",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006b"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 3600,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000008",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-00000000006c"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 90,
+                "notes": ""
+              }
+            ]
+          }
+        ],
+        "content_hash": "598fc5945525a69a2f9cbdf06730d653c2a0e0161f0417f4c995179b5f65c4f1",
+        "account_id": "10000000-0000-4000-8000-000000000009"
+      },
+      "error": "INVALID"
+    },
+    {
+      "name": "case-variant-field",
+      "dto": {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "routine_id": "10000000-0000-4000-8000-000000000002",
+        "revision": "1",
+        "version_number": 7,
+        "title_snapshot": "Fuerza – México 🏋️",
+        "format_version": 1,
+        "source_draft_revision": "9007199254740993",
+        "days": [
+          {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "label": "Día Á",
+            "position": 0,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000005",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-000000000069"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": null,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000006",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006a"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 0,
+                "notes": ""
+              }
+            ]
+          },
+          {
+            "id": "10000000-0000-4000-8000-000000000004",
+            "label": "Día B",
+            "position": 1,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000007",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006b"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 3600,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000008",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-00000000006c"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 90,
+                "notes": ""
+              }
+            ]
+          }
+        ],
+        "content_hash": "598fc5945525a69a2f9cbdf06730d653c2a0e0161f0417f4c995179b5f65c4f1",
+        "Published_at": "2026-10-19T12:34:56.000Z"
+      },
+      "error": "INVALID"
+    },
+    {
+      "name": "missing-root-field",
+      "dto": {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "routine_id": "10000000-0000-4000-8000-000000000002",
+        "revision": "1",
+        "version_number": 7,
+        "title_snapshot": "Fuerza – México 🏋️",
+        "format_version": 1,
+        "published_at": "2026-10-19T12:34:56.000Z",
+        "days": [
+          {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "label": "Día Á",
+            "position": 0,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000005",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-000000000069"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": null,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000006",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006a"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 0,
+                "notes": ""
+              }
+            ]
+          },
+          {
+            "id": "10000000-0000-4000-8000-000000000004",
+            "label": "Día B",
+            "position": 1,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000007",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006b"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 3600,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000008",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-00000000006c"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 90,
+                "notes": ""
+              }
+            ]
+          }
+        ],
+        "content_hash": "598fc5945525a69a2f9cbdf06730d653c2a0e0161f0417f4c995179b5f65c4f1"
+      },
+      "error": "INVALID"
+    },
+    {
+      "name": "extra-day-field",
+      "dto": {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "routine_id": "10000000-0000-4000-8000-000000000002",
+        "revision": "1",
+        "version_number": 7,
+        "title_snapshot": "Fuerza – México 🏋️",
+        "format_version": 1,
+        "source_draft_revision": "9007199254740993",
+        "published_at": "2026-10-19T12:34:56.000Z",
+        "days": [
+          {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "label": "Día Á",
+            "position": 0,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000005",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-000000000069"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": null,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000006",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006a"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 0,
+                "notes": ""
+              }
+            ],
+            "hidden": true
+          },
+          {
+            "id": "10000000-0000-4000-8000-000000000004",
+            "label": "Día B",
+            "position": 1,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000007",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006b"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 3600,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000008",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-00000000006c"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 90,
+                "notes": ""
+              }
+            ]
+          }
+        ],
+        "content_hash": "598fc5945525a69a2f9cbdf06730d653c2a0e0161f0417f4c995179b5f65c4f1"
+      },
+      "error": "INVALID"
+    },
+    {
+      "name": "extra-exercise-field",
+      "dto": {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "routine_id": "10000000-0000-4000-8000-000000000002",
+        "revision": "1",
+        "version_number": 7,
+        "title_snapshot": "Fuerza – México 🏋️",
+        "format_version": 1,
+        "source_draft_revision": "9007199254740993",
+        "published_at": "2026-10-19T12:34:56.000Z",
+        "days": [
+          {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "label": "Día Á",
+            "position": 0,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000005",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-000000000069"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": null,
+                "notes": "Á · Á · 😀 <tinta> \\\n\"",
+                "content_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000006",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006a"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 0,
+                "notes": ""
+              }
+            ]
+          },
+          {
+            "id": "10000000-0000-4000-8000-000000000004",
+            "label": "Día B",
+            "position": 1,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000007",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006b"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 3600,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000008",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-00000000006c"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 90,
+                "notes": ""
+              }
+            ]
+          }
+        ],
+        "content_hash": "598fc5945525a69a2f9cbdf06730d653c2a0e0161f0417f4c995179b5f65c4f1"
+      },
+      "error": "INVALID"
+    },
+    {
+      "name": "extra-reference-field",
+      "dto": {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "routine_id": "10000000-0000-4000-8000-000000000002",
+        "revision": "1",
+        "version_number": 7,
+        "title_snapshot": "Fuerza – México 🏋️",
+        "format_version": 1,
+        "source_draft_revision": "9007199254740993",
+        "published_at": "2026-10-19T12:34:56.000Z",
+        "days": [
+          {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "label": "Día Á",
+            "position": 0,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000005",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-000000000069",
+                  "label": "extra"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": null,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000006",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006a"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 0,
+                "notes": ""
+              }
+            ]
+          },
+          {
+            "id": "10000000-0000-4000-8000-000000000004",
+            "label": "Día B",
+            "position": 1,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000007",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006b"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 3600,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000008",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-00000000006c"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 90,
+                "notes": ""
+              }
+            ]
+          }
+        ],
+        "content_hash": "598fc5945525a69a2f9cbdf06730d653c2a0e0161f0417f4c995179b5f65c4f1"
+      },
+      "error": "INVALID"
+    },
+    {
+      "name": "missing-nullable-rest",
+      "dto": {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "routine_id": "10000000-0000-4000-8000-000000000002",
+        "revision": "1",
+        "version_number": 7,
+        "title_snapshot": "Fuerza – México 🏋️",
+        "format_version": 1,
+        "source_draft_revision": "9007199254740993",
+        "published_at": "2026-10-19T12:34:56.000Z",
+        "days": [
+          {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "label": "Día Á",
+            "position": 0,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000005",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-000000000069"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000006",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006a"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 0,
+                "notes": ""
+              }
+            ]
+          },
+          {
+            "id": "10000000-0000-4000-8000-000000000004",
+            "label": "Día B",
+            "position": 1,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000007",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006b"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 3600,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000008",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-00000000006c"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 90,
+                "notes": ""
+              }
+            ]
+          }
+        ],
+        "content_hash": "598fc5945525a69a2f9cbdf06730d653c2a0e0161f0417f4c995179b5f65c4f1"
+      },
+      "error": "INVALID"
+    },
+    {
+      "name": "null-notes",
+      "dto": {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "routine_id": "10000000-0000-4000-8000-000000000002",
+        "revision": "1",
+        "version_number": 7,
+        "title_snapshot": "Fuerza – México 🏋️",
+        "format_version": 1,
+        "source_draft_revision": "9007199254740993",
+        "published_at": "2026-10-19T12:34:56.000Z",
+        "days": [
+          {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "label": "Día Á",
+            "position": 0,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000005",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-000000000069"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": null,
+                "notes": null
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000006",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006a"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 0,
+                "notes": ""
+              }
+            ]
+          },
+          {
+            "id": "10000000-0000-4000-8000-000000000004",
+            "label": "Día B",
+            "position": 1,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000007",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006b"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 3600,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000008",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-00000000006c"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 90,
+                "notes": ""
+              }
+            ]
+          }
+        ],
+        "content_hash": "598fc5945525a69a2f9cbdf06730d653c2a0e0161f0417f4c995179b5f65c4f1"
+      },
+      "error": "INVALID"
+    },
+    {
+      "name": "invalid-calendar",
+      "dto": {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "routine_id": "10000000-0000-4000-8000-000000000002",
+        "revision": "1",
+        "version_number": 7,
+        "title_snapshot": "Fuerza – México 🏋️",
+        "format_version": 1,
+        "source_draft_revision": "9007199254740993",
+        "published_at": "2026-02-30T12:34:56.000Z",
+        "days": [
+          {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "label": "Día Á",
+            "position": 0,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000005",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-000000000069"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": null,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000006",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006a"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 0,
+                "notes": ""
+              }
+            ]
+          },
+          {
+            "id": "10000000-0000-4000-8000-000000000004",
+            "label": "Día B",
+            "position": 1,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000007",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006b"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 3600,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000008",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-00000000006c"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 90,
+                "notes": ""
+              }
+            ]
+          }
+        ],
+        "content_hash": "598fc5945525a69a2f9cbdf06730d653c2a0e0161f0417f4c995179b5f65c4f1"
+      },
+      "error": "INVALID"
+    },
+    {
+      "name": "wrong-format-version",
+      "dto": {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "routine_id": "10000000-0000-4000-8000-000000000002",
+        "revision": "1",
+        "version_number": 7,
+        "title_snapshot": "Fuerza – México 🏋️",
+        "format_version": 2,
+        "source_draft_revision": "9007199254740993",
+        "published_at": "2026-10-19T12:34:56.000Z",
+        "days": [
+          {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "label": "Día Á",
+            "position": 0,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000005",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-000000000069"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": null,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000006",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006a"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 0,
+                "notes": ""
+              }
+            ]
+          },
+          {
+            "id": "10000000-0000-4000-8000-000000000004",
+            "label": "Día B",
+            "position": 1,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000007",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006b"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 3600,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000008",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-00000000006c"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 90,
+                "notes": ""
+              }
+            ]
+          }
+        ],
+        "content_hash": "598fc5945525a69a2f9cbdf06730d653c2a0e0161f0417f4c995179b5f65c4f1"
+      },
+      "error": "INVALID"
+    },
+    {
+      "name": "wrong-revision",
+      "dto": {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "routine_id": "10000000-0000-4000-8000-000000000002",
+        "revision": "2",
+        "version_number": 7,
+        "title_snapshot": "Fuerza – México 🏋️",
+        "format_version": 1,
+        "source_draft_revision": "9007199254740993",
+        "published_at": "2026-10-19T12:34:56.000Z",
+        "days": [
+          {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "label": "Día Á",
+            "position": 0,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000005",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-000000000069"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": null,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000006",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006a"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 0,
+                "notes": ""
+              }
+            ]
+          },
+          {
+            "id": "10000000-0000-4000-8000-000000000004",
+            "label": "Día B",
+            "position": 1,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000007",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006b"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 3600,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000008",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-00000000006c"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 90,
+                "notes": ""
+              }
+            ]
+          }
+        ],
+        "content_hash": "598fc5945525a69a2f9cbdf06730d653c2a0e0161f0417f4c995179b5f65c4f1"
+      },
+      "error": "INVALID"
+    },
+    {
+      "name": "revision-as-number",
+      "dto": {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "routine_id": "10000000-0000-4000-8000-000000000002",
+        "revision": "1",
+        "version_number": 7,
+        "title_snapshot": "Fuerza – México 🏋️",
+        "format_version": 1,
+        "source_draft_revision": 1,
+        "published_at": "2026-10-19T12:34:56.000Z",
+        "days": [
+          {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "label": "Día Á",
+            "position": 0,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000005",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-000000000069"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": null,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000006",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006a"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 0,
+                "notes": ""
+              }
+            ]
+          },
+          {
+            "id": "10000000-0000-4000-8000-000000000004",
+            "label": "Día B",
+            "position": 1,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000007",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006b"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 3600,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000008",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-00000000006c"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 90,
+                "notes": ""
+              }
+            ]
+          }
+        ],
+        "content_hash": "598fc5945525a69a2f9cbdf06730d653c2a0e0161f0417f4c995179b5f65c4f1"
+      },
+      "error": "INVALID"
+    },
+    {
+      "name": "revision-over-int64",
+      "dto": {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "routine_id": "10000000-0000-4000-8000-000000000002",
+        "revision": "1",
+        "version_number": 7,
+        "title_snapshot": "Fuerza – México 🏋️",
+        "format_version": 1,
+        "source_draft_revision": "9223372036854775808",
+        "published_at": "2026-10-19T12:34:56.000Z",
+        "days": [
+          {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "label": "Día Á",
+            "position": 0,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000005",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-000000000069"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": null,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000006",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006a"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 0,
+                "notes": ""
+              }
+            ]
+          },
+          {
+            "id": "10000000-0000-4000-8000-000000000004",
+            "label": "Día B",
+            "position": 1,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000007",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006b"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 3600,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000008",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-00000000006c"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 90,
+                "notes": ""
+              }
+            ]
+          }
+        ],
+        "content_hash": "598fc5945525a69a2f9cbdf06730d653c2a0e0161f0417f4c995179b5f65c4f1"
+      },
+      "error": "INVALID"
+    },
+    {
+      "name": "uuid-uppercase",
+      "dto": {
+        "id": "10000000-0000-4000-8000-ABCDEFABCDEF",
+        "routine_id": "10000000-0000-4000-8000-000000000002",
+        "revision": "1",
+        "version_number": 7,
+        "title_snapshot": "Fuerza – México 🏋️",
+        "format_version": 1,
+        "source_draft_revision": "9007199254740993",
+        "published_at": "2026-10-19T12:34:56.000Z",
+        "days": [
+          {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "label": "Día Á",
+            "position": 0,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000005",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-000000000069"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": null,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000006",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006a"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 0,
+                "notes": ""
+              }
+            ]
+          },
+          {
+            "id": "10000000-0000-4000-8000-000000000004",
+            "label": "Día B",
+            "position": 1,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000007",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006b"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 3600,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000008",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-00000000006c"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 90,
+                "notes": ""
+              }
+            ]
+          }
+        ],
+        "content_hash": "598fc5945525a69a2f9cbdf06730d653c2a0e0161f0417f4c995179b5f65c4f1"
+      },
+      "error": "INVALID"
+    },
+    {
+      "name": "empty-days",
+      "dto": {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "routine_id": "10000000-0000-4000-8000-000000000002",
+        "revision": "1",
+        "version_number": 7,
+        "title_snapshot": "Fuerza – México 🏋️",
+        "format_version": 1,
+        "source_draft_revision": "9007199254740993",
+        "published_at": "2026-10-19T12:34:56.000Z",
+        "days": [],
+        "content_hash": "598fc5945525a69a2f9cbdf06730d653c2a0e0161f0417f4c995179b5f65c4f1"
+      },
+      "error": "INVALID"
+    },
+    {
+      "name": "empty-exercises",
+      "dto": {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "routine_id": "10000000-0000-4000-8000-000000000002",
+        "revision": "1",
+        "version_number": 7,
+        "title_snapshot": "Fuerza – México 🏋️",
+        "format_version": 1,
+        "source_draft_revision": "9007199254740993",
+        "published_at": "2026-10-19T12:34:56.000Z",
+        "days": [
+          {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "label": "Día Á",
+            "position": 0,
+            "exercises": []
+          },
+          {
+            "id": "10000000-0000-4000-8000-000000000004",
+            "label": "Día B",
+            "position": 1,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000007",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006b"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 3600,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000008",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-00000000006c"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 90,
+                "notes": ""
+              }
+            ]
+          }
+        ],
+        "content_hash": "598fc5945525a69a2f9cbdf06730d653c2a0e0161f0417f4c995179b5f65c4f1"
+      },
+      "error": "INVALID"
+    },
+    {
+      "name": "invalid-reference-source",
+      "dto": {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "routine_id": "10000000-0000-4000-8000-000000000002",
+        "revision": "1",
+        "version_number": 7,
+        "title_snapshot": "Fuerza – México 🏋️",
+        "format_version": 1,
+        "source_draft_revision": "9007199254740993",
+        "published_at": "2026-10-19T12:34:56.000Z",
+        "days": [
+          {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "label": "Día Á",
+            "position": 0,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000005",
+                "exercise_ref": {
+                  "source": "gym",
+                  "id": "10000000-0000-4000-8000-000000000069"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": null,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000006",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006a"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 0,
+                "notes": ""
+              }
+            ]
+          },
+          {
+            "id": "10000000-0000-4000-8000-000000000004",
+            "label": "Día B",
+            "position": 1,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000007",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006b"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 3600,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000008",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-00000000006c"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 90,
+                "notes": ""
+              }
+            ]
+          }
+        ],
+        "content_hash": "598fc5945525a69a2f9cbdf06730d653c2a0e0161f0417f4c995179b5f65c4f1"
+      },
+      "error": "INVALID"
+    },
+    {
+      "name": "null-reference",
+      "dto": {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "routine_id": "10000000-0000-4000-8000-000000000002",
+        "revision": "1",
+        "version_number": 7,
+        "title_snapshot": "Fuerza – México 🏋️",
+        "format_version": 1,
+        "source_draft_revision": "9007199254740993",
+        "published_at": "2026-10-19T12:34:56.000Z",
+        "days": [
+          {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "label": "Día Á",
+            "position": 0,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000005",
+                "exercise_ref": null,
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": null,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000006",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006a"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 0,
+                "notes": ""
+              }
+            ]
+          },
+          {
+            "id": "10000000-0000-4000-8000-000000000004",
+            "label": "Día B",
+            "position": 1,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000007",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006b"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 3600,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000008",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-00000000006c"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 90,
+                "notes": ""
+              }
+            ]
+          }
+        ],
+        "content_hash": "598fc5945525a69a2f9cbdf06730d653c2a0e0161f0417f4c995179b5f65c4f1"
+      },
+      "error": "INVALID"
+    },
+    {
+      "name": "invalid-load-mode",
+      "dto": {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "routine_id": "10000000-0000-4000-8000-000000000002",
+        "revision": "1",
+        "version_number": 7,
+        "title_snapshot": "Fuerza – México 🏋️",
+        "format_version": 1,
+        "source_draft_revision": "9007199254740993",
+        "published_at": "2026-10-19T12:34:56.000Z",
+        "days": [
+          {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "label": "Día Á",
+            "position": 0,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000005",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-000000000069"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "bodyweight",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": null,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000006",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006a"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 0,
+                "notes": ""
+              }
+            ]
+          },
+          {
+            "id": "10000000-0000-4000-8000-000000000004",
+            "label": "Día B",
+            "position": 1,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000007",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006b"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 3600,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000008",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-00000000006c"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 90,
+                "notes": ""
+              }
+            ]
+          }
+        ],
+        "content_hash": "598fc5945525a69a2f9cbdf06730d653c2a0e0161f0417f4c995179b5f65c4f1"
+      },
+      "error": "INVALID"
+    },
+    {
+      "name": "version-over-int32",
+      "dto": {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "routine_id": "10000000-0000-4000-8000-000000000002",
+        "revision": "1",
+        "version_number": 2147483648,
+        "title_snapshot": "Fuerza – México 🏋️",
+        "format_version": 1,
+        "source_draft_revision": "9007199254740993",
+        "published_at": "2026-10-19T12:34:56.000Z",
+        "days": [
+          {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "label": "Día Á",
+            "position": 0,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000005",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-000000000069"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": null,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000006",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006a"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 0,
+                "notes": ""
+              }
+            ]
+          },
+          {
+            "id": "10000000-0000-4000-8000-000000000004",
+            "label": "Día B",
+            "position": 1,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000007",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006b"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 3600,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000008",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-00000000006c"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 90,
+                "notes": ""
+              }
+            ]
+          }
+        ],
+        "content_hash": "598fc5945525a69a2f9cbdf06730d653c2a0e0161f0417f4c995179b5f65c4f1"
+      },
+      "error": "INVALID"
+    },
+    {
+      "name": "fractional-position",
+      "dto": {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "routine_id": "10000000-0000-4000-8000-000000000002",
+        "revision": "1",
+        "version_number": 7,
+        "title_snapshot": "Fuerza – México 🏋️",
+        "format_version": 1,
+        "source_draft_revision": "9007199254740993",
+        "published_at": "2026-10-19T12:34:56.000Z",
+        "days": [
+          {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "label": "Día Á",
+            "position": 0.5,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000005",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-000000000069"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": null,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000006",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006a"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 0,
+                "notes": ""
+              }
+            ]
+          },
+          {
+            "id": "10000000-0000-4000-8000-000000000004",
+            "label": "Día B",
+            "position": 1,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000007",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006b"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 3600,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000008",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-00000000006c"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 90,
+                "notes": ""
+              }
+            ]
+          }
+        ],
+        "content_hash": "598fc5945525a69a2f9cbdf06730d653c2a0e0161f0417f4c995179b5f65c4f1"
+      },
+      "error": "INVALID"
+    },
+    {
+      "name": "rest-over-limit",
+      "dto": {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "routine_id": "10000000-0000-4000-8000-000000000002",
+        "revision": "1",
+        "version_number": 7,
+        "title_snapshot": "Fuerza – México 🏋️",
+        "format_version": 1,
+        "source_draft_revision": "9007199254740993",
+        "published_at": "2026-10-19T12:34:56.000Z",
+        "days": [
+          {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "label": "Día Á",
+            "position": 0,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000005",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-000000000069"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 3601,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000006",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006a"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 0,
+                "notes": ""
+              }
+            ]
+          },
+          {
+            "id": "10000000-0000-4000-8000-000000000004",
+            "label": "Día B",
+            "position": 1,
+            "exercises": [
+              {
+                "id": "10000000-0000-4000-8000-000000000007",
+                "exercise_ref": {
+                  "source": "personal",
+                  "id": "10000000-0000-4000-8000-00000000006b"
+                },
+                "name_snapshot": "Press – Pecho 🏋️",
+                "load_mode_snapshot": "external",
+                "position": 0,
+                "prescribed_sets": 3,
+                "prescribed_reps": "8–12",
+                "rest_seconds": 3600,
+                "notes": "Á · Á · 😀 <tinta> \\\n\""
+              },
+              {
+                "id": "10000000-0000-4000-8000-000000000008",
+                "exercise_ref": {
+                  "source": "catalog",
+                  "id": "10000000-0000-4000-8000-00000000006c"
+                },
+                "name_snapshot": "Sentadilla ágil",
+                "load_mode_snapshot": "none",
+                "position": 1,
+                "prescribed_sets": 1,
+                "prescribed_reps": "Al fallo",
+                "rest_seconds": 90,
+                "notes": ""
+              }
+            ]
+          }
+        ],
+        "content_hash": "598fc5945525a69a2f9cbdf06730d653c2a0e0161f0417f4c995179b5f65c4f1"
+      },
+      "error": "INVALID"
+    }
+  ]
+}

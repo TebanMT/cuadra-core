@@ -1,0 +1,2448 @@
+[
+  {
+    "name": "UUID",
+    "schema": "UUID",
+    "valid": true,
+    "value": "00000000-0000-4000-8000-000000000001"
+  },
+  {
+    "name": "Revision",
+    "schema": "Revision",
+    "valid": true,
+    "value": "1"
+  },
+  {
+    "name": "Timestamp",
+    "schema": "Timestamp",
+    "valid": true,
+    "value": "2026-10-15T18:00:00Z"
+  },
+  {
+    "name": "Secret",
+    "schema": "Secret",
+    "valid": true,
+    "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  {
+    "name": "SHA256",
+    "schema": "SHA256",
+    "valid": true,
+    "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  {
+    "name": "Phone",
+    "schema": "Phone",
+    "valid": true,
+    "value": "+525500000001"
+  },
+  {
+    "name": "Cursor",
+    "schema": "Cursor",
+    "valid": true,
+    "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  {
+    "name": "Base",
+    "schema": "Base",
+    "valid": true,
+    "value": {
+      "revision": "1"
+    }
+  },
+  {
+    "name": "ExerciseRef",
+    "schema": "ExerciseRef",
+    "valid": true,
+    "value": {
+      "source": "catalog",
+      "id": "00000000-0000-4000-8000-000000000002"
+    }
+  },
+  {
+    "name": "Load",
+    "schema": "Load",
+    "valid": true,
+    "value": {
+      "load_mode": "external",
+      "weight_value": "30.000",
+      "weight_unit": "kg"
+    }
+  },
+  {
+    "name": "DraftExercise",
+    "schema": "DraftExercise",
+    "valid": true,
+    "value": {
+      "id": "00000000-0000-4000-8000-000000000003",
+      "exercise_ref": {
+        "source": "catalog",
+        "id": "00000000-0000-4000-8000-000000000004"
+      },
+      "prescribed_sets": 1,
+      "prescribed_reps": "a",
+      "rest_seconds": 0,
+      "notes": "a"
+    }
+  },
+  {
+    "name": "DraftDay",
+    "schema": "DraftDay",
+    "valid": true,
+    "value": {
+      "id": "00000000-0000-4000-8000-000000000005",
+      "label": "a",
+      "exercises": []
+    }
+  },
+  {
+    "name": "Draft",
+    "schema": "Draft",
+    "valid": true,
+    "value": {
+      "format_version": 1,
+      "title": "a",
+      "days": []
+    }
+  },
+  {
+    "name": "DayIDMap",
+    "schema": "DayIDMap",
+    "valid": true,
+    "value": {
+      "draft_day_id": "00000000-0000-4000-8000-000000000006",
+      "id": "00000000-0000-4000-8000-000000000007",
+      "exercises": [
+        {
+          "draft_exercise_id": "00000000-0000-4000-8000-000000000008",
+          "id": "00000000-0000-4000-8000-000000000009"
+        }
+      ]
+    }
+  },
+  {
+    "name": "DuplicateDayMap",
+    "schema": "DuplicateDayMap",
+    "valid": true,
+    "value": {
+      "source_day_id": "00000000-0000-4000-8000-00000000000a",
+      "id": "00000000-0000-4000-8000-00000000000b",
+      "exercises": [
+        {
+          "source_exercise_id": "00000000-0000-4000-8000-00000000000c",
+          "id": "00000000-0000-4000-8000-00000000000d"
+        }
+      ]
+    }
+  },
+  {
+    "name": "Command_profile_update",
+    "schema": "Command_profile_update",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-00000000000e",
+      "origin_device_id": "00000000-0000-4000-8000-00000000000f",
+      "type": "profile.update",
+      "entity_id": "00000000-0000-4000-8000-000000000010",
+      "base": {
+        "revision": "1"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {
+        "display_name": "a",
+        "weight_unit": "kg"
+      }
+    }
+  },
+  {
+    "name": "Command_personal_exercise_create",
+    "schema": "Command_personal_exercise_create",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-000000000011",
+      "origin_device_id": "00000000-0000-4000-8000-000000000012",
+      "type": "personal_exercise.create",
+      "entity_id": "00000000-0000-4000-8000-000000000013",
+      "base": {
+        "revision": "1"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {
+        "name": "a",
+        "load_mode": "external",
+        "notes": "a"
+      }
+    }
+  },
+  {
+    "name": "Command_personal_exercise_update",
+    "schema": "Command_personal_exercise_update",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-000000000014",
+      "origin_device_id": "00000000-0000-4000-8000-000000000015",
+      "type": "personal_exercise.update",
+      "entity_id": "00000000-0000-4000-8000-000000000016",
+      "base": {
+        "revision": "1"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {
+        "name": "a",
+        "load_mode": "external",
+        "notes": "a"
+      }
+    }
+  },
+  {
+    "name": "Command_personal_exercise_archive",
+    "schema": "Command_personal_exercise_archive",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-000000000017",
+      "origin_device_id": "00000000-0000-4000-8000-000000000018",
+      "type": "personal_exercise.archive",
+      "entity_id": "00000000-0000-4000-8000-000000000019",
+      "base": {
+        "revision": "1"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {}
+    }
+  },
+  {
+    "name": "Command_routine_create",
+    "schema": "Command_routine_create",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-00000000001a",
+      "origin_device_id": "00000000-0000-4000-8000-00000000001b",
+      "type": "routine.create",
+      "entity_id": "00000000-0000-4000-8000-00000000001c",
+      "base": {
+        "revision": "1"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {
+        "draft": {
+          "format_version": 1,
+          "title": "a",
+          "days": []
+        }
+      }
+    }
+  },
+  {
+    "name": "Command_routine_draft_save",
+    "schema": "Command_routine_draft_save",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-00000000001d",
+      "origin_device_id": "00000000-0000-4000-8000-00000000001e",
+      "type": "routine.draft.save",
+      "entity_id": "00000000-0000-4000-8000-00000000001f",
+      "base": {
+        "revision": "1"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {
+        "content": {
+          "format_version": 1,
+          "title": "a",
+          "days": []
+        },
+        "base_version_id": "00000000-0000-4000-8000-000000000020"
+      }
+    }
+  },
+  {
+    "name": "Command_routine_draft_discard",
+    "schema": "Command_routine_draft_discard",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-000000000021",
+      "origin_device_id": "00000000-0000-4000-8000-000000000022",
+      "type": "routine.draft.discard",
+      "entity_id": "00000000-0000-4000-8000-000000000023",
+      "base": {
+        "revision": "1"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {}
+    }
+  },
+  {
+    "name": "Command_routine_publish",
+    "schema": "Command_routine_publish",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-000000000024",
+      "origin_device_id": "00000000-0000-4000-8000-000000000025",
+      "type": "routine.publish",
+      "entity_id": "00000000-0000-4000-8000-000000000026",
+      "base": {
+        "revision": "1"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {
+        "draft_revision": "1",
+        "version_id": "00000000-0000-4000-8000-000000000027",
+        "days": [
+          {
+            "draft_day_id": "00000000-0000-4000-8000-000000000028",
+            "id": "00000000-0000-4000-8000-000000000029",
+            "exercises": [
+              {
+                "draft_exercise_id": "00000000-0000-4000-8000-00000000002a",
+                "id": "00000000-0000-4000-8000-00000000002b"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "Command_routine_duplicate",
+    "schema": "Command_routine_duplicate",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-00000000002c",
+      "origin_device_id": "00000000-0000-4000-8000-00000000002d",
+      "type": "routine.duplicate",
+      "entity_id": "00000000-0000-4000-8000-00000000002e",
+      "base": {
+        "revision": "1"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {
+        "source_version_id": "00000000-0000-4000-8000-00000000002f",
+        "title": "a",
+        "days": [
+          {
+            "source_day_id": "00000000-0000-4000-8000-000000000030",
+            "id": "00000000-0000-4000-8000-000000000031",
+            "exercises": [
+              {
+                "source_exercise_id": "00000000-0000-4000-8000-000000000032",
+                "id": "00000000-0000-4000-8000-000000000033"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "Command_routine_archive",
+    "schema": "Command_routine_archive",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-000000000034",
+      "origin_device_id": "00000000-0000-4000-8000-000000000035",
+      "type": "routine.archive",
+      "entity_id": "00000000-0000-4000-8000-000000000036",
+      "base": {
+        "revision": "1"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {}
+    }
+  },
+  {
+    "name": "Command_routine_restore",
+    "schema": "Command_routine_restore",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-000000000037",
+      "origin_device_id": "00000000-0000-4000-8000-000000000038",
+      "type": "routine.restore",
+      "entity_id": "00000000-0000-4000-8000-000000000039",
+      "base": {
+        "revision": "1"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {}
+    }
+  },
+  {
+    "name": "Command_routine_delete",
+    "schema": "Command_routine_delete",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-00000000003a",
+      "origin_device_id": "00000000-0000-4000-8000-00000000003b",
+      "type": "routine.delete",
+      "entity_id": "00000000-0000-4000-8000-00000000003c",
+      "base": {
+        "revision": "1"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {}
+    }
+  },
+  {
+    "name": "Command_workout_start",
+    "schema": "Command_workout_start",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-00000000003d",
+      "origin_device_id": "00000000-0000-4000-8000-00000000003e",
+      "type": "workout.start",
+      "entity_id": "00000000-0000-4000-8000-00000000003f",
+      "base": {
+        "revision": "1"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {
+        "routine_version_id": "00000000-0000-4000-8000-000000000040",
+        "routine_day_id": "00000000-0000-4000-8000-000000000041",
+        "version_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "started_at": "2026-10-15T18:00:00Z",
+        "timezone": "a",
+        "exercises": [
+          {
+            "source_exercise_id": "00000000-0000-4000-8000-000000000042",
+            "id": "00000000-0000-4000-8000-000000000043"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "Command_workout_set_create",
+    "schema": "Command_workout_set_create",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-000000000044",
+      "origin_device_id": "00000000-0000-4000-8000-000000000045",
+      "type": "workout.set.create",
+      "entity_id": "00000000-0000-4000-8000-000000000046",
+      "base": {
+        "revision": "1"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {
+        "workout_id": "00000000-0000-4000-8000-000000000047",
+        "workout_exercise_id": "00000000-0000-4000-8000-000000000048",
+        "observed_workout": {
+          "revision": "1"
+        },
+        "position_hint": 0,
+        "load": {
+          "load_mode": "external",
+          "weight_value": "30.000",
+          "weight_unit": "kg"
+        },
+        "repetitions": 0
+      }
+    }
+  },
+  {
+    "name": "Command_workout_set_update",
+    "schema": "Command_workout_set_update",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-000000000049",
+      "origin_device_id": "00000000-0000-4000-8000-00000000004a",
+      "type": "workout.set.update",
+      "entity_id": "00000000-0000-4000-8000-00000000004b",
+      "base": {
+        "revision": "1"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {
+        "workout_id": "00000000-0000-4000-8000-00000000004c",
+        "observed_workout": {
+          "revision": "1"
+        },
+        "load": {
+          "load_mode": "external",
+          "weight_value": "30.000",
+          "weight_unit": "kg"
+        },
+        "repetitions": 0
+      }
+    }
+  },
+  {
+    "name": "Command_workout_set_delete",
+    "schema": "Command_workout_set_delete",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-00000000004d",
+      "origin_device_id": "00000000-0000-4000-8000-00000000004e",
+      "type": "workout.set.delete",
+      "entity_id": "00000000-0000-4000-8000-00000000004f",
+      "base": {
+        "revision": "1"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {
+        "workout_id": "00000000-0000-4000-8000-000000000050",
+        "observed_workout": {
+          "revision": "1"
+        }
+      }
+    }
+  },
+  {
+    "name": "Command_workout_complete",
+    "schema": "Command_workout_complete",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-000000000051",
+      "origin_device_id": "00000000-0000-4000-8000-000000000052",
+      "type": "workout.complete",
+      "entity_id": "00000000-0000-4000-8000-000000000053",
+      "base": {
+        "revision": "1"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {
+        "finished_at": "2026-10-15T18:00:00Z"
+      }
+    }
+  },
+  {
+    "name": "Command_workout_delete",
+    "schema": "Command_workout_delete",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-000000000054",
+      "origin_device_id": "00000000-0000-4000-8000-000000000055",
+      "type": "workout.delete",
+      "entity_id": "00000000-0000-4000-8000-000000000056",
+      "base": {
+        "revision": "1"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {}
+    }
+  },
+  {
+    "name": "Command_conflict_resolve",
+    "schema": "Command_conflict_resolve",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-000000000057",
+      "origin_device_id": "00000000-0000-4000-8000-000000000058",
+      "type": "conflict.resolve",
+      "entity_id": "00000000-0000-4000-8000-000000000059",
+      "base": {
+        "revision": "1"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {
+        "conflict_revision": "1",
+        "choice": "keep_current",
+        "expected_current": {
+          "revision": "1"
+        }
+      }
+    }
+  },
+  {
+    "name": "Command",
+    "schema": "Command",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-00000000005a",
+      "origin_device_id": "00000000-0000-4000-8000-00000000005b",
+      "type": "profile.update",
+      "entity_id": "00000000-0000-4000-8000-00000000005c",
+      "base": {
+        "revision": "1"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {
+        "display_name": "a",
+        "weight_unit": "kg"
+      }
+    }
+  },
+  {
+    "name": "OfflineCommand",
+    "schema": "OfflineCommand",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-00000000005d",
+      "origin_device_id": "00000000-0000-4000-8000-00000000005e",
+      "type": "workout.start",
+      "entity_id": "00000000-0000-4000-8000-00000000005f",
+      "base": {
+        "revision": "1"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {
+        "routine_version_id": "00000000-0000-4000-8000-000000000060",
+        "routine_day_id": "00000000-0000-4000-8000-000000000061",
+        "version_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "started_at": "2026-10-15T18:00:00Z",
+        "timezone": "a",
+        "exercises": [
+          {
+            "source_exercise_id": "00000000-0000-4000-8000-000000000062",
+            "id": "00000000-0000-4000-8000-000000000063"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "Affected",
+    "schema": "Affected",
+    "valid": true,
+    "value": {
+      "entity_type": "profile",
+      "entity_id": "00000000-0000-4000-8000-000000000064",
+      "revision": "1"
+    }
+  },
+  {
+    "name": "Error",
+    "schema": "Error",
+    "valid": true,
+    "value": {
+      "code": "VALIDATION_ERROR",
+      "message": "a",
+      "retryable": true,
+      "request_id": "00000000-0000-4000-8000-000000000065",
+      "action": "correct",
+      "fields": []
+    }
+  },
+  {
+    "name": "Result_accepted",
+    "schema": "Result_accepted",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-000000000066",
+      "outcome": "accepted",
+      "affected": [
+        {
+          "entity_type": "profile",
+          "entity_id": "00000000-0000-4000-8000-000000000067",
+          "revision": "1"
+        }
+      ],
+      "committed_at": "2026-10-15T18:00:00Z",
+      "result": {}
+    }
+  },
+  {
+    "name": "Result_accepted_with_review",
+    "schema": "Result_accepted_with_review",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-000000000068",
+      "outcome": "accepted_with_review",
+      "affected": [
+        {
+          "entity_type": "profile",
+          "entity_id": "00000000-0000-4000-8000-000000000069",
+          "revision": "1"
+        }
+      ],
+      "committed_at": "2026-10-15T18:00:00Z",
+      "result": {},
+      "conflict_id": "00000000-0000-4000-8000-00000000006a"
+    }
+  },
+  {
+    "name": "Result_conflict",
+    "schema": "Result_conflict",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-00000000006b",
+      "outcome": "conflict",
+      "error": {
+        "code": "VALIDATION_ERROR",
+        "message": "a",
+        "retryable": true,
+        "request_id": "00000000-0000-4000-8000-00000000006c",
+        "action": "correct",
+        "fields": []
+      },
+      "conflict_id": "00000000-0000-4000-8000-00000000006d"
+    }
+  },
+  {
+    "name": "Result_dependency_pending",
+    "schema": "Result_dependency_pending",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-00000000006e",
+      "outcome": "dependency_pending",
+      "error": {
+        "code": "VALIDATION_ERROR",
+        "message": "a",
+        "retryable": true,
+        "request_id": "00000000-0000-4000-8000-00000000006f",
+        "action": "correct",
+        "fields": []
+      }
+    }
+  },
+  {
+    "name": "Result_dependency_blocked",
+    "schema": "Result_dependency_blocked",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-000000000070",
+      "outcome": "dependency_blocked",
+      "error": {
+        "code": "VALIDATION_ERROR",
+        "message": "a",
+        "retryable": true,
+        "request_id": "00000000-0000-4000-8000-000000000071",
+        "action": "correct",
+        "fields": []
+      }
+    }
+  },
+  {
+    "name": "Result_rejected",
+    "schema": "Result_rejected",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-000000000072",
+      "outcome": "rejected",
+      "error": {
+        "code": "VALIDATION_ERROR",
+        "message": "a",
+        "retryable": true,
+        "request_id": "00000000-0000-4000-8000-000000000073",
+        "action": "correct",
+        "fields": []
+      }
+    }
+  },
+  {
+    "name": "Result_retry",
+    "schema": "Result_retry",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-000000000074",
+      "outcome": "retry",
+      "error": {
+        "code": "VALIDATION_ERROR",
+        "message": "a",
+        "retryable": true,
+        "request_id": "00000000-0000-4000-8000-000000000075",
+        "action": "correct",
+        "fields": []
+      }
+    }
+  },
+  {
+    "name": "OperationResult",
+    "schema": "OperationResult",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-000000000076",
+      "outcome": "accepted",
+      "affected": [
+        {
+          "entity_type": "profile",
+          "entity_id": "00000000-0000-4000-8000-000000000077",
+          "revision": "1"
+        }
+      ],
+      "committed_at": "2026-10-15T18:00:00Z",
+      "result": {}
+    }
+  },
+  {
+    "name": "Push",
+    "schema": "Push",
+    "valid": true,
+    "value": {
+      "protocol_version": 1,
+      "operations": [
+        {
+          "operation_id": "00000000-0000-4000-8000-000000000078",
+          "origin_device_id": "00000000-0000-4000-8000-000000000079",
+          "type": "workout.start",
+          "entity_id": "00000000-0000-4000-8000-00000000007a",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {
+            "routine_version_id": "00000000-0000-4000-8000-00000000007b",
+            "routine_day_id": "00000000-0000-4000-8000-00000000007c",
+            "version_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "started_at": "2026-10-15T18:00:00Z",
+            "timezone": "a",
+            "exercises": [
+              {
+                "source_exercise_id": "00000000-0000-4000-8000-00000000007d",
+                "id": "00000000-0000-4000-8000-00000000007e"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "PushResult",
+    "schema": "PushResult",
+    "valid": true,
+    "value": {
+      "protocol_version": 1,
+      "results": [
+        {
+          "operation_id": "00000000-0000-4000-8000-00000000007f",
+          "outcome": "accepted",
+          "affected": [
+            {
+              "entity_type": "profile",
+              "entity_id": "00000000-0000-4000-8000-000000000080",
+              "revision": "1"
+            }
+          ],
+          "committed_at": "2026-10-15T18:00:00Z",
+          "result": {}
+        }
+      ]
+    }
+  },
+  {
+    "name": "Profile",
+    "schema": "Profile",
+    "valid": true,
+    "value": {
+      "id": "00000000-0000-4000-8000-000000000081",
+      "display_name": "a",
+      "weight_unit": "kg",
+      "revision": "1"
+    }
+  },
+  {
+    "name": "Exercise",
+    "schema": "Exercise",
+    "valid": true,
+    "value": {
+      "id": "00000000-0000-4000-8000-000000000082",
+      "revision": "1",
+      "created_at": "2026-10-15T18:00:00Z",
+      "updated_at": "2026-10-15T18:00:00Z",
+      "deleted_at": "2026-10-15T18:00:00Z",
+      "source": "catalog",
+      "name": "a",
+      "load_mode": "external",
+      "notes": "a",
+      "archived_at": "2026-10-15T18:00:00Z"
+    }
+  },
+  {
+    "name": "Routine",
+    "schema": "Routine",
+    "valid": true,
+    "value": {
+      "id": "00000000-0000-4000-8000-000000000083",
+      "revision": "1",
+      "created_at": "2026-10-15T18:00:00Z",
+      "updated_at": "2026-10-15T18:00:00Z",
+      "deleted_at": "2026-10-15T18:00:00Z",
+      "title": "a",
+      "status": "draft",
+      "current_version_id": "00000000-0000-4000-8000-000000000084",
+      "duplicated_from_version_id": "00000000-0000-4000-8000-000000000085"
+    }
+  },
+  {
+    "name": "RoutineDraft",
+    "schema": "RoutineDraft",
+    "valid": true,
+    "value": {
+      "id": "00000000-0000-4000-8000-000000000086",
+      "revision": "1",
+      "base_version_id": "00000000-0000-4000-8000-000000000087",
+      "content": {
+        "format_version": 1,
+        "title": "a",
+        "days": []
+      },
+      "deleted_at": "2026-10-15T18:00:00Z"
+    }
+  },
+  {
+    "name": "PublishedExercise",
+    "schema": "PublishedExercise",
+    "valid": true,
+    "value": {
+      "id": "00000000-0000-4000-8000-000000000088",
+      "exercise_ref": {
+        "source": "catalog",
+        "id": "00000000-0000-4000-8000-000000000089"
+      },
+      "name_snapshot": "a",
+      "load_mode_snapshot": "external",
+      "position": 0,
+      "prescribed_sets": 1,
+      "prescribed_reps": "a",
+      "rest_seconds": 0,
+      "notes": "a"
+    }
+  },
+  {
+    "name": "PublishedDay",
+    "schema": "PublishedDay",
+    "valid": true,
+    "value": {
+      "id": "00000000-0000-4000-8000-00000000008a",
+      "label": "a",
+      "position": 0,
+      "exercises": [
+        {
+          "id": "00000000-0000-4000-8000-00000000008b",
+          "exercise_ref": {
+            "source": "catalog",
+            "id": "00000000-0000-4000-8000-00000000008c"
+          },
+          "name_snapshot": "a",
+          "load_mode_snapshot": "external",
+          "position": 0,
+          "prescribed_sets": 1,
+          "prescribed_reps": "a",
+          "rest_seconds": 0,
+          "notes": "a"
+        }
+      ]
+    }
+  },
+  {
+    "name": "RoutineVersion",
+    "schema": "RoutineVersion",
+    "valid": true,
+    "value": {
+      "id": "00000000-0000-4000-8000-00000000008d",
+      "routine_id": "00000000-0000-4000-8000-00000000008e",
+      "revision": "1",
+      "version_number": 1,
+      "title_snapshot": "a",
+      "format_version": 1,
+      "source_draft_revision": "1",
+      "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "published_at": "2026-10-15T18:00:00Z",
+      "days": [
+        {
+          "id": "00000000-0000-4000-8000-00000000008f",
+          "label": "a",
+          "position": 0,
+          "exercises": [
+            {
+              "id": "00000000-0000-4000-8000-000000000090",
+              "exercise_ref": {
+                "source": "catalog",
+                "id": "00000000-0000-4000-8000-000000000091"
+              },
+              "name_snapshot": "a",
+              "load_mode_snapshot": "external",
+              "position": 0,
+              "prescribed_sets": 1,
+              "prescribed_reps": "a",
+              "rest_seconds": 0,
+              "notes": "a"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "WorkoutExercise",
+    "schema": "WorkoutExercise",
+    "valid": true,
+    "value": {
+      "id": "00000000-0000-4000-8000-000000000092",
+      "exercise_ref": {
+        "source": "catalog",
+        "id": "00000000-0000-4000-8000-000000000093"
+      },
+      "name_snapshot": "a",
+      "load_mode_snapshot": "external",
+      "position": 0,
+      "prescribed_sets": 1,
+      "prescribed_reps": "a",
+      "rest_seconds": 0,
+      "notes": "a",
+      "source_exercise_id": "00000000-0000-4000-8000-000000000094"
+    }
+  },
+  {
+    "name": "Workout",
+    "schema": "Workout",
+    "valid": true,
+    "value": {
+      "id": "00000000-0000-4000-8000-000000000095",
+      "revision": "1",
+      "created_at": "2026-10-15T18:00:00Z",
+      "updated_at": "2026-10-15T18:00:00Z",
+      "deleted_at": "2026-10-15T18:00:00Z",
+      "routine_version_id": "00000000-0000-4000-8000-000000000096",
+      "routine_day_id": "00000000-0000-4000-8000-000000000097",
+      "routine_title_snapshot": "a",
+      "day_label_snapshot": "a",
+      "state": "in_progress",
+      "started_at": "2026-10-15T18:00:00Z",
+      "finished_at": "2026-10-15T18:00:00Z",
+      "timezone": "a",
+      "finalized_revision": "1",
+      "needs_review": true,
+      "origin_device_id": "00000000-0000-4000-8000-000000000098",
+      "exercises": [
+        {
+          "id": "00000000-0000-4000-8000-000000000099",
+          "exercise_ref": {
+            "source": "catalog",
+            "id": "00000000-0000-4000-8000-00000000009a"
+          },
+          "name_snapshot": "a",
+          "load_mode_snapshot": "external",
+          "position": 0,
+          "prescribed_sets": 1,
+          "prescribed_reps": "a",
+          "rest_seconds": 0,
+          "notes": "a",
+          "source_exercise_id": "00000000-0000-4000-8000-00000000009b"
+        }
+      ]
+    }
+  },
+  {
+    "name": "WorkoutSet",
+    "schema": "WorkoutSet",
+    "valid": true,
+    "value": {
+      "id": "00000000-0000-4000-8000-00000000009c",
+      "revision": "1",
+      "created_at": "2026-10-15T18:00:00Z",
+      "updated_at": "2026-10-15T18:00:00Z",
+      "deleted_at": "2026-10-15T18:00:00Z",
+      "workout_id": "00000000-0000-4000-8000-00000000009d",
+      "workout_exercise_id": "00000000-0000-4000-8000-00000000009e",
+      "origin_device_id": "00000000-0000-4000-8000-00000000009f",
+      "position_hint": 0,
+      "load": {
+        "load_mode": "external",
+        "weight_value": "30.000",
+        "weight_unit": "kg"
+      },
+      "repetitions": 0,
+      "captured_at": "2026-10-15T18:00:00Z"
+    }
+  },
+  {
+    "name": "Conflict",
+    "schema": "Conflict",
+    "valid": true,
+    "value": {
+      "id": "00000000-0000-4000-8000-0000000000a0",
+      "revision": "1",
+      "created_at": "2026-10-15T18:00:00Z",
+      "updated_at": "2026-10-15T18:00:00Z",
+      "deleted_at": "2026-10-15T18:00:00Z",
+      "operation_id": "00000000-0000-4000-8000-0000000000a1",
+      "entity_type": "profile",
+      "entity_id": "00000000-0000-4000-8000-0000000000a2",
+      "base_revision": "1",
+      "current_revision": "1",
+      "proposal": {
+        "operation_id": "00000000-0000-4000-8000-0000000000a3",
+        "origin_device_id": "00000000-0000-4000-8000-0000000000a4",
+        "type": "profile.update",
+        "entity_id": "00000000-0000-4000-8000-0000000000a5",
+        "base": {
+          "revision": "1"
+        },
+        "captured_at": "2026-10-15T18:00:00Z",
+        "payload": {
+          "display_name": "a",
+          "weight_unit": "kg"
+        }
+      },
+      "reason": "revision",
+      "state": "open",
+      "resolution_operation_id": "00000000-0000-4000-8000-0000000000a6"
+    }
+  },
+  {
+    "name": "Change",
+    "schema": "Change",
+    "valid": true,
+    "value": {
+      "entity_type": "profile",
+      "entity_id": "00000000-0000-4000-8000-0000000000a7",
+      "revision": "1",
+      "data": {
+        "id": "00000000-0000-4000-8000-0000000000a8",
+        "display_name": "a",
+        "weight_unit": "kg",
+        "revision": "1"
+      }
+    }
+  },
+  {
+    "name": "ChangeGroup",
+    "schema": "ChangeGroup",
+    "valid": true,
+    "value": {
+      "sequence": "1",
+      "operation_id": "00000000-0000-4000-8000-0000000000a9",
+      "changes": [
+        {
+          "entity_type": "profile",
+          "entity_id": "00000000-0000-4000-8000-0000000000aa",
+          "revision": "1",
+          "data": {
+            "id": "00000000-0000-4000-8000-0000000000ab",
+            "display_name": "a",
+            "weight_unit": "kg",
+            "revision": "1"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "PullResult",
+    "schema": "PullResult",
+    "valid": true,
+    "value": {
+      "protocol_version": 1,
+      "epoch": "00000000-0000-4000-8000-0000000000ac",
+      "groups": [],
+      "next_cursor": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "has_more": true
+    }
+  },
+  {
+    "name": "Capabilities",
+    "schema": "Capabilities",
+    "valid": true,
+    "value": {
+      "protocol_version": 1,
+      "minimum_protocol_version": 1,
+      "minimum_app_version": "a",
+      "max_push_operations": 50,
+      "max_request_bytes": 2097152,
+      "max_group_bytes": 1048576,
+      "features": [],
+      "policy_version": "a"
+    }
+  },
+  {
+    "name": "Snapshot",
+    "schema": "Snapshot",
+    "valid": true,
+    "value": {
+      "id": "00000000-0000-4000-8000-0000000000ad",
+      "epoch": "00000000-0000-4000-8000-0000000000ae",
+      "through_sequence": "1",
+      "page_count": 1,
+      "page_hashes": [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ],
+      "expires_at": "2026-10-15T18:00:00Z",
+      "cursor": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "capabilities": {
+        "protocol_version": 1,
+        "minimum_protocol_version": 1,
+        "minimum_app_version": "a",
+        "max_push_operations": 50,
+        "max_request_bytes": 2097152,
+        "max_group_bytes": 1048576,
+        "features": [],
+        "policy_version": "a"
+      }
+    }
+  },
+  {
+    "name": "SnapshotPage",
+    "schema": "SnapshotPage",
+    "valid": true,
+    "value": {
+      "snapshot_id": "00000000-0000-4000-8000-0000000000af",
+      "page_number": 0,
+      "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "records": []
+    }
+  },
+  {
+    "name": "Me",
+    "schema": "Me",
+    "valid": true,
+    "value": {
+      "profile": {
+        "id": "00000000-0000-4000-8000-0000000000b0",
+        "display_name": "a",
+        "weight_unit": "kg",
+        "revision": "1"
+      },
+      "phone_masked": "a",
+      "status": "active",
+      "security_version": "1",
+      "recovery_prepared": true,
+      "capabilities": {
+        "protocol_version": 1,
+        "minimum_protocol_version": 1,
+        "minimum_app_version": "a",
+        "max_push_operations": 50,
+        "max_request_bytes": 2097152,
+        "max_group_bytes": 1048576,
+        "features": [],
+        "policy_version": "a"
+      }
+    }
+  },
+  {
+    "name": "CandidateDevice",
+    "schema": "CandidateDevice",
+    "valid": true,
+    "value": {
+      "id": "00000000-0000-4000-8000-0000000000b1",
+      "platform": "android",
+      "label": "a",
+      "public_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  {
+    "name": "Device",
+    "schema": "Device",
+    "valid": true,
+    "value": {
+      "id": "00000000-0000-4000-8000-0000000000b2",
+      "platform": "android",
+      "label": "a",
+      "authorized_at": "2026-10-15T18:00:00Z",
+      "revoked_at": "2026-10-15T18:00:00Z",
+      "last_seen_at": "2026-10-15T18:00:00Z",
+      "current": true
+    }
+  },
+  {
+    "name": "Session",
+    "schema": "Session",
+    "valid": true,
+    "value": {
+      "account_id": "00000000-0000-4000-8000-0000000000b3",
+      "device_id": "00000000-0000-4000-8000-0000000000b4",
+      "session_id": "00000000-0000-4000-8000-0000000000b5",
+      "access_token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "access_expires_at": "2026-10-15T18:00:00Z",
+      "refresh_token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "refresh_expires_at": "2026-10-15T18:00:00Z",
+      "generation": "1",
+      "revocation_ticket": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  {
+    "name": "RecoveryKit",
+    "schema": "RecoveryKit",
+    "valid": true,
+    "value": {
+      "id": "00000000-0000-4000-8000-0000000000b6",
+      "secret": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generation": "1"
+    }
+  },
+  {
+    "name": "Attempt",
+    "schema": "Attempt",
+    "valid": true,
+    "value": {
+      "id": "00000000-0000-4000-8000-0000000000b7",
+      "state": "pending",
+      "destination_masked": "a",
+      "nonce": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expires_at": "2026-10-15T18:00:00Z",
+      "resend_after_seconds": 0
+    }
+  },
+  {
+    "name": "AuthResult",
+    "schema": "AuthResult",
+    "valid": true,
+    "value": {
+      "status": "pending",
+      "attempt": {
+        "id": "00000000-0000-4000-8000-0000000000b8",
+        "state": "pending",
+        "destination_masked": "a",
+        "nonce": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "expires_at": "2026-10-15T18:00:00Z",
+        "resend_after_seconds": 0
+      }
+    }
+  },
+  {
+    "name": "DeviceAuthorization",
+    "schema": "DeviceAuthorization",
+    "valid": true,
+    "value": {
+      "id": "00000000-0000-4000-8000-0000000000b9",
+      "candidate": {
+        "id": "00000000-0000-4000-8000-0000000000ba",
+        "platform": "android",
+        "label": "a",
+        "public_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "comparison_code": "123456",
+      "status": "pending",
+      "expires_at": "2026-10-15T18:00:00Z"
+    }
+  },
+  {
+    "name": "DeviceProof",
+    "schema": "DeviceProof",
+    "valid": true,
+    "value": {
+      "id": "00000000-0000-4000-8000-0000000000bb",
+      "nonce": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "purpose": "authorize_device",
+      "request_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expires_at": "2026-10-15T18:00:00Z"
+    }
+  },
+  {
+    "name": "ProofToken",
+    "schema": "ProofToken",
+    "valid": true,
+    "value": {
+      "proof_token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expires_at": "2026-10-15T18:00:00Z"
+    }
+  },
+  {
+    "name": "Acknowledgement",
+    "schema": "Acknowledgement",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-0000000000bc",
+      "status": "completed",
+      "completed_at": "2026-10-15T18:00:00Z"
+    }
+  },
+  {
+    "name": "DeviceAuthorizationDecisionResult",
+    "schema": "DeviceAuthorizationDecisionResult",
+    "valid": true,
+    "value": {
+      "account_id": "00000000-0000-4000-8000-0000000000bd",
+      "authorization_id": "00000000-0000-4000-8000-0000000000be",
+      "operation_id": "00000000-0000-4000-8000-0000000000bf",
+      "original_session_id": "00000000-0000-4000-8000-0000000000c0",
+      "original_device_id": "00000000-0000-4000-8000-0000000000c1",
+      "decision": "approve",
+      "request_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "checked_at": "2026-10-15T18:00:00Z",
+      "status": "completed",
+      "completed_at": "2026-10-15T18:00:00Z"
+    }
+  },
+  {
+    "name": "Vault",
+    "schema": "Vault",
+    "valid": true,
+    "value": {
+      "id": "00000000-0000-4000-8000-0000000000c2",
+      "key_version": "a",
+      "data_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  {
+    "name": "post_auth_start_Request",
+    "schema": "post_auth_start_Request",
+    "valid": true,
+    "value": {
+      "attempt_id": "00000000-0000-4000-8000-0000000000c3",
+      "phone": "+525500000001",
+      "country": "MX",
+      "channel": "whatsapp",
+      "purpose": "access",
+      "candidate": {
+        "id": "00000000-0000-4000-8000-0000000000c4",
+        "platform": "android",
+        "label": "a",
+        "public_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "new_account_id": "00000000-0000-4000-8000-0000000000c5",
+      "continuation_secret": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  {
+    "name": "post_auth_attempts_id_resend_Request",
+    "schema": "post_auth_attempts_id_resend_Request",
+    "valid": true,
+    "value": {
+      "channel": "whatsapp"
+    }
+  },
+  {
+    "name": "post_auth_check_Request",
+    "schema": "post_auth_check_Request",
+    "valid": true,
+    "value": {
+      "attempt_id": "00000000-0000-4000-8000-0000000000c6",
+      "code": "123456"
+    }
+  },
+  {
+    "name": "post_auth_device_authorizations_Request",
+    "schema": "post_auth_device_authorizations_Request",
+    "valid": true,
+    "value": {
+      "attempt_id": "00000000-0000-4000-8000-0000000000c7",
+      "id": "00000000-0000-4000-8000-0000000000c8"
+    }
+  },
+  {
+    "name": "post_me_device_authorizations_id_decision_Request",
+    "schema": "post_me_device_authorizations_id_decision_Request",
+    "valid": true,
+    "value": {
+      "decision": "approve"
+    }
+  },
+  {
+    "name": "post_auth_recovery_complete_Request",
+    "schema": "post_auth_recovery_complete_Request",
+    "valid": true,
+    "value": {
+      "attempt_id": "00000000-0000-4000-8000-0000000000c9",
+      "recovery_key_id": "00000000-0000-4000-8000-0000000000ca",
+      "recovery_secret": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "confirm_phone_change": true
+    }
+  },
+  {
+    "name": "post_auth_refresh_Request",
+    "schema": "post_auth_refresh_Request",
+    "valid": true,
+    "value": {
+      "refresh_token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "device_signature": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  {
+    "name": "post_me_devices_id_revoke_Request",
+    "schema": "post_me_devices_id_revoke_Request",
+    "valid": true,
+    "value": {}
+  },
+  {
+    "name": "post_me_devices_revoke_Request",
+    "schema": "post_me_devices_revoke_Request",
+    "valid": true,
+    "value": {
+      "scope": "others"
+    }
+  },
+  {
+    "name": "post_auth_logout_Request",
+    "schema": "post_auth_logout_Request",
+    "valid": true,
+    "value": {
+      "revocation_ticket": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  {
+    "name": "post_me_recovery_key_Request",
+    "schema": "post_me_recovery_key_Request",
+    "valid": true,
+    "value": {
+      "id": "00000000-0000-4000-8000-0000000000cb"
+    }
+  },
+  {
+    "name": "post_me_recovery_key_confirm_Request",
+    "schema": "post_me_recovery_key_confirm_Request",
+    "valid": true,
+    "value": {
+      "recovery_key_id": "00000000-0000-4000-8000-0000000000cc",
+      "saved": true
+    }
+  },
+  {
+    "name": "post_me_proofs_Request",
+    "schema": "post_me_proofs_Request",
+    "valid": true,
+    "value": {
+      "id": "00000000-0000-4000-8000-0000000000cd",
+      "purpose": "authorize_device",
+      "request_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  {
+    "name": "post_me_proofs_id_complete_Request",
+    "schema": "post_me_proofs_id_complete_Request",
+    "valid": true,
+    "value": {
+      "signature": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  {
+    "name": "post_me_phone_change_start_Request",
+    "schema": "post_me_phone_change_start_Request",
+    "valid": true,
+    "value": {
+      "attempt_id": "00000000-0000-4000-8000-0000000000ce",
+      "phone": "+525500000001",
+      "country": "MX",
+      "channel": "whatsapp",
+      "continuation_secret": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  {
+    "name": "post_me_phone_change_complete_Request",
+    "schema": "post_me_phone_change_complete_Request",
+    "valid": true,
+    "value": {
+      "attempt_id": "00000000-0000-4000-8000-0000000000cf",
+      "code": "123456",
+      "continuation_secret": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  {
+    "name": "post_me_deletion_Request",
+    "schema": "post_me_deletion_Request",
+    "valid": true,
+    "value": {
+      "confirmation": "delete_my_account",
+      "policy_version": "a",
+      "result_secret": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  {
+    "name": "post_me_vaults_Request",
+    "schema": "post_me_vaults_Request",
+    "valid": true,
+    "value": {
+      "id": "00000000-0000-4000-8000-0000000000d0"
+    }
+  },
+  {
+    "name": "post_me_vaults_id_unlock_Request",
+    "schema": "post_me_vaults_id_unlock_Request",
+    "valid": true,
+    "value": {}
+  },
+  {
+    "name": "post_commands_Request",
+    "schema": "post_commands_Request",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-0000000000d1",
+      "origin_device_id": "00000000-0000-4000-8000-0000000000d2",
+      "type": "profile.update",
+      "entity_id": "00000000-0000-4000-8000-0000000000d3",
+      "base": {
+        "revision": "1"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {
+        "display_name": "a",
+        "weight_unit": "kg"
+      }
+    }
+  },
+  {
+    "name": "post_sync_push_Request",
+    "schema": "post_sync_push_Request",
+    "valid": true,
+    "value": {
+      "protocol_version": 1,
+      "operations": [
+        {
+          "operation_id": "00000000-0000-4000-8000-0000000000d4",
+          "origin_device_id": "00000000-0000-4000-8000-0000000000d5",
+          "type": "workout.start",
+          "entity_id": "00000000-0000-4000-8000-0000000000d6",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {
+            "routine_version_id": "00000000-0000-4000-8000-0000000000d7",
+            "routine_day_id": "00000000-0000-4000-8000-0000000000d8",
+            "version_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "started_at": "2026-10-15T18:00:00Z",
+            "timezone": "a",
+            "exercises": [
+              {
+                "source_exercise_id": "00000000-0000-4000-8000-0000000000d9",
+                "id": "00000000-0000-4000-8000-0000000000da"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "post_sync_snapshots_Request",
+    "schema": "post_sync_snapshots_Request",
+    "valid": true,
+    "value": {
+      "protocol_version": 1
+    }
+  },
+  {
+    "name": "Command_profile_update_injected_owner",
+    "schema": "Command_profile_update",
+    "valid": false,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-0000000000db",
+      "origin_device_id": "00000000-0000-4000-8000-0000000000dc",
+      "type": "profile.update",
+      "entity_id": "00000000-0000-4000-8000-0000000000dd",
+      "base": {
+        "revision": "1"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {
+        "display_name": "a",
+        "weight_unit": "kg"
+      },
+      "account_id": "00000000-0000-4000-8000-0000000000de"
+    }
+  },
+  {
+    "name": "Command_workout_set_create_injected_owner",
+    "schema": "Command_workout_set_create",
+    "valid": false,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-0000000000df",
+      "origin_device_id": "00000000-0000-4000-8000-0000000000e0",
+      "type": "workout.set.create",
+      "entity_id": "00000000-0000-4000-8000-0000000000e1",
+      "base": {
+        "revision": "1"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {
+        "workout_id": "00000000-0000-4000-8000-0000000000e2",
+        "workout_exercise_id": "00000000-0000-4000-8000-0000000000e3",
+        "observed_workout": {
+          "revision": "1"
+        },
+        "position_hint": 0,
+        "load": {
+          "load_mode": "external",
+          "weight_value": "30.000",
+          "weight_unit": "kg"
+        },
+        "repetitions": 0
+      },
+      "account_id": "00000000-0000-4000-8000-0000000000e4"
+    }
+  },
+  {
+    "name": "post_auth_start_Request_injected_owner",
+    "schema": "post_auth_start_Request",
+    "valid": false,
+    "value": {
+      "attempt_id": "00000000-0000-4000-8000-0000000000e5",
+      "phone": "+525500000001",
+      "country": "MX",
+      "channel": "whatsapp",
+      "purpose": "access",
+      "candidate": {
+        "id": "00000000-0000-4000-8000-0000000000e6",
+        "platform": "android",
+        "label": "a",
+        "public_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "new_account_id": "00000000-0000-4000-8000-0000000000e7",
+      "continuation_secret": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "account_id": "00000000-0000-4000-8000-0000000000e8"
+    }
+  },
+  {
+    "name": "decision_not_applied",
+    "schema": "DeviceAuthorizationDecisionResult",
+    "valid": true,
+    "value": {
+      "account_id": "00000000-0000-4000-8000-0000000000e9",
+      "authorization_id": "00000000-0000-4000-8000-0000000000ea",
+      "operation_id": "00000000-0000-4000-8000-0000000000eb",
+      "original_session_id": "00000000-0000-4000-8000-0000000000ec",
+      "original_device_id": "00000000-0000-4000-8000-0000000000ed",
+      "decision": "approve",
+      "request_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "checked_at": "2026-10-15T18:00:00Z",
+      "status": "not_applied",
+      "completed_at": null
+    }
+  },
+  {
+    "name": "decision_unresolved",
+    "schema": "DeviceAuthorizationDecisionResult",
+    "valid": true,
+    "value": {
+      "account_id": "00000000-0000-4000-8000-0000000000ee",
+      "authorization_id": "00000000-0000-4000-8000-0000000000ef",
+      "operation_id": "00000000-0000-4000-8000-0000000000f0",
+      "original_session_id": "00000000-0000-4000-8000-0000000000f1",
+      "original_device_id": "00000000-0000-4000-8000-0000000000f2",
+      "decision": "approve",
+      "request_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "checked_at": "2026-10-15T18:00:00Z",
+      "status": "unresolved",
+      "completed_at": null
+    }
+  },
+  {
+    "name": "decision_completed_without_time",
+    "schema": "DeviceAuthorizationDecisionResult",
+    "valid": false,
+    "value": {
+      "account_id": "00000000-0000-4000-8000-0000000000f3",
+      "authorization_id": "00000000-0000-4000-8000-0000000000f4",
+      "operation_id": "00000000-0000-4000-8000-0000000000f5",
+      "original_session_id": "00000000-0000-4000-8000-0000000000f6",
+      "original_device_id": "00000000-0000-4000-8000-0000000000f7",
+      "decision": "approve",
+      "request_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "checked_at": "2026-10-15T18:00:00Z",
+      "status": "completed",
+      "completed_at": null
+    }
+  },
+  {
+    "name": "decision_absent_with_completion",
+    "schema": "DeviceAuthorizationDecisionResult",
+    "valid": false,
+    "value": {
+      "account_id": "00000000-0000-4000-8000-0000000000f8",
+      "authorization_id": "00000000-0000-4000-8000-0000000000f9",
+      "operation_id": "00000000-0000-4000-8000-0000000000fa",
+      "original_session_id": "00000000-0000-4000-8000-0000000000fb",
+      "original_device_id": "00000000-0000-4000-8000-0000000000fc",
+      "decision": "approve",
+      "request_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "checked_at": "2026-10-15T18:00:00Z",
+      "status": "not_applied",
+      "completed_at": "2026-10-15T18:00:00Z"
+    }
+  },
+  {
+    "name": "decision_result_no_credentials",
+    "schema": "DeviceAuthorizationDecisionResult",
+    "valid": false,
+    "value": {
+      "account_id": "00000000-0000-4000-8000-0000000000fd",
+      "authorization_id": "00000000-0000-4000-8000-0000000000fe",
+      "operation_id": "00000000-0000-4000-8000-0000000000ff",
+      "original_session_id": "00000000-0000-4000-8000-000000000100",
+      "original_device_id": "00000000-0000-4000-8000-000000000101",
+      "decision": "approve",
+      "request_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "checked_at": "2026-10-15T18:00:00Z",
+      "status": "completed",
+      "completed_at": "2026-10-15T18:00:00Z",
+      "access_token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  {
+    "name": "recovery_not_saved",
+    "schema": "post_me_recovery_key_confirm_Request",
+    "valid": false,
+    "value": {
+      "recovery_key_id": "00000000-0000-4000-8000-000000000102",
+      "saved": false
+    }
+  },
+  {
+    "name": "recovery_confirm_injected_owner",
+    "schema": "post_me_recovery_key_confirm_Request",
+    "valid": false,
+    "value": {
+      "recovery_key_id": "00000000-0000-4000-8000-000000000103",
+      "saved": true,
+      "account_id": "00000000-0000-4000-8000-000000000104"
+    }
+  },
+  {
+    "name": "negative_weight",
+    "schema": "Load",
+    "valid": false,
+    "value": {
+      "load_mode": "external",
+      "weight_value": "-1",
+      "weight_unit": "kg"
+    }
+  },
+  {
+    "name": "no_load_with_weight",
+    "schema": "Load",
+    "valid": false,
+    "value": {
+      "load_mode": "none",
+      "weight_value": "0",
+      "weight_unit": "kg"
+    }
+  },
+  {
+    "name": "too_many_decimals",
+    "schema": "Load",
+    "valid": false,
+    "value": {
+      "load_mode": "external",
+      "weight_value": "1.2345",
+      "weight_unit": "kg"
+    }
+  },
+  {
+    "name": "ambiguous_base",
+    "schema": "Base",
+    "valid": false,
+    "value": {
+      "revision": "1",
+      "after_operation_id": "00000000-0000-4000-8000-000000000105"
+    }
+  },
+  {
+    "name": "unsafe_numeric_revision",
+    "schema": "Revision",
+    "valid": false,
+    "value": 9007199254740993
+  },
+  {
+    "name": "negative_revision",
+    "schema": "Revision",
+    "valid": false,
+    "value": "-1"
+  },
+  {
+    "name": "phone_spaces",
+    "schema": "Phone",
+    "valid": false,
+    "value": "+52 55 0000 0001"
+  },
+  {
+    "name": "no_load_explicit",
+    "schema": "Load",
+    "valid": true,
+    "value": {
+      "load_mode": "none",
+      "weight_value": null,
+      "weight_unit": null
+    }
+  },
+  {
+    "name": "zero_load_explicit",
+    "schema": "Load",
+    "valid": true,
+    "value": {
+      "load_mode": "external",
+      "weight_value": "0",
+      "weight_unit": "kg"
+    }
+  },
+  {
+    "name": "routine_is_not_offline",
+    "schema": "OfflineCommand",
+    "valid": false,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-000000000106",
+      "origin_device_id": "00000000-0000-4000-8000-000000000107",
+      "type": "routine.create",
+      "entity_id": "00000000-0000-4000-8000-000000000108",
+      "base": {
+        "revision": "1"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {
+        "draft": {
+          "format_version": 1,
+          "title": "a",
+          "days": []
+        }
+      }
+    }
+  },
+  {
+    "name": "empty_push",
+    "schema": "Push",
+    "valid": false,
+    "value": {
+      "protocol_version": 1,
+      "operations": []
+    }
+  },
+  {
+    "name": "oversized_push",
+    "schema": "Push",
+    "valid": false,
+    "value": {
+      "protocol_version": 1,
+      "operations": [
+        {
+          "operation_id": "00000000-0000-4000-8000-000000000109",
+          "origin_device_id": "00000000-0000-4000-8000-00000000010a",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-00000000010b",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-00000000010c",
+          "origin_device_id": "00000000-0000-4000-8000-00000000010d",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-00000000010e",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-00000000010f",
+          "origin_device_id": "00000000-0000-4000-8000-000000000110",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-000000000111",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-000000000112",
+          "origin_device_id": "00000000-0000-4000-8000-000000000113",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-000000000114",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-000000000115",
+          "origin_device_id": "00000000-0000-4000-8000-000000000116",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-000000000117",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-000000000118",
+          "origin_device_id": "00000000-0000-4000-8000-000000000119",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-00000000011a",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-00000000011b",
+          "origin_device_id": "00000000-0000-4000-8000-00000000011c",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-00000000011d",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-00000000011e",
+          "origin_device_id": "00000000-0000-4000-8000-00000000011f",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-000000000120",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-000000000121",
+          "origin_device_id": "00000000-0000-4000-8000-000000000122",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-000000000123",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-000000000124",
+          "origin_device_id": "00000000-0000-4000-8000-000000000125",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-000000000126",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-000000000127",
+          "origin_device_id": "00000000-0000-4000-8000-000000000128",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-000000000129",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-00000000012a",
+          "origin_device_id": "00000000-0000-4000-8000-00000000012b",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-00000000012c",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-00000000012d",
+          "origin_device_id": "00000000-0000-4000-8000-00000000012e",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-00000000012f",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-000000000130",
+          "origin_device_id": "00000000-0000-4000-8000-000000000131",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-000000000132",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-000000000133",
+          "origin_device_id": "00000000-0000-4000-8000-000000000134",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-000000000135",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-000000000136",
+          "origin_device_id": "00000000-0000-4000-8000-000000000137",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-000000000138",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-000000000139",
+          "origin_device_id": "00000000-0000-4000-8000-00000000013a",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-00000000013b",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-00000000013c",
+          "origin_device_id": "00000000-0000-4000-8000-00000000013d",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-00000000013e",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-00000000013f",
+          "origin_device_id": "00000000-0000-4000-8000-000000000140",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-000000000141",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-000000000142",
+          "origin_device_id": "00000000-0000-4000-8000-000000000143",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-000000000144",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-000000000145",
+          "origin_device_id": "00000000-0000-4000-8000-000000000146",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-000000000147",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-000000000148",
+          "origin_device_id": "00000000-0000-4000-8000-000000000149",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-00000000014a",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-00000000014b",
+          "origin_device_id": "00000000-0000-4000-8000-00000000014c",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-00000000014d",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-00000000014e",
+          "origin_device_id": "00000000-0000-4000-8000-00000000014f",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-000000000150",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-000000000151",
+          "origin_device_id": "00000000-0000-4000-8000-000000000152",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-000000000153",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-000000000154",
+          "origin_device_id": "00000000-0000-4000-8000-000000000155",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-000000000156",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-000000000157",
+          "origin_device_id": "00000000-0000-4000-8000-000000000158",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-000000000159",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-00000000015a",
+          "origin_device_id": "00000000-0000-4000-8000-00000000015b",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-00000000015c",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-00000000015d",
+          "origin_device_id": "00000000-0000-4000-8000-00000000015e",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-00000000015f",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-000000000160",
+          "origin_device_id": "00000000-0000-4000-8000-000000000161",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-000000000162",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-000000000163",
+          "origin_device_id": "00000000-0000-4000-8000-000000000164",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-000000000165",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-000000000166",
+          "origin_device_id": "00000000-0000-4000-8000-000000000167",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-000000000168",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-000000000169",
+          "origin_device_id": "00000000-0000-4000-8000-00000000016a",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-00000000016b",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-00000000016c",
+          "origin_device_id": "00000000-0000-4000-8000-00000000016d",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-00000000016e",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-00000000016f",
+          "origin_device_id": "00000000-0000-4000-8000-000000000170",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-000000000171",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-000000000172",
+          "origin_device_id": "00000000-0000-4000-8000-000000000173",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-000000000174",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-000000000175",
+          "origin_device_id": "00000000-0000-4000-8000-000000000176",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-000000000177",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-000000000178",
+          "origin_device_id": "00000000-0000-4000-8000-000000000179",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-00000000017a",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-00000000017b",
+          "origin_device_id": "00000000-0000-4000-8000-00000000017c",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-00000000017d",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-00000000017e",
+          "origin_device_id": "00000000-0000-4000-8000-00000000017f",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-000000000180",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-000000000181",
+          "origin_device_id": "00000000-0000-4000-8000-000000000182",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-000000000183",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-000000000184",
+          "origin_device_id": "00000000-0000-4000-8000-000000000185",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-000000000186",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-000000000187",
+          "origin_device_id": "00000000-0000-4000-8000-000000000188",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-000000000189",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-00000000018a",
+          "origin_device_id": "00000000-0000-4000-8000-00000000018b",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-00000000018c",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-00000000018d",
+          "origin_device_id": "00000000-0000-4000-8000-00000000018e",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-00000000018f",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-000000000190",
+          "origin_device_id": "00000000-0000-4000-8000-000000000191",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-000000000192",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-000000000193",
+          "origin_device_id": "00000000-0000-4000-8000-000000000194",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-000000000195",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-000000000196",
+          "origin_device_id": "00000000-0000-4000-8000-000000000197",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-000000000198",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-000000000199",
+          "origin_device_id": "00000000-0000-4000-8000-00000000019a",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-00000000019b",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-00000000019c",
+          "origin_device_id": "00000000-0000-4000-8000-00000000019d",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-00000000019e",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        },
+        {
+          "operation_id": "00000000-0000-4000-8000-00000000019f",
+          "origin_device_id": "00000000-0000-4000-8000-0000000001a0",
+          "type": "workout.delete",
+          "entity_id": "00000000-0000-4000-8000-0000000001a1",
+          "base": {
+            "revision": "1"
+          },
+          "captured_at": "2026-10-15T18:00:00Z",
+          "payload": {}
+        }
+      ]
+    }
+  }
+]

@@ -1,0 +1,113 @@
+{
+  "version": 1,
+  "decision": "MC-DEC042",
+  "purpose": "Entity/read projection only; preserve original command text for hashing. No float, rounding or kg/lb conversion.",
+  "valid": [
+    {
+      "input": "0",
+      "canonical": "0.000"
+    },
+    {
+      "input": "0.0",
+      "canonical": "0.000"
+    },
+    {
+      "input": "0.00",
+      "canonical": "0.000"
+    },
+    {
+      "input": "0.000",
+      "canonical": "0.000"
+    },
+    {
+      "input": "0.001",
+      "canonical": "0.001"
+    },
+    {
+      "input": "0.010",
+      "canonical": "0.010"
+    },
+    {
+      "input": "0.100",
+      "canonical": "0.100"
+    },
+    {
+      "input": "1",
+      "canonical": "1.000"
+    },
+    {
+      "input": "1.2",
+      "canonical": "1.200"
+    },
+    {
+      "input": "1.20",
+      "canonical": "1.200"
+    },
+    {
+      "input": "1.234",
+      "canonical": "1.234"
+    },
+    {
+      "input": "30.0",
+      "canonical": "30.000"
+    },
+    {
+      "input": "30.000",
+      "canonical": "30.000"
+    },
+    {
+      "input": "1234567.890",
+      "canonical": "1234567.890"
+    },
+    {
+      "input": "9999999",
+      "canonical": "9999999.000"
+    },
+    {
+      "input": "9999999.9",
+      "canonical": "9999999.900"
+    },
+    {
+      "input": "9999999.99",
+      "canonical": "9999999.990"
+    },
+    {
+      "input": "9999999.999",
+      "canonical": "9999999.999"
+    }
+  ],
+  "invalid": [
+    "",
+    " ",
+    " 1",
+    "1 ",
+    "-0",
+    "-1",
+    "+1",
+    "00",
+    "01",
+    "00.1",
+    "01.000",
+    ".1",
+    "1.",
+    "1.0000",
+    "9999999.9999",
+    "10000000",
+    "10000000.000",
+    "1e3",
+    "1E0",
+    "0x1",
+    "NaN",
+    "Infinity",
+    "1,2",
+    "1_000",
+    "١",
+    "１２",
+    "1\n",
+    "1\r\n",
+    "1 ",
+    "0.0.0",
+    "1..0",
+    "\u0000"
+  ]
+}

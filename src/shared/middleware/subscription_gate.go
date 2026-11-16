@@ -180,6 +180,7 @@ var cloudTrialReadOnlyBypass = subscriptionGateBypass{
 		"/api/v1/subscriptions/", // activar el plan: checkout y portal de pago
 		"/api/v1/webhooks/",      // Stripe, Mercado Pago y Twilio
 		"/api/v1/admin/",         // releases, con su propio secreto
+		"/api/mancuerna/",        // otro producto con su propia auth
 	},
 }
 

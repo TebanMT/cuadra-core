@@ -28,6 +28,26 @@ env:
   GO_VERSION: "1.25.3"
 
 jobs:
+  mancuerna-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.29.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: contracts/mancuerna/v1/pnpm-lock.yaml
+      - name: Contrato personal, fixtures y generación reproducible
+        working-directory: contracts/mancuerna/v1
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm test
+          pnpm check
+
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -63,12 +83,12 @@ jobs:
         env:
           POSTGRES_USER: tinta
           POSTGRES_PASSWORD: tinta_dev
-          POSTGRES_DB: tinta
+          POSTGRES_DB: mancuerna_ci_test
         ports:
           - 5432:5432
         # Health check para que el step que sigue espere a que arranque.
         options: >-
-          --health-cmd "pg_isready -U tinta -d tinta"
+          --health-cmd "pg_isready -U tinta -d mancuerna_ci_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
@@ -77,8 +97,12 @@ jobs:
       # Las dos formas que el repo usa: DB_URL la lee el Makefile,
       # DATABASE_URL la leen los tests de integración (sidecartoken,
       # etc). Apuntan al mismo Postgres del service container.
-      DB_URL: postgresql://tinta:tinta_dev@localhost:5432/tinta?sslmode=disable
-      DATABASE_URL: postgresql://tinta:tinta_dev@localhost:5432/tinta?sslmode=disable
+      DB_URL: postgresql://tinta:tinta_dev@localhost:5432/mancuerna_ci_test?sslmode=disable
+      DATABASE_URL: postgresql://tinta:tinta_dev@localhost:5432/mancuerna_ci_test?sslmode=disable
+      # Credenciales exclusivamente del contenedor efímero de este job.
+      MANCUERNA_TEST_OWNER_DSN: postgresql://tinta:tinta_dev@localhost:5432/mancuerna_ci_test?sslmode=disable
+      MANCUERNA_TEST_DATA_DSN: postgresql://mc_data:mc_test_data@localhost:5432/mancuerna_ci_test?sslmode=disable
+      MANCUERNA_TEST_AUTH_DSN: postgresql://mc_auth:mc_test_auth@localhost:5432/mancuerna_ci_test?sslmode=disable
       TINTA_MODE: test
 
     steps:
@@ -93,11 +117,23 @@ jobs:
         # Use the same version-aware runner as deployment. A second run must
         # skip committed DDL before the test helpers invoke it again.
         run: |
+          psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f scripts/db/mancuerna_roles.sql
           make migrate-postgres
           make migrate-postgres
+
+      - name: Crear logins de prueba personales restringidos
+        run: |
+          psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE mc_data LOGIN PASSWORD 'mc_test_data' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
+          GRANT mancuerna_data TO mc_data;
+          CREATE ROLE mc_auth LOGIN PASSWORD 'mc_test_auth' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
+          GRANT mancuerna_auth TO mc_auth;
+          SQL
 
       - name: go test (server + sidecar)
         # El sidecar usa CGO via mattn/go-sqlite3; ubuntu-latest trae gcc.
         env:
           CGO_ENABLED: "1"
-        run: go test -tags "server sidecar integration" -race -count=1 -timeout 5m ./...
+        # Adversarial role tests must finish before another package checks the
+        # same login. Concurrency within each package remains enabled.
+        run: go test -p 1 -tags "server sidecar integration" -race -count=1 -timeout 5m ./...

@@ -99,6 +99,15 @@ import (
 var version = "dev"
 
 func main() {
+	// Local Mancuerna must branch before dotenv or any administrative startup.
+	if local, err := mancuernaLocalRequested(); err != nil {
+		log.Fatal("MANCUERNA_LOCAL_ONLY debe ser 1 o estar ausente.")
+	} else if local {
+		if err := runMancuernaLocalOnly(); err != nil {
+			log.Fatal("No se pudo iniciar la prueba local de Mancuerna; revisa su configuración privada y su ledger existente.")
+		}
+		return
+	}
 	_ = godotenv.Load()
 
 	logRuntimeMode()
@@ -619,7 +628,7 @@ func main() {
 	if os.Getenv("ENVIRONMENT") == "production" {
 		gin.SetMode(gin.ReleaseMode)
 	}
-	r := gin.Default()
+	r := newServerRouter()
 	r.Use(middleware.CORS(middleware.CORSConfig{
 		AllowedOrigins: parseOrigins(envOrDefault("CORS_ALLOWED_ORIGINS", "http://localhost:5174")),
 	}))
@@ -634,6 +643,11 @@ func main() {
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "tinta-server", "version": version})
 	})
+	closePersonal, err := configureMancuerna(r)
+	if err != nil {
+		log.Fatal("No se pudo iniciar Mancuerna: revisa su configuración privada y migraciones.")
+	}
+	defer closePersonal()
 	authCtrl.RegisterRoutes(r)
 	authCtrl.RegisterUploadsRoute(r)
 	mtCtrl.RegisterRoutes(r)

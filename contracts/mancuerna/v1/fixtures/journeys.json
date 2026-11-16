@@ -1,0 +1,534 @@
+[
+  {
+    "flow": "F01",
+    "name": "start_new_account",
+    "schema": "post_auth_start_Request",
+    "valid": true,
+    "value": {
+      "attempt_id": "00000000-0000-4000-8000-00000000000b",
+      "phone": "+525500000001",
+      "country": "MX",
+      "channel": "whatsapp",
+      "purpose": "access",
+      "candidate": {
+        "id": "00000000-0000-4000-8000-000000000001",
+        "platform": "android",
+        "label": "Teléfono de Ana",
+        "public_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "new_account_id": "00000000-0000-4000-8000-000000000002",
+      "continuation_secret": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "expected_behavior": "Sólo intento enmascarado; sin datos de cuenta."
+  },
+  {
+    "flow": "F01",
+    "name": "check_otp",
+    "schema": "post_auth_check_Request",
+    "valid": true,
+    "value": {
+      "attempt_id": "00000000-0000-4000-8000-00000000000b",
+      "code": "123456"
+    },
+    "expected_behavior": "Sesión sólo si alta ganadora; una cuenta existente exige autorización adicional."
+  },
+  {
+    "flow": "F01",
+    "name": "prepare_recovery",
+    "schema": "post_me_recovery_key_Request",
+    "valid": true,
+    "value": {
+      "id": "00000000-0000-4000-8000-00000000000c"
+    },
+    "expected_behavior": "Requiere sesión + prueba reciente; kit nunca en journal."
+  },
+  {
+    "flow": "F01",
+    "name": "confirm_recovery_saved",
+    "schema": "post_me_recovery_key_confirm_Request",
+    "valid": true,
+    "value": {
+      "recovery_key_id": "00000000-0000-4000-8000-00000000000c",
+      "saved": true
+    },
+    "expected_behavior": "Sesión activa propia; confirmar sólo kit vigente, idempotente. No emitir ni rotar clave; recovery_prepared requiere prepared_at."
+  },
+  {
+    "flow": "F01",
+    "name": "profile",
+    "schema": "Command",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-000000000068",
+      "origin_device_id": "00000000-0000-4000-8000-000000000001",
+      "type": "profile.update",
+      "entity_id": "00000000-0000-4000-8000-000000000002",
+      "base": {
+        "revision": "1"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {
+        "display_name": "Ana",
+        "weight_unit": "kg"
+      }
+    },
+    "expected_behavior": "Perfil propio, sin gym obligatorio."
+  },
+  {
+    "flow": "F01",
+    "name": "create_routine",
+    "schema": "Command",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-000000000069",
+      "origin_device_id": "00000000-0000-4000-8000-000000000001",
+      "type": "routine.create",
+      "entity_id": "00000000-0000-4000-8000-000000000003",
+      "base": {
+        "revision": "0"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {
+        "draft": {
+          "format_version": 1,
+          "title": "Tres días",
+          "days": [
+            {
+              "id": "00000000-0000-4000-8000-00000000000d",
+              "label": "Día A",
+              "exercises": [
+                {
+                  "id": "00000000-0000-4000-8000-00000000000e",
+                  "exercise_ref": {
+                    "source": "catalog",
+                    "id": "00000000-0000-4000-8000-000000000007"
+                  },
+                  "prescribed_sets": 3,
+                  "prescribed_reps": "8–12",
+                  "rest_seconds": 90,
+                  "notes": ""
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "expected_behavior": "Crea rutina y borrador revision 1 juntos."
+  },
+  {
+    "flow": "F01",
+    "name": "publish",
+    "schema": "Command",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-00000000006a",
+      "origin_device_id": "00000000-0000-4000-8000-000000000001",
+      "type": "routine.publish",
+      "entity_id": "00000000-0000-4000-8000-000000000003",
+      "base": {
+        "revision": "1"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {
+        "draft_revision": "1",
+        "version_id": "00000000-0000-4000-8000-000000000004",
+        "days": [
+          {
+            "draft_day_id": "00000000-0000-4000-8000-00000000000d",
+            "id": "00000000-0000-4000-8000-000000000005",
+            "exercises": [
+              {
+                "draft_exercise_id": "00000000-0000-4000-8000-00000000000e",
+                "id": "00000000-0000-4000-8000-000000000006"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "expected_behavior": "Publica agregado inmutable y mueve puntero una vez."
+  },
+  {
+    "flow": "F01",
+    "name": "download_version",
+    "schema": "RoutineVersion",
+    "valid": true,
+    "value": {
+      "id": "00000000-0000-4000-8000-000000000004",
+      "routine_id": "00000000-0000-4000-8000-000000000003",
+      "revision": "1",
+      "version_number": 1,
+      "title_snapshot": "Tres días",
+      "format_version": 1,
+      "source_draft_revision": "1",
+      "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "published_at": "2026-10-15T18:00:00Z",
+      "days": [
+        {
+          "id": "00000000-0000-4000-8000-000000000005",
+          "label": "Día A",
+          "position": 0,
+          "exercises": [
+            {
+              "id": "00000000-0000-4000-8000-000000000006",
+              "exercise_ref": {
+                "source": "catalog",
+                "id": "00000000-0000-4000-8000-000000000007"
+              },
+              "name_snapshot": "Press de pecho",
+              "load_mode_snapshot": "external",
+              "position": 0,
+              "prescribed_sets": 3,
+              "prescribed_reps": "8–12",
+              "rest_seconds": 90,
+              "notes": ""
+            }
+          ]
+        }
+      ]
+    },
+    "expected_behavior": "Hash ilustrativo: el servidor calcula el digest real al publicar; descargar conjunto completo."
+  },
+  {
+    "flow": "F02",
+    "name": "start_offline",
+    "schema": "Command",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-00000000006c",
+      "origin_device_id": "00000000-0000-4000-8000-000000000001",
+      "type": "workout.start",
+      "entity_id": "00000000-0000-4000-8000-000000000008",
+      "base": {
+        "revision": "0"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {
+        "routine_version_id": "00000000-0000-4000-8000-000000000004",
+        "routine_day_id": "00000000-0000-4000-8000-000000000005",
+        "version_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "started_at": "2026-10-15T18:10:00Z",
+        "timezone": "America/Mexico_City",
+        "exercises": [
+          {
+            "source_exercise_id": "00000000-0000-4000-8000-000000000006",
+            "id": "00000000-0000-4000-8000-000000000009"
+          }
+        ]
+      }
+    },
+    "expected_behavior": "Guardar snapshot+outbox; el servidor verificará la versión antes de aceptar."
+  },
+  {
+    "flow": "F02",
+    "name": "capture_set",
+    "schema": "Command",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-00000000006d",
+      "origin_device_id": "00000000-0000-4000-8000-000000000001",
+      "type": "workout.set.create",
+      "entity_id": "00000000-0000-4000-8000-00000000000a",
+      "base": {
+        "revision": "0"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {
+        "workout_id": "00000000-0000-4000-8000-000000000008",
+        "workout_exercise_id": "00000000-0000-4000-8000-000000000009",
+        "observed_workout": {
+          "after_operation_id": "00000000-0000-4000-8000-00000000006c"
+        },
+        "position_hint": 0,
+        "load": {
+          "load_mode": "external",
+          "weight_value": "30.000",
+          "weight_unit": "kg"
+        },
+        "repetitions": 10
+      }
+    },
+    "expected_behavior": "Reintento usa este mismo ID y payload. Cierre/reapertura preserva dato+cola."
+  },
+  {
+    "flow": "F02",
+    "name": "correct_before_ack",
+    "schema": "Command",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-00000000006e",
+      "origin_device_id": "00000000-0000-4000-8000-000000000001",
+      "type": "workout.set.update",
+      "entity_id": "00000000-0000-4000-8000-00000000000a",
+      "base": {
+        "after_operation_id": "00000000-0000-4000-8000-00000000006d"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {
+        "workout_id": "00000000-0000-4000-8000-000000000008",
+        "observed_workout": {
+          "after_operation_id": "00000000-0000-4000-8000-00000000006d"
+        },
+        "load": {
+          "load_mode": "external",
+          "weight_value": "32.500",
+          "weight_unit": "kg"
+        },
+        "repetitions": 10
+      }
+    },
+    "expected_behavior": "Resolver bases de serie y workout del recibo anterior, no la última revisión."
+  },
+  {
+    "flow": "F02",
+    "name": "finish",
+    "schema": "Command",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-00000000006f",
+      "origin_device_id": "00000000-0000-4000-8000-000000000001",
+      "type": "workout.complete",
+      "entity_id": "00000000-0000-4000-8000-000000000008",
+      "base": {
+        "after_operation_id": "00000000-0000-4000-8000-00000000006e"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {
+        "finished_at": "2026-10-15T18:40:00Z"
+      }
+    },
+    "expected_behavior": "Admite entrenamiento incompleto; no inventa otras dos series."
+  },
+  {
+    "flow": "F03",
+    "name": "request_device",
+    "schema": "post_auth_device_authorizations_Request",
+    "valid": true,
+    "value": {
+      "attempt_id": "00000000-0000-4000-8000-000000000014",
+      "id": "00000000-0000-4000-8000-000000000015"
+    },
+    "expected_behavior": "Sólo intento OTP verificado; aún no descarga historial."
+  },
+  {
+    "flow": "F03",
+    "name": "approve_candidate",
+    "schema": "post_me_device_authorizations_id_decision_Request",
+    "valid": true,
+    "value": {
+      "decision": "approve"
+    },
+    "expected_behavior": "Equipo anterior prueba control y aprueba candidato exacto; consulta del intento obtiene sesión."
+  },
+  {
+    "flow": "F04",
+    "name": "duplicate",
+    "schema": "Command",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-000000000072",
+      "origin_device_id": "00000000-0000-4000-8000-000000000001",
+      "type": "routine.duplicate",
+      "entity_id": "00000000-0000-4000-8000-000000000016",
+      "base": {
+        "revision": "0"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {
+        "source_version_id": "00000000-0000-4000-8000-000000000004",
+        "title": "Mi variante",
+        "days": [
+          {
+            "source_day_id": "00000000-0000-4000-8000-000000000005",
+            "id": "00000000-0000-4000-8000-000000000017",
+            "exercises": [
+              {
+                "source_exercise_id": "00000000-0000-4000-8000-000000000006",
+                "id": "00000000-0000-4000-8000-000000000018"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "expected_behavior": "Crea borrador editable con IDs nuevos, sin historial ni selección."
+  },
+  {
+    "flow": "F04",
+    "name": "archive_original",
+    "schema": "Command",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-000000000073",
+      "origin_device_id": "00000000-0000-4000-8000-000000000001",
+      "type": "routine.archive",
+      "entity_id": "00000000-0000-4000-8000-000000000003",
+      "base": {
+        "revision": "2"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {}
+    },
+    "expected_behavior": "Retira biblioteca activa; workout existente no cambia."
+  },
+  {
+    "flow": "F05",
+    "name": "correction_A",
+    "schema": "Command",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-000000000074",
+      "origin_device_id": "00000000-0000-4000-8000-000000000001",
+      "type": "workout.set.update",
+      "entity_id": "00000000-0000-4000-8000-00000000000a",
+      "base": {
+        "revision": "2"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {
+        "workout_id": "00000000-0000-4000-8000-000000000008",
+        "observed_workout": {
+          "revision": "4"
+        },
+        "load": {
+          "load_mode": "external",
+          "weight_value": "35.000",
+          "weight_unit": "kg"
+        },
+        "repetitions": 8
+      }
+    },
+    "expected_behavior": "Rama A puede ganar; avanza revisión de serie y workout."
+  },
+  {
+    "flow": "F05",
+    "name": "correction_B",
+    "schema": "Command",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-000000000075",
+      "origin_device_id": "00000000-0000-4000-8000-000000000001",
+      "type": "workout.set.update",
+      "entity_id": "00000000-0000-4000-8000-00000000000a",
+      "base": {
+        "revision": "2"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {
+        "workout_id": "00000000-0000-4000-8000-000000000008",
+        "observed_workout": {
+          "revision": "4"
+        },
+        "load": {
+          "load_mode": "external",
+          "weight_value": "32.500",
+          "weight_unit": "kg"
+        },
+        "repetitions": 12
+      }
+    },
+    "expected_behavior": "Rama B llega con misma base: conservar como conflicto, no LWW."
+  },
+  {
+    "flow": "F05",
+    "name": "independent_set",
+    "schema": "Command",
+    "valid": true,
+    "value": {
+      "operation_id": "00000000-0000-4000-8000-000000000076",
+      "origin_device_id": "00000000-0000-4000-8000-000000000001",
+      "type": "workout.set.create",
+      "entity_id": "00000000-0000-4000-8000-000000000019",
+      "base": {
+        "revision": "0"
+      },
+      "captured_at": "2026-10-15T18:00:00Z",
+      "payload": {
+        "workout_id": "00000000-0000-4000-8000-000000000008",
+        "workout_exercise_id": "00000000-0000-4000-8000-000000000009",
+        "observed_workout": {
+          "revision": "4"
+        },
+        "position_hint": 1,
+        "load": {
+          "load_mode": "external",
+          "weight_value": "32.500",
+          "weight_unit": "kg"
+        },
+        "repetitions": 10
+      }
+    },
+    "expected_behavior": "ID diferente se conserva aunque valores coincidan; si terminó mientras tanto, revisión pendiente."
+  },
+  {
+    "flow": "F06",
+    "name": "revoke_others",
+    "schema": "post_me_devices_revoke_Request",
+    "valid": true,
+    "value": {
+      "scope": "others"
+    },
+    "expected_behavior": "Revocar bajo mismo mutex que escrituras; no borrar entrenamiento."
+  },
+  {
+    "flow": "F06",
+    "name": "recover_new_number",
+    "schema": "post_auth_recovery_complete_Request",
+    "valid": true,
+    "value": {
+      "attempt_id": "00000000-0000-4000-8000-00000000001a",
+      "recovery_key_id": "00000000-0000-4000-8000-00000000000c",
+      "recovery_secret": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+      "confirm_phone_change": true
+    },
+    "expected_behavior": "Intento recovery verificó número nuevo libre; kit + OTP, consumo/rotación atómicos."
+  },
+  {
+    "flow": "F07",
+    "name": "bootstrap",
+    "schema": "post_sync_snapshots_Request",
+    "valid": true,
+    "value": {
+      "protocol_version": 1
+    },
+    "expected_behavior": "Materializar vista consistente y conservar overlay local hasta promoción completa."
+  },
+  {
+    "flow": "F07",
+    "name": "old_protocol",
+    "schema": "Error",
+    "valid": true,
+    "value": {
+      "code": "UPGRADE_REQUIRED",
+      "message": "Actualiza la app para sincronizar.",
+      "retryable": false,
+      "request_id": "00000000-0000-4000-8000-00000000001b",
+      "action": "update_app",
+      "fields": []
+    },
+    "expected_behavior": "No borrar datos locales, cola ni rutina descargada."
+  },
+  {
+    "flow": "F08",
+    "name": "offline_logout_intent",
+    "schema": "post_auth_logout_Request",
+    "valid": true,
+    "value": {
+      "revocation_ticket": "lllllllllllllllllllllllllllllllllllllllllll"
+    },
+    "expected_behavior": "Retirar credenciales locales; guardar sólo ticket limitado hasta confirmar revocación remota."
+  },
+  {
+    "flow": "F08",
+    "name": "delete_account",
+    "schema": "post_me_deletion_Request",
+    "valid": true,
+    "value": {
+      "confirmation": "delete_my_account",
+      "policy_version": "policy-approved-in-S11",
+      "result_secret": "ddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "expected_behavior": "Sólo con política configurada y prueba reciente; no habilitar con valor de ejemplo."
+  }
+]

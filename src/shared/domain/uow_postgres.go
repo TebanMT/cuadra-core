@@ -56,11 +56,11 @@ func (u *gormUnitOfWork) Rollback(tx Transaction) error {
 }
 
 func (u *gormUnitOfWork) Query(ctx context.Context) (Transaction, error) {
-	if !u.strict && TenantID(ctx) == uuid.Nil {
-		return &GormTransaction{Tx: u.db.WithContext(ctx)}, nil
-	}
 	if tenantInvalid(ctx) {
 		return nil, ErrTenantScope
+	}
+	if !u.strict && TenantID(ctx) == uuid.Nil {
+		return &GormTransaction{Tx: u.db.WithContext(ctx)}, nil
 	}
 	tx := u.db.WithContext(ctx).Begin(&sql.TxOptions{ReadOnly: true})
 	if tx.Error != nil {
