@@ -111,6 +111,16 @@ cloud_only: pg=057_tenant_rls.sql reason="aislamiento PostgreSQL por contexto tr
 
 cloud_only: pg=058_held_recovery.sql reason="acciones y control de envío de mensajes retenidos, autoridad cloud"
 
+# Mancuerna (app móvil de socios): esquema personal mancuerna/mancuerna_private,
+# separado de public/Tinta. Vive sólo en el cloud y no entra al sync del sidecar.
+cloud_only: pg=059_mancuerna_personal.sql reason="esquema personal de Mancuerna con RLS y roles propios; solo cloud, sin tablas en el sync del sidecar"
+cloud_only: pg=060_mancuerna_attempt_operations.sql reason="reserva durable de una operación del proveedor por intento de acceso de Mancuerna"
+cloud_only: pg=061_mancuerna_refresh_logout_tickets.sql reason="tickets de cierre de sesión ligados a cada refresh de Mancuerna"
+cloud_only: pg=062_mancuerna_device_proof_binding.sql reason="liga cada prueba de dispositivo a su cuenta, sesión y dispositivo de Mancuerna"
+cloud_only: pg=063_mancuerna_snapshot_manifest.sql reason="manifiestos inmutables de los snapshots del sync personal de Mancuerna"
+cloud_only: pg=064_mancuerna_command_capture.sql reason="conserva el texto de captura original de cada comando de Mancuerna"
+cloud_only: pg=065_mancuerna_initial_catalog.sql reason="catálogo inicial de ejercicios de Mancuerna, solo aditivo"
+
 cloud_only: pg=066_repair_cash_session_legacy_unique.sql reason="repara bases Postgres que registraron 040 pero conservaron el índice legado; SQLite ya lo quita en 035_cash_sessions"
 
 pair: pg=067_cash_session_review.sql sqlite=048_cash_session_review.sql
