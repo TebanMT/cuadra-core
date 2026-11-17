@@ -74,7 +74,7 @@ def run_ui(suite):
             base.Faults.offline = False
             suite.wait('incomplete sale is visible for recovery', lambda: suite.request(suite.edges[0], 'GET', '/api/v1/sync/status')['queue_stuck_count'] > 0)
             assert suite.stock(suite.cloud, suite.product) == before
-            page.get_by_role('button', name='Estado de sincronización', exact=True).click()
+            page.get_by_role('button', name=re.compile(r'^Estado de sincronización')).click()
             dialog = page.get_by_role('dialog')
             retry = dialog.get_by_role('button', name='Reintentar operación completa', exact=True)
             expect(retry).to_be_visible()
@@ -138,7 +138,7 @@ def run_ui(suite):
             base.Faults.offline = False
             suite.wait('permanent duplicate is actionable', lambda: any(item['entity_id']==local_product and item['kind']=='duplicate' for item in suite.request(suite.edges[0],'GET','/api/v1/sync/status').get('queue_stuck_items',[])), timeout=65)
             assert suite.sql(f"SELECT COUNT(*) FROM sales WHERE id='{sale['sale_id']}'") == '0'
-            page.get_by_role('button',name='Estado de sincronización',exact=True).click()
+            page.get_by_role('button',name=re.compile(r'^Estado de sincronización')).click()
             page.get_by_role('dialog').get_by_role('button',name='Abrir para renombrar',exact=True).click()
             edit = page.get_by_role('dialog')
             edit.locator('#p-name').fill(name + ' recepción')
@@ -150,7 +150,7 @@ def run_ui(suite):
             suite.wait('repaired financial queue',suite.settled,timeout=65)
             # The explicit retry also reloads any catalog row quarantined while
             # the duplicate existed. No direct SQLite edits or discarded money.
-            page.get_by_role('button',name='Estado de sincronización',exact=True).click()
+            page.get_by_role('button',name=re.compile(r'^Estado de sincronización')).click()
             dialog=page.get_by_role('dialog')
             if suite.request(suite.edges[0],'GET','/api/v1/sync/status').get('quarantined_count',0):
                 dialog.get_by_role('button',name='Sincronizar ahora',exact=True).click()
