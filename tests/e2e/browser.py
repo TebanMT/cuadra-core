@@ -24,8 +24,15 @@ def run_ui(suite):
 
             # Open a physical cash session using the actual form.
             page.goto(suite.args.desktop_ui + '/reports/cash-close')
-            expect(page.get_by_role('button', name='Agregar efectivo', exact=True)).to_be_visible()
+            # ADR-011 enmienda 1 (13-nov-2026): con la caja sin abrir,
+            # «Abrir caja» es el único paso a la vista y los botones de
+            # movimiento viven plegados tras «¿Entró o salió efectivo antes
+            # de abrir la caja?». Se expande el pliegue antes de esperarlos.
+            expect(page.get_by_role('button', name=re.compile(r'^(Abrir caja|Hacer corte)')).first).to_be_visible()
             opening = page.get_by_role('button', name=re.compile(r'^Abrir caja'))
+            if opening.count():
+                page.get_by_text('¿Entró o salió efectivo antes de abrir la caja?').click()
+            expect(page.get_by_role('button', name='Agregar efectivo', exact=True)).to_be_visible()
             if opening.count():
                 opening.click()
                 dialog = page.get_by_role('dialog')
