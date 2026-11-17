@@ -118,6 +118,10 @@ def run_ui(suite):
             report = suite.request(suite.edges[0], 'GET', '/api/v1/cash-close?date=' + suite.day)
             dialog = page.get_by_role('dialog')
             dialog.locator('#cash-counted').fill(str(report['session']['expected_cash']))
+            # Conteo a ciegas (ADR-011 enmienda 1): el corte es de dos pasos —
+            # primero se escribe lo contado y «Ver resultado» muestra la
+            # diferencia con las opciones de retiro.
+            dialog.get_by_role('button', name='Ver resultado', exact=True).click()
             dialog.get_by_label('Retirar efectivo al terminar').uncheck()
             with page.expect_response(lambda r: '/api/v1/cash-close' in r.url and r.request.method == 'POST') as saved:
                 dialog.get_by_role('button', name='Guardar corte', exact=True).click()
