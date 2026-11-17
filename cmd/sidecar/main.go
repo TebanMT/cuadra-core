@@ -413,6 +413,9 @@ func main() {
 		WithPromotions(applyPromo).
 		WithWelcomeNotifier(enqueueWelcomePin).
 		WithGyms(gymRepo)
+	// UC-048 — cambio de plan a mitad de ciclo (upgrade/lateral, prorrateado).
+	changePlan := billingApp.NewChangeMembershipPlan(paymentRepo, folios, memberSvc, memberRepo, uow, recorder, billingSubscriber).
+		WithGyms(gymRepo)
 	settlePayment := billingApp.NewSettlePendingBalance(paymentRepo, folios, uow, recorder).WithGyms(gymRepo)
 	receiptPayment := billingApp.NewGenerateReceipt(paymentRepo, gymRepo, memberRepo, uow)
 	sendReceipt := billingApp.NewSendReceipt(paymentRepo, uow).WithPublisher(billingSubscriber).WithResender(billingSubscriber)
@@ -483,6 +486,7 @@ func main() {
 	correctPayment := billingApp.NewCorrectPayment(paymentRepo, paymentCorrectionRepo, cashClose, uow, recorder).WithGyms(gymRepo)
 	cashDrawers := billingApp.NewCashDrawers(cashDrawerRepo, uow, recorder)
 	registerPayment.WithCashDrawers(cashDrawers)
+	changePlan.WithCashDrawers(cashDrawers)
 	settlePayment.WithCashDrawers(cashDrawers)
 	registerSale.WithCashDrawers(cashDrawers)
 	registerOtherIncome.WithCashDrawers(cashDrawers)
@@ -556,7 +560,7 @@ func main() {
 	// galería al helper (que la cachea completa para el 1:N).
 	fingerprintCtrl := memCtrl.NewFingerprintController(registerFingerprint, deleteFingerprint, tokens).
 		WithOnChange(bioHub.NotifyFingerprintsChanged)
-	paymentCtrl := billingCtrl.NewPaymentController(registerPayment, settlePayment, receiptPayment, sendReceipt, listMemberPayments, listGymPayments, refundPayment, registerSale, refundSale, cashClose, tokens).WithOtherIncome(registerOtherIncome).WithSaleCorrections(correctSale).WithPaymentCorrections(correctPayment)
+	paymentCtrl := billingCtrl.NewPaymentController(registerPayment, settlePayment, receiptPayment, sendReceipt, listMemberPayments, listGymPayments, refundPayment, registerSale, refundSale, cashClose, tokens).WithOtherIncome(registerOtherIncome).WithSaleCorrections(correctSale).WithPaymentCorrections(correctPayment).WithPlanChange(changePlan)
 	cashDrawerCtrl := billingCtrl.NewCashDrawerController(cashDrawers, tokens)
 	productCtrl := prodCtrl.NewProductController(createProduct, updateProduct, deactivateProduct, reactivateProduct, listProducts, adjustStock, tokens).
 		WithInventoryPurchases(listInventoryPurchases, payInventoryPurchase, reopenInventoryPurchase).
