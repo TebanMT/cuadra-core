@@ -181,6 +181,81 @@ func (s *MemberService) RenewMembershipForPayment(ctx context.Context, tx shared
 	}, nil
 }
 
+// ChangeMembershipPlanInput is the cross-BC input from billing/UC-048.
+// Today is the gym-local "hoy" already resolved by the caller — el cambio
+// aplica siempre hoy (sin backdating en v1).
+type ChangeMembershipPlanInput struct {
+	MemberID  uuid.UUID
+	NewTypeID uuid.UUID
+	Today     time.Time
+}
+
+type ChangeMembershipPlanOutput struct {
+	OldMembership *membershipDomain.Membership
+	NewMembership *membershipDomain.Membership
+	NewType       *mtDomain.MembershipType
+}
+
+// ChangeMembershipPlan runs the members half of UC-048: validate the target
+// type (active, upgrade/lateral only), create the new Membership preserving
+// the current expiry (Membership.ChangePlan), and mark the current one
+// replaced. Caller (billing) must be inside its own UnitOfWork.Command tx —
+// the proration charge and the plan change commit or roll back together.
+//
+// Vencido, pending_payment o sin membresía → error de negocio: esos casos
+// se resuelven con UC-018 (renovación / primer pago), donde no hay nada que
+// prorratear.
+func (s *MemberService) ChangeMembershipPlan(ctx context.Context, tx sharedDomain.Transaction, in ChangeMembershipPlanInput, now time.Time) (*ChangeMembershipPlanOutput, error) {
+	mt, err := s.MembershipTypes.GetByID(tx, in.NewTypeID)
+	if err != nil {
+		return nil, err
+	}
+	if !mt.Active {
+		return nil, sharedDomain.NewBusinessError(memErrors.ErrMembershipTypeInactive, "")
+	}
+	current, err := s.Memberships.GetCurrentByMember(tx, in.MemberID)
+	if err != nil {
+		// Incluye BusinessError(ErrNoActiveMembership) — el FE ofrece el
+		// CTA "véndele el plan nuevo directo" (UC-018).
+		return nil, err
+	}
+	if current.GymID != mt.GymID {
+		return nil, sharedDomain.NewBusinessError(memErrors.ErrCrossGym, "")
+	}
+	if current.IsPendingPayment() {
+		// Inscrito sin pagar: no hay vigencia que conservar ni nada que
+		// prorratear. El primer cobro (UC-018) ya permite elegir otro plan.
+		return nil, sharedDomain.NewBusinessError(memErrors.ErrNoActiveMembership, "")
+	}
+	newID := uuid.New()
+	next, err := current.ChangePlan(newID, mt, in.Today, now)
+	if err != nil {
+		return nil, sharedDomain.NewBusinessError(err, "")
+	}
+	// Same 3-step dance as RenewMembershipForPayment (see its comment):
+	// vacate the partial unique index, insert, then point replaced_by.
+	current.Status = membershipDomain.StatusReplaced
+	current.Version++
+	current.UpdatedAt = now
+	if _, err := s.Memberships.Update(tx, current); err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
+	if _, err := s.Memberships.Create(tx, next); err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
+	current.ReplacedBy = &newID
+	current.Version++
+	current.UpdatedAt = now
+	if _, err := s.Memberships.Update(tx, current); err != nil {
+		return nil, sharedDomain.NewUnexpectedError(err)
+	}
+	return &ChangeMembershipPlanOutput{
+		OldMembership: current,
+		NewMembership: next,
+		NewType:       mt,
+	}, nil
+}
+
 // RevertMembershipFromPaymentInput is the cross-BC input from billing/UC-022.
 // Caller passes the member whose latest renewal must be undone. The members
 // BC cancels the active Membership and re-activates the one it replaced (the

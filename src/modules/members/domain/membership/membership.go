@@ -178,6 +178,50 @@ func (m *Membership) Renew(newID uuid.UUID, nextType *mtDomain.MembershipType, p
 	}
 }
 
+// ChangePlan computes the mid-cycle plan-change Membership from `m` per
+// UC-048: a new row with the NEW type's full snapshot, start = today and
+// expiry PRESERVED exactly from `m` (DA-48.2 — el prorrateo existe
+// precisamente para no mover el día de pago del socio). Sólo upgrade o
+// cambio lateral: el precio del tipo nuevo debe ser ≥ al snapshot actual;
+// un downgrade se elige al renovar (DA-48.1, sin reembolsos ni saldo a
+// favor). Requiere membresía activa y no vencida — vencido o sin membresía
+// el camino es UC-018.
+//
+// It DOES NOT mutate `m`; the caller marks it replaced with the same
+// 3-step dance used for renewals.
+func (m *Membership) ChangePlan(newID uuid.UUID, newType *mtDomain.MembershipType, today, now time.Time) (*Membership, error) {
+	day := truncateDate(today)
+	if m.Status != StatusActive || m.ExpiryDate == nil {
+		return nil, memErrors.ErrNoActiveMembership
+	}
+	if m.ExpiryDate.Before(day) {
+		return nil, memErrors.ErrPlanChangeExpired
+	}
+	if newType.ID == m.MembershipTypeID {
+		return nil, memErrors.ErrPlanChangeSameType
+	}
+	if newType.Price < m.PriceSnapshot {
+		return nil, memErrors.ErrPlanChangeDowngrade
+	}
+	expiry := *m.ExpiryDate // conservada EXACTA (DA-48.2)
+	return &Membership{
+		ID:                     newID,
+		GymID:                  m.GymID,
+		Version:                1,
+		MemberID:               m.MemberID,
+		MembershipTypeID:       newType.ID,
+		TypeNameSnapshot:       newType.Name,
+		PriceSnapshot:          newType.Price,
+		DurationDaysSnapshot:   newType.DurationDays,
+		DurationMonthsSnapshot: cloneIntPtr(newType.DurationMonths),
+		StartDate:              day,
+		ExpiryDate:             &expiry,
+		Status:                 StatusActive,
+		CreatedAt:              now,
+		UpdatedAt:              now,
+	}, nil
+}
+
 // MarkReplaced sets status=replaced and ReplacedBy. Called on the OLD
 // membership when a new one supersedes it.
 func (m *Membership) MarkReplaced(replacement uuid.UUID, now time.Time) {
