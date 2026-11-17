@@ -40,6 +40,11 @@ var (
 	ErrNoActiveMembership         = errors.New("el socio no tiene membresía vigente")
 	ErrMembershipRefundNotCurrent = errors.New("ese pago corresponde a una membresía anterior; no se puede cancelar una renovación posterior")
 
+	// Cambio de plan a mitad de ciclo (UC-048)
+	ErrPlanChangeExpired   = errors.New("la membresía está vencida; cóbrale la renovación con el plan nuevo")
+	ErrPlanChangeDowngrade = errors.New("para cambiar a un plan más barato, elígelo al renovar")
+	ErrPlanChangeSameType  = errors.New("el socio ya tiene ese plan; para extender la vigencia usa la renovación")
+
 	// Adjustment
 	ErrAdjustmentReasonRequired = errors.New("la razón del ajuste es obligatoria (mínimo 5 caracteres)")
 	ErrAdjustmentInvalidDays    = errors.New("la cantidad de días del ajuste no es válida")
