@@ -61,7 +61,10 @@ def check_counts(s):
 def seed_held(s):
     owner=s.sql(f"SELECT id FROM users WHERE gym_id='{s.gym}' AND role='owner' LIMIT 1")
     s.sql(f"UPDATE users SET phone='+525500009877' WHERE id='{owner}'; UPDATE gyms SET subscription_plan='standard_monthly',all_features_access=false WHERE id='{s.gym}'")
-    s.request(s.cloud,'GET','/api/v1/held-notifications',expected=(402,))
+    # Retenidos son TierStandard desde la oferta del 16-nov-2026: un Standard
+    # sin beneficio recibe 200. El flip de all_features_access de abajo se
+    # conserva porque el resto de la suite asume ese estado del gym.
+    s.request(s.cloud,'GET','/api/v1/held-notifications')
     s.sql(f"UPDATE gyms SET all_features_access=true WHERE id='{s.gym}'; UPDATE sync_entities SET version=version+1,server_updated_at=clock_timestamp() WHERE gym_id='{s.gym}' AND entity_type='gyms'")
     s.request(s.cloud,'GET','/api/v1/held-notifications')
     s.request(s.cloud,'GET','/api/v1/held-notifications',token=operator_token(s.tokens[s.cloud]),expected=(403,))

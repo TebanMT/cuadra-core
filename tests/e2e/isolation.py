@@ -19,10 +19,12 @@ def check_isolation(s):
     s.request(s.cloud, 'GET', '/api/v1/payments/'+foreign_payment+'/receipt.pdf', token=token, expected=(422,))
     foreign_expense = s.sql(f"SELECT id FROM expenses WHERE gym_id='{s.gym}' LIMIT 1")
     s.request(s.cloud, 'GET', '/api/v1/expenses/'+foreign_expense, token=token, expected=(422,))
-    s.request(s.cloud, 'GET', '/api/v1/analytics', token=token, expected=(402,))
-    s.sql(f"UPDATE gyms SET all_features_access=true WHERE id='{other}'")
+    # Oferta del 16-nov-2026 (gyms/domain/gym/features.go): analytics es
+    # TierStandard, así que un Standard sin beneficio recibe 200. Ya no hay
+    # ruta que devuelva 402 a un Standard — lo exclusivo de Plus (WhatsApp
+    # propio, topes de broadcast) se decide en el use case, no en la ruta.
     s.request(s.cloud, 'GET', '/api/v1/analytics', token=token)
-    s.check('Dos gimnasios: listados, IDs de productos/pagos/gastos y gates Standard/beneficio sin bypass')
+    s.check('Dos gimnasios: listados, IDs de productos/pagos/gastos y analytics abierto a Standard')
     # Forged outer IDs AND payload IDs must not authorize cross-tenant writes.
     timestamp = int(time.time()*1000)
     item = {'queue_id':str(uuid.uuid4()), 'entity_type':'products', 'entity_id':s.product, 'operation':'upsert', 'client_version':999,

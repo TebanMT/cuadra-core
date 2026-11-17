@@ -59,15 +59,16 @@ desktop después. No se simula ni publica un release.
 - Gastos concurrentes y sus salidas de caja, versiones y correcciones siguientes.
 - Dos ventas offline desde stock 10: cantidades 2 y 3, resultado 5 y $98.75.
 - Dos gimnasios: catálogos, cambios con UUID ajeno, recibos PDF, gastos,
-  push manipulado y full sync. Standard sin beneficio recibe 402 en analytics;
-  con beneficio recibe 200, bajo `TINTA_MODE=test`.
+  push manipulado y full sync. Analytics responde 200 a Standard sin beneficio
+  (oferta del 16-nov-2026: Standard incluye todo lo construido; Plus sólo
+  WhatsApp propio y topes de broadcast), bajo `TINTA_MODE=test`.
 - Bootstrap público de un solo uso y worker in_app de dos gimnasios, sin
   proveedores externos.
 - Conteo físico con cero, diferencias positivas/negativas, venta durante la
   captura, rollback completo, ocho reintentos, reinicio offline, respuesta de
   sync perdida y movimientos de dos recepciones conservados al reconectar.
-- Recuperación de retenidos: paginación, permisos de dueño, Standard/beneficio
-  de lanzamiento, credenciales antiguas bloqueadas y envío a stdout.
+- Recuperación de retenidos: paginación, permisos de dueño, retenidos abiertos
+  a Standard, credenciales antiguas bloqueadas y envío a stdout.
 - En Chromium: login, venta offline, lote financiero incompleto, recuperación
   desde el diálogo, rechazo de catálogo duplicado y renombrado; membresía, compra, corte de caja
   y consulta cloud. Los datos de preparación se crean por API; las operaciones
