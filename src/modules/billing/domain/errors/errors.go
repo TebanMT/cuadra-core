@@ -33,6 +33,10 @@ var (
 	ErrIdempotencyKeyRequired         = errors.New("la operación requiere una clave de idempotencia")
 	ErrIdempotencyKeyConflict         = errors.New("esa clave de idempotencia ya se usó con datos distintos")
 
+	// Plan change (UC-048): el cobro nunca supera la diferencia completa
+	// entre planes — lo demás es una renovación, no un cambio.
+	ErrPlanChangeAmountExceedsDelta = errors.New("el cobro del cambio de plan no puede superar la diferencia completa entre planes")
+
 	// Settlement (UC-019)
 	ErrCannotSettleConcept      = errors.New("solo se puede liquidar saldo de pagos de membresía o producto")
 	ErrSettlementExceedsBalance = errors.New("el abono excede el saldo pendiente")

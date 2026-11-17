@@ -28,9 +28,10 @@ var (
 	errIdempotencyRequired = errors.New("la operación requiere idempotency_key")
 )
 
-// PaymentController bundles UC-018 ... UC-022 + UC-025/UC-026/UC-027.
+// PaymentController bundles UC-018 ... UC-022 + UC-025/UC-026/UC-027 + UC-048.
 type PaymentController struct {
 	Register       *billingApp.RegisterMembershipPayment
+	ChangePlan     *billingApp.ChangeMembershipPlan
 	Settle         *billingApp.SettlePendingBalance
 	Receipt        *billingApp.GenerateReceipt
 	SendReceipt    *billingApp.SendReceipt
@@ -64,6 +65,14 @@ func (ctrl *PaymentController) WithPaymentCorrections(uc *billingApp.CorrectPaym
 	return ctrl
 }
 
+// WithPlanChange enables the UC-048 mid-cycle plan change endpoint. Optional
+// setter (same pattern as WithSaleCorrections) so narrow controller tests keep
+// constructing the controller without it; both production binaries wire it.
+func (ctrl *PaymentController) WithPlanChange(uc *billingApp.ChangeMembershipPlan) *PaymentController {
+	ctrl.ChangePlan = uc
+	return ctrl
+}
+
 func NewPaymentController(
 	register *billingApp.RegisterMembershipPayment,
 	settle *billingApp.SettlePendingBalance,
@@ -90,6 +99,9 @@ func (ctrl *PaymentController) RegisterRoutes(r *gin.Engine) {
 	api.Use(middleware.AuthMiddleware(ctrl.Tokens))
 	{
 		api.POST("/payments/membership", ctrl.handleRegister)
+		if ctrl.ChangePlan != nil {
+			api.POST("/payments/plan-change", ctrl.handlePlanChange)
+		}
 		api.POST("/payments/:id/settle", ctrl.handleSettle)
 		api.GET("/payments/:id/receipt.pdf", ctrl.handleReceipt)
 		api.POST("/payments/:id/send-receipt", ctrl.handleSendReceipt)
@@ -178,6 +190,42 @@ type registerPaymentResp struct {
 	PromotionKind      string      `json:"promotion_kind,omitempty"`
 	PromotionExtraDays int         `json:"promotion_extra_days,omitempty"`
 	PromotionGiftedIDs []uuid.UUID `json:"promotion_gifted_membership_ids,omitempty"`
+}
+
+// planChangeReq — body de POST /api/v1/payments/plan-change (UC-048). Amount
+// es el monto elegido (proporcional o diferencia completa) ANTES de descuento;
+// puede ser 0 en un cambio lateral. payment_method sólo se exige cuando el
+// total resultante es > 0 (el use case lo valida).
+type planChangeReq struct {
+	MemberID            string  `json:"member_id" validate:"required,uuid"`
+	NewMembershipTypeID string  `json:"new_membership_type_id" validate:"required,uuid"`
+	Amount              float64 `json:"amount" validate:"min=0"`
+	Method              string  `json:"payment_method,omitempty" validate:"omitempty,oneof=cash transfer card"`
+	CashDrawerID        *string `json:"cash_drawer_id,omitempty"`
+	Discount            float64 `json:"discount_amount,omitempty" validate:"min=0"`
+	DiscountReason      *string `json:"discount_reason,omitempty"`
+	PaidNow             float64 `json:"partial_amount,omitempty" validate:"min=0"`
+	Notes               *string `json:"notes,omitempty"`
+	IdempotencyKey      string  `json:"idempotency_key,omitempty"`
+}
+
+type planChangeResp struct {
+	PaymentID       *uuid.UUID `json:"payment_id,omitempty"` // nil → cambio $0, no se creó Payment (DA-48.6)
+	Folio           string     `json:"folio,omitempty"`
+	Delta           float64    `json:"delta"`
+	Prorated        float64    `json:"prorated_suggested"`
+	Subtotal        float64    `json:"subtotal"`
+	Discount        float64    `json:"discount"`
+	Total           float64    `json:"total"`
+	Paid            float64    `json:"paid"`
+	BalancePending  float64    `json:"balance_pending"`
+	NewMembershipID uuid.UUID  `json:"new_membership_id"`
+	Expiry          string     `json:"expiry"` // vigencia CONSERVADA (DA-48.2) — "Sigue venciendo el DD MMM"
+	OldTypeName     string     `json:"old_type_name"`
+	NewTypeName     string     `json:"new_type_name"`
+	ChargeOption    string     `json:"charge_option"`
+	DaysRemaining   int        `json:"days_remaining"`
+	CycleDays       int        `json:"cycle_days"`
 }
 
 type settleReq struct {
@@ -395,6 +443,78 @@ func (ctrl *PaymentController) handleRegister(c *gin.Context) {
 		PromotionKind:      out.PromotionKind,
 		PromotionExtraDays: out.PromotionExtraDays,
 		PromotionGiftedIDs: out.PromotionGiftedIDs,
+	})
+}
+
+// handlePlanChange backs POST /api/v1/payments/plan-change (UC-048). Handler
+// delgado: parsea el request, delega en el use case y mapea la respuesta. El
+// cambio aplica HOY siempre (sin backdating) — por eso no acepta fecha.
+func (ctrl *PaymentController) handlePlanChange(c *gin.Context) {
+	gymID, ok := middleware.GetGymID(c)
+	if !ok {
+		utils.ErrorResponse(c, http.StatusUnauthorized, errBadAuth)
+		return
+	}
+	userID, _ := middleware.GetUserID(c)
+	var req planChangeReq
+	if !bindJSON(c, &req) {
+		return
+	}
+	memberID, err := uuid.Parse(req.MemberID)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, errBadID)
+		return
+	}
+	typeID, err := uuid.Parse(req.NewMembershipTypeID)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, errBadID)
+		return
+	}
+	drawerID, err := parseOptionalCashDrawerID(req.CashDrawerID)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, errBadID)
+		return
+	}
+	commandKey := strings.TrimSpace(firstNonEmpty(req.IdempotencyKey, c.GetHeader("Idempotency-Key")))
+	if commandKey == "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, errIdempotencyRequired)
+		return
+	}
+	out, err := ctrl.ChangePlan.Execute(c.Request.Context(), billingApp.ChangeMembershipPlanInput{
+		GymID:               gymID,
+		ActorUserID:         userID,
+		MemberID:            memberID,
+		NewMembershipTypeID: typeID,
+		Amount:              req.Amount,
+		Discount:            req.Discount,
+		DiscountReason:      req.DiscountReason,
+		PaidNow:             req.PaidNow,
+		Method:              req.Method,
+		CashDrawerID:        drawerID,
+		Notes:               req.Notes,
+		IdempotencyKey:      commandKey,
+	})
+	if err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	utils.JsonResponse(c, http.StatusCreated, planChangeResp{
+		PaymentID:       out.PaymentID,
+		Folio:           out.Folio,
+		Delta:           out.Delta,
+		Prorated:        out.Prorated,
+		Subtotal:        out.Subtotal,
+		Discount:        out.Discount,
+		Total:           out.Total,
+		Paid:            out.Paid,
+		BalancePending:  out.BalancePending,
+		NewMembershipID: out.NewMembershipID,
+		Expiry:          out.Expiry.Format("2006-01-02"),
+		OldTypeName:     out.OldTypeName,
+		NewTypeName:     out.NewTypeName,
+		ChargeOption:    out.ChargeOption,
+		DaysRemaining:   out.DaysRemaining,
+		CycleDays:       out.CycleDays,
 	})
 }
 
