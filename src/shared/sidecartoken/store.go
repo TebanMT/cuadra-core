@@ -30,11 +30,12 @@ func (s *PostgresStore) lookupActiveByHashScoped(ctx context.Context, hash []byt
 		ClientID    uuid.UUID `gorm:"column:client_id"`
 		UserID      uuid.UUID `gorm:"column:user_id"`
 		DeviceLabel *string   `gorm:"column:device_label"`
+		AppVersion  *string   `gorm:"column:app_version"`
 		CreatedAt   time.Time `gorm:"column:created_at"`
 		LastSeenAt  time.Time `gorm:"column:last_seen_at"`
 	}
 	res := s.db.WithContext(ctx).Raw(`
-		SELECT id, gym_id, client_id, user_id, device_label, created_at, last_seen_at
+		SELECT id, gym_id, client_id, user_id, device_label, app_version, created_at, last_seen_at
 		FROM sidecar_credentials
 		WHERE key_hash = ? AND revoked_at IS NULL
 		LIMIT 1`, hash).Scan(&rec)
@@ -46,15 +47,21 @@ func (s *PostgresStore) lookupActiveByHashScoped(ctx context.Context, hash []byt
 	}
 	return Credential{
 		ID: rec.ID, GymID: rec.GymID, ClientID: rec.ClientID, UserID: rec.UserID,
-		DeviceLabel: derefString(rec.DeviceLabel),
-		CreatedAt:   rec.CreatedAt, LastSeenAt: rec.LastSeenAt,
+		DeviceLabel: derefString(rec.DeviceLabel), AppVersion: derefString(rec.AppVersion),
+		CreatedAt: rec.CreatedAt, LastSeenAt: rec.LastSeenAt,
 	}, nil
 }
 
-func (s *PostgresStore) touchLastSeenScoped(ctx context.Context, credentialID uuid.UUID) error {
+func (s *PostgresStore) touchLastSeenScoped(ctx context.Context, credentialID uuid.UUID, appVersion string) error {
+	// NULLIF deja app_version intacto cuando el request no trajo header —
+	// sólo el sync agent lo manda; uploads y otros paths con token no deben
+	// pisar lo que un push ya reportó.
 	return s.db.WithContext(ctx).Exec(
-		`UPDATE sidecar_credentials SET last_seen_at = NOW() WHERE id = ?`,
-		credentialID,
+		`UPDATE sidecar_credentials
+		 SET last_seen_at = NOW(),
+		     app_version = COALESCE(NULLIF(?, ''), app_version)
+		 WHERE id = ?`,
+		appVersion, credentialID,
 	).Error
 }
 
@@ -65,11 +72,12 @@ func (s *PostgresStore) findActiveScoped(ctx context.Context, gymID, clientID uu
 		ClientID    uuid.UUID `gorm:"column:client_id"`
 		UserID      uuid.UUID `gorm:"column:user_id"`
 		DeviceLabel *string   `gorm:"column:device_label"`
+		AppVersion  *string   `gorm:"column:app_version"`
 		CreatedAt   time.Time `gorm:"column:created_at"`
 		LastSeenAt  time.Time `gorm:"column:last_seen_at"`
 	}
 	res := s.db.WithContext(ctx).Raw(`
-		SELECT id, gym_id, client_id, user_id, device_label, created_at, last_seen_at
+		SELECT id, gym_id, client_id, user_id, device_label, app_version, created_at, last_seen_at
 		FROM sidecar_credentials
 		WHERE gym_id = ? AND client_id = ? AND revoked_at IS NULL
 		LIMIT 1`, gymID, clientID).Scan(&rec)
@@ -81,8 +89,8 @@ func (s *PostgresStore) findActiveScoped(ctx context.Context, gymID, clientID uu
 	}
 	return Credential{
 		ID: rec.ID, GymID: rec.GymID, ClientID: rec.ClientID, UserID: rec.UserID,
-		DeviceLabel: derefString(rec.DeviceLabel),
-		CreatedAt:   rec.CreatedAt, LastSeenAt: rec.LastSeenAt,
+		DeviceLabel: derefString(rec.DeviceLabel), AppVersion: derefString(rec.AppVersion),
+		CreatedAt: rec.CreatedAt, LastSeenAt: rec.LastSeenAt,
 	}, nil
 }
 
@@ -93,11 +101,12 @@ func (s *PostgresStore) listActiveByGymScoped(ctx context.Context, gymID uuid.UU
 		ClientID    uuid.UUID `gorm:"column:client_id"`
 		UserID      uuid.UUID `gorm:"column:user_id"`
 		DeviceLabel *string   `gorm:"column:device_label"`
+		AppVersion  *string   `gorm:"column:app_version"`
 		CreatedAt   time.Time `gorm:"column:created_at"`
 		LastSeenAt  time.Time `gorm:"column:last_seen_at"`
 	}
 	if err := s.db.WithContext(ctx).Raw(`
-		SELECT id, gym_id, client_id, user_id, device_label, created_at, last_seen_at
+		SELECT id, gym_id, client_id, user_id, device_label, app_version, created_at, last_seen_at
 		FROM sidecar_credentials
 		WHERE gym_id = ? AND revoked_at IS NULL
 		ORDER BY last_seen_at DESC`, gymID).Scan(&rows).Error; err != nil {
@@ -107,8 +116,8 @@ func (s *PostgresStore) listActiveByGymScoped(ctx context.Context, gymID uuid.UU
 	for _, r := range rows {
 		out = append(out, Credential{
 			ID: r.ID, GymID: r.GymID, ClientID: r.ClientID, UserID: r.UserID,
-			DeviceLabel: derefString(r.DeviceLabel),
-			CreatedAt:   r.CreatedAt, LastSeenAt: r.LastSeenAt,
+			DeviceLabel: derefString(r.DeviceLabel), AppVersion: derefString(r.AppVersion),
+			CreatedAt: r.CreatedAt, LastSeenAt: r.LastSeenAt,
 		})
 	}
 	return out, nil
@@ -172,13 +181,13 @@ func (s *PostgresStore) LookupActiveByHash(ctx context.Context, hash []byte) (ou
 	return
 }
 
-func (s *PostgresStore) TouchLastSeen(ctx context.Context, credentialID uuid.UUID) (err error) {
+func (s *PostgresStore) TouchLastSeen(ctx context.Context, credentialID uuid.UUID, appVersion string) (err error) {
 	tx, err := shared.TenantDB(ctx, s.db)
 	if err != nil {
 		return
 	}
 	defer tx.Rollback()
-	err = (&PostgresStore{db: tx}).touchLastSeenScoped(ctx, credentialID)
+	err = (&PostgresStore{db: tx}).touchLastSeenScoped(ctx, credentialID, appVersion)
 	if err != nil {
 		return
 	}

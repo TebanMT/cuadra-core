@@ -91,6 +91,18 @@ import (
 // cuadra-desktop en su propio CI; la inyección de versión allá es futura.)
 var version = "dev"
 
+// appVersion es la versión de Tinta Desktop que este sidecar reporta al
+// cloud (X-Tinta-App-Version → sidecar_credentials.app_version). Tauri la
+// inyecta por env al spawnearlo — es la versión que el updater compara, o
+// sea "qué tiene instalado el gym". Fallback: la del binario sidecar, que
+// en builds locales es "dev".
+func appVersion() string {
+	if v := strings.TrimSpace(os.Getenv("TINTA_APP_VERSION")); v != "" {
+		return v
+	}
+	return version
+}
+
 func main() {
 	_ = godotenv.Load()
 
@@ -717,6 +729,7 @@ func main() {
 		Interval:   syncInterval,
 		Logger:     log.New(os.Stderr, "[sync] ", log.LstdFlags),
 		UploadsDir: uploadsDir,
+		AppVersion: appVersion(),
 	}, db, uow)
 	// Bind the persisted pull/full-sync checkpoint to the paired tenant
 	// BEFORE the agent boots. Older builds stored one global cursor; when

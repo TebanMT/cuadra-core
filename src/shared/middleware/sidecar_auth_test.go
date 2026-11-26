@@ -6,6 +6,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -19,12 +20,14 @@ import (
 
 // fakeStore is an in-memory sidecartoken.Store used by middleware tests.
 type fakeStore struct {
-	cred      sidecartoken.Credential
-	hash      []byte
-	notFound  bool
-	touched   int32
-	touchErr  error
-	lookupErr error
+	cred       sidecartoken.Credential
+	hash       []byte
+	notFound   bool
+	touched    int32
+	touchErr   error
+	lookupErr  error
+	mu         sync.Mutex
+	appVersion string // last appVersion passed to TouchLastSeen
 }
 
 func (f *fakeStore) LookupActiveByHash(ctx context.Context, hash []byte) (sidecartoken.Credential, error) {
@@ -37,9 +40,18 @@ func (f *fakeStore) LookupActiveByHash(ctx context.Context, hash []byte) (sideca
 	return f.cred, nil
 }
 
-func (f *fakeStore) TouchLastSeen(ctx context.Context, credentialID uuid.UUID) error {
+func (f *fakeStore) TouchLastSeen(ctx context.Context, credentialID uuid.UUID, appVersion string) error {
+	f.mu.Lock()
+	f.appVersion = appVersion
+	f.mu.Unlock()
 	atomic.AddInt32(&f.touched, 1)
 	return f.touchErr
+}
+
+func (f *fakeStore) lastAppVersion() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.appVersion
 }
 
 func (f *fakeStore) FindActive(context.Context, uuid.UUID, uuid.UUID) (sidecartoken.Credential, error) {
@@ -97,6 +109,48 @@ func TestSidecarAuth_AcceptsActiveSidecarToken(t *testing.T) {
 	}
 	if atomic.LoadInt32(&store.touched) != 1 {
 		t.Errorf("expected TouchLastSeen called once, got %d", store.touched)
+	}
+}
+
+func TestSidecarAuth_ForwardsAppVersionHeader(t *testing.T) {
+	r, _, store := makeRouter(t)
+	store.cred = sidecartoken.Credential{
+		ID: uuid.New(), GymID: uuid.New(), ClientID: uuid.New(), UserID: uuid.New(),
+	}
+	tok, _, err := sidecartoken.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("GET", "/x/probe", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set(AppVersionHeader, " 1.2.7 ")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status %d body=%s", rec.Code, rec.Body.String())
+	}
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) && atomic.LoadInt32(&store.touched) == 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := store.lastAppVersion(); got != "1.2.7" {
+		t.Errorf("TouchLastSeen appVersion = %q, want %q", got, "1.2.7")
+	}
+}
+
+func TestSanitizeAppVersion(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"1.2.7", "1.2.7"},
+		{" v1.2.7-beta.1 ", "v1.2.7-beta.1"},
+		{"dev", "dev"},
+		{"", ""},
+		{"1.2.7'; DROP TABLE gyms;--", ""},
+		{"una-cadena-larguisima-que-no-parece-version-real", ""},
+	}
+	for _, tc := range cases {
+		if got := sanitizeAppVersion(tc.in); got != tc.want {
+			t.Errorf("sanitizeAppVersion(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
 
