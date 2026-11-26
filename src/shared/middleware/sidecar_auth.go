@@ -25,6 +25,15 @@ import (
 // increments the corresponding counter (ADR-008 §7).
 const AuthMethodKey = "cuadra_auth_method"
 
+// AppVersionHeader es el header con el que el sync agent del sidecar reporta
+// la versión instalada de Tinta Desktop. Se persiste junto al touch de
+// last_seen_at — misma goroutine, cero requests extra.
+const AppVersionHeader = "X-Tinta-App-Version"
+
+// maxAppVersionLen acota lo que aceptamos del header: un semver real mide
+// <15 chars; cualquier cosa más larga es basura o un cliente hostil.
+const maxAppVersionLen = 32
+
 // SidecarOrJWTMiddleware is the hybrid auth gate for /sync/* (ADR-008
 // §3.2). Tokens with the `sk_live_` prefix go through the sidecar table;
 // everything else falls through to the operator JWT path. The fallback
@@ -75,13 +84,34 @@ func SidecarOrJWTMiddleware(tokens auth.TokenService, store sidecartoken.Store) 
 		// returning. If it fails we accept staleness — the touch is for
 		// idle-revoke, not security.
 		credID := cred.ID
+		appVersion := sanitizeAppVersion(c.GetHeader(AppVersionHeader))
 		go func() {
 			ctx, cancel := detachedContext()
 			defer cancel()
-			_ = store.TouchLastSeen(sharedDomain.WithTenant(ctx, cred.GymID), credID)
+			_ = store.TouchLastSeen(sharedDomain.WithTenant(ctx, cred.GymID), credID, appVersion)
 		}()
 		c.Next()
 	}
+}
+
+// sanitizeAppVersion deja pasar sólo valores con pinta de versión: trim,
+// tope de longitud y charset [0-9A-Za-z.+-]. Devuelve "" (= no tocar lo
+// persistido) ante cualquier cosa rara — el header viaja autenticado pero
+// sigue siendo input del cliente.
+func sanitizeAppVersion(raw string) string {
+	v := strings.TrimSpace(raw)
+	if v == "" || len(v) > maxAppVersionLen {
+		return ""
+	}
+	for _, r := range v {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z',
+			r == '.', r == '-', r == '+':
+		default:
+			return ""
+		}
+	}
+	return v
 }
 
 // GetAuthMethod returns "sidecar_token", "jwt", or empty string when no

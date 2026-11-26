@@ -120,3 +120,5 @@ pair: pg=068_cash_opening_check.sql sqlite=049_cash_opening_check.sql
 cloud_only: pg=069_legal_acceptances.sql reason="aceptación de términos y aviso de privacidad del dueño al crear la cuenta; el alta solo ocurre en el cloud"
 
 pair: pg=070_user_permissions.sql sqlite=050_user_permissions.sql
+
+cloud_only: pg=071_sidecar_app_version.sql reason="versión instalada por dispositivo; sidecar_credentials sólo vive en el cloud"

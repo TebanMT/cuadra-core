@@ -38,6 +38,11 @@ type AgentConfig struct {
 	HTTPClient       *http.Client
 	TokenProvider    func() string // returns a Bearer token; called on every request so refresh isn't our concern
 	Logger           *log.Logger
+	// AppVersion es la versión instalada de Tinta Desktop que este sidecar
+	// reporta al cloud en X-Tinta-App-Version (el middleware de sidecar-auth
+	// la persiste en sidecar_credentials junto a last_seen_at). Vacío = no
+	// mandar el header; el cloud conserva lo último reportado.
+	AppVersion string
 	// UploadsDir es la raíz local en disco donde el agent cachea blobs
 	// que la nube es canónica sobre (fotos de socios, futuro logo del
 	// gym). El FE renderea imágenes vía la ruta local-serve del sidecar
@@ -767,6 +772,15 @@ func expandRefundGraphBatch(
 	return initial, nil
 }
 
+// setAuthHeaders pone los headers que viajan en toda llamada autenticada al
+// cloud: el Bearer vigente y, si el build la conoce, la versión instalada.
+func (a *Agent) setAuthHeaders(req *http.Request) {
+	req.Header.Set("Authorization", "Bearer "+a.currentToken())
+	if a.cfg.AppVersion != "" {
+		req.Header.Set("X-Tinta-App-Version", a.cfg.AppVersion)
+	}
+}
+
 func (a *Agent) postPush(ctx context.Context, req PushRequest) (*PushResponse, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -781,7 +795,7 @@ func (a *Agent) postPush(ctx context.Context, req PushRequest) (*PushResponse, e
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+a.currentToken())
+	a.setAuthHeaders(httpReq)
 	resp, err := a.cfg.HTTPClient.Do(httpReq)
 	if err != nil {
 		return nil, err
@@ -1142,7 +1156,7 @@ func (a *Agent) getPull(ctx context.Context, since time.Time, cursors ...string)
 		return nil, err
 	}
 	req.Header.Set("X-Tinta-Sync-Schema", strconv.Itoa(SchemaVersion))
-	req.Header.Set("Authorization", "Bearer "+a.currentToken())
+	a.setAuthHeaders(req)
 	resp, err := a.cfg.HTTPClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -1287,7 +1301,7 @@ func (a *Agent) getFull(ctx context.Context, cursor string) (*FullSyncResponse, 
 		return nil, err
 	}
 	req.Header.Set("X-Tinta-Sync-Schema", strconv.Itoa(SchemaVersion))
-	req.Header.Set("Authorization", "Bearer "+a.currentToken())
+	a.setAuthHeaders(req)
 	resp, err := a.cfg.HTTPClient.Do(req)
 	if err != nil {
 		return nil, err

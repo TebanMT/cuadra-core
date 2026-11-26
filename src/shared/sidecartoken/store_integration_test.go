@@ -163,7 +163,7 @@ func TestStore_TouchLastSeen(t *testing.T) {
 	}
 	before := cred.LastSeenAt
 	time.Sleep(20 * time.Millisecond)
-	if err := store.TouchLastSeen(ctx, cred.ID); err != nil {
+	if err := store.TouchLastSeen(ctx, cred.ID, "1.2.7"); err != nil {
 		t.Fatalf("touch: %v", err)
 	}
 	got, err := store.LookupActiveByHash(ctx, sidecartoken.Hash("x"))
@@ -172,5 +172,21 @@ func TestStore_TouchLastSeen(t *testing.T) {
 	}
 	if !got.LastSeenAt.After(before) {
 		t.Errorf("last_seen_at not updated: before=%s after=%s", before, got.LastSeenAt)
+	}
+	if got.AppVersion != "1.2.7" {
+		t.Errorf("app_version = %q, want %q", got.AppVersion, "1.2.7")
+	}
+
+	// Un touch sin versión (request que no manda el header) NO pisa la
+	// última reportada.
+	if err := store.TouchLastSeen(ctx, cred.ID, ""); err != nil {
+		t.Fatalf("touch sin versión: %v", err)
+	}
+	got, err = store.LookupActiveByHash(ctx, sidecartoken.Hash("x"))
+	if err != nil {
+		t.Fatalf("re-lookup 2: %v", err)
+	}
+	if got.AppVersion != "1.2.7" {
+		t.Errorf("app_version tras touch vacío = %q, want %q (no clobber)", got.AppVersion, "1.2.7")
 	}
 }

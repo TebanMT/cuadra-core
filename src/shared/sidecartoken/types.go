@@ -21,8 +21,12 @@ type Credential struct {
 	ClientID    uuid.UUID
 	UserID      uuid.UUID
 	DeviceLabel string
-	CreatedAt   time.Time
-	LastSeenAt  time.Time
+	// AppVersion es la última versión de Tinta Desktop que este dispositivo
+	// reportó vía X-Tinta-App-Version. Vacío = todavía no sincroniza con un
+	// build que mande el header.
+	AppVersion string
+	CreatedAt  time.Time
+	LastSeenAt time.Time
 }
 
 // Store is the persistence surface for sidecar credentials. The Postgres
@@ -35,8 +39,11 @@ type Store interface {
 	LookupActiveByHash(ctx context.Context, hash []byte) (Credential, error)
 
 	// TouchLastSeen updates last_seen_at to NOW(). Called after every
-	// successful sidecar request — fire-and-forget OK.
-	TouchLastSeen(ctx context.Context, credentialID uuid.UUID) error
+	// successful sidecar request — fire-and-forget OK. appVersion, when
+	// non-empty, is persisted as the device's installed version; empty
+	// leaves the stored value untouched (requests without the header must
+	// not clobber what a sync already reported).
+	TouchLastSeen(ctx context.Context, credentialID uuid.UUID, appVersion string) error
 
 	// FindActive returns the active credential for (gym_id, client_id), or
 	// ErrNotFound if none exists. Used by the auth bootstrap to decide

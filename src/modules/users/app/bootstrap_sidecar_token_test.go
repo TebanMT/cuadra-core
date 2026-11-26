@@ -25,7 +25,7 @@ type fakeStore struct {
 func (f *fakeStore) LookupActiveByHash(context.Context, []byte) (sidecartoken.Credential, error) {
 	return sidecartoken.Credential{}, sidecartoken.ErrNotFound
 }
-func (f *fakeStore) TouchLastSeen(context.Context, uuid.UUID) error { return nil }
+func (f *fakeStore) TouchLastSeen(context.Context, uuid.UUID, string) error { return nil }
 func (f *fakeStore) FindActive(_ context.Context, gymID, clientID uuid.UUID) (sidecartoken.Credential, error) {
 	if f.findErr != nil {
 		return sidecartoken.Credential{}, f.findErr

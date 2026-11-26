@@ -485,8 +485,11 @@ type deviceResp struct {
 	ID          uuid.UUID `json:"id"`
 	ClientID    uuid.UUID `json:"client_id"`
 	DeviceLabel string    `json:"device_label"`
-	CreatedAt   time.Time `json:"created_at"`
-	LastSeenAt  time.Time `json:"last_seen_at"`
+	// AppVersion: última versión de Tinta Desktop reportada por el sync de
+	// este dispositivo. "" = aún no reporta (build viejo o nunca sincronizó).
+	AppVersion string    `json:"app_version"`
+	CreatedAt  time.Time `json:"created_at"`
+	LastSeenAt time.Time `json:"last_seen_at"`
 }
 
 type listDevicesResp struct {
@@ -1107,6 +1110,7 @@ func (ctrl *AuthController) handleListDevices(c *gin.Context) {
 			ID:          cr.ID,
 			ClientID:    cr.ClientID,
 			DeviceLabel: cr.DeviceLabel,
+			AppVersion:  cr.AppVersion,
 			CreatedAt:   cr.CreatedAt,
 			LastSeenAt:  cr.LastSeenAt,
 		}
