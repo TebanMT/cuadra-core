@@ -22,7 +22,12 @@ permissions:
 
 jobs:
   integration:
-    runs-on: ubuntu-latest
+    # Pineado a 24.04: GitHub está rolando ubuntu-latest a 26.04 y el
+    # Playwright de core/tests/e2e/requirements.txt no soporta chromium ahí
+    # ("Playwright does not support chromium on ubuntu26.04-x64"). Según la
+    # suerte del runner, la pata fallaba en "Preparar navegador y frontends".
+    # Despinear cuando Playwright soporte 26.04.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
