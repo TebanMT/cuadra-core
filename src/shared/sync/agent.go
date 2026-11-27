@@ -267,6 +267,7 @@ func NewAgent(cfg AgentConfig, db *sqlx.DB, uow sharedDomain.UnitOfWork) *Agent 
 	}
 	full.UploadsDir = cfg.UploadsDir
 	full.TokenProvider = cfg.TokenProvider
+	full.AppVersion = cfg.AppVersion
 	full.Logger = cfg.Logger
 	if full.Logger == nil {
 		full.Logger = log.New(io.Discard, "", 0)
