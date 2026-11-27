@@ -33,6 +33,9 @@ type fakeCloud struct {
 	failNxt atomic.Int32
 	srv     *httptest.Server
 	now     func() time.Time
+	// appVersions guarda el X-Tinta-App-Version de cada request recibido,
+	// en orden ("" = el request llegó sin header).
+	appVersions []string
 }
 
 func newFakeCloud(t *testing.T) *fakeCloud {
@@ -41,10 +44,18 @@ func newFakeCloud(t *testing.T) *fakeCloud {
 		rows: map[string]map[string]any{},
 		now:  func() time.Time { return time.Now().UTC() },
 	}
+	record := func(h http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			c.mu.Lock()
+			c.appVersions = append(c.appVersions, r.Header.Get("X-Tinta-App-Version"))
+			c.mu.Unlock()
+			h(w, r)
+		}
+	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/sync/push", c.push)
-	mux.HandleFunc("/api/v1/sync/pull", c.pull)
-	mux.HandleFunc("/api/v1/sync/full", c.full)
+	mux.HandleFunc("/api/v1/sync/push", record(c.push))
+	mux.HandleFunc("/api/v1/sync/pull", record(c.pull))
+	mux.HandleFunc("/api/v1/sync/full", record(c.full))
 	c.srv = httptest.NewServer(mux)
 	t.Cleanup(c.srv.Close)
 	return c
@@ -344,6 +355,42 @@ func TestAgentPush_FlushesQueueAndMarksSynced(t *testing.T) {
 	cloud.mu.Unlock()
 	if pushCount != 1 {
 		t.Errorf("second RunOnce caused %d pushes, want still 1", pushCount)
+	}
+}
+
+// TestAgent_ReportsAppVersionHeader construye el agent por NewAgent — el
+// camino de cmd/sidecar — y exige X-Tinta-App-Version en cada request de
+// sync. El cloud lo persiste en sidecar_credentials.app_version; si el
+// header no viaja, la columna queda NULL para siempre sin ningún error.
+func TestAgent_ReportsAppVersionHeader(t *testing.T) {
+	cloud := newFakeCloud(t)
+	db, uow, gymID := setupSidecarDB(t)
+	enqueueMember(t, db, gymID, 1)
+	mustMarkInitialSyncDone(t, db, uow)
+
+	a := syncpkg.NewAgent(syncpkg.AgentConfig{
+		BaseURL:    cloud.srv.URL,
+		Interval:   24 * time.Hour,
+		HTTPClient: cloud.srv.Client(),
+		AppVersion: "1.2.8",
+	}, db, uow)
+	a.SetToken("fake-token")
+	if err := a.Bootstrap(context.Background()); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	a.RunOnce(context.Background())
+
+	cloud.mu.Lock()
+	got := append([]string(nil), cloud.appVersions...)
+	cloud.mu.Unlock()
+	if len(got) == 0 {
+		t.Fatal("el cloud no recibió ningún request de sync")
+	}
+	for i, v := range got {
+		if v != "1.2.8" {
+			t.Errorf("request #%d: X-Tinta-App-Version = %q, want %q", i, v, "1.2.8")
+		}
 	}
 }
 
