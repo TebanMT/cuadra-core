@@ -36,6 +36,8 @@ type NotificationModel struct {
 	ScheduledFor        time.Time  `gorm:"not null;column:scheduled_for"`
 	IdempotencyKey      *string    `gorm:"column:idempotency_key"`
 	ProviderMessageID   *string    `gorm:"column:provider_message_id"`
+	DeliveredAt         *time.Time `gorm:"column:delivered_at"`
+	ReadAt              *time.Time `gorm:"column:read_at"`
 }
 
 func (NotificationModel) TableName() string { return "notification_queue" }

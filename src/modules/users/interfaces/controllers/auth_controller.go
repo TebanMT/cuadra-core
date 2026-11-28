@@ -33,16 +33,19 @@ import (
 // AuthController bundles every UC that touches identity. It also owns the
 // gym-side wizard endpoints since they share the same lifecycle.
 type AuthController struct {
-	Signup            *usersApp.SignupOwner
-	Login             *usersApp.Login
-	Logout            *usersApp.Logout
-	Refresh           *usersApp.RefreshSession // solo cmd/server; el sidecar refresca offline en SidecarAuthProxy
-	RequestReset      *usersApp.RequestPasswordReset
-	ConfirmReset      *usersApp.ConfirmPasswordReset
-	UpdateBasicInfo   *gymApp.UpdateBasicInfo
-	UpdatePayMethods  *gymApp.UpdatePaymentMethods
-	CompleteSetup     *gymApp.CompleteSetup
-	UpdateProfile     *gymApp.UpdateProfile
+	Signup           *usersApp.SignupOwner
+	Login            *usersApp.Login
+	Logout           *usersApp.Logout
+	Refresh          *usersApp.RefreshSession // solo cmd/server; el sidecar refresca offline en SidecarAuthProxy
+	RequestReset     *usersApp.RequestPasswordReset
+	ConfirmReset     *usersApp.ConfirmPasswordReset
+	UpdateBasicInfo  *gymApp.UpdateBasicInfo
+	UpdatePayMethods *gymApp.UpdatePaymentMethods
+	CompleteSetup    *gymApp.CompleteSetup
+	UpdateProfile    *gymApp.UpdateProfile
+	// SetLogo respalda POST/DELETE /gyms/me/logo (sólo cmd/server; el
+	// sidecar monta GymLogoSidecarProxy en su lugar).
+	SetLogo           *gymApp.SetGymLogo
 	UpdateChargeSet   *gymApp.UpdateChargeSettings
 	CreateOperator    *usersApp.CreateOperator
 	UpdateOperator    *usersApp.UpdateOperator
@@ -199,7 +202,22 @@ func (ctrl *AuthController) RegisterRoutes(r *gin.Engine) {
 	}
 
 	ctrl.RegisterAccountRoutes(r)
+	ctrl.RegisterLogoRoutes(r)
 	ctrl.RegisterOperatorRoutes(r)
+}
+
+// RegisterLogoRoutes — POST/DELETE /api/v1/gyms/me/logo en el cloud. Acepta
+// el JWT del dueño (dashboard) y el sk_live_* del pareo: el desktop sube por
+// GymLogoSidecarProxy, que exige owner localmente antes de reenviar. El
+// binario sidecar NO llama esto (no tiene dónde publicar el logo).
+func (ctrl *AuthController) RegisterLogoRoutes(r *gin.Engine) {
+	authMW := middleware.AuthMiddleware(ctrl.Tokens)
+	if ctrl.SidecarTokens != nil {
+		authMW = middleware.SidecarOrJWTMiddleware(ctrl.Tokens, ctrl.SidecarTokens)
+	}
+	logo := r.Group("/api/v1/gyms/me/logo", authMW, requireOwnerOrSidecarToken())
+	logo.POST("", ctrl.handleUploadLogo)
+	logo.DELETE("", ctrl.handleRemoveLogo)
 }
 
 // RegisterMeRoute exposes the read-only `GET /api/v1/auth/me` endpoint.
@@ -274,7 +292,6 @@ func (ctrl *AuthController) RegisterAccountRoutes(r *gin.Engine) {
 		// kiosk_volume, …). The legacy handleUpdateProfile is dead code kept
 		// around for direct test callers; the wire handler is the active path.
 		gyms.PATCH("/me", middleware.RequireOwner(), ctrl.handleUpdateProfileWire)
-		gyms.POST("/me/logo", middleware.RequireOwner(), ctrl.handleUploadLogo)
 		gyms.POST("/me/transfer-ownership", middleware.RequireOwner(), ctrl.handleTransferOwnership)
 		// Charge settings (cobros a nivel gym: inscripción + mantenimiento).
 		// Antes vivía en localStorage del desktop — frágil y per-device.

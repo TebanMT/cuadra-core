@@ -462,7 +462,7 @@ func (s *PostgresStore) updateRow(
 // canonicalAugmentExpr injects live cloud-canonical fields over historical
 // sync_entities payloads.
 //
-// Para entity_type='gyms', inyecta cuatro grupos desde el row vivo:
+// Para entity_type='gyms', inyecta cinco grupos desde el row vivo:
 //
 //  1. Billing (cloud-owned): subscription_plan, subscription_status,
 //     stripe_customer_id, trial_ends_at, subscription_ends_at. El sidecar
@@ -480,6 +480,12 @@ func (s *PostgresStore) updateRow(
 //     en cada push. Leerlo de gyms en lugar del payload garantiza que
 //     pull-eo siempre recibe el último valor reconocido por cloud,
 //     incluso si el payload guardado es viejo.
+//
+//  5. logo_url (cloud-owned, SetGymLogo): el logo se sube al bucket
+//     público desde el dashboard o desde el desktop vía
+//     GymLogoSidecarProxy, y enqueueGym nunca lo emite. Esta inyección
+//     (más el TouchGym de SetGymLogo) es lo que lleva el logo al ticket de
+//     cada recepción.
 //
 //  4. WhatsApp Business (cloud-owned, UC-037): whatsapp_business_phone,
 //     whatsapp_connected_at, whatsapp_business_token_enc. El ceremony de
@@ -542,6 +548,7 @@ const canonicalAugmentExpr = `
 	                ELSE (EXTRACT(EPOCH FROM g.subscription_ends_at) * 1000)::bigint END,
 	            'created_at',     (EXTRACT(EPOCH FROM g.created_at) * 1000)::bigint,
 	            'kiosk_settings', g.kiosk_settings,
+	            'logo_url',       g.logo_url,
 	            'whatsapp_business_phone', g.whatsapp_business_phone,
 	            'whatsapp_connected_at',
 	                CASE WHEN g.whatsapp_connected_at IS NULL THEN NULL

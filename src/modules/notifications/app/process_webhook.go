@@ -185,8 +185,27 @@ func (uc *ProcessWebhook) Execute(ctx context.Context, in ProcessWebhookInput) (
 				out.UpdatedStatus = notification.StatusFailed
 			}
 		}
-		// Successful delivered/read — sent_at is already set; we just keep
-		// the event log for analytics.
+		// Acuses delivered/read (gratis en Twilio): se guardan en la fila
+		// para el historial del socio — "sent" sólo dice que Twilio aceptó el
+		// mensaje; delivered_at es la evidencia de que llegó. El Update
+		// espeja a sync_entities, así que el desktop los baja en su próximo
+		// pull aunque haya estado días sin internet. Idempotente: callbacks
+		// duplicados o fuera de orden no re-bumpean la versión.
+		if notif != nil && in.EventType == eventDomain.EventTypeStatus {
+			var changed bool
+			switch strings.ToLower(strings.TrimSpace(in.Status)) {
+			case eventDomain.StatusDelivered:
+				changed = notif.MarkDelivered(now)
+			case eventDomain.StatusRead:
+				changed = notif.MarkRead(now)
+			}
+			if changed {
+				if _, err := uc.Notifications.Update(tx, notif); err != nil {
+					return sharedDomain.NewUnexpectedError(err)
+				}
+				out.UpdatedStatus = notif.DeliveryState()
+			}
+		}
 
 		if notifID != nil {
 			out.NotificationID = notifID

@@ -32,6 +32,10 @@ type NotificationRepository interface {
 	// ListByGym is the debug listing endpoint (UC-040 dashboard).
 	ListByGym(tx sharedDomain.Transaction, gymID uuid.UUID, statusFilter string, page, pageSize int) ([]*notiDomain.Notification, int, error)
 
+	// ListByRecipient — historial de mensajes de un destinatario (perfil del
+	// socio), más reciente primero. Devuelve también el total para paginar.
+	ListByRecipient(tx sharedDomain.Transaction, gymID uuid.UUID, recipientType string, recipientID uuid.UUID, page, pageSize int) ([]*notiDomain.Notification, int, error)
+
 	// ChannelStats agrega contadores del último período (since → now) para un
 	// canal específico (whatsapp, email, …). Lo consume el handler de
 	// /api/v1/gyms/me/whatsapp para llenar la card de stats sin tener que

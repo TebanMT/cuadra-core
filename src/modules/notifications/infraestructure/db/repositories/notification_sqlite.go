@@ -47,6 +47,8 @@ type sqliteNotificationRow struct {
 	ScheduledFor      int64          `db:"scheduled_for"`
 	IdempotencyKey    sql.NullString `db:"idempotency_key"`
 	ProviderMessageID sql.NullString `db:"provider_message_id"`
+	DeliveredAt       sql.NullInt64  `db:"delivered_at"`
+	ReadAt            sql.NullInt64  `db:"read_at"`
 }
 
 func (r *NotificationSQLiteRepository) Create(tx sharedDomain.Transaction, n *notiDomain.Notification) (*notiDomain.Notification, error) {
@@ -60,12 +62,14 @@ func (r *NotificationSQLiteRepository) Create(tx sharedDomain.Transaction, n *no
 		    id, gym_id, version, created_at, updated_at, deleted_at,
 		    channel, template_key, recipient_type, recipient_id, recipient_address,
 		    payload, status, sent_at, failed_at, error_message, retry_count,
-		    scheduled_for, idempotency_key, provider_message_id
+		    scheduled_for, idempotency_key, provider_message_id,
+		    delivered_at, read_at
 		) VALUES (
 		    :id, :gym_id, :version, :created_at, :updated_at, :deleted_at,
 		    :channel, :template_key, :recipient_type, :recipient_id, :recipient_address,
 		    :payload, :status, :sent_at, :failed_at, :error_message, :retry_count,
-		    :scheduled_for, :idempotency_key, :provider_message_id
+		    :scheduled_for, :idempotency_key, :provider_message_id,
+		    :delivered_at, :read_at
 		)`
 	if _, err := stx.NamedExec(context.Background(), stmt, row); err != nil {
 		return nil, err
@@ -88,7 +92,8 @@ func (r *NotificationSQLiteRepository) Update(tx sharedDomain.Transaction, n *no
 		    version = :version, updated_at = :updated_at,
 		    status = :status, sent_at = :sent_at, failed_at = :failed_at,
 		    error_message = :error_message, retry_count = :retry_count,
-		    scheduled_for = :scheduled_for, provider_message_id = :provider_message_id
+		    scheduled_for = :scheduled_for, provider_message_id = :provider_message_id,
+		    delivered_at = :delivered_at, read_at = :read_at
 		WHERE id = :id`
 	if _, err := stx.NamedExec(context.Background(), stmt, row); err != nil {
 		return nil, err
@@ -206,6 +211,42 @@ func (r *NotificationSQLiteRepository) ListByGym(tx sharedDomain.Transaction, gy
 	return out, total, nil
 }
 
+// ListByRecipient — historial de mensajes de un destinatario, servido desde
+// la copia local (funciona sin internet). Los acuses delivered/read llegan
+// por pull cuando vuelve la conexión.
+func (r *NotificationSQLiteRepository) ListByRecipient(tx sharedDomain.Transaction, gymID uuid.UUID, recipientType string, recipientID uuid.UUID, page, pageSize int) ([]*notiDomain.Notification, int, error) {
+	stx := tx.(*sharedDomain.SqlxTransaction)
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 || pageSize > 100 {
+		pageSize = 20
+	}
+	const where = `gym_id = ? AND recipient_id = ? AND recipient_type = ? AND deleted_at IS NULL`
+	args := []any{gymID.String(), recipientID.String(), recipientType}
+	var total int
+	if err := stx.Get(context.Background(), &total,
+		`SELECT COUNT(*) FROM notification_queue WHERE `+where, args...); err != nil {
+		return nil, 0, err
+	}
+	q := fmt.Sprintf(
+		`SELECT * FROM notification_queue WHERE %s ORDER BY created_at DESC, id DESC LIMIT %d OFFSET %d`,
+		where, pageSize, (page-1)*pageSize)
+	var rows []sqliteNotificationRow
+	if err := stx.Select(context.Background(), &rows, q, args...); err != nil {
+		return nil, 0, err
+	}
+	out := make([]*notiDomain.Notification, 0, len(rows))
+	for i := range rows {
+		n, err := notificationFromRow(&rows[i])
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, n)
+	}
+	return out, total, nil
+}
+
 func notificationToRow(n *notiDomain.Notification) (map[string]any, error) {
 	payload, err := json.Marshal(n.Payload)
 	if err != nil {
@@ -232,6 +273,8 @@ func notificationToRow(n *notiDomain.Notification) (map[string]any, error) {
 		"scheduled_for":       n.ScheduledFor.UTC().UnixMilli(),
 		"idempotency_key":     nullStringFromPtr(n.IdempotencyKey),
 		"provider_message_id": nullStringFromPtr(n.ProviderMessageID),
+		"delivered_at":        nullInt64FromTime(n.DeliveredAt),
+		"read_at":             nullInt64FromTime(n.ReadAt),
 	}
 	return row, nil
 }
@@ -294,6 +337,14 @@ func notificationFromRow(r *sqliteNotificationRow) (*notiDomain.Notification, er
 	if r.ProviderMessageID.Valid {
 		s := r.ProviderMessageID.String
 		n.ProviderMessageID = &s
+	}
+	if r.DeliveredAt.Valid {
+		t := time.UnixMilli(r.DeliveredAt.Int64).UTC()
+		n.DeliveredAt = &t
+	}
+	if r.ReadAt.Valid {
+		t := time.UnixMilli(r.ReadAt.Int64).UTC()
+		n.ReadAt = &t
 	}
 	return n, nil
 }

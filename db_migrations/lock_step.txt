@@ -122,3 +122,7 @@ cloud_only: pg=069_legal_acceptances.sql reason="aceptación de términos y avis
 pair: pg=070_user_permissions.sql sqlite=050_user_permissions.sql
 
 cloud_only: pg=071_sidecar_app_version.sql reason="versión instalada por dispositivo; sidecar_credentials sólo vive en el cloud"
+
+pair: pg=072_notification_delivery_receipts.sql sqlite=051_notification_delivery_receipts.sql
+
+sqlite_fix_only: sqlite=052_repair_timestamptz_text_columns.sql reason="repara in-place scheduled_for (notification_queue) y las mediciones de challenges guardadas como TEXT RFC3339 por el apply que sólo convertía columnas *_at; Postgres nunca tuvo el veneno porque sus columnas son TIMESTAMPTZ"

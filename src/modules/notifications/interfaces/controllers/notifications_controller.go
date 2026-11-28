@@ -39,15 +39,18 @@ var (
 // memory because the OTP TTL is 10 min — losing it on restart only means
 // the owner re-runs /start. Production should swap for a Redis/SQL impl.
 type Controller struct {
-	Held             *notiApp.HeldNotifications
-	HeldGate         gin.HandlerFunc
-	Connect          *notiApp.ConnectWhatsApp
-	Disconnect       *notiApp.DisconnectWhatsApp
-	Status           *notiApp.GetWhatsAppStatus
-	ListTemplates    *notiApp.ListTemplates
-	UpdateTemplate   *notiApp.UpdateTemplate
-	Broadcast        *notiApp.Broadcast
-	List             *notiApp.ListNotifications
+	Held           *notiApp.HeldNotifications
+	HeldGate       gin.HandlerFunc
+	Connect        *notiApp.ConnectWhatsApp
+	Disconnect     *notiApp.DisconnectWhatsApp
+	Status         *notiApp.GetWhatsAppStatus
+	ListTemplates  *notiApp.ListTemplates
+	UpdateTemplate *notiApp.UpdateTemplate
+	Broadcast      *notiApp.Broadcast
+	List           *notiApp.ListNotifications
+	// MemberHistory (opcional) — historial de mensajes del perfil del socio.
+	// Se cablea en ambos binarios después de NewController.
+	MemberHistory    *notiApp.ListMemberNotifications
 	Retry            *notiApp.RetryNotification
 	ListOwnerAlerts  *notiApp.ListOwnerAlerts
 	UpdateOwnerAlert *notiApp.UpdateOwnerAlert
@@ -147,6 +150,12 @@ func (ctrl *Controller) RegisterRoutes(r *gin.Engine) {
 		// por eso ya no va bajo PlanGate.
 		api.POST("/broadcasts", middleware.RequireOwner(), ctrl.handleBroadcast)
 		api.GET("/notifications", ctrl.handleList)
+		// Historial de mensajes de un socio (perfil). Lectura para cualquier
+		// usuario del gym — el operador de recepción es quien atiende el
+		// reclamo. Sin reenvío desde aquí: cada mensaje cuesta.
+		if ctrl.MemberHistory != nil {
+			api.GET("/members/:id/notifications", ctrl.handleMemberNotifications)
+		}
 		// Dead-letter retry — owner-only. Re-encola un row failed para que
 		// el dispatcher lo procese en la próxima vuelta. Sin esto los rows
 		// failed se acumulan indefinidamente sin canal de recuperación.
@@ -278,6 +287,34 @@ type notificationResp struct {
 	ProviderMessageID *string    `json:"provider_message_id,omitempty"`
 	ErrorMessage      *string    `json:"error_message,omitempty"`
 	CreatedAt         time.Time  `json:"created_at"`
+}
+
+// memberNotificationResp — fila del historial de mensajes del socio.
+// delivery_state: queued | sent | delivered | read | failed | held | cancelled.
+type memberNotificationResp struct {
+	ID               uuid.UUID  `json:"id"`
+	Channel          string     `json:"channel"`
+	TemplateKey      string     `json:"template_key"`
+	Kind             string     `json:"kind"`
+	Title            string     `json:"title"`
+	Body             string     `json:"body"`
+	RecipientAddress string     `json:"recipient_address"`
+	Status           string     `json:"status"`
+	DeliveryState    string     `json:"delivery_state"`
+	CreatedAt        time.Time  `json:"created_at"`
+	ScheduledFor     time.Time  `json:"scheduled_for"`
+	SentAt           *time.Time `json:"sent_at"`
+	DeliveredAt      *time.Time `json:"delivered_at"`
+	ReadAt           *time.Time `json:"read_at"`
+	FailedAt         *time.Time `json:"failed_at"`
+	FailureReason    *string    `json:"failure_reason"`
+}
+
+type listMemberNotificationsResp struct {
+	Items    []memberNotificationResp `json:"items"`
+	Total    int                      `json:"total"`
+	Page     int                      `json:"page"`
+	PageSize int                      `json:"page_size"`
 }
 
 type listNotificationsResp struct {
@@ -521,6 +558,59 @@ func (ctrl *Controller) handleList(c *gin.Context) {
 	})
 }
 
+func (ctrl *Controller) handleMemberNotifications(c *gin.Context) {
+	gymID, ok := middleware.GetGymID(c)
+	if !ok {
+		utils.ErrorResponse(c, http.StatusUnauthorized, errBadAuth)
+		return
+	}
+	memberID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, errBadID)
+		return
+	}
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+	out, err := ctrl.MemberHistory.Execute(c.Request.Context(), notiApp.ListMemberNotificationsInput{
+		GymID:    gymID,
+		MemberID: memberID,
+		Page:     page,
+		PageSize: pageSize,
+	})
+	if err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	items := make([]memberNotificationResp, 0, len(out.Items))
+	for _, v := range out.Items {
+		item := memberNotificationResp{
+			ID:               v.ID,
+			Channel:          v.Channel,
+			TemplateKey:      v.TemplateKey,
+			Kind:             v.Kind,
+			Title:            v.Title,
+			Body:             v.Body,
+			RecipientAddress: v.RecipientAddress,
+			Status:           v.Status,
+			DeliveryState:    v.DeliveryState,
+			CreatedAt:        v.CreatedAt,
+			ScheduledFor:     v.ScheduledFor,
+			SentAt:           v.SentAt,
+			DeliveredAt:      v.DeliveredAt,
+			ReadAt:           v.ReadAt,
+			FailedAt:         v.FailedAt,
+		}
+		if v.FailureReason != "" {
+			reason := v.FailureReason
+			item.FailureReason = &reason
+		}
+		items = append(items, item)
+	}
+	utils.JsonResponse(c, http.StatusOK, listMemberNotificationsResp{
+		Items: items, Total: out.Total, Page: out.Page, PageSize: out.PageSize,
+	})
+}
+
 func (ctrl *Controller) handleRetry(c *gin.Context) {
 	if ctrl.Retry == nil {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, errors.New("retry not configured"))
@@ -588,9 +678,6 @@ func bindJSON[T any](c *gin.Context, dst *T) bool {
 	}
 	return true
 }
-
-// guard against unused
-var _ = errBadID
 
 // ---------------------------------------------------------------------------
 // UC-037 — 2-step WhatsApp connect (/start emits OTP, /connect verifies)

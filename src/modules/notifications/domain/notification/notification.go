@@ -64,9 +64,16 @@ type Notification struct {
 	ScheduledFor        time.Time
 	IdempotencyKey      *string
 	ProviderMessageID   *string
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
-	DeletedAt           *time.Time
+	// DeliveredAt / ReadAt — acuses del StatusCallback de Twilio (delivered /
+	// read). Cloud-authoritative: sólo el webhook los escribe; el sidecar
+	// los recibe por pull. "sent" sólo dice que Twilio aceptó el mensaje;
+	// DeliveredAt es la evidencia de que llegó al teléfono del socio. ReadAt
+	// sólo existe si el socio tiene activas las confirmaciones de lectura.
+	DeliveredAt *time.Time
+	ReadAt      *time.Time
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	DeletedAt   *time.Time
 }
 
 // New builds a pending Notification. `payload` is the ready-to-substitute
@@ -136,6 +143,10 @@ func (n *Notification) MarkSent(providerMessageID string, now time.Time) error {
 	n.Status = StatusSent
 	n.SentAt = &now
 	n.ErrorMessage = nil
+	// Envío nuevo = ciclo de acuses nuevo: los de un envío anterior (reenvío
+	// del comprobante, retry manual) pertenecen a otro provider message.
+	n.DeliveredAt = nil
+	n.ReadAt = nil
 	n.Version++
 	n.UpdatedAt = now
 	return nil
@@ -244,10 +255,81 @@ func (n *Notification) RearmForResend(recipientAddress string, payload map[strin
 	n.FailedAt = nil
 	n.ErrorMessage = nil
 	n.ProviderMessageID = nil
+	n.DeliveredAt = nil
+	n.ReadAt = nil
 	n.RecipientAddress = strings.TrimSpace(recipientAddress)
 	n.Payload = payload
 	n.Version++
 	n.UpdatedAt = now
+}
+
+// MarkDelivered registra el acuse "delivered" de Twilio. Sólo aplica a una
+// fila sent (un callback tardío del envío anterior de una fila re-armada a
+// pending no debe pintarla como entregada) y es idempotente: el primer acuse
+// gana, un callback duplicado devuelve false (no-op, sin bump de versión).
+func (n *Notification) MarkDelivered(at time.Time) bool {
+	if n.Status != StatusSent || n.DeliveredAt != nil {
+		return false
+	}
+	t := at.UTC()
+	n.DeliveredAt = &t
+	n.Version++
+	n.UpdatedAt = at
+	return true
+}
+
+// MarkRead registra el acuse "read". Leído implica entregado: Twilio puede
+// mandar read sin delivered previo (o en desorden), así que también rellena
+// DeliveredAt si faltaba. Mismas reglas de idempotencia que MarkDelivered.
+func (n *Notification) MarkRead(at time.Time) bool {
+	if n.Status != StatusSent || n.ReadAt != nil {
+		return false
+	}
+	t := at.UTC()
+	n.ReadAt = &t
+	if n.DeliveredAt == nil {
+		d := t
+		n.DeliveredAt = &d
+	}
+	n.Version++
+	n.UpdatedAt = at
+	return true
+}
+
+// Estado de entrega visible para el operador (historial del socio). Más fino
+// que Status: separa "Twilio lo aceptó" de "llegó" y "lo leyó".
+const (
+	DeliveryQueued    = "queued"
+	DeliverySent      = "sent"
+	DeliveryDelivered = "delivered"
+	DeliveryRead      = "read"
+	DeliveryFailed    = "failed"
+	DeliveryHeld      = "held"
+	DeliveryCancelled = "cancelled"
+)
+
+// DeliveryState resume Status + acuses en un solo estado. Los acuses sólo
+// cuentan sobre una fila sent: en una fila re-armada (pending) el cloud puede
+// conservar unos minutos los del envío anterior hasta que el dispatcher la
+// vuelva a mandar.
+func (n *Notification) DeliveryState() string {
+	switch n.Status {
+	case StatusPending:
+		return DeliveryQueued
+	case StatusFailed:
+		return DeliveryFailed
+	case StatusHeld:
+		return DeliveryHeld
+	case StatusCancelled:
+		return DeliveryCancelled
+	}
+	if n.ReadAt != nil {
+		return DeliveryRead
+	}
+	if n.DeliveredAt != nil {
+		return DeliveryDelivered
+	}
+	return DeliverySent
 }
 
 // IsPending is a convenience for the dispatcher.
@@ -282,6 +364,8 @@ func (n *Notification) ResolveHeld(version int, action string, now time.Time) {
 		n.ErrorMessage = nil
 		n.FailedAt = nil
 		n.ProviderMessageID = nil
+		n.DeliveredAt = nil
+		n.ReadAt = nil
 	}
 	n.Version++
 	n.UpdatedAt = now

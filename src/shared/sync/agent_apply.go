@@ -914,8 +914,11 @@ func extractColumnValue(pl map[string]any, table, col string) any {
 	// (SQLite dynamic typing lo acepta sin ruido) → todo Scan posterior del
 	// gym en esa máquina moría con "converting string to int64" y los
 	// recibos/bienvenidas fallaban en el enqueue. Toda columna *_at del
-	// esquema SQLite guarda epoch-ms — la coerción es segura por sufijo.
-	if s, isStr := v.(string); isStr && strings.HasSuffix(col, "_at") {
+	// esquema SQLite guarda epoch-ms, igual que las TIMESTAMPTZ sin ese
+	// sufijo del catálogo timestamptzColumns (scheduled_for de
+	// notification_queue: nov-2026 llegaba como texto y el historial de
+	// WhatsApp del socio daba 500). Mismo criterio que el projector.
+	if s, isStr := v.(string); isStr && isTimestampColumn(table, col) {
 		if t, terr := time.Parse(time.RFC3339Nano, s); terr == nil {
 			return t.UnixMilli()
 		}
