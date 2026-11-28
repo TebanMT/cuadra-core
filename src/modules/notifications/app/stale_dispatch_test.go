@@ -65,6 +65,9 @@ func (f *fakeNotifRepo) GetByIdempotencyKey(sharedDomain.Transaction, uuid.UUID,
 func (f *fakeNotifRepo) GetByProviderMessageID(sharedDomain.Transaction, string) (*notification.Notification, error) {
 	return nil, nil
 }
+func (f *fakeNotifRepo) ListByRecipient(sharedDomain.Transaction, uuid.UUID, string, uuid.UUID, int, int) ([]*notification.Notification, int, error) {
+	return nil, 0, nil
+}
 func (f *fakeNotifRepo) ListByGym(sharedDomain.Transaction, uuid.UUID, string, int, int) ([]*notification.Notification, int, error) {
 	return nil, 0, nil
 }

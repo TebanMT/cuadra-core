@@ -79,6 +79,7 @@ import (
 	bcrypto "github.com/cuadra/cuadra-core/src/shared/biometric/crypto"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 	"github.com/cuadra/cuadra-core/src/shared/email"
+	"github.com/cuadra/cuadra-core/src/shared/logocache"
 	"github.com/cuadra/cuadra-core/src/shared/middleware"
 	"github.com/cuadra/cuadra-core/src/shared/runtime"
 	syncShared "github.com/cuadra/cuadra-core/src/shared/sync"
@@ -429,7 +430,12 @@ func main() {
 	changePlan := billingApp.NewChangeMembershipPlan(paymentRepo, folios, memberSvc, memberRepo, uow, recorder, billingSubscriber).
 		WithGyms(gymRepo)
 	settlePayment := billingApp.NewSettlePendingBalance(paymentRepo, folios, uow, recorder).WithGyms(gymRepo)
-	receiptPayment := billingApp.NewGenerateReceipt(paymentRepo, gymRepo, memberRepo, uow)
+	receiptPayment := billingApp.NewGenerateReceipt(paymentRepo, gymRepo, memberRepo, uow).
+		WithMemberships(membershipRepo).
+		WithUsers(userRepo).
+		// Logo del gym para el ticket/PDF. Sidecar: copia en disco para que
+		// el ticket lleve logo sin internet. Cloud: sólo memoria.
+		WithLogos(logocache.New(filepath.Join(dataDir, "logos")))
 	sendReceipt := billingApp.NewSendReceipt(paymentRepo, uow).WithPublisher(billingSubscriber).WithResender(billingSubscriber)
 	listMemberPayments := billingApp.NewListMemberPayments(paymentRepo, memberRepo, uow).WithSales(saleItemRepo)
 	listGymPayments := billingApp.NewListGymPayments(paymentRepo, memberRepo, uow).WithGyms(gymRepo).WithSales(saleItemRepo)
@@ -597,6 +603,7 @@ func main() {
 	// Connect/Disconnect nil → el controller compartido NO registra las
 	// rutas del ceremony; las cubre el WhatsAppSidecarProxy (proxy al cloud).
 	notificationsCtrl := notiCtrl.NewController(nil, nil, whatsappStatus, listTemplates, updateTemplate, broadcast, listNotifications, retryNotification, listOwnerAlerts, updateOwnerAlert, whatsappMock, tokens)
+	notificationsCtrl.MemberHistory = notiApp.NewListMemberNotifications(notificationRepo, uow)
 	notificationsCtrl.PlanGate = featureGate(gymDomain.FeatureOwnWhatsApp)
 
 	// Suscripción — sidecar sólo expone el GET. El historial ahora SÍ vive
@@ -715,6 +722,14 @@ func main() {
 		Tokens:   tokens,
 	})
 	whatsappProxy.RegisterRoutes(r)
+	// Logo del gym (POST/DELETE /gyms/me/logo) → proxy al cloud: el logo
+	// vive en el bucket público y vuelve por el pull. Owner-only local.
+	logoProxy := usersCtrl.NewGymLogoSidecarProxy(usersCtrl.GymLogoSidecarProxy{
+		CloudURL: cloudURL,
+		UoW:      uow,
+		Tokens:   tokens,
+	})
+	logoProxy.RegisterRoutes(r)
 	reportsController.RegisterRoutes(r)
 	subscriptionCtrl.RegisterReadOnlyRoutes(r)
 	auditCtrl.RegisterRoutes(r)
@@ -751,6 +766,7 @@ func main() {
 	//     for the 30s tick. Order matters — swap first, then trigger.
 	authProxy.OnSidecarTokenChanged = agent.SetToken
 	authProxy.AgentReload = agent.TriggerNow
+	logoProxy.AgentReload = agent.TriggerNow
 	// Replace the temporary biometric-only hook with the process-wide gym
 	// switch. SetActiveGym is synchronous and the auth proxy invokes it
 	// before handing the new sidecar token to the agent, so a request can

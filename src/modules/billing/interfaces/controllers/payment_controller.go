@@ -104,6 +104,11 @@ func (ctrl *PaymentController) RegisterRoutes(r *gin.Engine) {
 		}
 		api.POST("/payments/:id/settle", ctrl.handleSettle)
 		api.GET("/payments/:id/receipt.pdf", ctrl.handleReceipt)
+		// Contenido del comprobante ya armado (ticket impreso de recepción y
+		// dashboard). Misma vista que el PDF de WhatsApp.
+		api.GET("/payments/:id/receipt", ctrl.handleReceiptView)
+		// Logo del gym normalizado (PNG) para el ticket. 204 = sin logo.
+		api.GET("/receipts/logo", ctrl.handleReceiptLogo)
 		api.POST("/payments/:id/send-receipt", ctrl.handleSendReceipt)
 		api.GET("/members/:id/payments", ctrl.handleListByMember)
 		api.GET("/payments", ctrl.handleListByGym)
@@ -649,6 +654,33 @@ func (ctrl *PaymentController) handleReceipt(c *gin.Context) {
 	c.Header("Content-Disposition", `inline; filename="`+out.SuggestedFilename+`"`)
 	c.Status(http.StatusOK)
 	_, _ = c.Writer.Write(out.PDF)
+}
+
+func (ctrl *PaymentController) handleReceiptView(c *gin.Context) {
+	gymID, _ := middleware.GetGymID(c)
+	id, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	v, err := ctrl.Receipt.View(c.Request.Context(), billingApp.GenerateReceiptInput{GymID: gymID, PaymentID: id})
+	if err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	utils.JsonResponse(c, http.StatusOK, v)
+}
+
+func (ctrl *PaymentController) handleReceiptLogo(c *gin.Context) {
+	gymID, _ := middleware.GetGymID(c)
+	png, err := ctrl.Receipt.GymLogoPNG(c.Request.Context(), gymID)
+	if err != nil || len(png) == 0 {
+		// Sin logo (o no se pudo bajar y no hay copia local): el ticket
+		// sale sin él. No es un error para el cliente.
+		c.Status(http.StatusNoContent)
+		return
+	}
+	c.Header("Cache-Control", "private, max-age=300")
+	c.Data(http.StatusOK, "image/png", png)
 }
 
 func (ctrl *PaymentController) handleSendReceipt(c *gin.Context) {

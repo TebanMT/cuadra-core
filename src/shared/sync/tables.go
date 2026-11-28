@@ -355,6 +355,9 @@ var SyncedTables = []EntityTable{
 			"recipient_id", "recipient_address", "payload",
 			"status", "sent_at", "failed_at", "error_message",
 			"retry_count", "scheduled_for",
+			// Acuses de Twilio (072/051). Cloud-authoritative: viajan sólo
+			// cloud→sidecar; el projector los descarta de los pushes.
+			"delivered_at", "read_at",
 		},
 	},
 	{

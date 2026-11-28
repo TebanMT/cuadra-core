@@ -81,6 +81,7 @@ import (
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 	"github.com/cuadra/cuadra-core/src/shared/email"
 	"github.com/cuadra/cuadra-core/src/shared/installerbootstrap"
+	"github.com/cuadra/cuadra-core/src/shared/logocache"
 	"github.com/cuadra/cuadra-core/src/shared/middleware"
 	"github.com/cuadra/cuadra-core/src/shared/r2"
 	"github.com/cuadra/cuadra-core/src/shared/recovery"
@@ -233,6 +234,13 @@ func main() {
 	updatePay := gymApp.NewUpdatePaymentMethods(gymRepo, uow, recorder)
 	completeSetup := gymApp.NewCompleteSetup(gymRepo, uow, recorder)
 	updateProfile := gymApp.NewUpdateProfile(gymRepo, uow, recorder)
+	// Logo del gym (ticket + dashboard): se publica en el mismo bucket
+	// público de R2 que los banners de bienvenida. Sin bucket, la subida
+	// responde 503 «no disponible» y el ticket sale sin logo.
+	setGymLogo := gymApp.NewSetGymLogo(gymRepo, uow, recorder, nil)
+	if r2Client != nil && r2Cfg.IsPublicMediaConfigured() {
+		setGymLogo.Publisher = r2LogoPublisher{c: r2Client}
+	}
 	updateChargeSettings := gymApp.NewUpdateChargeSettings(gymRepo, uow, recorder)
 	createOp := usersApp.NewCreateOperator(userRepo, uow, recorder).WithGymRepo(gymRepo)
 	updateOp := usersApp.NewUpdateOperator(userRepo, uow, recorder)
@@ -383,7 +391,12 @@ func main() {
 	changePlan := billingApp.NewChangeMembershipPlan(paymentRepo, folios, memberSvc, memberRepo, uow, recorder, billingSubscriber).
 		WithGyms(gymRepo)
 	settlePayment := billingApp.NewSettlePendingBalance(paymentRepo, folios, uow, recorder).WithGyms(gymRepo)
-	receiptPayment := billingApp.NewGenerateReceipt(paymentRepo, gymRepo, memberRepo, uow)
+	receiptPayment := billingApp.NewGenerateReceipt(paymentRepo, gymRepo, memberRepo, uow).
+		WithMemberships(membershipRepo).
+		WithUsers(userRepo).
+		// Logo del gym para el ticket/PDF. Sidecar: copia en disco para que
+		// el ticket lleve logo sin internet. Cloud: sólo memoria.
+		WithLogos(logocache.New(""))
 	// El dispatcher genera el PDF del comprobante (reusa GenerateReceipt),
 	// lo sube a R2 y mete la URL en el template de recibo ({receipt_url}).
 	dispatchNoti.Receipt = receiptPDFRenderer{gen: receiptPayment}
@@ -498,6 +511,7 @@ func main() {
 		UpdatePayMethods:   updatePay,
 		CompleteSetup:      completeSetup,
 		UpdateProfile:      updateProfile,
+		SetLogo:            setGymLogo,
 		UpdateChargeSet:    updateChargeSettings,
 		CreateOperator:     createOp,
 		UpdateOperator:     updateOp,
@@ -562,6 +576,7 @@ func main() {
 	analyticsController := analyticsCtrl.NewAnalyticsController(analyticsOverview, tokens)
 	analyticsController.PlanGate = featureGate(gymDomain.FeatureAnalytics)
 	notificationsCtrl := notiCtrl.NewController(connectWhatsApp, disconnectWhatsApp, whatsappStatus, listTemplates, updateTemplate, broadcast, listNotifications, retryNotification, listOwnerAlerts, updateOwnerAlert, whatsappProvider, tokens)
+	notificationsCtrl.MemberHistory = notiApp.NewListMemberNotifications(notificationRepo, uow)
 	notificationsCtrl.PlanGate = featureGate(gymDomain.FeatureOwnWhatsApp)
 	// El ceremony de UC-037 acepta sk_live_* además de JWT owner: el desktop
 	// conecta WhatsApp a través del WhatsAppSidecarProxy del sidecar, cuyos
@@ -691,6 +706,9 @@ func main() {
 	// valores vivos los inyecta gymCanonicalAugmentExpr en cada pull.
 	connectWhatsApp.SyncTouch = syncStore
 	disconnectWhatsApp.SyncTouch = syncStore
+	// Logo del gym: también cloud-authoritative (el push del sidecar no lo
+	// lleva); logo_url viaja en canonicalAugmentExpr.
+	setGymLogo.SyncTouch = syncStore
 
 	// Releases (ADR-005) — GET público para el Tauri updater + POST admin
 	// con shared secret para el pipeline. RELEASES_ADMIN_TOKEN vacío

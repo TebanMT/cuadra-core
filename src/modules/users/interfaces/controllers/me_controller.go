@@ -10,12 +10,9 @@ package controllers
 
 import (
 	"errors"
-	"fmt"
 	sharedDomain "github.com/cuadra/cuadra-core/src/shared/domain"
 	"io"
 	"net/http"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -29,27 +26,28 @@ import (
 	"github.com/cuadra/cuadra-core/src/shared/utils"
 )
 
-// Logo upload limits. Values are coupled to the FE preview; bumping these
-// without checking GymProfilePage is fine but a heads-up for the reviewer.
+// Límites de la subida del logo. 5 MB alcanza para una foto del logo
+// tomada con el celular; lo que se publica sale reducido (PrepareUpload).
+// El FE (GymLogoField) valida el mismo tope antes de mandar.
 const (
-	maxLogoBytes = 2 * 1024 * 1024 // 2 MiB
+	maxLogoBytes = 5 * 1024 * 1024 // 5 MiB
 	mimeSniffLen = 512             // http.DetectContentType reads up to 512 B
 )
 
-// logoExtForMime is the allowed-mime allowlist. Returning the canonical
-// extension keeps the on-disk filename stable regardless of what the browser
-// chose to call the upload (.jpeg vs .jpg).
-var logoExtForMime = map[string]string{
-	"image/png":  ".png",
-	"image/jpeg": ".jpg",
-	"image/webp": ".webp",
+// logoMimes — formatos que acepta la subida (sniff del contenido real).
+var logoMimes = map[string]struct{}{
+	"image/png":  {},
+	"image/jpeg": {},
+	"image/webp": {},
+	"image/gif":  {},
 }
 
 var (
-	errUploadsNotConfigured = errors.New("subida de archivos deshabilitada (UPLOADS_DIR no configurado)")
-	errLogoMissingFile      = errors.New("archivo faltante (campo 'file')")
-	errLogoTooLarge         = errors.New("archivo > 2 MB")
-	errLogoBadMime          = errors.New("formato no soportado: usa png, jpg o webp")
+	errLogoUploadUnavailable = errors.New("subir el logo no está disponible por ahora")
+	errLogoMissingFile       = errors.New("elige una imagen para el logo")
+	errLogoTooLarge          = errors.New("la imagen pesa más de 5 MB; usa una más ligera")
+	errLogoBadMime           = errors.New("formato no soportado: usa PNG, JPG o WebP")
+	errLogoNotOwner          = errors.New("sólo el dueño puede cambiar el logo")
 )
 
 // ---------------------------------------------------------------------------
@@ -472,15 +470,13 @@ func (ctrl *AuthController) handleSetupStatus(c *gin.Context) {
 	utils.JsonResponse(c, http.StatusOK, resp)
 }
 
-// handleUploadLogo accepts a multipart upload (field "file"), persists the
-// asset to UploadsDir/<gym_id>/<gym_id>_<unix_ms>.<ext>, and updates the gym
-// row with a relative `/uploads/<gym_id>/<filename>` URL via UpdateProfile so
-// the audit log captures the change.
+// handleUploadLogo — POST /api/v1/gyms/me/logo (multipart, campo "file").
+// El dueño sube su logo desde un botón; SetGymLogo lo deja como PNG limpio
+// en el bucket público y guarda la URL absoluta en el gym. Llega del
+// dashboard (JWT) o del desktop vía GymLogoSidecarProxy (sk_live_*).
 //
-// The relative URL keeps the value origin-agnostic: the desktop hits the
-// sidecar, the dashboard hits cloud, both prefix the same path with their own
-// API base. Migrating to S3/R2 later only flips the URL builder + storage
-// backend — the wire shape stays.
+// El logo es parte de la feature branding (gym.GatedFeatures), así que la
+// subida pasa por el mismo gate inline que PATCH /gyms/me con logo_url.
 func (ctrl *AuthController) handleUploadLogo(c *gin.Context) {
 	gymID, ok := middleware.GetGymID(c)
 	if !ok || gymID == uuid.Nil {
@@ -488,13 +484,11 @@ func (ctrl *AuthController) handleUploadLogo(c *gin.Context) {
 		return
 	}
 	userID, _ := middleware.GetUserID(c)
-
-	if ctrl.UploadsDir == "" {
-		utils.ErrorResponse(c, http.StatusInternalServerError, errUploadsNotConfigured)
+	if !ctrl.SetLogo.CanUpload() {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, errLogoUploadUnavailable)
 		return
 	}
-	if ctrl.UpdateProfile == nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, errBadAuth)
+	if !middleware.EnforceFeaturesInline(c, ctrl.Gyms, ctrl.UoW, gymDomain.FeatureBranding) {
 		return
 	}
 
@@ -507,62 +501,76 @@ func (ctrl *AuthController) handleUploadLogo(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, errLogoTooLarge)
 		return
 	}
-
 	src, err := fh.Open()
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, err)
 		return
 	}
 	defer src.Close()
-
-	// Sniff the actual content type instead of trusting the multipart header —
-	// the browser will happily report image/png for a renamed exe.
-	head := make([]byte, mimeSniffLen)
-	n, _ := io.ReadFull(src, head)
-	head = head[:n]
-	ext, ok := logoExtForMime[http.DetectContentType(head)]
-	if !ok {
+	raw, err := io.ReadAll(io.LimitReader(src, maxLogoBytes+1))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, errLogoMissingFile)
+		return
+	}
+	if len(raw) > maxLogoBytes {
+		utils.ErrorResponse(c, http.StatusBadRequest, errLogoTooLarge)
+		return
+	}
+	// Sniff del contenido real, no del header del multipart: el navegador
+	// reporta image/png para un .exe renombrado. PrepareUpload vuelve a
+	// validar al decodificar; esto corta antes lo obvio.
+	if _, ok := logoMimes[http.DetectContentType(raw[:min(len(raw), mimeSniffLen)])]; !ok {
 		utils.ErrorResponse(c, http.StatusBadRequest, errLogoBadMime)
 		return
 	}
 
-	gymDir := filepath.Join(ctrl.UploadsDir, gymID.String())
-	if err := os.MkdirAll(gymDir, 0o755); err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, err)
-		return
-	}
-	filename := fmt.Sprintf("%s_%d%s", gymID.String(), time.Now().UTC().UnixMilli(), ext)
-	dst, err := os.Create(filepath.Join(gymDir, filename))
+	g, err := ctrl.SetLogo.Upload(c.Request.Context(), gymApp.UploadGymLogoInput{
+		GymID: gymID, ActorUserID: userID, Image: raw,
+	})
 	if err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, err)
-		return
-	}
-	defer dst.Close()
-	// Write the sniff buffer first, then stream the rest — saves re-opening
-	// the multipart file and avoids allocating the whole image in RAM.
-	if _, err := dst.Write(head); err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, err)
-		return
-	}
-	if _, err := io.Copy(dst, src); err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, err)
-		return
-	}
-
-	logoURL := fmt.Sprintf("/uploads/%s/%s", gymID.String(), filename)
-	if _, err := ctrl.UpdateProfile.Execute(c.Request.Context(), gymApp.UpdateProfileInput{
-		GymID:       gymID,
-		ActorUserID: userID,
-		Update:      gymDomain.ProfileUpdate{LogoURL: &logoURL},
-	}); err != nil {
-		// Best-effort cleanup of the orphaned file — leaving it would be a
-		// disk leak on every failure; not worth a transactional dance for an
-		// asset upload.
-		_ = os.Remove(filepath.Join(gymDir, filename))
 		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
 		return
 	}
-	utils.JsonResponse(c, http.StatusOK, gin.H{"logo_url": logoURL})
+	utils.JsonResponse(c, http.StatusOK, gin.H{"logo_url": g.LogoURL})
+}
+
+// handleRemoveLogo — DELETE /api/v1/gyms/me/logo. Sin gate de plan: un gym
+// que dejó Plus debe poder quitar su logo.
+func (ctrl *AuthController) handleRemoveLogo(c *gin.Context) {
+	gymID, ok := middleware.GetGymID(c)
+	if !ok || gymID == uuid.Nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, errBadAuth)
+		return
+	}
+	userID, _ := middleware.GetUserID(c)
+	if ctrl.SetLogo == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, errLogoUploadUnavailable)
+		return
+	}
+	if _, err := ctrl.SetLogo.Remove(c.Request.Context(), gymID, userID); err != nil {
+		utils.ErrorResponse(c, utils.DomainErrorToHttpCode(err), err)
+		return
+	}
+	utils.JsonResponse(c, http.StatusOK, gin.H{"logo_url": nil})
+}
+
+// requireOwnerOrSidecarToken — con JWT exige role=owner; con sk_live_* deja
+// pasar: la credencial de máquina la emitió el pareo del dueño y el proxy
+// del sidecar ya validó role=owner contra su JWT local antes de reenviar.
+// Mismo contrato que el ceremony de WhatsApp (notifications).
+func requireOwnerOrSidecarToken() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if middleware.GetAuthMethod(c) == "sidecar_token" {
+			c.Next()
+			return
+		}
+		if role, _ := middleware.GetRole(c); role != "owner" {
+			utils.ErrorResponse(c, http.StatusForbidden, errLogoNotOwner)
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
 }
 
 // ---------------------------------------------------------------------------

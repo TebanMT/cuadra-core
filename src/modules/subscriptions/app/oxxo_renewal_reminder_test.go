@@ -102,6 +102,10 @@ func (r *fakeNotifications) GetByProviderMessageID(_ sharedDomain.Transaction, _
 func (r *fakeNotifications) LeasePending(_ sharedDomain.Transaction, _ time.Time, _ int) ([]*notiDomain.Notification, error) {
 	return nil, nil
 }
+func (r *fakeNotifications) ListByRecipient(_ sharedDomain.Transaction, _ uuid.UUID, _ string, _ uuid.UUID, _, _ int) ([]*notiDomain.Notification, int, error) {
+	return nil, 0, nil
+}
+
 func (r *fakeNotifications) ListByGym(_ sharedDomain.Transaction, _ uuid.UUID, _ string, _, _ int) ([]*notiDomain.Notification, int, error) {
 	return nil, 0, nil
 }

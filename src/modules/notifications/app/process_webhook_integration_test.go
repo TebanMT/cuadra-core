@@ -335,27 +335,61 @@ func TestProcessWebhook_CallbackViejoTrasRetryManual_NoMataElReencolado(t *testi
 	}
 }
 
-// TestProcessWebhook_StatusDelivered_NoTocaLaNotiSent: delivered/read no
-// cambian el status (sent_at ya está seteado por el dispatcher) — sólo se
-// registra el evento para analytics. Documenta el comportamiento por diseño.
-func TestProcessWebhook_StatusDelivered_NoTocaLaNotiSent(t *testing.T) {
+// TestProcessWebhook_StatusDelivered_GuardaElAcuse: delivered no cambia el
+// status (sigue sent) pero guarda delivered_at y bumpea la versión para que
+// el acuse viaje por sync al desktop. Un callback duplicado es no-op.
+func TestProcessWebhook_StatusDelivered_GuardaElAcuse(t *testing.T) {
 	f := newFixture(t)
 	uc := newWebhookUC(f)
 	sid := "SMdelivered0000000000000000000000"
 	notifID := createSentNotification(f, sid)
+	before := getNotification(f, notifID)
 
-	_, err := uc.Execute(context.Background(), notiApp.ProcessWebhookInput{
-		EventType:         eventDomain.EventTypeStatus,
-		ProviderMessageID: sid,
-		Status:            "delivered",
-		RawPayload:        []byte("MessageStatus=delivered&MessageSid=" + sid),
-	})
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
+	for i := 0; i < 2; i++ { // el segundo es el duplicado
+		_, err := uc.Execute(context.Background(), notiApp.ProcessWebhookInput{
+			EventType:         eventDomain.EventTypeStatus,
+			ProviderMessageID: sid,
+			Status:            "delivered",
+			RawPayload:        []byte("MessageStatus=delivered&MessageSid=" + sid),
+		})
+		if err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
 	}
 
 	n := getNotification(f, notifID)
 	if n.Status != notification.StatusSent {
-		t.Errorf("status = %q, want sent (delivered sólo se loguea)", n.Status)
+		t.Errorf("status = %q, want sent", n.Status)
+	}
+	if n.DeliveredAt == nil || n.ReadAt != nil {
+		t.Fatalf("delivered_at=%v read_at=%v, want sólo delivered", n.DeliveredAt, n.ReadAt)
+	}
+	if n.Version != before.Version+1 {
+		t.Errorf("version = %d, want %d (un bump; el duplicado no re-bumpea)", n.Version, before.Version+1)
+	}
+	if n.DeliveryState() != notification.DeliveryDelivered {
+		t.Errorf("delivery state = %q", n.DeliveryState())
+	}
+}
+
+// TestProcessWebhook_StatusRead_ImplicaEntregado: read sin delivered previo
+// (Twilio los puede mandar en desorden) deja ambos acuses.
+func TestProcessWebhook_StatusRead_ImplicaEntregado(t *testing.T) {
+	f := newFixture(t)
+	uc := newWebhookUC(f)
+	sid := "SMread000000000000000000000000000"
+	notifID := createSentNotification(f, sid)
+
+	if _, err := uc.Execute(context.Background(), notiApp.ProcessWebhookInput{
+		EventType:         eventDomain.EventTypeStatus,
+		ProviderMessageID: sid,
+		Status:            "read",
+		RawPayload:        []byte("MessageStatus=read&MessageSid=" + sid),
+	}); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	n := getNotification(f, notifID)
+	if n.DeliveredAt == nil || n.ReadAt == nil || n.DeliveryState() != notification.DeliveryRead {
+		t.Fatalf("delivered_at=%v read_at=%v state=%q", n.DeliveredAt, n.ReadAt, n.DeliveryState())
 	}
 }

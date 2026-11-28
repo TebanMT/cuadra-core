@@ -54,6 +54,8 @@ func (r *NotificationPostgresRepository) Update(tx sharedDomain.Transaction, n *
 		"retry_count":         n.RetryCount,
 		"scheduled_for":       n.ScheduledFor,
 		"provider_message_id": n.ProviderMessageID,
+		"delivered_at":        n.DeliveredAt,
+		"read_at":             n.ReadAt,
 	}
 	if err := gormTx.Model(&models.NotificationModel{}).Where("id = ?", n.ID).Updates(updates).Error; err != nil {
 		return nil, err
@@ -110,6 +112,8 @@ func emitNotificationToSync(g *gorm.DB, n *notiDomain.Notification) error {
 		"scheduled_for":       n.ScheduledFor.UTC().UnixMilli(),
 		"idempotency_key":     n.IdempotencyKey,
 		"provider_message_id": n.ProviderMessageID,
+		"delivered_at":        msOrNil(n.DeliveredAt),
+		"read_at":             msOrNil(n.ReadAt),
 	})
 	if err != nil {
 		return err
@@ -226,6 +230,38 @@ func (r *NotificationPostgresRepository) ListByGym(tx sharedDomain.Transaction, 
 	return out, int(total), nil
 }
 
+// ListByRecipient — historial de mensajes de un destinatario (perfil del
+// socio). Mismo orden y paginación que ListByGym; usa
+// idx_notification_queue_recipient.
+func (r *NotificationPostgresRepository) ListByRecipient(tx sharedDomain.Transaction, gymID uuid.UUID, recipientType string, recipientID uuid.UUID, page, pageSize int) ([]*notiDomain.Notification, int, error) {
+	gormTx := tx.(*sharedDomain.GormTransaction).Tx
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 || pageSize > 100 {
+		pageSize = 20
+	}
+	base := gormTx.Model(&models.NotificationModel{}).
+		Where("gym_id = ? AND recipient_id = ? AND recipient_type = ? AND deleted_at IS NULL", gymID, recipientID, recipientType)
+	var total int64
+	if err := base.Session(&gorm.Session{}).Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var rows []models.NotificationModel
+	if err := base.Order("created_at DESC, id DESC").Limit(pageSize).Offset((page - 1) * pageSize).Find(&rows).Error; err != nil {
+		return nil, 0, err
+	}
+	out := make([]*notiDomain.Notification, 0, len(rows))
+	for i := range rows {
+		n, err := notificationFromModel(&rows[i])
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, n)
+	}
+	return out, int(total), nil
+}
+
 func notificationToModel(n *notiDomain.Notification) (models.NotificationModel, error) {
 	payload, err := json.Marshal(n.Payload)
 	if err != nil {
@@ -254,6 +290,8 @@ func notificationToModel(n *notiDomain.Notification) (models.NotificationModel, 
 		ScheduledFor:      n.ScheduledFor,
 		IdempotencyKey:    n.IdempotencyKey,
 		ProviderMessageID: n.ProviderMessageID,
+		DeliveredAt:       n.DeliveredAt,
+		ReadAt:            n.ReadAt,
 	}, nil
 }
 
@@ -346,6 +384,8 @@ func notificationFromModel(m *models.NotificationModel) (*notiDomain.Notificatio
 		ScheduledFor:      m.ScheduledFor,
 		IdempotencyKey:    m.IdempotencyKey,
 		ProviderMessageID: m.ProviderMessageID,
+		DeliveredAt:       m.DeliveredAt,
+		ReadAt:            m.ReadAt,
 		CreatedAt:         m.CreatedAt,
 		UpdatedAt:         m.UpdatedAt,
 		DeletedAt:         m.DeletedAt,

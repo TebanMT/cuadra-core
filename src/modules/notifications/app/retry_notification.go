@@ -85,6 +85,8 @@ func (uc *RetryNotification) Execute(ctx context.Context, in RetryNotificationIn
 		n.FailedAt = nil
 		n.ErrorMessage = nil
 		n.ProviderMessageID = nil
+		n.DeliveredAt = nil
+		n.ReadAt = nil
 		n.Version++
 		n.UpdatedAt = now
 		if _, err := uc.Notifications.Update(tx, n); err != nil {

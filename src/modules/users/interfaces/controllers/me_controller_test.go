@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/mattn/go-sqlite3"
 
@@ -33,16 +34,32 @@ import (
 )
 
 // meFixture wires the bare minimum of the AuthController against a SQLite
-// UoW so we can exercise PATCH /gyms/me + POST /gyms/me/logo end-to-end.
+// UoW so we can exercise PATCH /gyms/me + POST/DELETE /gyms/me/logo
+// end-to-end. El logo se "publica" en fakeLogoPublisher (en producción es el
+// bucket público de R2; sólo cmd/server lo cablea).
 type meFixture struct {
-	t          *testing.T
-	db         *sqlx.DB
-	uow        sharedDomain.UnitOfWork
-	router     *gin.Engine
-	gymID      string
-	ownerID    string
-	access     string
-	uploadsDir string
+	t         *testing.T
+	db        *sqlx.DB
+	uow       sharedDomain.UnitOfWork
+	router    *gin.Engine
+	gymID     string
+	ownerID   string
+	access    string
+	publisher *fakeLogoPublisher
+	setLogo   *gymApp.SetGymLogo
+}
+
+// fakeLogoPublisher guarda lo último publicado y devuelve una URL pública
+// determinista.
+type fakeLogoPublisher struct {
+	calls int
+	last  []byte
+}
+
+func (p *fakeLogoPublisher) PublishLogo(_ context.Context, gymID uuid.UUID, png []byte) (string, error) {
+	p.calls++
+	p.last = png
+	return "https://media.example.test/gym-logos/" + gymID.String() + "/logo.png", nil
 }
 
 func setupMeFixture(t *testing.T) *meFixture {
@@ -91,26 +108,28 @@ func setupMeFixture(t *testing.T) *meFixture {
 		t.Fatalf("signup: %v", err)
 	}
 
-	uploadsDir := filepath.Join(dir, "uploads")
+	publisher := &fakeLogoPublisher{}
+	setLogo := gymApp.NewSetGymLogo(gymRepo, uow, recorder, publisher)
 	authCtrl := usersCtrl.NewAuthController(usersCtrl.AuthController{
 		UpdateProfile: gymApp.NewUpdateProfile(gymRepo, uow, recorder),
+		SetLogo:       setLogo,
 		Gyms:          gymRepo,
 		Users:         userRepo,
 		UoW:           uow,
 		Tokens:        tokens,
-		UploadsDir:    uploadsDir,
 	})
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	authCtrl.RegisterAccountRoutes(r)
-	authCtrl.RegisterUploadsRoute(r)
+	authCtrl.RegisterLogoRoutes(r)
 
 	return &meFixture{
 		t: t, db: db, uow: uow, router: r,
 		gymID: owner.GymID.String(), ownerID: owner.UserID.String(),
-		access:     owner.AccessToken,
-		uploadsDir: uploadsDir,
+		access:    owner.AccessToken,
+		publisher: publisher,
+		setLogo:   setLogo,
 	}
 }
 
@@ -155,9 +174,8 @@ func (f *meFixture) do(method, path string, body *bytes.Buffer, contentType stri
 	return rec
 }
 
-// TestUploadLogo_HappyPath — POST a tiny PNG, expect 200 + the file written
-// to disk + the gym row's logo_url updated to the public path. The static
-// route must serve the same file.
+// TestUploadLogo_HappyPath — el dueño sube un PNG: se publica un PNG limpio
+// y la URL pública queda en el gym.
 func TestUploadLogo_HappyPath(t *testing.T) {
 	f := setupMeFixture(t)
 	body, ct := multipartUpload(t, "file", "logo.png", pngBytes(t))
@@ -166,7 +184,6 @@ func TestUploadLogo_HappyPath(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 	}
-
 	var resp struct {
 		Data struct {
 			LogoURL string `json:"logo_url"`
@@ -175,22 +192,55 @@ func TestUploadLogo_HappyPath(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v body=%s", err, rec.Body.String())
 	}
-	logoURL := resp.Data.LogoURL
-	if !strings.HasPrefix(logoURL, "/uploads/"+f.gymID+"/") || !strings.HasSuffix(logoURL, ".png") {
-		t.Errorf("logo_url = %q, expected /uploads/<gym>/...png", logoURL)
+	want := "https://media.example.test/gym-logos/" + f.gymID + "/logo.png"
+	if resp.Data.LogoURL != want {
+		t.Errorf("logo_url = %q, want %q", resp.Data.LogoURL, want)
+	}
+	if f.publisher.calls != 1 {
+		t.Fatalf("publisher calls = %d, want 1", f.publisher.calls)
+	}
+	if _, err := png.Decode(bytes.NewReader(f.publisher.last)); err != nil {
+		t.Errorf("lo publicado no es un PNG: %v", err)
 	}
 
-	// File present on disk under the gym subdirectory.
-	rel := strings.TrimPrefix(logoURL, "/uploads/")
-	onDisk := filepath.Join(f.uploadsDir, rel)
-	if _, err := os.Stat(onDisk); err != nil {
-		t.Errorf("expected file on disk at %s: %v", onDisk, err)
+	if got := f.profileLogo(); got == nil || *got != want {
+		t.Errorf("profile.logo_url = %v, want %q", got, want)
 	}
+}
 
-	// gym.logo_url persisted.
+// TestRemoveLogo — DELETE limpia logo_url (el ticket sale sin logo).
+func TestRemoveLogo(t *testing.T) {
+	f := setupMeFixture(t)
+	body, ct := multipartUpload(t, "file", "logo.png", pngBytes(t))
+	if rec := f.do(http.MethodPost, "/api/v1/gyms/me/logo", body, ct); rec.Code != http.StatusOK {
+		t.Fatalf("upload = %d body=%s", rec.Code, rec.Body.String())
+	}
+	rec := f.do(http.MethodDelete, "/api/v1/gyms/me/logo", nil, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := f.profileLogo(); got != nil {
+		t.Errorf("profile.logo_url = %q, want nil", *got)
+	}
+}
+
+// TestUploadLogo_SinBucket503 — un binario sin bucket público no finge que
+// guardó el logo.
+func TestUploadLogo_SinBucket503(t *testing.T) {
+	f := setupMeFixture(t)
+	f.setLogo.Publisher = nil
+	body, ct := multipartUpload(t, "file", "logo.png", pngBytes(t))
+	rec := f.do(http.MethodPost, "/api/v1/gyms/me/logo", body, ct)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func (f *meFixture) profileLogo() *string {
+	f.t.Helper()
 	getRec := f.do(http.MethodGet, "/api/v1/gyms/me", nil, "")
 	if getRec.Code != http.StatusOK {
-		t.Fatalf("get profile = %d body=%s", getRec.Code, getRec.Body.String())
+		f.t.Fatalf("get profile = %d body=%s", getRec.Code, getRec.Body.String())
 	}
 	var profile struct {
 		Data struct {
@@ -198,19 +248,9 @@ func TestUploadLogo_HappyPath(t *testing.T) {
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(getRec.Body.Bytes(), &profile); err != nil {
-		t.Fatalf("decode profile: %v", err)
+		f.t.Fatalf("decode profile: %v", err)
 	}
-	if profile.Data.LogoURL == nil || *profile.Data.LogoURL != logoURL {
-		t.Errorf("profile.logo_url = %v, want %q", profile.Data.LogoURL, logoURL)
-	}
-
-	// Static route serves the asset (no auth required).
-	staticReq := httptest.NewRequest(http.MethodGet, logoURL, nil)
-	staticRec := httptest.NewRecorder()
-	f.router.ServeHTTP(staticRec, staticReq)
-	if staticRec.Code != http.StatusOK {
-		t.Errorf("static serve = %d, want 200", staticRec.Code)
-	}
+	return profile.Data.LogoURL
 }
 
 // TestUploadLogo_RejectsBadMime — a text payload should be rejected by
@@ -224,12 +264,12 @@ func TestUploadLogo_RejectsBadMime(t *testing.T) {
 	}
 }
 
-// TestUploadLogo_RejectsOversize — bumping past 2 MiB must 400.
+// TestUploadLogo_RejectsOversize — más de 5 MiB debe dar 400.
 func TestUploadLogo_RejectsOversize(t *testing.T) {
 	f := setupMeFixture(t)
-	// PNG header + 2 MiB+ of pad. http.DetectContentType still says image/png
+	// PNG header + 5 MiB+ of pad. http.DetectContentType still says image/png
 	// because of the magic bytes, but Size > maxLogoBytes trips first.
-	pad := make([]byte, 2*1024*1024+128)
+	pad := make([]byte, 5*1024*1024+128)
 	header := pngBytes(t)
 	body, ct := multipartUpload(t, "file", "huge.png", append(header, pad...))
 	rec := f.do(http.MethodPost, "/api/v1/gyms/me/logo", body, ct)

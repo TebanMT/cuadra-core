@@ -362,6 +362,45 @@ func TestMigration027_HealsPoisonedSetupCompletedAt(t *testing.T) {
 	}
 }
 
+// TestMigration052_HealsTextScheduledFor — la reparación convierte el
+// scheduled_for TEXT RFC3339 (escrito por el apply que sólo coercía *_at)
+// a epoch-ms in-place, idempotente, y la fila vuelve a escanearse como
+// int64 (el historial de WhatsApp del socio daba 500 con estas filas).
+func TestMigration052_HealsTextScheduledFor(t *testing.T) {
+	gymID := uuid.New()
+	db, _ := freshSidecarDBWithGym(t, gymID)
+	id := uuid.New()
+	if _, err := db.Exec(`
+		INSERT INTO notification_queue (id, gym_id, created_at, updated_at, channel, template_key,
+			recipient_type, recipient_id, recipient_address, payload, status, scheduled_for)
+		VALUES (?, ?, 1787000000000, 1787000000000, 'whatsapp', 'expiry_reminder_today',
+			'member', ?, '+525512345678', '{}', 'sent', '2026-08-31T17:42:37.960967-06:00')`,
+		id, gymID, uuid.New(),
+	); err != nil {
+		t.Fatalf("poison row: %v", err)
+	}
+
+	sqlBytes, err := os.ReadFile("../../../db_migrations/sqlite/052_repair_timestamptz_text_columns.sql")
+	if err != nil {
+		t.Fatalf("read migration: %v", err)
+	}
+	for i := 0; i < 2; i++ { // la segunda pasada pin-ea la idempotencia
+		if _, err := db.Exec(string(sqlBytes)); err != nil {
+			t.Fatalf("apply migration 052 (pasada %d): %v", i+1, err)
+		}
+	}
+
+	var ms int64
+	if err := db.Get(&ms, `SELECT scheduled_for FROM notification_queue WHERE id = ?`, id); err != nil {
+		t.Fatalf("read healed row as int64: %v", err)
+	}
+	// strftime('%f') redondea a milisegundos (.960967 → .961), igual que la 027.
+	want := time.Date(2026, 8, 31, 23, 42, 37, 961_000_000, time.UTC).UnixMilli()
+	if ms != want {
+		t.Errorf("scheduled_for = %d, want %d", ms, want)
+	}
+}
+
 // subscriptionPullPayload — el payload que el cloud emite en un pull tras un
 // touch de suscripción: el payload guardado del último push, con los campos
 // billing vivos inyectados por gymCanonicalAugmentExpr encima.
